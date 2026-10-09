@@ -49,6 +49,10 @@ ASR 不提供 context、时间戳或流式识别。TTS 不提供 ICL transcript 
 
 单次中文 ASR 约 10–13 秒，早期短句 TTS 混合请求约 5–7 秒（均不含模型加载）。这些是本次机器上的运行观察，不是并发、长文本或实时性能承诺。严格权重哈希和冷加载另有开销。
 
+## 速度与识别质量评测
+
+后续按 2 次预热、5 次固定输入测量及中英文多输入协议完成了[速度与识别质量评测](qwen3_audio_benchmark_r1.zh.md)。该报告包含 RTF、加载/推理耗时、ASR CER/WER、CPU 对照及 TTS 内容一致性，替代上文零散耗时观察作为本次性能结论。
+
 ## 在新环境安装与运行
 
 先按[运行时资产](runtime_assets.md)配置匹配的 R1/Launch/operator assets，再安装本分支构建的包及 `audio` extra。不要安装官方 ASR/TTS 包覆盖仓库固定的 Transformers 5.3.0。
@@ -98,7 +102,7 @@ ASR Python API 接受 CPU 浮点数组；CLI 只读 PCM16 WAV。TTS CLI 不覆�
   --output /home/agi/rhinoforge_audio_runtime/my-speech.wav
 ```
 
-没有进行完整 WER/CER 数据集、MOS/音色相似度评测、长音频、多语言质量、并发或实时压力测试。后续扩大范围应单独评估，不能从本次短输入结果直接推断支持。
+已补充 20 条公开音频的 ASR CER/WER 和 10 条 TTS 内容一致性评测；没有进行完整 WER/CER 数据集、MOS/音色相似度评测、长音频、多语言质量、并发或实时压力测试。后续扩大范围应单独评估，不能从本次短输入结果直接推断支持。
 
 正式 ASR/TTS CLI 均在持久环境运行成功，TTS CLI 波形与 API 样本逐位一致。交付示例已生成 `/home/agi/rhinoforge_audio_runtime/hello.wav`；重新运行请使用新的输出文件名。
 

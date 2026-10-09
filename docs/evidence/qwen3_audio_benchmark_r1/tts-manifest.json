@@ -1,0 +1,62 @@
+[
+  {
+    "id": "Chinese-0",
+    "language": "Chinese",
+    "text": "你好，欢迎使用语音助手。",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  },
+  {
+    "id": "Chinese-1",
+    "language": "Chinese",
+    "text": "请把杯子放在桌子上。",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  },
+  {
+    "id": "Chinese-2",
+    "language": "Chinese",
+    "text": "前方有人，请减慢速度。",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  },
+  {
+    "id": "Chinese-3",
+    "language": "Chinese",
+    "text": "任务完成，现在返回充电。",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  },
+  {
+    "id": "Chinese-4",
+    "language": "Chinese",
+    "text": "今天天气很好，我们出发吧。",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  },
+  {
+    "id": "English-0",
+    "language": "English",
+    "text": "Hello, welcome to the voice assistant.",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  },
+  {
+    "id": "English-1",
+    "language": "English",
+    "text": "Please put the cup on the table.",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  },
+  {
+    "id": "English-2",
+    "language": "English",
+    "text": "Someone is ahead. Please slow down.",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  },
+  {
+    "id": "English-3",
+    "language": "English",
+    "text": "The task is complete. Return to the charger.",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  },
+  {
+    "id": "English-4",
+    "language": "English",
+    "text": "The weather is nice today. Let us go.",
+    "reference_audio": "/home/agi/rhinoforge_audio_runtime/audio/clone.wav"
+  }
+]
