@@ -1,0 +1,85 @@
+{
+  "runtime_pass": true,
+  "runs": [
+    {
+      "text_tokens": 32,
+      "samples": 120960,
+      "stats": {
+        "head_calls": [
+          64,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63,
+          63
+        ],
+        "components": {
+          "talker": {
+            "calls": 64,
+            "tokens": 106,
+            "graph_size": 1,
+            "graph_replays": 105,
+            "graph_invariant_ok": true
+          },
+          "predictor": {
+            "calls": 945,
+            "tokens": 1008,
+            "graph_size": 1,
+            "graph_replays": 1007,
+            "graph_invariant_ok": true
+          }
+        }
+      }
+    },
+    {
+      "reload_equal": true,
+      "samples": 71040,
+      "stats": {
+        "head_calls": [
+          38,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37,
+          37
+        ],
+        "components": {
+          "talker": {
+            "calls": 38,
+            "tokens": 57,
+            "graph_size": 1,
+            "graph_replays": 56,
+            "graph_invariant_ok": true
+          },
+          "predictor": {
+            "calls": 555,
+            "tokens": 592,
+            "graph_size": 1,
+            "graph_replays": 591,
+            "graph_invariant_ok": true
+          }
+        }
+      }
+    }
+  ]
+}

@@ -86,3 +86,15 @@ implementation. Treat model-support status as profile-specific. Use the entry
 points and runtime boundaries linked from [Examples](../docs/model_support.md)
 and follow [model validation policy](../docs/validation_policy.md). Update stale
 knowledge in the same change; do not preserve conflicting summaries.
+
+
+For the bounded Qwen3 speech APIs, start with the
+[speech profile](../docs/qwen3_audio_r1.zh.md). Keep the frozen checkpoint guards
+and TTS reviewed-source hashes before loading; do not install the upstream
+package over the pinned Transformers runtime. Normal CPU construction plus
+strict safetensors loading preserves TTS weights and nonpersistent RoPE buffers.
+Speech is a dedicated API, not a generic CausalLM/VLM registry alias. ASR prompt
+length changes clear the old Graph pair before eager audio Linear execution,
+leaving launch arena capacity; same-length requests replay the pair. TTS owns
+two decoder handles under one process owner. Retire both Graphs before handles
+and weights. Test retained outputs and close/reload across component handoffs.

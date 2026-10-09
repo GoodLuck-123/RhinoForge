@@ -21,3 +21,7 @@ TOML 配置在 [`examples/configs/`](../examples/configs/README.md) 下按模型
 模型权重、请求数据、Rhino Launch 和算子资产分别获取，其格式、来源和许可要求见
 [模型资产](model_assets.zh.md)与[运行时资产](runtime_assets.zh.md)。保留公开
 Wall-OSS 底座适配；公开交付不包含私有应用模型、数据或部署定制。
+
+## Qwen3 语音模型
+
+新增独立的 `Qwen3ASRModel` 和 `Qwen3TTSModel` 混合推理接口。精确 checkpoint、CPU/RPU 分工、输入限制和 R1 实测见[语音迁移报告](qwen3_audio_r1.zh.md)。这两个接口不经过通用 CausalLM/VLM registry；运行验证不等同于识别质量、音色相似度或实时性能认证。

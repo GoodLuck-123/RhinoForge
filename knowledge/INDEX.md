@@ -99,3 +99,9 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
 - [Saved queries](queries/README.md): reusable, source-linked decision records.
 - [External snapshots](raw/README.md): provenance and sanitization rules for
   reviewed public sources.
+
+## Speech inference
+
+- [Qwen3 ASR/TTS profile and R1 evidence](../docs/qwen3_audio_r1.zh.md): exact
+  weights, reviewed source preparation, CPU/RPU boundaries, bounded Graphs,
+  dependency compatibility, CLI usage and remaining quality limits.

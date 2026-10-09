@@ -88,3 +88,12 @@ changed path: normally 3–10 replays, or 2 warmups and 5–10 performance sampl
 Confirm computational-path correctness before recording accumulated numerical
 differences. Stop after the affected checks pass; see
 [validation](validation_policy.md) and [performance](performance.md).
+
+## Qwen3 speech
+
+Speech uses the dedicated `examples/qwen3_asr.py` and `examples/qwen3_tts.py`
+entry points. Install the `audio` extra and use the frozen assets and TTS source
+preparation described in the [R1 speech guide](qwen3_audio_r1.zh.md). These scripts
+are independent of the text/vision TOML runner. Host checks are
+`tests/test_qwen3_asr.py`, `tests/test_qwen3_tts.py` and
+`tests/test_qwen3_tts_source.py`; they do not need board execution.

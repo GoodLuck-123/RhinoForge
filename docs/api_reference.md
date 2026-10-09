@@ -403,3 +403,35 @@ normal inference. Chunk size is a per-handle `rpu_execution` setting, not a
 process-global `torch.rpu` setter. Internal `torch.ops.rpu.*` schemas are host
 wrapper interfaces used by adapters; unless a function is documented here or
 in a model example, treat it as an implementation detail.
+
+## Bounded speech APIs
+
+`from rpu_backend.api import Qwen3ASRModel, Qwen3TTSModel`
+
+- `Qwen3ASRModel.from_pretrained(checkpoint, dtype=torch.float16)` accepts the
+  frozen local ASR checkpoint. `transcribe(audio, sample_rate=16000,
+  max_new_tokens=64)` takes one finite CPU floating-point waveform, mono 16 kHz,
+  0.5–8 seconds, and returns `ASRTranscription(text, raw_text, token_ids)`.
+  The generation limit is 1–64 tokens. No context prompt, timestamps or streaming.
+- `Qwen3TTSModel.from_pretrained(checkpoint, source=prepared_package,
+  dtype=torch.float16)` accepts the frozen local Base checkpoint and explicitly
+  prepared upstream source. `synthesize(text, reference_audio=local_file,
+  language="Chinese", max_new_tokens=64)` returns an independent float32 mono
+  waveform and sample rate 24000. Text must have 1–128 characters and at most
+  32 tokenizer tokens; language is `Chinese` or `English`. Reference audio is
+  mono 24 kHz, 0.5–20 seconds. The token limit is 2–64 and may truncate speech.
+  Only non-streaming, greedy, speaker-embedding-only voice cloning is admitted.
+  Talker prompt plus requested generation must fit 128 positions.
+
+Both classes support context managers, explicit idempotent `close()`, and
+`execution_stats()`. Requests, statistics and close are serial, with one live
+RPU model/policy per process. Loading validates frozen assets before weight
+transformation. ASR uses FP16; TTS explicitly keeps CPU components in FP32 and
+casts RPU boundaries to FP16. Unsupported precisions fail before loading.
+
+ASR retains at most the current prompt length's prefill/decode Graph pair.
+Changing that length clears the pair before audio execution; returning to an
+old length rebuilds it. `graph_replays` counts the currently cached entries,
+so it resets on a shape switch. TTS keeps one fixed decode Graph per component,
+processing short prefills token by token. Output storage is independent of replay.
+See the [speech profile and examples](qwen3_audio_r1.zh.md).

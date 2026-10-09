@@ -30,6 +30,8 @@ from .lingbot2 import Lingbot2ActionOutput, Lingbot2Policy
 from .hy_embodied import HyEmbodiedActionOutput, HyEmbodiedPolicy
 from .conditional_generation import RPUModelForConditionalGeneration
 from .generation import greedy_token_ids
+from .qwen3_asr import Qwen3ASRModel
+from .qwen3_tts import Qwen3TTSModel
 from ._execution import reconfigure_rpu_execution, rpu_execution_stats
 from rpu_backend._version import API_VERSION
 
@@ -65,6 +67,8 @@ __all__ = [
     "HyEmbodiedPolicy",
     "RPUModelForConditionalGeneration",
     "greedy_token_ids",
+    "Qwen3ASRModel",
+    "Qwen3TTSModel",
     "reconfigure_rpu_execution",
     "rpu_execution_stats",
     "RPUBackendError",

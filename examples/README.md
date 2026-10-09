@@ -46,3 +46,12 @@ NVFP4 需要独立离线 checkpoint，使用 `striped_v2`、block16，Action Q/O
 ## 公开 Wall-OSS 与 RhinoVLA
 
 Wall-OSS 使用公开 [wall-oss-0.5](https://huggingface.co/x-square-robot/wall-oss-0.5) 底座的 processor、normalizer、state bins 和动作定义；配置集中在 `base/`。RhinoVLA 按 v1、v3 选择调用方信任的 factory 与请求输入；版本目录不代表内置了模型仓库的私有装配代码。
+
+## Qwen3 speech
+
+- `qwen3_asr.py`: local mono 16 kHz PCM16 WAV → transcript.
+- `qwen3_tts.py`: short Chinese/English text + mono 24 kHz reference → WAV.
+
+These dedicated APIs use a bounded CPU/RPU profile. See the
+[speech setup and R1 evidence](../docs/qwen3_audio_r1.zh.md) for pinned assets,
+source preparation, commands, CPU boundaries and limits.

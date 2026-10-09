@@ -48,3 +48,19 @@ This notice is an engineering inventory, not legal advice or a grant of rights
 to separately distributed software, runtime binaries, operator assets, model
 assets, or datasets. Recipients must follow the terms supplied by each owner
 for the exact versions and assets they obtain.
+
+
+## Optional Qwen3 speech integration
+
+ASR audio placeholder/length semantics are adapted from
+[QwenLM/Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR/tree/7c6daf77a2421100f5fb066495372c00129d39ff)
+(Apache-2.0, Copyright 2026 The Qwen team, Alibaba Group and the HuggingFace Inc. team).
+The TTS preparation helper applies explicit compatibility edits to a
+user-supplied [QwenLM/Qwen3-TTS checkout](https://github.com/QwenLM/Qwen3-TTS/tree/022e286b98fbec7e1e916cb940cdf532cd9f488e)
+(Apache-2.0, Copyright 2026 Alibaba Cloud). Upstream source, checkpoint
+weights and reference audio are not distributed in this repository. Preserve
+upstream copyright and license files with separately prepared source.
+
+The optional audio dependencies are librosa (ISC), SoundFile (BSD-3-Clause),
+python-sox (BSD-3-Clause), ONNX Runtime (MIT), einops (MIT), and TorchAudio (BSD-2-Clause).
+Their dependencies retain their respective upstream licenses.
