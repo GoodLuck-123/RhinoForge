@@ -427,7 +427,9 @@ Both classes support context managers, explicit idempotent `close()`, and
 `execution_stats()`. Requests, statistics and close are serial, with one live
 RPU model/policy per process. Loading validates frozen assets before weight
 transformation. ASR uses FP16 weights and boundaries, with CPU convolutions
-computed in FP32 from those rounded weights. TTS keeps CPU components in FP32
+computed in FP32 from those rounded weights; its vocabulary head runs on RPU
+with FP32 accumulation while the tied input embedding remains on CPU.
+TTS keeps CPU components in FP32
 and casts RPU boundaries to FP16. Unsupported precisions fail before loading.
 Both loaders select the common caching allocator before RPU materialization;
 a process already frozen to the direct allocator must be restarted.
@@ -441,4 +443,7 @@ Both APIs retain private KV storage and reset its logical position for each new
 sequence. TTS retains only the latest speaker embedding, keyed by decoded audio
 content; every request still reads and validates the reference file. Reference
 codec encoding is omitted because this profile consumes no reference codec tokens.
+The frozen TTS Predictor uses a fixed 15-step greedy loop; Talker retains its
+EOS and repetition-penalty handling. The TTS CLI accepts `--threads` (default 4)
+for CPU codec tuning without changing the Python API's process-wide thread setting.
 See the [speech profile and examples](qwen3_audio_r1.zh.md).

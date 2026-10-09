@@ -204,6 +204,7 @@ class Qwen3ASRModel:
         self._lock = threading.Lock()
         self._closed = True
         self._audio = self._text = self._embedding_weight = None
+        self._head_weight = None
         self._audio_linear_calls = {}
         self._decoder_calls = 0
         self._restore_forwards = []
@@ -250,6 +251,7 @@ class Qwen3ASRModel:
             cos_sin=tables, chunk_envelope_for=lookup_causal_decoder,
             execution_config={"model": {"num_cores": 8}, "prefill": {"linear_acc32": True}},
             _graph_cache_max_entries=2)
+        self._head_weight = transform_linear_weight(self._embedding_weight, 1, 8).to("rpu")
         counters = self._audio_linear_calls
         for name, module in self._audio.named_modules():
             if isinstance(module, torch.nn.Conv2d):
@@ -329,7 +331,7 @@ class Qwen3ASRModel:
                 position_ids=positions.unsqueeze(0), cache_position=positions,
                 attention_mask=attention_mask, past_key_values=cache, use_cache=True)
             self._decoder_calls += 1
-            logits = torch.nn.functional.linear(output.last_hidden_state[:, -1:].cpu(), self._embedding_weight)
+            logits = self._project_logits(output.last_hidden_state[:, -1:])
             if not torch.isfinite(logits).all():
                 raise FloatingPointError("non-finite ASR logits")
             token = logits[:, -1].argmax(-1, keepdim=True)
@@ -342,6 +344,10 @@ class Qwen3ASRModel:
         # Preserve raw output for diagnostics; expose the text after ASR metadata.
         text = raw.split("<asr_text>", 1)[-1].strip()
         return ASRTranscription(text=text, raw_text=raw, token_ids=tuple(generated))
+
+    def _project_logits(self, hidden):
+        return torch.ops.rpu.linear_with_accumulation(
+            hidden.contiguous(), self._head_weight, None, 1, 8, True).cpu()
 
     def execution_stats(self) -> dict:
         """Counters identify explicit routes; they do not claim a speedup."""
@@ -375,6 +381,7 @@ class Qwen3ASRModel:
             if self._text is not None:
                 vars(self._text).pop("forward", None)
             self._audio = self._text = self._embedding_weight = None
+            self._head_weight = None
             self._cache = None
             self._closed = True
             _release_live_instance(self)

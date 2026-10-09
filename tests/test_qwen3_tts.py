@@ -11,6 +11,39 @@ from rpu_backend.api import qwen3_tts as tts
 from rpu_backend.api.errors import RPUUnsupportedDtypeError
 
 
+def test_fixed_predictor_greedy_steps_and_cache():
+    class Predictor:
+        generation_config = SimpleNamespace(eos_token_id=None, repetition_penalty=None)
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, **kwargs):
+            index = self.calls
+            assert kwargs["generation_steps"] == index
+            assert kwargs["past_key_values"] == (None if index == 0 else index)
+            if index == 0:
+                assert kwargs["inputs_embeds"].shape == (1, 2, 1024)
+                assert kwargs["input_ids"] is None
+            else:
+                assert kwargs["inputs_embeds"] is None
+                assert kwargs["input_ids"].item() == index - 1
+            self.calls += 1
+            logits = torch.zeros(1, 1, 16)
+            logits[0, 0, index] = 1
+            return SimpleNamespace(logits=logits, past_key_values=self.calls)
+
+    owner = Predictor()
+    result = tts._greedy_predictor_generate(owner, torch.zeros(1, 2, 1024),
+        max_new_tokens=15, do_sample=False)
+    assert result.sequences.tolist() == [list(range(15))]
+    for count, sampling in ((14, False), (15, True)):
+        with pytest.raises(ValueError, match="15-step"):
+            tts._greedy_predictor_generate(owner, torch.zeros(1, 2, 1024),
+                max_new_tokens=count, do_sample=sampling)
+    assert owner.calls == 15
+
+
 @pytest.mark.parametrize("text,language,limit", [
     ("", "English", 32), ("  ", "Chinese", 32), ("x" * 129, "English", 32),
     ("hello", "French", 32), ("hello", "English", 1), ("hello", "English", 65),
@@ -83,6 +116,19 @@ def test_close_and_stats_are_serial():
     model.close()
     with pytest.raises(RuntimeError, match="closed"):
         model.synthesize("你好", reference_audio="missing")
+
+
+def test_close_restores_predictor_generation(monkeypatch):
+    from rpu_backend.api import causal_lm
+
+    monkeypatch.setattr(causal_lm, "_release_live_instance", lambda owner: None)
+    original = object()
+    predictor = SimpleNamespace(generate=object())
+    model = Qwen3TTSModel()
+    model._closed = False
+    model._restore_generate = (predictor, original)
+    model.close()
+    assert predictor.generate is original and model._restore_generate is None
 
 
 def test_decoder_rejects_bad_shapes_and_nonfinite_without_device_work():

@@ -108,5 +108,7 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
 
 - [Qwen3 speech measurements](../docs/qwen3_audio_benchmark_r1.zh.md): fixed-input
   timing, corpus-weighted CER/WER, CPU reference and TTS content-consistency scope.
+- [Qwen3 speech Thor comparison and stage timing](../docs/qwen3_audio_thor_stages.zh.md):
+  R1 vocabulary-head and Predictor optimization, CPU codec threads, Thor quality-aware comparison.
 - [Qwen3 speech optimization](../docs/qwen3_audio_optimization_r1.zh.md): RhinoVLA
   storage reuse, CPU convolution boundary, speaker reuse and baseline comparison.

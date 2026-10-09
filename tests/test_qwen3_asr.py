@@ -118,10 +118,12 @@ def test_close_retires_before_releasing_and_is_idempotent(monkeypatch):
     model = Qwen3ASRModel()
     model._closed = False
     model._text = SimpleNamespace(_rpu_decoder_retirement_state=SimpleNamespace(retire=lambda: events.append("retire")))
+    model._head_weight = object()
     model.close()
     model.close()
     assert events == ["retire", "release"]
     assert model._text is None
+    assert model._head_weight is None
     with pytest.raises(RuntimeError, match="closed"):
         model.transcribe(np.zeros(8000, dtype=np.float32))
     with pytest.raises(RuntimeError, match="closed"):
@@ -152,9 +154,11 @@ def test_failed_retirement_does_not_release_owner(monkeypatch):
         raise RuntimeError("retirement failed")
 
     model._text = SimpleNamespace(_rpu_decoder_retirement_state=SimpleNamespace(retire=fail))
+    head = model._head_weight = object()
     with pytest.raises(RuntimeError, match="retirement failed"):
         model.close()
     assert events == [] and not model._closed and model._text is not None
+    assert model._head_weight is head
     # No real native resource exists in this host test.
     model._closed = True
 

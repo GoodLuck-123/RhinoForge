@@ -26,10 +26,10 @@ checkpoint 配置、分词器和原始权重 SHA256 均由加载器固定校验�
 
 | | RPU | CPU | 当前输入限制 |
 |---|---|---|---|
-| ASR | FP16，28 层文本 decoder；音频 encoder 的 111 个 Linear | 卷积用 FP16 权重提升至 FP32 计算，输出回 FP16；音频 attention/norm/激活、embedding/输出头为 FP16；音频预处理 | batch 1，单声道 16 kHz，0.5–8 秒，最多生成 64 token |
+| ASR | FP16，28 层文本 decoder、输出头；音频 encoder 的 111 个 Linear | 卷积用 FP16 权重提升至 FP32 计算，输出回 FP16；音频 attention/norm/激活、embedding 为 FP16；音频预处理 | batch 1，单声道 16 kHz，0.5–8 秒，最多生成 64 token |
 | TTS | FP16，28 层 Talker、5 层 Code Predictor、16 个输出头 | FP32 embedding/text projection、speaker encoder、音频 codec、组合和采样 | batch 1，中/英文，非流式、greedy、仅 speaker embedding 克隆；文本 ≤128 字符且 ≤32 tokenizer token；参考音频单声道 24 kHz、0.5–20 秒；生成 2–64 token |
 
-ASR 官方中文样本按 Linear/Conv2d 实际调用统计，RPU 占 **66.59%** MAC；该统计不含 QK/AV、norm、激活或数据搬运，不是性能占比。TTS 的自回归生成主体全部在 RPU；CPU codec 仍有较大计算量，不能将此描述为整个冷请求的大多数 MAC 均在 RPU。
+ASR 初始适配（输出头尚在 CPU）的官方中文样本按 Linear/Conv2d 实际调用统计，RPU 占 **66.59%** MAC；该统计不含 QK/AV、norm、激活或数据搬运，不是性能占比。TTS 的自回归生成主体全部在 RPU；CPU codec 仍有较大计算量，不能将此描述为整个冷请求的大多数 MAC 均在 RPU。
 
 ASR 不提供 context、时间戳或流式识别。TTS 不提供 ICL transcript 模式、CustomVoice/VoiceDesign、流式或批量生成。Talker prompt 加生成上限必须不超过 128 位置；短 prompt 沿已验证的 decode 路径逐 token 处理。生成长度上限可能截断句子，建议先使用短句。
 
@@ -53,7 +53,9 @@ ASR 不提供 context、时间戳或流式识别。TTS 不提供 ICL transcript 
 
 后续按 2 次预热、5 次固定输入测量及中英文多输入协议完成了[速度与识别质量评测](qwen3_audio_benchmark_r1.zh.md)。该报告包含 RTF、加载/推理耗时、ASR CER/WER、CPU 对照及 TTS 内容一致性，替代上文零散耗时观察作为本次性能结论。
 
-最新实现参考 RhinoVLA 复用分配器和 KV 存储，减少无用计算；ASR 卷积精度边界按上表更新。最新速度与原样本质量对比见[推理优化报告](qwen3_audio_optimization_r1.zh.md)，前述迁移记录和首次性能报告保留为历史基线。两模型加载前需要尚未固定为 direct allocator 的新进程。
+最新性能与计算位置见 [Thor 对比及分阶段优化](qwen3_audio_thor_stages.zh.md)：ASR 输出头已迁至 RPU，TTS 使用固定 Predictor 生成循环，并提供 CPU 线程配置。
+
+首轮优化参考 RhinoVLA 复用分配器和 KV 存储，减少无用计算；ASR 卷积精度边界按上表更新。该轮速度与原样本质量对比见[推理优化报告](qwen3_audio_optimization_r1.zh.md)，前述迁移记录和首次性能报告保留为历史基线。两模型加载前需要尚未固定为 direct allocator 的新进程。
 
 ## 在新环境安装与运行
 

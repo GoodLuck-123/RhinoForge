@@ -42,6 +42,26 @@ def _read_reference(path):
     return samples, rate
 
 
+def _greedy_predictor_generate(owner, inputs_embeds, *, max_new_tokens, do_sample, **kwargs):
+    # shortcut: the frozen Base profile emits exactly 15 greedy subcodes, revisit for other profiles.
+    if (max_new_tokens != 15 or do_sample is not False
+            or inputs_embeds.shape != (1, 2, 1024)
+            or owner.generation_config.eos_token_id is not None
+            or owner.generation_config.repetition_penalty not in (None, 1)):
+        raise ValueError("TTS Predictor requires the fixed 15-step greedy profile")
+    cache = None
+    ids = None
+    tokens = []
+    for index in range(15):
+        result = owner(inputs_embeds=inputs_embeds if index == 0 else None,
+            input_ids=ids, past_key_values=cache, use_cache=True,
+            generation_steps=index, return_dict=True)
+        ids = result.logits[:, -1].argmax(-1, keepdim=True)
+        tokens.append(ids)
+        cache = result.past_key_values
+    return types.SimpleNamespace(sequences=torch.cat(tokens, dim=1))
+
+
 class Qwen3TTSModel:
     """Frozen 0.6B Base, short non-streaming voice cloning, batch one.
 
@@ -56,6 +76,7 @@ class Qwen3TTSModel:
         self._wrapper = None
         self._components = {}
         self._restore = []
+        self._restore_generate = None
         self._head_weights = []
         self._head_calls = [0] * 16
         self._retirement_error = None
@@ -157,6 +178,9 @@ class Qwen3TTSModel:
                 calls[index] += 1
                 return result.reshape(*hidden.shape[:-1], owner.out_features)
             head.forward = types.MethodType(linear, head)
+        predictor = talker.code_predictor
+        self._restore_generate = (predictor, predictor.generate)
+        predictor.generate = types.MethodType(_greedy_predictor_generate, predictor)
 
     def synthesize(self, text, *, reference_audio, language="Chinese", max_new_tokens=64):
         """Return an independent float32 mono waveform and sample rate (24 kHz).
@@ -244,6 +268,10 @@ class Qwen3TTSModel:
             for module, original in reversed(self._restore):
                 module.forward = original
             self._restore.clear()
+            if self._restore_generate is not None:
+                predictor, original = self._restore_generate
+                predictor.generate = original
+                self._restore_generate = None
             self._components.clear()
             self._head_weights.clear()
             self._wrapper = None

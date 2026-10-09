@@ -18,11 +18,14 @@ def main():
     parser.add_argument("--language", choices=("Chinese", "English"), default="Chinese")
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--threads", type=int, default=4, help="CPU intra-op threads; R1 codec benefits from 8")
     args = parser.parse_args()
+    if args.threads < 1:
+        parser.error("threads must be positive")
     target = Path(args.output)
     if target.exists():
         parser.error("output already exists")
-    torch.set_num_threads(4)
+    torch.set_num_threads(args.threads)
     with Qwen3TTSModel.from_pretrained(args.checkpoint, source=args.source) as model:
         waveform, rate = model.synthesize(args.text, reference_audio=args.reference_audio,
             language=args.language, max_new_tokens=args.max_new_tokens)

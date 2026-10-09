@@ -106,3 +106,9 @@ Its x-vector-only profile does not consume reference codec tokens. ASR CPU
 convolutions accumulate FP16-rounded weights in FP32 and round outputs back to
 FP16; preserve this boundary in reference comparisons. See the
 [speech optimization evidence](../docs/qwen3_audio_optimization_r1.zh.md).
+ASR now keeps a separately transformed RPU vocabulary head and projects only the
+last hidden position, retaining the CPU input embedding. Retire the decoder
+before releasing that head. TTS Predictor's fixed 15-step greedy loop resets KV
+per frame; Talker still owns stopping and repetition penalties. Compare full
+tokens/waveforms when changing either route. CPU codec thread tuning belongs to
+the caller/CLI, not a hidden process-wide change inside the API.

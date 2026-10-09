@@ -75,7 +75,10 @@ def main():
     parser.add_argument("--source", help="Prepared TTS source directory")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True, help="New result directory")
+    parser.add_argument("--threads", type=int, default=4, help="CPU intra-op threads")
     args = parser.parse_args()
+    if args.threads < 1:
+        parser.error("threads must be positive")
     records = json.loads(args.manifest.read_text())
     if not records or len(records) > 20 or len({r['id'] for r in records}) != len(records):
         parser.error("manifest must contain 1–20 uniquely identified requests")
@@ -89,7 +92,7 @@ def main():
     import torch
     from rpu_backend.api import Qwen3ASRModel, Qwen3TTSModel
 
-    torch.set_num_threads(4)
+    torch.set_num_threads(args.threads)
     torch.manual_seed(0)
     inputs = {}
     if args.task == "asr":
@@ -101,7 +104,7 @@ def main():
     start = time.perf_counter()
     model = (Qwen3ASRModel.from_pretrained(args.checkpoint) if args.task == "asr" else
              Qwen3TTSModel.from_pretrained(args.checkpoint, source=args.source))
-    report = dict(task=args.task, load_seconds=time.perf_counter() - start, threads=4,
+    report = dict(task=args.task, load_seconds=time.perf_counter() - start, threads=args.threads,
                   warmup_count=2, measured_repeats=5, generation_limit=64, runs=[])
     try:
         held = None
