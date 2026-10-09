@@ -191,10 +191,14 @@ def test_text_token_limit_precedes_reference_work_and_returns_owned_output(monke
     def generate(**kwargs):
         calls.append("generate")
         return [source_wave], 24000
+    def speaker(**kwargs):
+        calls.append("speaker")
+        return torch.zeros(1024)
     model = Qwen3TTSModel()
     model._closed = False
     model._components = {"talker": {}}
     model._wrapper = SimpleNamespace(
+        model=SimpleNamespace(speaker_encoder_sample_rate=24000, extract_speaker_embedding=speaker),
         processor=SimpleNamespace(tokenizer=lambda text: {"input_ids": list(range(token_count))}),
         generate_voice_clone=generate)
     monkeypatch.setattr(tts, "_read_reference", reference)
@@ -206,8 +210,77 @@ def test_text_token_limit_precedes_reference_work_and_returns_owned_output(monke
         else:
             result, rate = model.synthesize("hello", reference_audio="unused")
             source_wave[:] = 1
-            assert calls == ["reference", "generate"]
+            assert calls == ["reference", "speaker", "generate"]
             assert rate == 24000 and np.array_equal(result, np.zeros(24))
     finally:
         # This host fixture has no claimed owner or native resources.
         model._closed = True
+
+
+def test_speaker_cache_tracks_audio_content_and_never_runs_reference_codec(monkeypatch):
+    wave = np.zeros(12000, dtype=np.float32)
+    embeddings = []
+    prompts = []
+    def speaker(**kwargs):
+        value = torch.tensor([float(kwargs["audio"].sum())])
+        embeddings.append(value)
+        return value
+    def generate(**kwargs):
+        assert "ref_audio" not in kwargs
+        prompt = kwargs["voice_clone_prompt"]
+        assert prompt["ref_code"] == [None] and prompt["icl_mode"] == [False]
+        assert prompt["x_vector_only_mode"] == [True]
+        prompts.append(prompt)
+        return [np.zeros(24, dtype=np.float32)], 24000
+    model = Qwen3TTSModel()
+    model._closed = False
+    model._components = {"talker": {}}
+    model._wrapper = SimpleNamespace(
+        model=SimpleNamespace(speaker_encoder_sample_rate=24000, extract_speaker_embedding=speaker),
+        processor=SimpleNamespace(tokenizer=lambda text: {"input_ids": [1]}),
+        generate_voice_clone=generate)
+    monkeypatch.setattr(tts, "_read_reference", lambda path: (wave, 24000))
+    try:
+        model.synthesize("first", reference_audio="same.wav")
+        model.synthesize("second", reference_audio="same.wav")
+        wave[0] = 1
+        model.synthesize("third", reference_audio="same.wav")
+        assert len(embeddings) == 2
+        assert prompts[0] is prompts[1] and prompts[2] is not prompts[1]
+        assert prompts[2]["ref_spk_embedding"][0].item() == 1
+    finally:
+        model._closed = True
+
+
+def test_predictor_reuses_kv_with_fresh_positions_inputs_and_owned_outputs(monkeypatch):
+    from contextlib import nullcontext
+    from rpu_backend.api import cache as cache_module
+
+    allocations, positions = [], []
+    class Cache:
+        def __init__(self, *args):
+            self.position = 0
+            self.k_caches = self.v_caches = []
+            allocations.append(self)
+        def reset_to_position(self, pos):
+            self.position = pos
+        def update_position(self, count):
+            self.position += count
+    monkeypatch.setattr(cache_module, "RPUCache", Cache)
+    original_to = torch.Tensor.to
+    def to(tensor, *args, **kwargs):
+        if args == ("rpu",):
+            return tensor
+        return original_to(tensor, *args, **kwargs)
+    monkeypatch.setattr(torch.Tensor, "to", to)
+    output = torch.empty(1, 1, 1024, dtype=torch.float16)
+    def forward(handle, hidden, k, v, mask, position, causal, **kwargs):
+        positions.append(position)
+        return output.copy_(hidden)
+    monkeypatch.setattr(torch.ops.rpu, "causal_decoder_forward", forward, raising=False)
+    part = dict(layers=5, capacity=32, name="predictor", handle=1, descriptor=[],
+                signature=None, graph=SimpleNamespace(capture=lambda sig: nullcontext()), calls=0, tokens=0)
+    first = tts._decoder_forward(part, torch.ones(1, 2, 1024), None, None, None, None, False)
+    second = tts._decoder_forward(part, torch.zeros(1, 1, 1024), None, None, None, None, False)
+    assert len(allocations) == 1 and positions == [0, 1, 0]
+    assert first.last_hidden_state.eq(1).all() and second.last_hidden_state.eq(0).all()

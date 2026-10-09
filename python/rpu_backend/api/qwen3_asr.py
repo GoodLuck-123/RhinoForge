@@ -208,6 +208,7 @@ class Qwen3ASRModel:
         self._decoder_calls = 0
         self._restore_forwards = []
         self._graph_prompt_length = None
+        self._cache = None
 
     @classmethod
     def from_pretrained(cls, checkpoint, *, dtype=torch.float16) -> "Qwen3ASRModel":
@@ -221,6 +222,7 @@ class Qwen3ASRModel:
         try:
             model._tokenizer, model._feature_extractor, model._prompt = _load_processor(path)
             model._audio, model._text = _load_components(path, config)
+            torch.rpu.set_caching_allocator(True)
             model._install_rpu()
         except BaseException:
             model.close()
@@ -250,6 +252,18 @@ class Qwen3ASRModel:
             _graph_cache_max_entries=2)
         counters = self._audio_linear_calls
         for name, module in self._audio.named_modules():
+            if isinstance(module, torch.nn.Conv2d):
+                self._restore_forwards.append((module, module.forward))
+                weight = module.weight.detach().float()
+                bias = module.bias.detach().float() if module.bias is not None else None
+
+                def convolution(owner, hidden, weight=weight, bias=bias):
+                    # CPU FP16 convolution dominates on R1; retain FP16 boundaries.
+                    return torch.nn.functional.conv2d(hidden.float(), weight, bias,
+                        owner.stride, owner.padding, owner.dilation, owner.groups).half()
+
+                module.forward = types.MethodType(convolution, module)
+                continue
             if not isinstance(module, torch.nn.Linear):
                 continue
             if module.in_features % 16 or module.out_features % 128:
@@ -293,7 +307,10 @@ class Qwen3ASRModel:
     def _generate(self, inputs, max_new_tokens):
         from .cache import RPUCache
 
-        cache = RPUCache(28, 1, _CACHE_LENGTH, 8, 128, dtype=torch.float16, attn_tp=8)
+        if self._cache is None:
+            self._cache = RPUCache(28, 1, _CACHE_LENGTH, 8, 128, dtype=torch.float16, attn_tp=8)
+        cache = self._cache
+        cache.reset_to_position(0)
         length = inputs["feature_lens"]
         features = self._audio(inputs["input_features"][0, :, :int(length.item())],
                                feature_lens=length).last_hidden_state
@@ -312,8 +329,7 @@ class Qwen3ASRModel:
                 position_ids=positions.unsqueeze(0), cache_position=positions,
                 attention_mask=attention_mask, past_key_values=cache, use_cache=True)
             self._decoder_calls += 1
-            # Full-sequence head preserves the assessed GEMM shape and CPU boundary.
-            logits = torch.nn.functional.linear(output.last_hidden_state.cpu(), self._embedding_weight)
+            logits = torch.nn.functional.linear(output.last_hidden_state[:, -1:].cpu(), self._embedding_weight)
             if not torch.isfinite(logits).all():
                 raise FloatingPointError("non-finite ASR logits")
             token = logits[:, -1].argmax(-1, keepdim=True)
@@ -359,6 +375,7 @@ class Qwen3ASRModel:
             if self._text is not None:
                 vars(self._text).pop("forward", None)
             self._audio = self._text = self._embedding_weight = None
+            self._cache = None
             self._closed = True
             _release_live_instance(self)
         finally:

@@ -426,12 +426,19 @@ in a model example, treat it as an implementation detail.
 Both classes support context managers, explicit idempotent `close()`, and
 `execution_stats()`. Requests, statistics and close are serial, with one live
 RPU model/policy per process. Loading validates frozen assets before weight
-transformation. ASR uses FP16; TTS explicitly keeps CPU components in FP32 and
-casts RPU boundaries to FP16. Unsupported precisions fail before loading.
+transformation. ASR uses FP16 weights and boundaries, with CPU convolutions
+computed in FP32 from those rounded weights. TTS keeps CPU components in FP32
+and casts RPU boundaries to FP16. Unsupported precisions fail before loading.
+Both loaders select the common caching allocator before RPU materialization;
+a process already frozen to the direct allocator must be restarted.
 
 ASR retains at most the current prompt length's prefill/decode Graph pair.
 Changing that length clears the pair before audio execution; returning to an
 old length rebuilds it. `graph_replays` counts the currently cached entries,
 so it resets on a shape switch. TTS keeps one fixed decode Graph per component,
 processing short prefills token by token. Output storage is independent of replay.
+Both APIs retain private KV storage and reset its logical position for each new
+sequence. TTS retains only the latest speaker embedding, keyed by decoded audio
+content; every request still reads and validates the reference file. Reference
+codec encoding is omitted because this profile consumes no reference codec tokens.
 See the [speech profile and examples](qwen3_audio_r1.zh.md).

@@ -2,6 +2,8 @@
 
 评测日期：2026-10-09。模型实现为 `feat/qwen3-audio-rpu` 分支的 `7fd9eb4`，模型和运行时身份沿用[迁移报告](qwen3_audio_r1.zh.md)。本次不修改模型实现。以下是固定协议的小样本实测，不能直接当作完整 AISHELL/LibriSpeech 榜单成绩。
 
+本报告保留优化前的历史基线；当前实现的速度和质量对比见[推理优化报告](qwen3_audio_optimization_r1.zh.md)。
+
 ## 方法与指标
 
 - R1，batch=1、串行请求、8 RPU cores、PyTorch CPU 线程数 4，关闭 profiler。ASR/TTS 各用独立进程；RPU 测量与 CPU 对照串行执行，无其他模型进程竞争。

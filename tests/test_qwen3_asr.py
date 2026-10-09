@@ -212,3 +212,26 @@ def test_shape_switch_releases_graphs_before_audio_and_same_shape_replays(monkey
         assert events == ["audio", "audio", "clear", "audio", "clear", "audio"]
     finally:
         model.close()
+
+
+def test_request_reuses_kv_storage_and_resets_position_after_failure(monkeypatch):
+    from rpu_backend.api import cache as cache_module
+
+    allocations = []
+    cache = SimpleNamespace(position=0)
+    cache.reset_to_position = lambda pos: setattr(cache, "position", pos)
+    def allocate(*args, **kwargs):
+        allocations.append(cache)
+        return cache
+    monkeypatch.setattr(cache_module, "RPUCache", allocate)
+    model = Qwen3ASRModel()
+    def audio(*args, **kwargs):
+        assert cache.position == 0
+        cache.position = 17
+        raise RuntimeError("interrupted request")
+    model._audio = audio
+    inputs = {"feature_lens": torch.tensor([50]), "input_features": torch.zeros(1, 128, 50)}
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="interrupted request"):
+            model._generate(inputs, 64)
+    assert len(allocations) == 1

@@ -1,6 +1,7 @@
 """Bounded Qwen3-TTS Base speech inference with RPU autoregressive components."""
 from __future__ import annotations
 
+import hashlib
 import operator
 from pathlib import Path
 import threading
@@ -58,6 +59,7 @@ class Qwen3TTSModel:
         self._head_weights = []
         self._head_calls = [0] * 16
         self._retirement_error = None
+        self._reference_key = self._voice_clone_prompt = None
 
     @classmethod
     def from_pretrained(cls, checkpoint, *, source, dtype=torch.float16):
@@ -72,6 +74,7 @@ class Qwen3TTSModel:
         model._closed = False
         try:
             model._wrapper = load_cpu_model(checkpoint, source)
+            torch.rpu.set_caching_allocator(True)
             model._install_rpu()
         except BaseException as error:
             try:
@@ -174,8 +177,18 @@ class Qwen3TTSModel:
             reference = _read_reference(reference_audio)
             self._components["talker"]["generation_limit"] = limit
             with torch.inference_mode():
+                key = hashlib.sha256(reference[0].tobytes()).digest()
+                if key != self._reference_key:
+                    if reference[1] != self._wrapper.model.speaker_encoder_sample_rate:
+                        raise ValueError("TTS frozen speaker encoder requires 24 kHz audio")
+                    embedding = self._wrapper.model.extract_speaker_embedding(
+                        audio=reference[0], sr=reference[1])
+                    # x-vector-only mode discards reference codec tokens entirely.
+                    self._voice_clone_prompt = dict(ref_code=[None], ref_spk_embedding=[embedding],
+                        x_vector_only_mode=[True], icl_mode=[False])
+                    self._reference_key = key
                 waves, rate = self._wrapper.generate_voice_clone(text=text, language=language,
-                    ref_audio=reference, x_vector_only_mode=True, non_streaming_mode=True,
+                    voice_clone_prompt=self._voice_clone_prompt, non_streaming_mode=True,
                     do_sample=False, subtalker_dosample=False, max_new_tokens=limit)
             if len(waves) != 1 or rate != 24000:
                 raise RuntimeError("TTS output shape or sample rate differs from the profile")
@@ -234,6 +247,7 @@ class Qwen3TTSModel:
             self._components.clear()
             self._head_weights.clear()
             self._wrapper = None
+            self._reference_key = self._voice_clone_prompt = None
             # Drop the last loop's storage before admitting a new resident model.
             part = None
             self._closed = True
@@ -269,7 +283,10 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
     if not isinstance(cache, RPUCache):
         if cache is not None and cache.get_seq_length() != 0:
             raise ValueError("cannot replace a populated CPU TTS cache")
-        cache = RPUCache(part["layers"], 1, part["capacity"], 8, 128)
+        if "cache" not in part:
+            part["cache"] = RPUCache(part["layers"], 1, part["capacity"], 8, 128)
+        cache = part["cache"]
+        cache.reset_to_position(0)
     count = hidden.shape[1]
     if count < 1 or cache.position + count > part["capacity"]:
         raise ValueError("TTS cache capacity exceeded")

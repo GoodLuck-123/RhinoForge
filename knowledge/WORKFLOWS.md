@@ -98,3 +98,11 @@ length changes clear the old Graph pair before eager audio Linear execution,
 leaving launch arena capacity; same-length requests replay the pair. TTS owns
 two decoder handles under one process owner. Retire both Graphs before handles
 and weights. Test retained outputs and close/reload across component handoffs.
+Speech loaders select the common caching allocator before device allocation.
+Reuse private KV storage with `reset_to_position(0)` at each new sequence;
+the causal path overwrites live rows before reading them. TTS speaker reuse is
+bounded to the latest decoded audio content, never just a file path or mtime.
+Its x-vector-only profile does not consume reference codec tokens. ASR CPU
+convolutions accumulate FP16-rounded weights in FP32 and round outputs back to
+FP16; preserve this boundary in reference comparisons. See the
+[speech optimization evidence](../docs/qwen3_audio_optimization_r1.zh.md).
