@@ -1,0 +1,6393 @@
+{
+  "date": "2026-10-10",
+  "branch": "feat/qwen3-audio-rpu",
+  "baseline_commit": "40e4574",
+  "scope": "existing bounded speech profiles; no precision, checkpoint, generation-length or native-binary change",
+  "native_sha256": "d2cd78227982c68d3576de06f26712763b26af6b7283f3107b55cd2a9f4521f4",
+  "host_checks": {
+    "asr": 42,
+    "tts": 33,
+    "codec": 29,
+    "benchmark_metrics": 2,
+    "prefill_eviction_targeted_recheck": 1
+  },
+  "asr": {
+    "layout_only": {
+      "task": "asr",
+      "load_seconds": 23.557545789997675,
+      "threads": 4,
+      "warmup_count": 2,
+      "measured_repeats": 5,
+      "generation_limit": 64,
+      "steady": {
+        "count": 5,
+        "median_seconds": 0.26239867199910805,
+        "mean_seconds": 0.2604229563992703,
+        "min_seconds": 0.25208127999212593,
+        "max_seconds": 0.2637977999984287,
+        "total_seconds": 1.3021147819963517,
+        "audio_seconds": 21.019687500000003,
+        "aggregate_rtf": 0.06194739013110216,
+        "audio_seconds_per_wall_second": 16.142730111529367
+      },
+      "languages": {
+        "Chinese": {
+          "timing": {
+            "count": 10,
+            "median_seconds": 0.7169242634990951,
+            "mean_seconds": 0.6947322948035435,
+            "min_seconds": 0.2562769680080237,
+            "max_seconds": 0.9381698450015392,
+            "total_seconds": 6.947322948035435,
+            "audio_seconds": 54.291875,
+            "aggregate_rtf": 0.1279624796166173,
+            "audio_seconds_per_wall_second": 7.81479073394057
+          },
+          "cap_reached": 0,
+          "quality": {
+            "count": 10,
+            "reference_units": 165,
+            "substitutions": 3,
+            "deletions": 0,
+            "insertions": 0,
+            "error_rate": 0.01818181818181818,
+            "one_minus_error_rate": 0.9818181818181818,
+            "exact_sentences": 9,
+            "exact_sentence_rate": 0.9
+          }
+        },
+        "English": {
+          "timing": {
+            "count": 10,
+            "median_seconds": 0.7998400074939127,
+            "mean_seconds": 0.7914852267989773,
+            "min_seconds": 0.5665724610007601,
+            "max_seconds": 0.9403791329968954,
+            "total_seconds": 7.914852267989772,
+            "audio_seconds": 48.685,
+            "aggregate_rtf": 0.16257270756885636,
+            "audio_seconds_per_wall_second": 6.151093962536473
+          },
+          "cap_reached": 0,
+          "quality": {
+            "count": 10,
+            "reference_units": 124,
+            "substitutions": 5,
+            "deletions": 2,
+            "insertions": 0,
+            "error_rate": 0.056451612903225805,
+            "one_minus_error_rate": 0.9435483870967742,
+            "exact_sentences": 4,
+            "exact_sentence_rate": 0.4
+          }
+        }
+      },
+      "runs": [
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "warmup",
+          "seconds": 0.7391485050029587,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 9,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.17582290531268807
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "warmup",
+          "seconds": 0.2647279610100668,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 20,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 1,
+          "rtf": 0.06297143119041775
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.2637977999984287,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 31,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 2,
+          "rtf": 0.06275017171364433
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.26105696900049224,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 42,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 3,
+          "rtf": 0.062098204124226924
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.2627800610061968,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 53,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 4,
+          "rtf": 0.06250807986707622
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.26239867199910805,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 64,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 5,
+          "rtf": 0.062417358012365316
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.25208127999212593,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 75,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 6,
+          "rtf": 0.05996313693819803
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "quality",
+          "seconds": 0.2562769680080237,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 86,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 7,
+          "rtf": 0.060961174614994555
+        },
+        {
+          "id": "zh-BAC009S0764W0378",
+          "language": "Chinese",
+          "reference": "    想通  过  训练  提升  脚踝  和  小腿  的  能力",
+          "phase": "quality",
+          "seconds": 0.6975471609912347,
+          "hypothesis": "想通过训练提升脚踝和小腿的能力。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            99172,
+            67338,
+            104034,
+            100341,
+            100037,
+            121601,
+            33108,
+            117773,
+            104426,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 15,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2529375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 12,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.16401538019104084
+        },
+        {
+          "id": "zh-BAC009S0765W0258",
+          "language": "Chinese",
+          "reference": "    并非  仅仅  针对  中国  公司",
+          "phase": "quality",
+          "seconds": 0.6234232779970625,
+          "hypothesis": "并非仅仅针对中国公司。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            104605,
+            102630,
+            101092,
+            58695,
+            73218,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 10,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 3.526,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 8,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.17680750935821402
+        },
+        {
+          "id": "zh-BAC009S0766W0150",
+          "language": "Chinese",
+          "reference": "    大数  据  营销  需要  的  是  强大  的  技术  实力",
+          "phase": "quality",
+          "seconds": 0.6840894720080541,
+          "hypothesis": "大数据营销需要的是强大的技术实力。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            104315,
+            101115,
+            85106,
+            100146,
+            104795,
+            99361,
+            101157,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 16,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.576,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 10,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.14949507692483702
+        },
+        {
+          "id": "zh-BAC009S0766W0437",
+          "language": "Chinese",
+          "reference": "    其中  内地  由  两年  前  的  一三零零  间  增至  今天  的  二三零  零  间",
+          "phase": "quality",
+          "seconds": 0.9381698450015392,
+          "hypothesis": "其中，内地由两年前的一三零零斤，升至今天的二三零零斤。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            90919,
+            3837,
+            105963,
+            67071,
+            118886,
+            99774,
+            44991,
+            99822,
+            99822,
+            102374,
+            3837,
+            99294,
+            56137,
+            106560,
+            40820,
+            44991,
+            99822,
+            99822,
+            102374,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 3,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 24,
+            "error_rate": 0.125,
+            "exact": false
+          },
+          "audio_seconds": 7.3789375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 22,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1271415898293676
+        },
+        {
+          "id": "zh-BAC009S0767W0334",
+          "language": "Chinese",
+          "reference": "    锂电  池生  产  企业  将  迎来  业绩  持续  高  增长  阶段",
+          "phase": "quality",
+          "seconds": 0.7363013660069555,
+          "hypothesis": "锂电池生产企业将迎来业绩持续高增长阶段。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            115235,
+            108183,
+            112909,
+            104076,
+            100652,
+            44636,
+            100023,
+            100385,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 19,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 6.454125,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 11,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1140822909390437
+        },
+        {
+          "id": "zh-BAC009S0768W0227",
+          "language": "Chinese",
+          "reference": "    对  促进  当地  经济  增长  和政  府  财力  的  增长",
+          "phase": "quality",
+          "seconds": 0.7401370510051493,
+          "hypothesis": "对促进当地经济增长和政府财力的增长。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            32664,
+            101902,
+            100198,
+            108277,
+            33108,
+            99563,
+            117029,
+            108397,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 17,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 6.5379375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 11,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.11320650449857456
+        },
+        {
+          "id": "zh-BAC009S0769W0157",
+          "language": "Chinese",
+          "reference": "    市政  府  决定  今年  将  全面  加快  棚户  区  改造  步伐",
+          "phase": "quality",
+          "seconds": 0.7813788930070587,
+          "hypothesis": "市政府决定今年将全面加快棚户区改造步伐。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            104836,
+            103930,
+            88308,
+            44063,
+            100011,
+            100710,
+            103031,
+            17523,
+            23836,
+            101985,
+            103067,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 19,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 6.133,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 14,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.12740565677597565
+        },
+        {
+          "id": "zh-BAC009S0769W0426",
+          "language": "Chinese",
+          "reference": "    这种  天气  很  适合  搞  池边  派对",
+          "phase": "quality",
+          "seconds": 0.6899560590100009,
+          "hypothesis": "这种天气很适合搞池边派对。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100137,
+            104307,
+            99165,
+            100231,
+            100460,
+            100230,
+            99319,
+            99890,
+            32664,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 12,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 3.9819375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 12,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.17327144361507454
+        },
+        {
+          "id": "zh-BAC009S0770W0380",
+          "language": "Chinese",
+          "reference": "    这些  出路  也是  中国  运动  员  比较  常见  的  退役  选择",
+          "phase": "quality",
+          "seconds": 0.8000428550003562,
+          "hypothesis": "这些出路也是中国运动员，比较常见的退役选择。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100001,
+            113212,
+            100000,
+            58695,
+            106275,
+            3837,
+            99792,
+            102716,
+            103399,
+            50404,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 20,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 7.2470625,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 13,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.11039546781890679
+        },
+        {
+          "id": "en-1272-128104-0000",
+          "language": "English",
+          "reference": "MISTER QUILTER IS THE APOSTLE OF THE MIDDLE CLASSES AND WE ARE GLAD TO WELCOME HIS GOSPEL",
+          "phase": "quality",
+          "seconds": 0.8922605410043616,
+          "hypothesis": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            12275,
+            13,
+            3406,
+            2044,
+            374,
+            279,
+            38471,
+            273,
+            315,
+            279,
+            6149,
+            6846,
+            11,
+            323,
+            582,
+            525,
+            15713,
+            311,
+            10565,
+            806,
+            41482,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 17,
+            "error_rate": 0.058823529411764705,
+            "exact": false
+          },
+          "audio_seconds": 5.855,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 24,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.15239291904429744
+        },
+        {
+          "id": "en-1272-128104-0013",
+          "language": "English",
+          "reference": "MISTER QUILTER HAS MISSED HIS CHANCE FOR HE HAS FAILED EVEN TO MAKE HIMSELF THE TUPPER OF PAINTING",
+          "phase": "quality",
+          "seconds": 0.9403791329968954,
+          "hypothesis": "Mr. Quilter has missed his chance, for he has failed even to make himself the tupper of painting.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            12275,
+            13,
+            3406,
+            2044,
+            702,
+            13628,
+            806,
+            6012,
+            11,
+            369,
+            566,
+            702,
+            4641,
+            1496,
+            311,
+            1281,
+            5561,
+            279,
+            259,
+            13574,
+            315,
+            18824,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 18,
+            "error_rate": 0.05555555555555555,
+            "exact": false
+          },
+          "audio_seconds": 7.1,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 25,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.13244776521083035
+        },
+        {
+          "id": "en-1272-135031-0007",
+          "language": "English",
+          "reference": "HE EATS AND SLEEPS VERY STEADILY REPLIED THE NEW KING",
+          "phase": "quality",
+          "seconds": 0.7382152659993153,
+          "hypothesis": "He eats and sleeps very steadily,\" replied the new king.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            1519,
+            49677,
+            323,
+            71390,
+            1602,
+            41971,
+            1335,
+            19995,
+            279,
+            501,
+            11477,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 10,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.055,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 14,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1820506204683885
+        },
+        {
+          "id": "en-1272-135031-0014",
+          "language": "English",
+          "reference": "WHERE IS THAT",
+          "phase": "quality",
+          "seconds": 0.5665724610007601,
+          "hypothesis": "Where is that?",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            9064,
+            374,
+            429,
+            30,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 3,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 1.74,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 6,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.32561635689698853
+        },
+        {
+          "id": "en-1272-135031-0020",
+          "language": "English",
+          "reference": "I DON'T BELIEVE ANN KNEW ANY MAGIC OR SHE'D HAVE WORKED IT BEFORE",
+          "phase": "quality",
+          "seconds": 0.8014288279955508,
+          "hypothesis": "I don't believe Anne knew any magic, or she'd have worked it before.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            40,
+            1513,
+            944,
+            4411,
+            27926,
+            6876,
+            894,
+            10963,
+            11,
+            476,
+            1340,
+            4172,
+            614,
+            6439,
+            432,
+            1573,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.07692307692307693,
+            "exact": false
+          },
+          "audio_seconds": 4.65,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 19,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.17235028559044102
+        },
+        {
+          "id": "en-1272-141231-0003",
+          "language": "English",
+          "reference": "HIS INSTANT OF PANIC WAS FOLLOWED BY A SMALL SHARP BLOW HIGH ON HIS CHEST",
+          "phase": "quality",
+          "seconds": 0.8140788570017321,
+          "hypothesis": "His instant panic was followed by a small, sharp blow high on his chest.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            15986,
+            9690,
+            21975,
+            572,
+            8110,
+            553,
+            264,
+            2613,
+            11,
+            17232,
+            12244,
+            1550,
+            389,
+            806,
+            15138,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 1,
+            "insertions": 0,
+            "reference_units": 15,
+            "error_rate": 0.06666666666666667,
+            "exact": false
+          },
+          "audio_seconds": 5.42,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 18,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.15019905110733064
+        },
+        {
+          "id": "en-1272-141231-0011",
+          "language": "English",
+          "reference": "THE OTHER VOICE SNAPPED WITH A HARSH URGENCY CLEARLY USED TO COMMAND",
+          "phase": "quality",
+          "seconds": 0.7982511869922746,
+          "hypothesis": "The other voice snapped with a harsh urgency, clearly used to command.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            785,
+            1008,
+            7743,
+            47010,
+            448,
+            264,
+            24939,
+            53817,
+            11,
+            9355,
+            1483,
+            311,
+            3210,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 12,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 5.015,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 16,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.15917271924073273
+        },
+        {
+          "id": "en-1272-141231-0017",
+          "language": "English",
+          "reference": "HE ASKED THE HANDLER WHO WAS KNEADING HIS ACHING MUSCLES",
+          "phase": "quality",
+          "seconds": 0.7390682349941926,
+          "hypothesis": "He asked the handler, who was kneading his aching muscles.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            1519,
+            4588,
+            279,
+            7013,
+            11,
+            879,
+            572,
+            13853,
+            2228,
+            806,
+            264,
+            26977,
+            23648,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 10,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 3.735,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 16,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1978763681376687
+        },
+        {
+          "id": "en-1272-141231-0026",
+          "language": "English",
+          "reference": "BREATHING DEEPLY BRION SOFTLY SPOKE THE AUTO HYPNOTIC PHRASES THAT TRIGGERED THE PROCESS",
+          "phase": "quality",
+          "seconds": 0.8655496279970976,
+          "hypothesis": "Breathing deeply, Brienne softly spoke the auto hypnotic phrases that triggered the process.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            50229,
+            43561,
+            17247,
+            11,
+            54758,
+            25136,
+            56050,
+            12290,
+            279,
+            3233,
+            75451,
+            292,
+            31747,
+            429,
+            22119,
+            279,
+            1882,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.07692307692307693,
+            "exact": false
+          },
+          "audio_seconds": 6.635,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 20,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.13045209163483007
+        },
+        {
+          "id": "en-1272-141231-0032",
+          "language": "English",
+          "reference": "THEN THE POWERFUL TWIST THAT THRUST IT ASIDE IN AND UNDER THE GUARD",
+          "phase": "quality",
+          "seconds": 0.7590481320075924,
+          "hypothesis": "Then the powerful twist that thrusted aside in and under the guard.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            12209,
+            279,
+            7988,
+            26646,
+            429,
+            29885,
+            291,
+            15663,
+            304,
+            323,
+            1212,
+            279,
+            7616,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 1,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.15384615384615385,
+            "exact": false
+          },
+          "audio_seconds": 4.48,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 16,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.16943038660883755
+        }
+      ]
+    },
+    "final": {
+      "task": "asr",
+      "load_seconds": 23.559326320988475,
+      "threads": 4,
+      "warmup_count": 2,
+      "measured_repeats": 5,
+      "generation_limit": 64,
+      "steady": {
+        "count": 5,
+        "median_seconds": 0.2580507859966019,
+        "mean_seconds": 0.2595002904010471,
+        "min_seconds": 0.2538874440069776,
+        "max_seconds": 0.2666215880017262,
+        "total_seconds": 1.2975014520052355,
+        "audio_seconds": 21.019687500000003,
+        "aggregate_rtf": 0.06172791350990519,
+        "audio_seconds_per_wall_second": 16.200126379446385
+      },
+      "languages": {
+        "Chinese": {
+          "timing": {
+            "count": 10,
+            "median_seconds": 0.7111465309935738,
+            "mean_seconds": 0.6842519818994333,
+            "min_seconds": 0.2554715730075259,
+            "max_seconds": 0.9361704300099518,
+            "total_seconds": 6.842519818994333,
+            "audio_seconds": 54.291875,
+            "aggregate_rtf": 0.12603211473161194,
+            "audio_seconds_per_wall_second": 7.934485604161457
+          },
+          "cap_reached": 0,
+          "quality": {
+            "count": 10,
+            "reference_units": 165,
+            "substitutions": 3,
+            "deletions": 0,
+            "insertions": 0,
+            "error_rate": 0.01818181818181818,
+            "one_minus_error_rate": 0.9818181818181818,
+            "exact_sentences": 9,
+            "exact_sentence_rate": 0.9
+          }
+        },
+        "English": {
+          "timing": {
+            "count": 10,
+            "median_seconds": 0.7852266045010765,
+            "mean_seconds": 0.7860306574977585,
+            "min_seconds": 0.5589162339892937,
+            "max_seconds": 0.9413757029979024,
+            "total_seconds": 7.860306574977585,
+            "audio_seconds": 48.685,
+            "aggregate_rtf": 0.16145232771854956,
+            "audio_seconds_per_wall_second": 6.19377877129924
+          },
+          "cap_reached": 0,
+          "quality": {
+            "count": 10,
+            "reference_units": 124,
+            "substitutions": 5,
+            "deletions": 2,
+            "insertions": 0,
+            "error_rate": 0.056451612903225805,
+            "one_minus_error_rate": 0.9435483870967742,
+            "exact_sentences": 4,
+            "exact_sentence_rate": 0.4
+          }
+        }
+      },
+      "runs": [
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "warmup",
+          "seconds": 0.7116552669904195,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 9,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.16928302739762888
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "warmup",
+          "seconds": 0.2510029969998868,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 20,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 1,
+          "rtf": 0.05970664335516092
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.2538874440069776,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 31,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 2,
+          "rtf": 0.06039277320535274
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.2627086710126605,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 42,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 3,
+          "rtf": 0.06249109816990868
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.2666215880017262,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 53,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 4,
+          "rtf": 0.06342187247115975
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.2562329629872693,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 64,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 5,
+          "rtf": 0.060950707042449905
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "steady",
+          "seconds": 0.2580507859966019,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 75,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 6,
+          "rtf": 0.0613831166606549
+        },
+        {
+          "id": "zh-BAC009S0764W0121",
+          "language": "Chinese",
+          "reference": "    甚至  出现  交易  几乎  停滞  的  情况",
+          "phase": "quality",
+          "seconds": 0.2554715730075259,
+          "hypothesis": "甚至出现交易几乎停滞的情况。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100636,
+            100347,
+            99886,
+            100740,
+            118083,
+            102072,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2039375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 86,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 7,
+          "rtf": 0.060769593507878236
+        },
+        {
+          "id": "zh-BAC009S0764W0378",
+          "language": "Chinese",
+          "reference": "    想通  过  训练  提升  脚踝  和  小腿  的  能力",
+          "phase": "quality",
+          "seconds": 0.6860602459928486,
+          "hypothesis": "想通过训练提升脚踝和小腿的能力。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            99172,
+            67338,
+            104034,
+            100341,
+            100037,
+            121601,
+            33108,
+            117773,
+            104426,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 15,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.2529375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 12,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.16131444348590795
+        },
+        {
+          "id": "zh-BAC009S0765W0258",
+          "language": "Chinese",
+          "reference": "    并非  仅仅  针对  中国  公司",
+          "phase": "quality",
+          "seconds": 0.6115437840053346,
+          "hypothesis": "并非仅仅针对中国公司。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            104605,
+            102630,
+            101092,
+            58695,
+            73218,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 10,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 3.526,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 8,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.17343839591756513
+        },
+        {
+          "id": "zh-BAC009S0766W0150",
+          "language": "Chinese",
+          "reference": "    大数  据  营销  需要  的  是  强大  的  技术  实力",
+          "phase": "quality",
+          "seconds": 0.6661970829882193,
+          "hypothesis": "大数据营销需要的是强大的技术实力。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            104315,
+            101115,
+            85106,
+            100146,
+            104795,
+            99361,
+            101157,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 16,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.576,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 10,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1455850268767962
+        },
+        {
+          "id": "zh-BAC009S0766W0437",
+          "language": "Chinese",
+          "reference": "    其中  内地  由  两年  前  的  一三零零  间  增至  今天  的  二三零  零  间",
+          "phase": "quality",
+          "seconds": 0.9361704300099518,
+          "hypothesis": "其中，内地由两年前的一三零零斤，升至今天的二三零零斤。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            90919,
+            3837,
+            105963,
+            67071,
+            118886,
+            99774,
+            44991,
+            99822,
+            99822,
+            102374,
+            3837,
+            99294,
+            56137,
+            106560,
+            40820,
+            44991,
+            99822,
+            99822,
+            102374,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 3,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 24,
+            "error_rate": 0.125,
+            "exact": false
+          },
+          "audio_seconds": 7.3789375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 22,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1268706273782576
+        },
+        {
+          "id": "zh-BAC009S0767W0334",
+          "language": "Chinese",
+          "reference": "    锂电  池生  产  企业  将  迎来  业绩  持续  高  增长  阶段",
+          "phase": "quality",
+          "seconds": 0.736232815994299,
+          "hypothesis": "锂电池生产企业将迎来业绩持续高增长阶段。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            115235,
+            108183,
+            112909,
+            104076,
+            100652,
+            44636,
+            100023,
+            100385,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 19,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 6.454125,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 11,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.11407166982267913
+        },
+        {
+          "id": "zh-BAC009S0768W0227",
+          "language": "Chinese",
+          "reference": "    对  促进  当地  经济  增长  和政  府  财力  的  增长",
+          "phase": "quality",
+          "seconds": 0.7368255509936716,
+          "hypothesis": "对促进当地经济增长和政府财力的增长。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            32664,
+            101902,
+            100198,
+            108277,
+            33108,
+            99563,
+            117029,
+            108397,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 17,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 6.5379375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 11,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.11269999919602652
+        },
+        {
+          "id": "zh-BAC009S0769W0157",
+          "language": "Chinese",
+          "reference": "    市政  府  决定  今年  将  全面  加快  棚户  区  改造  步伐",
+          "phase": "quality",
+          "seconds": 0.7696347070013871,
+          "hypothesis": "市政府决定今年将全面加快棚户区改造步伐。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            104836,
+            103930,
+            88308,
+            44063,
+            100011,
+            100710,
+            103031,
+            17523,
+            23836,
+            101985,
+            103067,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 19,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 6.133,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 14,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.12549073976869185
+        },
+        {
+          "id": "zh-BAC009S0769W0426",
+          "language": "Chinese",
+          "reference": "    这种  天气  很  适合  搞  池边  派对",
+          "phase": "quality",
+          "seconds": 0.6695517640036996,
+          "hypothesis": "这种天气很适合搞池边派对。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100137,
+            104307,
+            99165,
+            100231,
+            100460,
+            100230,
+            99319,
+            99890,
+            32664,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 12,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 3.9819375,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 12,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.16814723084018765
+        },
+        {
+          "id": "zh-BAC009S0770W0380",
+          "language": "Chinese",
+          "reference": "    这些  出路  也是  中国  运动  员  比较  常见  的  退役  选择",
+          "phase": "quality",
+          "seconds": 0.7748318649973953,
+          "hypothesis": "这些出路也是中国运动员，比较常见的退役选择。",
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100001,
+            113212,
+            100000,
+            58695,
+            106275,
+            3837,
+            99792,
+            102716,
+            103399,
+            50404,
+            1773,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 20,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 7.2470625,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 13,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1069166803787597
+        },
+        {
+          "id": "en-1272-128104-0000",
+          "language": "English",
+          "reference": "MISTER QUILTER IS THE APOSTLE OF THE MIDDLE CLASSES AND WE ARE GLAD TO WELCOME HIS GOSPEL",
+          "phase": "quality",
+          "seconds": 0.8846351190004498,
+          "hypothesis": "Mr. Quilter is the apostle of the middle classes, and we are glad to welcome his gospel.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            12275,
+            13,
+            3406,
+            2044,
+            374,
+            279,
+            38471,
+            273,
+            315,
+            279,
+            6149,
+            6846,
+            11,
+            323,
+            582,
+            525,
+            15713,
+            311,
+            10565,
+            806,
+            41482,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 17,
+            "error_rate": 0.058823529411764705,
+            "exact": false
+          },
+          "audio_seconds": 5.855,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 24,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1510905412468744
+        },
+        {
+          "id": "en-1272-128104-0013",
+          "language": "English",
+          "reference": "MISTER QUILTER HAS MISSED HIS CHANCE FOR HE HAS FAILED EVEN TO MAKE HIMSELF THE TUPPER OF PAINTING",
+          "phase": "quality",
+          "seconds": 0.9413757029979024,
+          "hypothesis": "Mr. Quilter has missed his chance, for he has failed even to make himself the tupper of painting.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            12275,
+            13,
+            3406,
+            2044,
+            702,
+            13628,
+            806,
+            6012,
+            11,
+            369,
+            566,
+            702,
+            4641,
+            1496,
+            311,
+            1281,
+            5561,
+            279,
+            259,
+            13574,
+            315,
+            18824,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 18,
+            "error_rate": 0.05555555555555555,
+            "exact": false
+          },
+          "audio_seconds": 7.1,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 25,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.13258812718280316
+        },
+        {
+          "id": "en-1272-135031-0007",
+          "language": "English",
+          "reference": "HE EATS AND SLEEPS VERY STEADILY REPLIED THE NEW KING",
+          "phase": "quality",
+          "seconds": 0.7243593319872161,
+          "hypothesis": "He eats and sleeps very steadily,\" replied the new king.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            1519,
+            49677,
+            323,
+            71390,
+            1602,
+            41971,
+            1335,
+            19995,
+            279,
+            501,
+            11477,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 10,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 4.055,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 14,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.17863362071201386
+        },
+        {
+          "id": "en-1272-135031-0014",
+          "language": "English",
+          "reference": "WHERE IS THAT",
+          "phase": "quality",
+          "seconds": 0.5589162339892937,
+          "hypothesis": "Where is that?",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            9064,
+            374,
+            429,
+            30,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 3,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 1.74,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 6,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.3212162264306286
+        },
+        {
+          "id": "en-1272-135031-0020",
+          "language": "English",
+          "reference": "I DON'T BELIEVE ANN KNEW ANY MAGIC OR SHE'D HAVE WORKED IT BEFORE",
+          "phase": "quality",
+          "seconds": 0.7873134289984591,
+          "hypothesis": "I don't believe Anne knew any magic, or she'd have worked it before.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            40,
+            1513,
+            944,
+            4411,
+            27926,
+            6876,
+            894,
+            10963,
+            11,
+            476,
+            1340,
+            4172,
+            614,
+            6439,
+            432,
+            1573,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.07692307692307693,
+            "exact": false
+          },
+          "audio_seconds": 4.65,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 19,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1693147159136471
+        },
+        {
+          "id": "en-1272-141231-0003",
+          "language": "English",
+          "reference": "HIS INSTANT OF PANIC WAS FOLLOWED BY A SMALL SHARP BLOW HIGH ON HIS CHEST",
+          "phase": "quality",
+          "seconds": 0.8089097230113111,
+          "hypothesis": "His instant panic was followed by a small, sharp blow high on his chest.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            15986,
+            9690,
+            21975,
+            572,
+            8110,
+            553,
+            264,
+            2613,
+            11,
+            17232,
+            12244,
+            1550,
+            389,
+            806,
+            15138,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 1,
+            "insertions": 0,
+            "reference_units": 15,
+            "error_rate": 0.06666666666666667,
+            "exact": false
+          },
+          "audio_seconds": 5.42,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 18,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1492453363489504
+        },
+        {
+          "id": "en-1272-141231-0011",
+          "language": "English",
+          "reference": "THE OTHER VOICE SNAPPED WITH A HARSH URGENCY CLEARLY USED TO COMMAND",
+          "phase": "quality",
+          "seconds": 0.7831397800036939,
+          "hypothesis": "The other voice snapped with a harsh urgency, clearly used to command.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            785,
+            1008,
+            7743,
+            47010,
+            448,
+            264,
+            24939,
+            53817,
+            11,
+            9355,
+            1483,
+            311,
+            3210,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 12,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 5.015,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 16,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1561594775680347
+        },
+        {
+          "id": "en-1272-141231-0017",
+          "language": "English",
+          "reference": "HE ASKED THE HANDLER WHO WAS KNEADING HIS ACHING MUSCLES",
+          "phase": "quality",
+          "seconds": 0.7508326289971592,
+          "hypothesis": "He asked the handler, who was kneading his aching muscles.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            1519,
+            4588,
+            279,
+            7013,
+            11,
+            879,
+            572,
+            13853,
+            2228,
+            806,
+            264,
+            26977,
+            23648,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 10,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "audio_seconds": 3.735,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 16,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.20102613895506272
+        },
+        {
+          "id": "en-1272-141231-0026",
+          "language": "English",
+          "reference": "BREATHING DEEPLY BRION SOFTLY SPOKE THE AUTO HYPNOTIC PHRASES THAT TRIGGERED THE PROCESS",
+          "phase": "quality",
+          "seconds": 0.8535597459995188,
+          "hypothesis": "Breathing deeply, Brienne softly spoke the auto hypnotic phrases that triggered the process.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            50229,
+            43561,
+            17247,
+            11,
+            54758,
+            25136,
+            56050,
+            12290,
+            279,
+            3233,
+            75451,
+            292,
+            31747,
+            429,
+            22119,
+            279,
+            1882,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.07692307692307693,
+            "exact": false
+          },
+          "audio_seconds": 6.635,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 20,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.12864502577234646
+        },
+        {
+          "id": "en-1272-141231-0032",
+          "language": "English",
+          "reference": "THEN THE POWERFUL TWIST THAT THRUST IT ASIDE IN AND UNDER THE GUARD",
+          "phase": "quality",
+          "seconds": 0.767264879992581,
+          "hypothesis": "Then the powerful twist that thrusted aside in and under the guard.",
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            12209,
+            279,
+            7988,
+            26646,
+            429,
+            29885,
+            291,
+            15663,
+            304,
+            323,
+            1212,
+            279,
+            7616,
+            13,
+            151645
+          ],
+          "score": {
+            "substitutions": 1,
+            "deletions": 1,
+            "insertions": 0,
+            "reference_units": 13,
+            "error_rate": 0.15384615384615385,
+            "exact": false
+          },
+          "audio_seconds": 4.48,
+          "cap_reached": false,
+          "graph_size": 2,
+          "graph_replays": 16,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "rtf": 0.1712644821412011
+        }
+      ]
+    },
+    "stages": {
+      "task": "asr",
+      "threads": 4,
+      "runs": [
+        {
+          "phase": "warmup",
+          "seconds": 0.7149194850062486,
+          "stage_seconds": {
+            "preprocessing": 0.009123651994741522,
+            "audio_conv": 0.08397281001089141,
+            "audio_linear": 0.0047316550044342875,
+            "audio_resident": 0.01834219000011217,
+            "prefill_output_head": 0.002694752998650074,
+            "text_prefill": 0.3922047800006112,
+            "text_decode_with_head": 0.11753270297776908,
+            "audio_attention_norm_other": 0.021731793982326053,
+            "other": 0.06458514803671278
+          },
+          "calls": {
+            "preprocessing": 1,
+            "audio_conv": 3,
+            "audio_linear": 2,
+            "audio_resident": 1,
+            "audio_total": 1,
+            "prefill_output_head": 1,
+            "text_prefill": 1,
+            "text_decode_with_head": 10
+          }
+        },
+        {
+          "phase": "warmup",
+          "seconds": 0.26050388399744406,
+          "stage_seconds": {
+            "preprocessing": 0.0036820690002059564,
+            "audio_conv": 0.07844499498605728,
+            "audio_linear": 0.0036846450093435124,
+            "audio_resident": 0.006478476992924698,
+            "prefill_output_head": 0.002457327995216474,
+            "text_prefill": 0.013432842009933665,
+            "text_decode_with_head": 0.11316531902411953,
+            "audio_attention_norm_other": 0.018122342007700354,
+            "other": 0.021035866971942596
+          },
+          "calls": {
+            "preprocessing": 1,
+            "audio_conv": 3,
+            "audio_linear": 2,
+            "audio_resident": 1,
+            "audio_total": 1,
+            "prefill_output_head": 1,
+            "text_prefill": 1,
+            "text_decode_with_head": 10
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 0.2688546069985023,
+          "stage_seconds": {
+            "preprocessing": 0.0033631050027906895,
+            "audio_conv": 0.09106129099382088,
+            "audio_linear": 0.0015783200069563463,
+            "audio_resident": 0.006265090996748768,
+            "prefill_output_head": 0.0024048269988270476,
+            "text_prefill": 0.013270764000480995,
+            "text_decode_with_head": 0.11299639598291833,
+            "audio_attention_norm_other": 0.017891764000523835,
+            "other": 0.02002304901543539
+          },
+          "calls": {
+            "preprocessing": 1,
+            "audio_conv": 3,
+            "audio_linear": 2,
+            "audio_resident": 1,
+            "audio_total": 1,
+            "prefill_output_head": 1,
+            "text_prefill": 1,
+            "text_decode_with_head": 10
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 0.2550301079900237,
+          "stage_seconds": {
+            "preprocessing": 0.004193265005596913,
+            "audio_conv": 0.07540496898582205,
+            "audio_linear": 0.0016725140158087015,
+            "audio_resident": 0.006268551005632617,
+            "prefill_output_head": 0.002418673990177922,
+            "text_prefill": 0.013297802011948079,
+            "text_decode_with_head": 0.11372843997378368,
+            "audio_attention_norm_other": 0.018039457994746044,
+            "other": 0.020006435006507672
+          },
+          "calls": {
+            "preprocessing": 1,
+            "audio_conv": 3,
+            "audio_linear": 2,
+            "audio_resident": 1,
+            "audio_total": 1,
+            "prefill_output_head": 1,
+            "text_prefill": 1,
+            "text_decode_with_head": 10
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 0.2600295339943841,
+          "stage_seconds": {
+            "preprocessing": 0.004246266005793586,
+            "audio_conv": 0.08100717001070734,
+            "audio_linear": 0.0015639730117982253,
+            "audio_resident": 0.00623670598724857,
+            "prefill_output_head": 0.0024105589982355013,
+            "text_prefill": 0.013256532009108923,
+            "text_decode_with_head": 0.11312609098968096,
+            "audio_attention_norm_other": 0.01826745900325477,
+            "other": 0.01991477797855623
+          },
+          "calls": {
+            "preprocessing": 1,
+            "audio_conv": 3,
+            "audio_linear": 2,
+            "audio_resident": 1,
+            "audio_total": 1,
+            "prefill_output_head": 1,
+            "text_prefill": 1,
+            "text_decode_with_head": 10
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 0.2685082960088039,
+          "stage_seconds": {
+            "preprocessing": 0.003299912001239136,
+            "audio_conv": 0.0915244479838293,
+            "audio_linear": 0.0014962040004320443,
+            "audio_resident": 0.006277474996750243,
+            "prefill_output_head": 0.002437944000121206,
+            "text_prefill": 0.013381187003687955,
+            "text_decode_with_head": 0.11266985301335808,
+            "audio_attention_norm_other": 0.017278029015869834,
+            "other": 0.02014324399351608
+          },
+          "calls": {
+            "preprocessing": 1,
+            "audio_conv": 3,
+            "audio_linear": 2,
+            "audio_resident": 1,
+            "audio_total": 1,
+            "prefill_output_head": 1,
+            "text_prefill": 1,
+            "text_decode_with_head": 10
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 0.2468466940044891,
+          "stage_seconds": {
+            "preprocessing": 0.003317066002637148,
+            "audio_conv": 0.06898299200111069,
+            "audio_linear": 0.001565742990351282,
+            "audio_resident": 0.0062277059914777055,
+            "prefill_output_head": 0.002435365997371264,
+            "text_prefill": 0.013292110001202673,
+            "text_decode_with_head": 0.11356778600020334,
+            "audio_attention_norm_other": 0.017280182015383616,
+            "other": 0.02017774300475139
+          },
+          "calls": {
+            "preprocessing": 1,
+            "audio_conv": 3,
+            "audio_linear": 2,
+            "audio_resident": 1,
+            "audio_total": 1,
+            "prefill_output_head": 1,
+            "text_prefill": 1,
+            "text_decode_with_head": 10
+          }
+        }
+      ],
+      "mean_seconds": 0.2598538477992406,
+      "stage_mean_seconds": {
+        "preprocessing": 0.0036839228036114947,
+        "audio_conv": 0.08159617399505806,
+        "audio_linear": 0.00157535080506932,
+        "audio_resident": 0.00625510579557158,
+        "prefill_output_head": 0.002421473996946588,
+        "text_prefill": 0.013299679005285725,
+        "text_decode_with_head": 0.11321771319198888,
+        "audio_attention_norm_other": 0.01775137840595562,
+        "other": 0.020053049799753354
+      },
+      "stats": {
+        "audio_linear_calls": {
+          "layers.0.self_attn.k_proj": 7,
+          "layers.0.self_attn.v_proj": 7,
+          "layers.0.self_attn.q_proj": 7,
+          "layers.0.self_attn.out_proj": 7,
+          "layers.0.fc1": 7,
+          "layers.0.fc2": 7,
+          "layers.1.self_attn.k_proj": 7,
+          "layers.1.self_attn.v_proj": 7,
+          "layers.1.self_attn.q_proj": 7,
+          "layers.1.self_attn.out_proj": 7,
+          "layers.1.fc1": 7,
+          "layers.1.fc2": 7,
+          "layers.2.self_attn.k_proj": 7,
+          "layers.2.self_attn.v_proj": 7,
+          "layers.2.self_attn.q_proj": 7,
+          "layers.2.self_attn.out_proj": 7,
+          "layers.2.fc1": 7,
+          "layers.2.fc2": 7,
+          "layers.3.self_attn.k_proj": 7,
+          "layers.3.self_attn.v_proj": 7,
+          "layers.3.self_attn.q_proj": 7,
+          "layers.3.self_attn.out_proj": 7,
+          "layers.3.fc1": 7,
+          "layers.3.fc2": 7,
+          "layers.4.self_attn.k_proj": 7,
+          "layers.4.self_attn.v_proj": 7,
+          "layers.4.self_attn.q_proj": 7,
+          "layers.4.self_attn.out_proj": 7,
+          "layers.4.fc1": 7,
+          "layers.4.fc2": 7,
+          "layers.5.self_attn.k_proj": 7,
+          "layers.5.self_attn.v_proj": 7,
+          "layers.5.self_attn.q_proj": 7,
+          "layers.5.self_attn.out_proj": 7,
+          "layers.5.fc1": 7,
+          "layers.5.fc2": 7,
+          "layers.6.self_attn.k_proj": 7,
+          "layers.6.self_attn.v_proj": 7,
+          "layers.6.self_attn.q_proj": 7,
+          "layers.6.self_attn.out_proj": 7,
+          "layers.6.fc1": 7,
+          "layers.6.fc2": 7,
+          "layers.7.self_attn.k_proj": 7,
+          "layers.7.self_attn.v_proj": 7,
+          "layers.7.self_attn.q_proj": 7,
+          "layers.7.self_attn.out_proj": 7,
+          "layers.7.fc1": 7,
+          "layers.7.fc2": 7,
+          "layers.8.self_attn.k_proj": 7,
+          "layers.8.self_attn.v_proj": 7,
+          "layers.8.self_attn.q_proj": 7,
+          "layers.8.self_attn.out_proj": 7,
+          "layers.8.fc1": 7,
+          "layers.8.fc2": 7,
+          "layers.9.self_attn.k_proj": 7,
+          "layers.9.self_attn.v_proj": 7,
+          "layers.9.self_attn.q_proj": 7,
+          "layers.9.self_attn.out_proj": 7,
+          "layers.9.fc1": 7,
+          "layers.9.fc2": 7,
+          "layers.10.self_attn.k_proj": 7,
+          "layers.10.self_attn.v_proj": 7,
+          "layers.10.self_attn.q_proj": 7,
+          "layers.10.self_attn.out_proj": 7,
+          "layers.10.fc1": 7,
+          "layers.10.fc2": 7,
+          "layers.11.self_attn.k_proj": 7,
+          "layers.11.self_attn.v_proj": 7,
+          "layers.11.self_attn.q_proj": 7,
+          "layers.11.self_attn.out_proj": 7,
+          "layers.11.fc1": 7,
+          "layers.11.fc2": 7,
+          "layers.12.self_attn.k_proj": 7,
+          "layers.12.self_attn.v_proj": 7,
+          "layers.12.self_attn.q_proj": 7,
+          "layers.12.self_attn.out_proj": 7,
+          "layers.12.fc1": 7,
+          "layers.12.fc2": 7,
+          "layers.13.self_attn.k_proj": 7,
+          "layers.13.self_attn.v_proj": 7,
+          "layers.13.self_attn.q_proj": 7,
+          "layers.13.self_attn.out_proj": 7,
+          "layers.13.fc1": 7,
+          "layers.13.fc2": 7,
+          "layers.14.self_attn.k_proj": 7,
+          "layers.14.self_attn.v_proj": 7,
+          "layers.14.self_attn.q_proj": 7,
+          "layers.14.self_attn.out_proj": 7,
+          "layers.14.fc1": 7,
+          "layers.14.fc2": 7,
+          "layers.15.self_attn.k_proj": 7,
+          "layers.15.self_attn.v_proj": 7,
+          "layers.15.self_attn.q_proj": 7,
+          "layers.15.self_attn.out_proj": 7,
+          "layers.15.fc1": 7,
+          "layers.15.fc2": 7,
+          "layers.16.self_attn.k_proj": 7,
+          "layers.16.self_attn.v_proj": 7,
+          "layers.16.self_attn.q_proj": 7,
+          "layers.16.self_attn.out_proj": 7,
+          "layers.16.fc1": 7,
+          "layers.16.fc2": 7,
+          "layers.17.self_attn.k_proj": 7,
+          "layers.17.self_attn.v_proj": 7,
+          "layers.17.self_attn.q_proj": 7,
+          "layers.17.self_attn.out_proj": 7,
+          "layers.17.fc1": 7,
+          "layers.17.fc2": 7,
+          "conv_out": 7,
+          "proj1": 7,
+          "proj2": 7
+        },
+        "decoder_calls": 77,
+        "audio_resident_calls": 7,
+        "audio_graph_size": 1,
+        "audio_graph_replays": 6,
+        "audio_graph_invariant_ok": true,
+        "graph_size": 2,
+        "graph_replays": 75,
+        "graph_invariant_ok": true
+      }
+    },
+    "lifecycle": [
+      {
+        "case": "zh",
+        "text": "甚至出现交易几乎停滞的情况。",
+        "equal_baseline": true,
+        "baseline": "甚至出现交易几乎停滞的情况。",
+        "stats": {
+          "audio_linear_calls": {
+            "layers.0.self_attn.k_proj": 1,
+            "layers.0.self_attn.v_proj": 1,
+            "layers.0.self_attn.q_proj": 1,
+            "layers.0.self_attn.out_proj": 1,
+            "layers.0.fc1": 1,
+            "layers.0.fc2": 1,
+            "layers.1.self_attn.k_proj": 1,
+            "layers.1.self_attn.v_proj": 1,
+            "layers.1.self_attn.q_proj": 1,
+            "layers.1.self_attn.out_proj": 1,
+            "layers.1.fc1": 1,
+            "layers.1.fc2": 1,
+            "layers.2.self_attn.k_proj": 1,
+            "layers.2.self_attn.v_proj": 1,
+            "layers.2.self_attn.q_proj": 1,
+            "layers.2.self_attn.out_proj": 1,
+            "layers.2.fc1": 1,
+            "layers.2.fc2": 1,
+            "layers.3.self_attn.k_proj": 1,
+            "layers.3.self_attn.v_proj": 1,
+            "layers.3.self_attn.q_proj": 1,
+            "layers.3.self_attn.out_proj": 1,
+            "layers.3.fc1": 1,
+            "layers.3.fc2": 1,
+            "layers.4.self_attn.k_proj": 1,
+            "layers.4.self_attn.v_proj": 1,
+            "layers.4.self_attn.q_proj": 1,
+            "layers.4.self_attn.out_proj": 1,
+            "layers.4.fc1": 1,
+            "layers.4.fc2": 1,
+            "layers.5.self_attn.k_proj": 1,
+            "layers.5.self_attn.v_proj": 1,
+            "layers.5.self_attn.q_proj": 1,
+            "layers.5.self_attn.out_proj": 1,
+            "layers.5.fc1": 1,
+            "layers.5.fc2": 1,
+            "layers.6.self_attn.k_proj": 1,
+            "layers.6.self_attn.v_proj": 1,
+            "layers.6.self_attn.q_proj": 1,
+            "layers.6.self_attn.out_proj": 1,
+            "layers.6.fc1": 1,
+            "layers.6.fc2": 1,
+            "layers.7.self_attn.k_proj": 1,
+            "layers.7.self_attn.v_proj": 1,
+            "layers.7.self_attn.q_proj": 1,
+            "layers.7.self_attn.out_proj": 1,
+            "layers.7.fc1": 1,
+            "layers.7.fc2": 1,
+            "layers.8.self_attn.k_proj": 1,
+            "layers.8.self_attn.v_proj": 1,
+            "layers.8.self_attn.q_proj": 1,
+            "layers.8.self_attn.out_proj": 1,
+            "layers.8.fc1": 1,
+            "layers.8.fc2": 1,
+            "layers.9.self_attn.k_proj": 1,
+            "layers.9.self_attn.v_proj": 1,
+            "layers.9.self_attn.q_proj": 1,
+            "layers.9.self_attn.out_proj": 1,
+            "layers.9.fc1": 1,
+            "layers.9.fc2": 1,
+            "layers.10.self_attn.k_proj": 1,
+            "layers.10.self_attn.v_proj": 1,
+            "layers.10.self_attn.q_proj": 1,
+            "layers.10.self_attn.out_proj": 1,
+            "layers.10.fc1": 1,
+            "layers.10.fc2": 1,
+            "layers.11.self_attn.k_proj": 1,
+            "layers.11.self_attn.v_proj": 1,
+            "layers.11.self_attn.q_proj": 1,
+            "layers.11.self_attn.out_proj": 1,
+            "layers.11.fc1": 1,
+            "layers.11.fc2": 1,
+            "layers.12.self_attn.k_proj": 1,
+            "layers.12.self_attn.v_proj": 1,
+            "layers.12.self_attn.q_proj": 1,
+            "layers.12.self_attn.out_proj": 1,
+            "layers.12.fc1": 1,
+            "layers.12.fc2": 1,
+            "layers.13.self_attn.k_proj": 1,
+            "layers.13.self_attn.v_proj": 1,
+            "layers.13.self_attn.q_proj": 1,
+            "layers.13.self_attn.out_proj": 1,
+            "layers.13.fc1": 1,
+            "layers.13.fc2": 1,
+            "layers.14.self_attn.k_proj": 1,
+            "layers.14.self_attn.v_proj": 1,
+            "layers.14.self_attn.q_proj": 1,
+            "layers.14.self_attn.out_proj": 1,
+            "layers.14.fc1": 1,
+            "layers.14.fc2": 1,
+            "layers.15.self_attn.k_proj": 1,
+            "layers.15.self_attn.v_proj": 1,
+            "layers.15.self_attn.q_proj": 1,
+            "layers.15.self_attn.out_proj": 1,
+            "layers.15.fc1": 1,
+            "layers.15.fc2": 1,
+            "layers.16.self_attn.k_proj": 1,
+            "layers.16.self_attn.v_proj": 1,
+            "layers.16.self_attn.q_proj": 1,
+            "layers.16.self_attn.out_proj": 1,
+            "layers.16.fc1": 1,
+            "layers.16.fc2": 1,
+            "layers.17.self_attn.k_proj": 1,
+            "layers.17.self_attn.v_proj": 1,
+            "layers.17.self_attn.q_proj": 1,
+            "layers.17.self_attn.out_proj": 1,
+            "layers.17.fc1": 1,
+            "layers.17.fc2": 1,
+            "conv_out": 1,
+            "proj1": 1,
+            "proj2": 1
+          },
+          "decoder_calls": 11,
+          "audio_resident_calls": 1,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 9,
+          "graph_invariant_ok": true
+        }
+      },
+      {
+        "case": "en_same_shape",
+        "text": "Hmm. Oh, yeah, yeah. He wasn't even that big when I.",
+        "equal_baseline": true,
+        "baseline": "Hmm. Oh, yeah, yeah. He wasn't even that big when I.",
+        "stats": {
+          "audio_linear_calls": {
+            "layers.0.self_attn.k_proj": 2,
+            "layers.0.self_attn.v_proj": 2,
+            "layers.0.self_attn.q_proj": 2,
+            "layers.0.self_attn.out_proj": 2,
+            "layers.0.fc1": 2,
+            "layers.0.fc2": 2,
+            "layers.1.self_attn.k_proj": 2,
+            "layers.1.self_attn.v_proj": 2,
+            "layers.1.self_attn.q_proj": 2,
+            "layers.1.self_attn.out_proj": 2,
+            "layers.1.fc1": 2,
+            "layers.1.fc2": 2,
+            "layers.2.self_attn.k_proj": 2,
+            "layers.2.self_attn.v_proj": 2,
+            "layers.2.self_attn.q_proj": 2,
+            "layers.2.self_attn.out_proj": 2,
+            "layers.2.fc1": 2,
+            "layers.2.fc2": 2,
+            "layers.3.self_attn.k_proj": 2,
+            "layers.3.self_attn.v_proj": 2,
+            "layers.3.self_attn.q_proj": 2,
+            "layers.3.self_attn.out_proj": 2,
+            "layers.3.fc1": 2,
+            "layers.3.fc2": 2,
+            "layers.4.self_attn.k_proj": 2,
+            "layers.4.self_attn.v_proj": 2,
+            "layers.4.self_attn.q_proj": 2,
+            "layers.4.self_attn.out_proj": 2,
+            "layers.4.fc1": 2,
+            "layers.4.fc2": 2,
+            "layers.5.self_attn.k_proj": 2,
+            "layers.5.self_attn.v_proj": 2,
+            "layers.5.self_attn.q_proj": 2,
+            "layers.5.self_attn.out_proj": 2,
+            "layers.5.fc1": 2,
+            "layers.5.fc2": 2,
+            "layers.6.self_attn.k_proj": 2,
+            "layers.6.self_attn.v_proj": 2,
+            "layers.6.self_attn.q_proj": 2,
+            "layers.6.self_attn.out_proj": 2,
+            "layers.6.fc1": 2,
+            "layers.6.fc2": 2,
+            "layers.7.self_attn.k_proj": 2,
+            "layers.7.self_attn.v_proj": 2,
+            "layers.7.self_attn.q_proj": 2,
+            "layers.7.self_attn.out_proj": 2,
+            "layers.7.fc1": 2,
+            "layers.7.fc2": 2,
+            "layers.8.self_attn.k_proj": 2,
+            "layers.8.self_attn.v_proj": 2,
+            "layers.8.self_attn.q_proj": 2,
+            "layers.8.self_attn.out_proj": 2,
+            "layers.8.fc1": 2,
+            "layers.8.fc2": 2,
+            "layers.9.self_attn.k_proj": 2,
+            "layers.9.self_attn.v_proj": 2,
+            "layers.9.self_attn.q_proj": 2,
+            "layers.9.self_attn.out_proj": 2,
+            "layers.9.fc1": 2,
+            "layers.9.fc2": 2,
+            "layers.10.self_attn.k_proj": 2,
+            "layers.10.self_attn.v_proj": 2,
+            "layers.10.self_attn.q_proj": 2,
+            "layers.10.self_attn.out_proj": 2,
+            "layers.10.fc1": 2,
+            "layers.10.fc2": 2,
+            "layers.11.self_attn.k_proj": 2,
+            "layers.11.self_attn.v_proj": 2,
+            "layers.11.self_attn.q_proj": 2,
+            "layers.11.self_attn.out_proj": 2,
+            "layers.11.fc1": 2,
+            "layers.11.fc2": 2,
+            "layers.12.self_attn.k_proj": 2,
+            "layers.12.self_attn.v_proj": 2,
+            "layers.12.self_attn.q_proj": 2,
+            "layers.12.self_attn.out_proj": 2,
+            "layers.12.fc1": 2,
+            "layers.12.fc2": 2,
+            "layers.13.self_attn.k_proj": 2,
+            "layers.13.self_attn.v_proj": 2,
+            "layers.13.self_attn.q_proj": 2,
+            "layers.13.self_attn.out_proj": 2,
+            "layers.13.fc1": 2,
+            "layers.13.fc2": 2,
+            "layers.14.self_attn.k_proj": 2,
+            "layers.14.self_attn.v_proj": 2,
+            "layers.14.self_attn.q_proj": 2,
+            "layers.14.self_attn.out_proj": 2,
+            "layers.14.fc1": 2,
+            "layers.14.fc2": 2,
+            "layers.15.self_attn.k_proj": 2,
+            "layers.15.self_attn.v_proj": 2,
+            "layers.15.self_attn.q_proj": 2,
+            "layers.15.self_attn.out_proj": 2,
+            "layers.15.fc1": 2,
+            "layers.15.fc2": 2,
+            "layers.16.self_attn.k_proj": 2,
+            "layers.16.self_attn.v_proj": 2,
+            "layers.16.self_attn.q_proj": 2,
+            "layers.16.self_attn.out_proj": 2,
+            "layers.16.fc1": 2,
+            "layers.16.fc2": 2,
+            "layers.17.self_attn.k_proj": 2,
+            "layers.17.self_attn.v_proj": 2,
+            "layers.17.self_attn.q_proj": 2,
+            "layers.17.self_attn.out_proj": 2,
+            "layers.17.fc1": 2,
+            "layers.17.fc2": 2,
+            "conv_out": 2,
+            "proj1": 2,
+            "proj2": 2
+          },
+          "decoder_calls": 32,
+          "audio_resident_calls": 2,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 1,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 30,
+          "graph_invariant_ok": true
+        }
+      },
+      {
+        "case": "lower_0_5s",
+        "text": "是。",
+        "equal_baseline": true,
+        "baseline": "是。",
+        "stats": {
+          "audio_linear_calls": {
+            "layers.0.self_attn.k_proj": 3,
+            "layers.0.self_attn.v_proj": 3,
+            "layers.0.self_attn.q_proj": 3,
+            "layers.0.self_attn.out_proj": 3,
+            "layers.0.fc1": 3,
+            "layers.0.fc2": 3,
+            "layers.1.self_attn.k_proj": 3,
+            "layers.1.self_attn.v_proj": 3,
+            "layers.1.self_attn.q_proj": 3,
+            "layers.1.self_attn.out_proj": 3,
+            "layers.1.fc1": 3,
+            "layers.1.fc2": 3,
+            "layers.2.self_attn.k_proj": 3,
+            "layers.2.self_attn.v_proj": 3,
+            "layers.2.self_attn.q_proj": 3,
+            "layers.2.self_attn.out_proj": 3,
+            "layers.2.fc1": 3,
+            "layers.2.fc2": 3,
+            "layers.3.self_attn.k_proj": 3,
+            "layers.3.self_attn.v_proj": 3,
+            "layers.3.self_attn.q_proj": 3,
+            "layers.3.self_attn.out_proj": 3,
+            "layers.3.fc1": 3,
+            "layers.3.fc2": 3,
+            "layers.4.self_attn.k_proj": 3,
+            "layers.4.self_attn.v_proj": 3,
+            "layers.4.self_attn.q_proj": 3,
+            "layers.4.self_attn.out_proj": 3,
+            "layers.4.fc1": 3,
+            "layers.4.fc2": 3,
+            "layers.5.self_attn.k_proj": 3,
+            "layers.5.self_attn.v_proj": 3,
+            "layers.5.self_attn.q_proj": 3,
+            "layers.5.self_attn.out_proj": 3,
+            "layers.5.fc1": 3,
+            "layers.5.fc2": 3,
+            "layers.6.self_attn.k_proj": 3,
+            "layers.6.self_attn.v_proj": 3,
+            "layers.6.self_attn.q_proj": 3,
+            "layers.6.self_attn.out_proj": 3,
+            "layers.6.fc1": 3,
+            "layers.6.fc2": 3,
+            "layers.7.self_attn.k_proj": 3,
+            "layers.7.self_attn.v_proj": 3,
+            "layers.7.self_attn.q_proj": 3,
+            "layers.7.self_attn.out_proj": 3,
+            "layers.7.fc1": 3,
+            "layers.7.fc2": 3,
+            "layers.8.self_attn.k_proj": 3,
+            "layers.8.self_attn.v_proj": 3,
+            "layers.8.self_attn.q_proj": 3,
+            "layers.8.self_attn.out_proj": 3,
+            "layers.8.fc1": 3,
+            "layers.8.fc2": 3,
+            "layers.9.self_attn.k_proj": 3,
+            "layers.9.self_attn.v_proj": 3,
+            "layers.9.self_attn.q_proj": 3,
+            "layers.9.self_attn.out_proj": 3,
+            "layers.9.fc1": 3,
+            "layers.9.fc2": 3,
+            "layers.10.self_attn.k_proj": 3,
+            "layers.10.self_attn.v_proj": 3,
+            "layers.10.self_attn.q_proj": 3,
+            "layers.10.self_attn.out_proj": 3,
+            "layers.10.fc1": 3,
+            "layers.10.fc2": 3,
+            "layers.11.self_attn.k_proj": 3,
+            "layers.11.self_attn.v_proj": 3,
+            "layers.11.self_attn.q_proj": 3,
+            "layers.11.self_attn.out_proj": 3,
+            "layers.11.fc1": 3,
+            "layers.11.fc2": 3,
+            "layers.12.self_attn.k_proj": 3,
+            "layers.12.self_attn.v_proj": 3,
+            "layers.12.self_attn.q_proj": 3,
+            "layers.12.self_attn.out_proj": 3,
+            "layers.12.fc1": 3,
+            "layers.12.fc2": 3,
+            "layers.13.self_attn.k_proj": 3,
+            "layers.13.self_attn.v_proj": 3,
+            "layers.13.self_attn.q_proj": 3,
+            "layers.13.self_attn.out_proj": 3,
+            "layers.13.fc1": 3,
+            "layers.13.fc2": 3,
+            "layers.14.self_attn.k_proj": 3,
+            "layers.14.self_attn.v_proj": 3,
+            "layers.14.self_attn.q_proj": 3,
+            "layers.14.self_attn.out_proj": 3,
+            "layers.14.fc1": 3,
+            "layers.14.fc2": 3,
+            "layers.15.self_attn.k_proj": 3,
+            "layers.15.self_attn.v_proj": 3,
+            "layers.15.self_attn.q_proj": 3,
+            "layers.15.self_attn.out_proj": 3,
+            "layers.15.fc1": 3,
+            "layers.15.fc2": 3,
+            "layers.16.self_attn.k_proj": 3,
+            "layers.16.self_attn.v_proj": 3,
+            "layers.16.self_attn.q_proj": 3,
+            "layers.16.self_attn.out_proj": 3,
+            "layers.16.fc1": 3,
+            "layers.16.fc2": 3,
+            "layers.17.self_attn.k_proj": 3,
+            "layers.17.self_attn.v_proj": 3,
+            "layers.17.self_attn.q_proj": 3,
+            "layers.17.self_attn.out_proj": 3,
+            "layers.17.fc1": 3,
+            "layers.17.fc2": 3,
+            "conv_out": 3,
+            "proj1": 3,
+            "proj2": 3
+          },
+          "decoder_calls": 38,
+          "audio_resident_calls": 3,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 4,
+          "graph_invariant_ok": true
+        }
+      },
+      {
+        "case": "upper_8s",
+        "text": "Mhm. Oh yeah, yeah. He wasn't even that big when I started listening to him, but and his solo music.",
+        "equal_baseline": true,
+        "baseline": "Mhm. Oh yeah, yeah. He wasn't even that big when I started listening to him, but and his solo music.",
+        "stats": {
+          "audio_linear_calls": {
+            "layers.0.self_attn.k_proj": 4,
+            "layers.0.self_attn.v_proj": 4,
+            "layers.0.self_attn.q_proj": 4,
+            "layers.0.self_attn.out_proj": 4,
+            "layers.0.fc1": 4,
+            "layers.0.fc2": 4,
+            "layers.1.self_attn.k_proj": 4,
+            "layers.1.self_attn.v_proj": 4,
+            "layers.1.self_attn.q_proj": 4,
+            "layers.1.self_attn.out_proj": 4,
+            "layers.1.fc1": 4,
+            "layers.1.fc2": 4,
+            "layers.2.self_attn.k_proj": 4,
+            "layers.2.self_attn.v_proj": 4,
+            "layers.2.self_attn.q_proj": 4,
+            "layers.2.self_attn.out_proj": 4,
+            "layers.2.fc1": 4,
+            "layers.2.fc2": 4,
+            "layers.3.self_attn.k_proj": 4,
+            "layers.3.self_attn.v_proj": 4,
+            "layers.3.self_attn.q_proj": 4,
+            "layers.3.self_attn.out_proj": 4,
+            "layers.3.fc1": 4,
+            "layers.3.fc2": 4,
+            "layers.4.self_attn.k_proj": 4,
+            "layers.4.self_attn.v_proj": 4,
+            "layers.4.self_attn.q_proj": 4,
+            "layers.4.self_attn.out_proj": 4,
+            "layers.4.fc1": 4,
+            "layers.4.fc2": 4,
+            "layers.5.self_attn.k_proj": 4,
+            "layers.5.self_attn.v_proj": 4,
+            "layers.5.self_attn.q_proj": 4,
+            "layers.5.self_attn.out_proj": 4,
+            "layers.5.fc1": 4,
+            "layers.5.fc2": 4,
+            "layers.6.self_attn.k_proj": 4,
+            "layers.6.self_attn.v_proj": 4,
+            "layers.6.self_attn.q_proj": 4,
+            "layers.6.self_attn.out_proj": 4,
+            "layers.6.fc1": 4,
+            "layers.6.fc2": 4,
+            "layers.7.self_attn.k_proj": 4,
+            "layers.7.self_attn.v_proj": 4,
+            "layers.7.self_attn.q_proj": 4,
+            "layers.7.self_attn.out_proj": 4,
+            "layers.7.fc1": 4,
+            "layers.7.fc2": 4,
+            "layers.8.self_attn.k_proj": 4,
+            "layers.8.self_attn.v_proj": 4,
+            "layers.8.self_attn.q_proj": 4,
+            "layers.8.self_attn.out_proj": 4,
+            "layers.8.fc1": 4,
+            "layers.8.fc2": 4,
+            "layers.9.self_attn.k_proj": 4,
+            "layers.9.self_attn.v_proj": 4,
+            "layers.9.self_attn.q_proj": 4,
+            "layers.9.self_attn.out_proj": 4,
+            "layers.9.fc1": 4,
+            "layers.9.fc2": 4,
+            "layers.10.self_attn.k_proj": 4,
+            "layers.10.self_attn.v_proj": 4,
+            "layers.10.self_attn.q_proj": 4,
+            "layers.10.self_attn.out_proj": 4,
+            "layers.10.fc1": 4,
+            "layers.10.fc2": 4,
+            "layers.11.self_attn.k_proj": 4,
+            "layers.11.self_attn.v_proj": 4,
+            "layers.11.self_attn.q_proj": 4,
+            "layers.11.self_attn.out_proj": 4,
+            "layers.11.fc1": 4,
+            "layers.11.fc2": 4,
+            "layers.12.self_attn.k_proj": 4,
+            "layers.12.self_attn.v_proj": 4,
+            "layers.12.self_attn.q_proj": 4,
+            "layers.12.self_attn.out_proj": 4,
+            "layers.12.fc1": 4,
+            "layers.12.fc2": 4,
+            "layers.13.self_attn.k_proj": 4,
+            "layers.13.self_attn.v_proj": 4,
+            "layers.13.self_attn.q_proj": 4,
+            "layers.13.self_attn.out_proj": 4,
+            "layers.13.fc1": 4,
+            "layers.13.fc2": 4,
+            "layers.14.self_attn.k_proj": 4,
+            "layers.14.self_attn.v_proj": 4,
+            "layers.14.self_attn.q_proj": 4,
+            "layers.14.self_attn.out_proj": 4,
+            "layers.14.fc1": 4,
+            "layers.14.fc2": 4,
+            "layers.15.self_attn.k_proj": 4,
+            "layers.15.self_attn.v_proj": 4,
+            "layers.15.self_attn.q_proj": 4,
+            "layers.15.self_attn.out_proj": 4,
+            "layers.15.fc1": 4,
+            "layers.15.fc2": 4,
+            "layers.16.self_attn.k_proj": 4,
+            "layers.16.self_attn.v_proj": 4,
+            "layers.16.self_attn.q_proj": 4,
+            "layers.16.self_attn.out_proj": 4,
+            "layers.16.fc1": 4,
+            "layers.16.fc2": 4,
+            "layers.17.self_attn.k_proj": 4,
+            "layers.17.self_attn.v_proj": 4,
+            "layers.17.self_attn.q_proj": 4,
+            "layers.17.self_attn.out_proj": 4,
+            "layers.17.fc1": 4,
+            "layers.17.fc2": 4,
+            "conv_out": 4,
+            "proj1": 4,
+            "proj2": 4
+          },
+          "decoder_calls": 69,
+          "audio_resident_calls": 4,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 29,
+          "graph_invariant_ok": true
+        }
+      },
+      {
+        "case": "zh",
+        "text": "甚至出现交易几乎停滞的情况。",
+        "equal_baseline": true,
+        "baseline": "甚至出现交易几乎停滞的情况。",
+        "stats": {
+          "audio_linear_calls": {
+            "layers.0.self_attn.k_proj": 5,
+            "layers.0.self_attn.v_proj": 5,
+            "layers.0.self_attn.q_proj": 5,
+            "layers.0.self_attn.out_proj": 5,
+            "layers.0.fc1": 5,
+            "layers.0.fc2": 5,
+            "layers.1.self_attn.k_proj": 5,
+            "layers.1.self_attn.v_proj": 5,
+            "layers.1.self_attn.q_proj": 5,
+            "layers.1.self_attn.out_proj": 5,
+            "layers.1.fc1": 5,
+            "layers.1.fc2": 5,
+            "layers.2.self_attn.k_proj": 5,
+            "layers.2.self_attn.v_proj": 5,
+            "layers.2.self_attn.q_proj": 5,
+            "layers.2.self_attn.out_proj": 5,
+            "layers.2.fc1": 5,
+            "layers.2.fc2": 5,
+            "layers.3.self_attn.k_proj": 5,
+            "layers.3.self_attn.v_proj": 5,
+            "layers.3.self_attn.q_proj": 5,
+            "layers.3.self_attn.out_proj": 5,
+            "layers.3.fc1": 5,
+            "layers.3.fc2": 5,
+            "layers.4.self_attn.k_proj": 5,
+            "layers.4.self_attn.v_proj": 5,
+            "layers.4.self_attn.q_proj": 5,
+            "layers.4.self_attn.out_proj": 5,
+            "layers.4.fc1": 5,
+            "layers.4.fc2": 5,
+            "layers.5.self_attn.k_proj": 5,
+            "layers.5.self_attn.v_proj": 5,
+            "layers.5.self_attn.q_proj": 5,
+            "layers.5.self_attn.out_proj": 5,
+            "layers.5.fc1": 5,
+            "layers.5.fc2": 5,
+            "layers.6.self_attn.k_proj": 5,
+            "layers.6.self_attn.v_proj": 5,
+            "layers.6.self_attn.q_proj": 5,
+            "layers.6.self_attn.out_proj": 5,
+            "layers.6.fc1": 5,
+            "layers.6.fc2": 5,
+            "layers.7.self_attn.k_proj": 5,
+            "layers.7.self_attn.v_proj": 5,
+            "layers.7.self_attn.q_proj": 5,
+            "layers.7.self_attn.out_proj": 5,
+            "layers.7.fc1": 5,
+            "layers.7.fc2": 5,
+            "layers.8.self_attn.k_proj": 5,
+            "layers.8.self_attn.v_proj": 5,
+            "layers.8.self_attn.q_proj": 5,
+            "layers.8.self_attn.out_proj": 5,
+            "layers.8.fc1": 5,
+            "layers.8.fc2": 5,
+            "layers.9.self_attn.k_proj": 5,
+            "layers.9.self_attn.v_proj": 5,
+            "layers.9.self_attn.q_proj": 5,
+            "layers.9.self_attn.out_proj": 5,
+            "layers.9.fc1": 5,
+            "layers.9.fc2": 5,
+            "layers.10.self_attn.k_proj": 5,
+            "layers.10.self_attn.v_proj": 5,
+            "layers.10.self_attn.q_proj": 5,
+            "layers.10.self_attn.out_proj": 5,
+            "layers.10.fc1": 5,
+            "layers.10.fc2": 5,
+            "layers.11.self_attn.k_proj": 5,
+            "layers.11.self_attn.v_proj": 5,
+            "layers.11.self_attn.q_proj": 5,
+            "layers.11.self_attn.out_proj": 5,
+            "layers.11.fc1": 5,
+            "layers.11.fc2": 5,
+            "layers.12.self_attn.k_proj": 5,
+            "layers.12.self_attn.v_proj": 5,
+            "layers.12.self_attn.q_proj": 5,
+            "layers.12.self_attn.out_proj": 5,
+            "layers.12.fc1": 5,
+            "layers.12.fc2": 5,
+            "layers.13.self_attn.k_proj": 5,
+            "layers.13.self_attn.v_proj": 5,
+            "layers.13.self_attn.q_proj": 5,
+            "layers.13.self_attn.out_proj": 5,
+            "layers.13.fc1": 5,
+            "layers.13.fc2": 5,
+            "layers.14.self_attn.k_proj": 5,
+            "layers.14.self_attn.v_proj": 5,
+            "layers.14.self_attn.q_proj": 5,
+            "layers.14.self_attn.out_proj": 5,
+            "layers.14.fc1": 5,
+            "layers.14.fc2": 5,
+            "layers.15.self_attn.k_proj": 5,
+            "layers.15.self_attn.v_proj": 5,
+            "layers.15.self_attn.q_proj": 5,
+            "layers.15.self_attn.out_proj": 5,
+            "layers.15.fc1": 5,
+            "layers.15.fc2": 5,
+            "layers.16.self_attn.k_proj": 5,
+            "layers.16.self_attn.v_proj": 5,
+            "layers.16.self_attn.q_proj": 5,
+            "layers.16.self_attn.out_proj": 5,
+            "layers.16.fc1": 5,
+            "layers.16.fc2": 5,
+            "layers.17.self_attn.k_proj": 5,
+            "layers.17.self_attn.v_proj": 5,
+            "layers.17.self_attn.q_proj": 5,
+            "layers.17.self_attn.out_proj": 5,
+            "layers.17.fc1": 5,
+            "layers.17.fc2": 5,
+            "conv_out": 5,
+            "proj1": 5,
+            "proj2": 5
+          },
+          "decoder_calls": 80,
+          "audio_resident_calls": 5,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 9,
+          "graph_invariant_ok": true
+        }
+      },
+      {
+        "reload_equal": true
+      }
+    ],
+    "matching_prefix_logits": {
+      "shape": [
+        1,
+        11,
+        151936
+      ],
+      "dtype": "torch.float16",
+      "tokens_equal": true,
+      "per_token_mse": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "per_token_max_abs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "max_abs": 0.0,
+      "mse": 0.0,
+      "finite": true
+    },
+    "all_20_tokens_match_baseline": true
+  },
+  "tts": {
+    "codec_ablations": [
+      {
+        "path": "baseline",
+        "times": [
+          1.3259740180074004,
+          1.1225165639916668,
+          1.2016973350109765,
+          1.1458602960046846,
+          1.15417063300265,
+          1.1871930609922856,
+          1.1789279920049012
+        ],
+        "median": 1.1789279920049012,
+        "mean": 1.1735698634030995,
+        "exact": true,
+        "mse": 0.0,
+        "max_abs": 0.0
+      },
+      {
+        "path": "overlap",
+        "times": [
+          1.0741370089963311,
+          1.0719795300101396,
+          1.1046726860076888,
+          1.0282845909969183,
+          1.1288325390050886,
+          1.0710179449961288,
+          1.0418704729963792
+        ],
+        "median": 1.0710179449961288,
+        "mean": 1.0749356468004407,
+        "exact": true,
+        "mse": 0.0,
+        "max_abs": 0.0
+      },
+      {
+        "path": "column_fold",
+        "times": [
+          1.1769499759975588,
+          1.1671980880055344,
+          1.1328240339935292,
+          1.1124456730030943,
+          1.2209351479978068,
+          1.245599197995034,
+          1.214235130988527
+        ],
+        "median": 1.214235130988527,
+        "mean": 1.1852078367955983,
+        "exact": true,
+        "mse": 0.0,
+        "max_abs": 0.0
+      },
+      {
+        "path": "overlap_k1",
+        "times": [
+          1.0749503620027099,
+          1.0235890909971204,
+          1.0258207629958633,
+          1.0095925519999582,
+          1.0283916309999768,
+          1.0270471200055908,
+          1.0344181420077803
+        ],
+        "median": 1.0270471200055908,
+        "mean": 1.0250540416018339,
+        "exact": false,
+        "mse": 1.6879568360618374e-14,
+        "max_abs": 2.3990869522094727e-06
+      },
+      {
+        "path": "overlap_packed_k7",
+        "times": [
+          1.7436532449937658,
+          1.6436063400033163,
+          1.6547520860040095,
+          1.6756534129963256,
+          1.6546114689990645,
+          1.6662853740126593,
+          1.665859062995878
+        ],
+        "median": 1.665859062995878,
+        "mean": 1.6634322810015874,
+        "exact": false,
+        "mse": 1.471224090939662e-13,
+        "max_abs": 8.374452590942383e-06
+      }
+    ],
+    "codec_only_baseline": {
+      "count": 5,
+      "median_seconds": 3.0173077439976623,
+      "mean_seconds": 3.0382035319984424,
+      "min_seconds": 2.998457164998399,
+      "max_seconds": 3.113082112002303,
+      "total_seconds": 15.191017659992212,
+      "audio_seconds": 12.4,
+      "aggregate_rtf": 1.2250820693542106,
+      "audio_seconds_per_wall_second": 0.8162718441607261
+    },
+    "codec_only_result": {
+      "count": 5,
+      "median_seconds": 2.9427896669949405,
+      "mean_seconds": 2.938399461400695,
+      "min_seconds": 2.9151855160016567,
+      "max_seconds": 2.963128912000684,
+      "total_seconds": 14.691997307003476,
+      "audio_seconds": 12.4,
+      "aggregate_rtf": 1.1848384925002802,
+      "audio_seconds_per_wall_second": 0.8439968876177978
+    },
+    "paired_no_compiler": {
+      "baseline": {
+        "runs": [
+          {
+            "phase": "warmup",
+            "seconds": 3.372145476998412,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                32,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31,
+                31
+              ],
+              "components": {
+                "talker": {
+                  "calls": 32,
+                  "tokens": 49,
+                  "graph_size": 1,
+                  "graph_replays": 48,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 465,
+                  "tokens": 496,
+                  "graph_size": 1,
+                  "graph_replays": 495,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "warmup",
+            "seconds": 3.0216957190132234,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                64,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62,
+                62
+              ],
+              "components": {
+                "talker": {
+                  "calls": 64,
+                  "tokens": 98,
+                  "graph_size": 1,
+                  "graph_replays": 97,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 930,
+                  "tokens": 992,
+                  "graph_size": 1,
+                  "graph_replays": 991,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 3.004916272009723,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                96,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93,
+                93
+              ],
+              "components": {
+                "talker": {
+                  "calls": 96,
+                  "tokens": 147,
+                  "graph_size": 1,
+                  "graph_replays": 146,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 1395,
+                  "tokens": 1488,
+                  "graph_size": 1,
+                  "graph_replays": 1487,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 3.022791536001023,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                128,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124,
+                124
+              ],
+              "components": {
+                "talker": {
+                  "calls": 128,
+                  "tokens": 196,
+                  "graph_size": 1,
+                  "graph_replays": 195,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 1860,
+                  "tokens": 1984,
+                  "graph_size": 1,
+                  "graph_replays": 1983,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 3.0254360959952464,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                160,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155,
+                155
+              ],
+              "components": {
+                "talker": {
+                  "calls": 160,
+                  "tokens": 245,
+                  "graph_size": 1,
+                  "graph_replays": 244,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 2325,
+                  "tokens": 2480,
+                  "graph_size": 1,
+                  "graph_replays": 2479,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 3.0486494049982866,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                192,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186,
+                186
+              ],
+              "components": {
+                "talker": {
+                  "calls": 192,
+                  "tokens": 294,
+                  "graph_size": 1,
+                  "graph_replays": 293,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 2790,
+                  "tokens": 2976,
+                  "graph_size": 1,
+                  "graph_replays": 2975,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 2.9887836379930377,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                224,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217,
+                217
+              ],
+              "components": {
+                "talker": {
+                  "calls": 224,
+                  "tokens": 343,
+                  "graph_size": 1,
+                  "graph_replays": 342,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 3255,
+                  "tokens": 3472,
+                  "graph_size": 1,
+                  "graph_replays": 3471,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          }
+        ],
+        "median_seconds": 3.022791536001023,
+        "mean_seconds": 3.018115389399463
+      },
+      "optimized": {
+        "runs": [
+          {
+            "phase": "warmup",
+            "seconds": 3.154175164992921,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                256,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248,
+                248
+              ],
+              "components": {
+                "talker": {
+                  "calls": 256,
+                  "tokens": 392,
+                  "graph_size": 2,
+                  "graph_replays": 30,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 3720,
+                  "tokens": 3968,
+                  "graph_size": 1,
+                  "graph_replays": 495,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "warmup",
+            "seconds": 2.82219194600475,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                288,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279,
+                279
+              ],
+              "components": {
+                "talker": {
+                  "calls": 288,
+                  "tokens": 441,
+                  "graph_size": 2,
+                  "graph_replays": 62,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 4185,
+                  "tokens": 4464,
+                  "graph_size": 1,
+                  "graph_replays": 991,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 2.846658763999585,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                320,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310,
+                310
+              ],
+              "components": {
+                "talker": {
+                  "calls": 320,
+                  "tokens": 490,
+                  "graph_size": 2,
+                  "graph_replays": 94,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 4650,
+                  "tokens": 4960,
+                  "graph_size": 1,
+                  "graph_replays": 1487,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 2.7499145759938983,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                352,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341,
+                341
+              ],
+              "components": {
+                "talker": {
+                  "calls": 352,
+                  "tokens": 539,
+                  "graph_size": 2,
+                  "graph_replays": 126,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 5115,
+                  "tokens": 5456,
+                  "graph_size": 1,
+                  "graph_replays": 1983,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 2.768179266000516,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                384,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372,
+                372
+              ],
+              "components": {
+                "talker": {
+                  "calls": 384,
+                  "tokens": 588,
+                  "graph_size": 2,
+                  "graph_replays": 158,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 5580,
+                  "tokens": 5952,
+                  "graph_size": 1,
+                  "graph_replays": 2479,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 2.809289530996466,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                416,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403,
+                403
+              ],
+              "components": {
+                "talker": {
+                  "calls": 416,
+                  "tokens": 637,
+                  "graph_size": 2,
+                  "graph_replays": 190,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 6045,
+                  "tokens": 6448,
+                  "graph_size": 1,
+                  "graph_replays": 2975,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          },
+          {
+            "phase": "steady",
+            "seconds": 2.7967740050080465,
+            "compiler_active": false,
+            "stats": {
+              "head_calls": [
+                448,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434,
+                434
+              ],
+              "components": {
+                "talker": {
+                  "calls": 448,
+                  "tokens": 686,
+                  "graph_size": 2,
+                  "graph_replays": 222,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 6510,
+                  "tokens": 6944,
+                  "graph_size": 1,
+                  "graph_replays": 3471,
+                  "graph_invariant_ok": true
+                }
+              }
+            }
+          }
+        ],
+        "median_seconds": 2.7967740050080465,
+        "mean_seconds": 2.7941632283997024
+      },
+      "waveform": {
+        "samples": 59520,
+        "mse": 1.6879568360618374e-14,
+        "max_abs": 2.3990869522094727e-06
+      },
+      "protocol": "same resident weights, 8 CPU threads, old/new routes each 2 warmups + 5 measured; graphs cleared at route switch; no compiler during measurements"
+    },
+    "stages_no_compiler": {
+      "task": "tts",
+      "threads": 8,
+      "runs": [
+        {
+          "phase": "warmup",
+          "seconds": 3.5161728270031745,
+          "stage_seconds": {
+            "reference_read": 0.00119347199506592,
+            "speaker": 0.16387328499695286,
+            "talker_decoder": 0.6753118030173937,
+            "output_heads": 0.2103124309942359,
+            "predictor_decoder": 1.0594557367730886,
+            "codec_decode": 1.1962031690054573,
+            "generation_glue": 0.2046658122126246,
+            "other": 0.00515711800835561
+          },
+          "calls": {
+            "reference_read": 1,
+            "speaker": 1,
+            "talker_decoder": 32,
+            "output_heads": 497,
+            "predictor_decoder": 465,
+            "autoregressive_total": 1,
+            "codec_decode": 1
+          }
+        },
+        {
+          "phase": "warmup",
+          "seconds": 2.7831603910017293,
+          "stage_seconds": {
+            "reference_read": 0.0010077390033984557,
+            "talker_decoder": 0.30077388396603055,
+            "output_heads": 0.20758561021648347,
+            "predictor_decoder": 1.0621700451010838,
+            "codec_decode": 1.004957964993082,
+            "generation_glue": 0.20452166872564703,
+            "other": 0.002143478996003978
+          },
+          "calls": {
+            "reference_read": 1,
+            "talker_decoder": 32,
+            "output_heads": 497,
+            "predictor_decoder": 465,
+            "autoregressive_total": 1,
+            "codec_decode": 1
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 2.7596941189985955,
+          "stage_seconds": {
+            "reference_read": 0.0009707389981485903,
+            "talker_decoder": 0.2980898959649494,
+            "output_heads": 0.2054437340120785,
+            "predictor_decoder": 1.056300364114577,
+            "codec_decode": 0.9994895729905693,
+            "generation_glue": 0.19731629590387456,
+            "other": 0.0020835170143982396
+          },
+          "calls": {
+            "reference_read": 1,
+            "talker_decoder": 32,
+            "output_heads": 497,
+            "predictor_decoder": 465,
+            "autoregressive_total": 1,
+            "codec_decode": 1
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 2.7822125749953557,
+          "stage_seconds": {
+            "reference_read": 0.000967277999734506,
+            "talker_decoder": 0.29847420596343,
+            "output_heads": 0.20724289302597754,
+            "predictor_decoder": 1.0568565502035199,
+            "codec_decode": 1.0148390079993987,
+            "generation_glue": 0.20176439279748593,
+            "other": 0.0020682470058090985
+          },
+          "calls": {
+            "reference_read": 1,
+            "talker_decoder": 32,
+            "output_heads": 497,
+            "predictor_decoder": 465,
+            "autoregressive_total": 1,
+            "codec_decode": 1
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 2.8153645819984376,
+          "stage_seconds": {
+            "reference_read": 0.0009766620059963316,
+            "talker_decoder": 0.2981493579427479,
+            "output_heads": 0.2075626438454492,
+            "predictor_decoder": 1.058899456053041,
+            "codec_decode": 1.045052489003865,
+            "generation_glue": 0.20270276215160266,
+            "other": 0.0020212109957356006
+          },
+          "calls": {
+            "reference_read": 1,
+            "talker_decoder": 32,
+            "output_heads": 497,
+            "predictor_decoder": 465,
+            "autoregressive_total": 1,
+            "codec_decode": 1
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 2.8079444430040894,
+          "stage_seconds": {
+            "reference_read": 0.0009804699948290363,
+            "talker_decoder": 0.2989049059979152,
+            "output_heads": 0.207656109079835,
+            "predictor_decoder": 1.0614151249465067,
+            "codec_decode": 1.0346192110009724,
+            "generation_glue": 0.20235891397169326,
+            "other": 0.0020097080123377964
+          },
+          "calls": {
+            "reference_read": 1,
+            "talker_decoder": 32,
+            "output_heads": 497,
+            "predictor_decoder": 465,
+            "autoregressive_total": 1,
+            "codec_decode": 1
+          }
+        },
+        {
+          "phase": "measured",
+          "seconds": 2.7493603409966454,
+          "stage_seconds": {
+            "reference_read": 0.0009771620098035783,
+            "talker_decoder": 0.29820159399241675,
+            "output_heads": 0.20626684298622422,
+            "predictor_decoder": 1.0575254702562233,
+            "codec_decode": 0.9828566649957793,
+            "generation_glue": 0.20143766576074995,
+            "other": 0.002094940995448269
+          },
+          "calls": {
+            "reference_read": 1,
+            "talker_decoder": 32,
+            "output_heads": 497,
+            "predictor_decoder": 465,
+            "autoregressive_total": 1,
+            "codec_decode": 1
+          }
+        }
+      ],
+      "mean_seconds": 2.782915211998625,
+      "stage_mean_seconds": {
+        "reference_read": 0.0009744622017024085,
+        "talker_decoder": 0.29836399197229185,
+        "output_heads": 0.2068344445899129,
+        "predictor_decoder": 1.0581993931147735,
+        "codec_decode": 1.0153713891981169,
+        "generation_glue": 0.20111600611708128,
+        "other": 0.002055524804745801
+      },
+      "stats": {
+        "head_calls": [
+          224,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217,
+          217
+        ],
+        "components": {
+          "talker": {
+            "calls": 224,
+            "tokens": 343,
+            "graph_size": 2,
+            "graph_replays": 222,
+            "graph_invariant_ok": true
+          },
+          "predictor": {
+            "calls": 3255,
+            "tokens": 3472,
+            "graph_size": 1,
+            "graph_replays": 3471,
+            "graph_invariant_ok": true
+          }
+        }
+      }
+    },
+    "lifecycle": [
+      {
+        "id": "Chinese-0",
+        "samples": 59520,
+        "stats": {
+          "head_calls": [
+            32,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31
+          ],
+          "components": {
+            "talker": {
+              "calls": 32,
+              "tokens": 49,
+              "graph_size": 2,
+              "graph_replays": 30,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 465,
+              "tokens": 496,
+              "graph_size": 1,
+              "graph_replays": 495,
+              "graph_invariant_ok": true
+            }
+          }
+        }
+      },
+      {
+        "id": "same-length-alternate",
+        "samples": 57600,
+        "stats": {
+          "head_calls": [
+            63,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61
+          ],
+          "components": {
+            "talker": {
+              "calls": 63,
+              "tokens": 97,
+              "graph_size": 2,
+              "graph_replays": 61,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 915,
+              "tokens": 976,
+              "graph_size": 1,
+              "graph_replays": 975,
+              "graph_invariant_ok": true
+            }
+          }
+        }
+      },
+      {
+        "id": "Chinese-0",
+        "samples": 59520,
+        "stats": {
+          "head_calls": [
+            95,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92
+          ],
+          "components": {
+            "talker": {
+              "calls": 95,
+              "tokens": 146,
+              "graph_size": 2,
+              "graph_replays": 93,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 1380,
+              "tokens": 1472,
+              "graph_size": 1,
+              "graph_replays": 1471,
+              "graph_invariant_ok": true
+            }
+          }
+        }
+      },
+      {
+        "id": "English-0",
+        "samples": 67200,
+        "stats": {
+          "head_calls": [
+            131,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127
+          ],
+          "components": {
+            "talker": {
+              "calls": 131,
+              "tokens": 200,
+              "graph_size": 2,
+              "graph_replays": 126,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 1905,
+              "tokens": 2032,
+              "graph_size": 1,
+              "graph_replays": 2031,
+              "graph_invariant_ok": true
+            }
+          }
+        }
+      },
+      {
+        "id": "Chinese-0",
+        "samples": 59520,
+        "stats": {
+          "head_calls": [
+            163,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158
+          ],
+          "components": {
+            "talker": {
+              "calls": 163,
+              "tokens": 249,
+              "graph_size": 2,
+              "graph_replays": 157,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 2370,
+              "tokens": 2528,
+              "graph_size": 1,
+              "graph_replays": 2527,
+              "graph_invariant_ok": true
+            }
+          }
+        }
+      },
+      {
+        "reload_equal": true,
+        "return_to_first_equal": true
+      }
+    ],
+    "waveform_vs_baseline": [
+      {
+        "id": "Chinese-0",
+        "samples": 59520,
+        "baseline_samples": 59520,
+        "generation_steps": 32,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 1.6879568360618374e-14,
+        "max_abs": 2.3990869522094727e-06,
+        "relative_l2": 7.619601116313939e-07
+      },
+      {
+        "id": "Chinese-1",
+        "samples": 44160,
+        "baseline_samples": 44160,
+        "generation_steps": 24,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 5.052872007412676e-15,
+        "max_abs": 1.519918441772461e-06,
+        "relative_l2": 5.647374683448987e-07
+      },
+      {
+        "id": "Chinese-2",
+        "samples": 120960,
+        "baseline_samples": 120960,
+        "generation_steps": 64,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 4.3228449932051345e-15,
+        "max_abs": 1.1026859283447266e-06,
+        "relative_l2": 4.701589412034132e-07
+      },
+      {
+        "id": "Chinese-3",
+        "samples": 69120,
+        "baseline_samples": 69120,
+        "generation_steps": 37,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 2.989046682408737e-15,
+        "max_abs": 9.685754776000977e-07,
+        "relative_l2": 6.223842634277602e-07
+      },
+      {
+        "id": "Chinese-4",
+        "samples": 69120,
+        "baseline_samples": 69120,
+        "generation_steps": 37,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 1.7948181360304918e-14,
+        "max_abs": 2.205371856689453e-06,
+        "relative_l2": 9.538536597856284e-07
+      },
+      {
+        "id": "English-0",
+        "samples": 67200,
+        "baseline_samples": 67200,
+        "generation_steps": 36,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 5.715119092372119e-15,
+        "max_abs": 1.2069940567016602e-06,
+        "relative_l2": 6.729006803670407e-07
+      },
+      {
+        "id": "English-1",
+        "samples": 120960,
+        "baseline_samples": 120960,
+        "generation_steps": 64,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 1.077987929850303e-14,
+        "max_abs": 1.430511474609375e-06,
+        "relative_l2": 3.017520388395342e-07
+      },
+      {
+        "id": "English-2",
+        "samples": 82560,
+        "baseline_samples": 82560,
+        "generation_steps": 44,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 6.17678743511419e-15,
+        "max_abs": 1.2516975402832031e-06,
+        "relative_l2": 5.422649677288595e-07
+      },
+      {
+        "id": "English-3",
+        "samples": 120960,
+        "baseline_samples": 120960,
+        "generation_steps": 64,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 6.521970911221748e-15,
+        "max_abs": 9.08970832824707e-07,
+        "relative_l2": 3.5509968467565856e-07
+      },
+      {
+        "id": "English-4",
+        "samples": 78720,
+        "baseline_samples": 78720,
+        "generation_steps": 42,
+        "same_generation_steps": true,
+        "same_shape": true,
+        "exact": false,
+        "mse": 5.987901443383121e-15,
+        "max_abs": 2.3990869522094727e-06,
+        "relative_l2": 9.589064561531499e-07
+      }
+    ],
+    "independent_cpu_fp32_asr": {
+      "dtype": "float32",
+      "load_seconds": 2.640031164002721,
+      "languages": {
+        "Chinese": {
+          "timing": {
+            "count": 5,
+            "median_seconds": 18.957902216003276,
+            "mean_seconds": 19.01639903760224,
+            "min_seconds": 16.60435191799479,
+            "max_seconds": 21.25514412400662,
+            "total_seconds": 95.0819951880112,
+            "audio_seconds": 15.12,
+            "aggregate_rtf": 6.2884917452388365,
+            "audio_seconds_per_wall_second": 0.15902064286831946
+          },
+          "quality": {
+            "count": 5,
+            "reference_units": 49,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "error_rate": 0.0,
+            "one_minus_error_rate": 1.0,
+            "exact_sentences": 5,
+            "exact_sentence_rate": 1.0
+          }
+        },
+        "English": {
+          "timing": {
+            "count": 5,
+            "median_seconds": 22.943413191998843,
+            "mean_seconds": 23.11340288920328,
+            "min_seconds": 19.88137223200465,
+            "max_seconds": 26.501135441008955,
+            "total_seconds": 115.5670144460164,
+            "audio_seconds": 19.6,
+            "aggregate_rtf": 5.896276247245734,
+            "audio_seconds_per_wall_second": 0.1695985666321383
+          },
+          "quality": {
+            "count": 5,
+            "reference_units": 35,
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "error_rate": 0.0,
+            "one_minus_error_rate": 1.0,
+            "exact_sentences": 5,
+            "exact_sentence_rate": 1.0
+          }
+        }
+      },
+      "runs": [
+        {
+          "id": "Chinese-0",
+          "language": "Chinese",
+          "reference": "你好，欢迎使用语音助手。",
+          "hypothesis": "你好，欢迎使用语音助手。",
+          "phase": "quality",
+          "seconds": 18.957902216003276,
+          "audio_seconds": 2.48,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 10,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            108386,
+            3837,
+            100437,
+            37029,
+            105761,
+            110498,
+            1773,
+            151645
+          ]
+        },
+        {
+          "id": "Chinese-1",
+          "language": "Chinese",
+          "reference": "请把杯子放在桌子上。",
+          "hypothesis": "请把杯子放在桌子上。",
+          "phase": "quality",
+          "seconds": 16.60435191799479,
+          "audio_seconds": 1.84,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 9,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            14880,
+            99360,
+            116120,
+            104132,
+            117816,
+            1773,
+            151645
+          ]
+        },
+        {
+          "id": "Chinese-2",
+          "language": "Chinese",
+          "reference": "前方有人，请减慢速度。",
+          "hypothesis": "前方有人，请减慢速度。",
+          "phase": "quality",
+          "seconds": 21.25514412400662,
+          "audio_seconds": 5.04,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 9,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            108348,
+            101114,
+            37945,
+            99536,
+            99843,
+            101149,
+            1773,
+            151645
+          ]
+        },
+        {
+          "id": "Chinese-3",
+          "language": "Chinese",
+          "reference": "任务完成，现在返回充电。",
+          "hypothesis": "任务完成，现在返回充电。",
+          "phase": "quality",
+          "seconds": 18.362215793007636,
+          "audio_seconds": 2.88,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 10,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            88802,
+            60548,
+            3837,
+            99601,
+            31526,
+            102552,
+            1773,
+            151645
+          ]
+        },
+        {
+          "id": "Chinese-4",
+          "language": "Chinese",
+          "reference": "今天天气很好，我们出发吧。",
+          "hypothesis": "今天天气很好，我们出发吧。",
+          "phase": "quality",
+          "seconds": 19.902381136998883,
+          "audio_seconds": 2.88,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 11,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            8453,
+            151704,
+            100644,
+            104307,
+            101243,
+            3837,
+            97639,
+            104532,
+            100003,
+            1773,
+            151645
+          ]
+        },
+        {
+          "id": "English-0",
+          "language": "English",
+          "reference": "Hello, welcome to the voice assistant.",
+          "hypothesis": "Hello, welcome to the voice assistant.",
+          "phase": "quality",
+          "seconds": 19.88137223200465,
+          "audio_seconds": 2.8,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 6,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            9707,
+            11,
+            10565,
+            311,
+            279,
+            7743,
+            17847,
+            13,
+            151645
+          ]
+        },
+        {
+          "id": "English-1",
+          "language": "English",
+          "reference": "Please put the cup on the table.",
+          "hypothesis": "Please put the cup on the table.",
+          "phase": "quality",
+          "seconds": 22.943413191998843,
+          "audio_seconds": 5.04,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 7,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            5501,
+            2182,
+            279,
+            10525,
+            389,
+            279,
+            1965,
+            13,
+            151645
+          ]
+        },
+        {
+          "id": "English-2",
+          "language": "English",
+          "reference": "Someone is ahead. Please slow down.",
+          "hypothesis": "Someone is ahead. Please slow down.",
+          "phase": "quality",
+          "seconds": 21.608941509999568,
+          "audio_seconds": 3.44,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 6,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            54511,
+            374,
+            8305,
+            13,
+            5209,
+            6301,
+            1495,
+            13,
+            151645
+          ]
+        },
+        {
+          "id": "English-3",
+          "language": "English",
+          "reference": "The task is complete. Return to the charger.",
+          "hypothesis": "The task is complete. Return to the charger.",
+          "phase": "quality",
+          "seconds": 26.501135441008955,
+          "audio_seconds": 5.04,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 8,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            785,
+            3383,
+            374,
+            4583,
+            13,
+            3411,
+            311,
+            279,
+            44569,
+            13,
+            151645
+          ]
+        },
+        {
+          "id": "English-4",
+          "language": "English",
+          "reference": "The weather is nice today. Let us go.",
+          "hypothesis": "The weather is nice today. Let us go.",
+          "phase": "quality",
+          "seconds": 24.632152071004384,
+          "audio_seconds": 3.28,
+          "score": {
+            "substitutions": 0,
+            "deletions": 0,
+            "insertions": 0,
+            "reference_units": 8,
+            "error_rate": 0.0,
+            "exact": true
+          },
+          "token_ids": [
+            11528,
+            6364,
+            151704,
+            785,
+            9104,
+            374,
+            6419,
+            3351,
+            13,
+            6771,
+            601,
+            728,
+            13,
+            151645
+          ]
+        }
+      ]
+    },
+    "diagnostics_with_background_compiler": {
+      "joint_before_eviction": {
+        "task": "tts",
+        "load_seconds": 32.035239792996435,
+        "threads": 8,
+        "warmup_count": 2,
+        "measured_repeats": 5,
+        "generation_limit": 64,
+        "steady": {
+          "count": 5,
+          "median_seconds": 2.822528518998297,
+          "mean_seconds": 2.818979166599456,
+          "min_seconds": 2.7984621659998083,
+          "max_seconds": 2.8420464110095054,
+          "total_seconds": 14.094895832997281,
+          "audio_seconds": 12.4,
+          "aggregate_rtf": 1.1366851478223614,
+          "audio_seconds_per_wall_second": 0.8797510919499388
+        },
+        "languages": {
+          "Chinese": {
+            "timing": {
+              "count": 5,
+              "median_seconds": 3.4345983090024674,
+              "mean_seconds": 3.6726666297996418,
+              "min_seconds": 2.573363421004615,
+              "max_seconds": 5.788338221987942,
+              "total_seconds": 18.36333314899821,
+              "audio_seconds": 15.12,
+              "aggregate_rtf": 1.2145061606480296,
+              "audio_seconds_per_wall_second": 0.8233799320263846
+            },
+            "cap_reached": 1
+          },
+          "English": {
+            "timing": {
+              "count": 5,
+              "median_seconds": 4.028354637994198,
+              "mean_seconds": 4.587606013999903,
+              "min_seconds": 3.3153627069987124,
+              "max_seconds": 6.059238268993795,
+              "total_seconds": 22.938030069999513,
+              "audio_seconds": 19.6,
+              "aggregate_rtf": 1.170307656632628,
+              "audio_seconds_per_wall_second": 0.8544761664444194
+            },
+            "cap_reached": 2
+          }
+        },
+        "runs": [
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "warmup",
+            "seconds": 3.5258362160093384,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 32,
+                  "tokens": 49,
+                  "graph_size": 2,
+                  "graph_replays": 30,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 465,
+                  "tokens": 496,
+                  "graph_size": 1,
+                  "graph_replays": 495,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.4217081516166687
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "warmup",
+            "seconds": 2.8214749329927145,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 64,
+                  "tokens": 98,
+                  "graph_size": 2,
+                  "graph_replays": 62,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 930,
+                  "tokens": 992,
+                  "graph_size": 1,
+                  "graph_replays": 991,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.1376915052389978
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 2.8057831109908875,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 96,
+                  "tokens": 147,
+                  "graph_size": 2,
+                  "graph_replays": 94,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 1395,
+                  "tokens": 1488,
+                  "graph_size": 1,
+                  "graph_replays": 1487,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.1313641576576159
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 2.8420464110095054,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 128,
+                  "tokens": 196,
+                  "graph_size": 2,
+                  "graph_replays": 126,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 1860,
+                  "tokens": 1984,
+                  "graph_size": 1,
+                  "graph_replays": 1983,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.14598645605222
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 2.822528518998297,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 160,
+                  "tokens": 245,
+                  "graph_size": 2,
+                  "graph_replays": 158,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 2325,
+                  "tokens": 2480,
+                  "graph_size": 1,
+                  "graph_replays": 2479,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.1381163383057649
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 2.7984621659998083,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 192,
+                  "tokens": 294,
+                  "graph_size": 2,
+                  "graph_replays": 190,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 2790,
+                  "tokens": 2976,
+                  "graph_size": 1,
+                  "graph_replays": 2975,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.1284121637096
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 2.826075625998783,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 224,
+                  "tokens": 343,
+                  "graph_size": 2,
+                  "graph_replays": 222,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 3255,
+                  "tokens": 3472,
+                  "graph_size": 1,
+                  "graph_replays": 3471,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.139546623386606
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "quality",
+            "seconds": 2.8566174549923744,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 256,
+                  "tokens": 392,
+                  "graph_size": 2,
+                  "graph_replays": 254,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 3720,
+                  "tokens": 3968,
+                  "graph_size": 1,
+                  "graph_replays": 3967,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-7.wav",
+            "rtf": 1.1518618770130542
+          },
+          {
+            "id": "Chinese-1",
+            "language": "Chinese",
+            "reference": "请把杯子放在桌子上。",
+            "phase": "quality",
+            "seconds": 2.573363421004615,
+            "audio_seconds": 1.84,
+            "samples": 44160,
+            "generation_steps": 24,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 280,
+                  "tokens": 432,
+                  "graph_size": 2,
+                  "graph_replays": 22,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 4065,
+                  "tokens": 4336,
+                  "graph_size": 1,
+                  "graph_replays": 4335,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-8.wav",
+            "rtf": 1.3985670766329428
+          },
+          {
+            "id": "Chinese-2",
+            "language": "Chinese",
+            "reference": "前方有人，请减慢速度。",
+            "phase": "quality",
+            "seconds": 5.788338221987942,
+            "audio_seconds": 5.04,
+            "samples": 120960,
+            "generation_steps": 64,
+            "cap_reached": true,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 344,
+                  "tokens": 513,
+                  "graph_size": 2,
+                  "graph_replays": 62,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 5010,
+                  "tokens": 5344,
+                  "graph_size": 1,
+                  "graph_replays": 5343,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-9.wav",
+            "rtf": 1.1484798059499886
+          },
+          {
+            "id": "Chinese-3",
+            "language": "Chinese",
+            "reference": "任务完成，现在返回充电。",
+            "phase": "quality",
+            "seconds": 3.4345983090024674,
+            "audio_seconds": 2.88,
+            "samples": 69120,
+            "generation_steps": 37,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 381,
+                  "tokens": 567,
+                  "graph_size": 2,
+                  "graph_replays": 99,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 5550,
+                  "tokens": 5920,
+                  "graph_size": 1,
+                  "graph_replays": 5919,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-10.wav",
+            "rtf": 1.1925688572925235
+          },
+          {
+            "id": "Chinese-4",
+            "language": "Chinese",
+            "reference": "今天天气很好，我们出发吧。",
+            "phase": "quality",
+            "seconds": 3.7104157420108095,
+            "audio_seconds": 2.88,
+            "samples": 69120,
+            "generation_steps": 37,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 418,
+                  "tokens": 622,
+                  "graph_size": 2,
+                  "graph_replays": 35,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 6090,
+                  "tokens": 6496,
+                  "graph_size": 1,
+                  "graph_replays": 6495,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-11.wav",
+            "rtf": 1.288338799309309
+          },
+          {
+            "id": "English-0",
+            "language": "English",
+            "reference": "Hello, welcome to the voice assistant.",
+            "phase": "quality",
+            "seconds": 3.3153627069987124,
+            "audio_seconds": 2.8,
+            "samples": 67200,
+            "generation_steps": 36,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 454,
+                  "tokens": 676,
+                  "graph_size": 2,
+                  "graph_replays": 71,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 6615,
+                  "tokens": 7056,
+                  "graph_size": 1,
+                  "graph_replays": 7055,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-12.wav",
+            "rtf": 1.1840581096423974
+          },
+          {
+            "id": "English-1",
+            "language": "English",
+            "reference": "Please put the cup on the table.",
+            "phase": "quality",
+            "seconds": 5.755100947004394,
+            "audio_seconds": 5.04,
+            "samples": 120960,
+            "generation_steps": 64,
+            "cap_reached": true,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 518,
+                  "tokens": 758,
+                  "graph_size": 2,
+                  "graph_replays": 135,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 7560,
+                  "tokens": 8064,
+                  "graph_size": 1,
+                  "graph_replays": 8063,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-13.wav",
+            "rtf": 1.1418851085326178
+          },
+          {
+            "id": "English-2",
+            "language": "English",
+            "reference": "Someone is ahead. Please slow down.",
+            "phase": "quality",
+            "seconds": 4.028354637994198,
+            "audio_seconds": 3.44,
+            "samples": 82560,
+            "generation_steps": 44,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 562,
+                  "tokens": 820,
+                  "graph_size": 2,
+                  "graph_replays": 179,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 8205,
+                  "tokens": 8752,
+                  "graph_size": 1,
+                  "graph_replays": 8751,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-14.wav",
+            "rtf": 1.1710333249983134
+          },
+          {
+            "id": "English-3",
+            "language": "English",
+            "reference": "The task is complete. Return to the charger.",
+            "phase": "quality",
+            "seconds": 6.059238268993795,
+            "audio_seconds": 5.04,
+            "samples": 120960,
+            "generation_steps": 64,
+            "cap_reached": true,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 626,
+                  "tokens": 904,
+                  "graph_size": 2,
+                  "graph_replays": 62,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 9150,
+                  "tokens": 9760,
+                  "graph_size": 1,
+                  "graph_replays": 9759,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-15.wav",
+            "rtf": 1.2022298152765467
+          },
+          {
+            "id": "English-4",
+            "language": "English",
+            "reference": "The weather is nice today. Let us go.",
+            "phase": "quality",
+            "seconds": 3.779973509008414,
+            "audio_seconds": 3.28,
+            "samples": 78720,
+            "generation_steps": 42,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 668,
+                  "tokens": 966,
+                  "graph_size": 2,
+                  "graph_replays": 104,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 9765,
+                  "tokens": 10416,
+                  "graph_size": 1,
+                  "graph_replays": 10415,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-final/speech-16.wav",
+            "rtf": 1.152430947868419
+          }
+        ]
+      },
+      "final_eviction_quality_and_graph_identity": {
+        "task": "tts",
+        "load_seconds": 32.28022231700015,
+        "threads": 8,
+        "warmup_count": 2,
+        "measured_repeats": 5,
+        "generation_limit": 64,
+        "steady": {
+          "count": 5,
+          "median_seconds": 3.0109302299970295,
+          "mean_seconds": 3.0116974592005135,
+          "min_seconds": 3.0004065280081704,
+          "max_seconds": 3.0262786259991117,
+          "total_seconds": 15.058487296002568,
+          "audio_seconds": 12.4,
+          "aggregate_rtf": 1.2143941367744007,
+          "audio_seconds_per_wall_second": 0.823455886122885
+        },
+        "languages": {
+          "Chinese": {
+            "timing": {
+              "count": 5,
+              "median_seconds": 3.4412329019978642,
+              "mean_seconds": 3.7305587006005227,
+              "min_seconds": 2.700136316008866,
+              "max_seconds": 5.7800350390025415,
+              "total_seconds": 18.652793503002613,
+              "audio_seconds": 15.12,
+              "aggregate_rtf": 1.2336503639551992,
+              "audio_seconds_per_wall_second": 0.8106024439484667
+            },
+            "cap_reached": 1
+          },
+          "English": {
+            "timing": {
+              "count": 5,
+              "median_seconds": 4.052864147990476,
+              "mean_seconds": 4.633241498999996,
+              "min_seconds": 3.292609212003299,
+              "max_seconds": 6.1216794770007255,
+              "total_seconds": 23.16620749499998,
+              "audio_seconds": 19.6,
+              "aggregate_rtf": 1.181949361989795,
+              "audio_seconds_per_wall_second": 0.8460599346798702
+            },
+            "cap_reached": 2
+          }
+        },
+        "runs": [
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "warmup",
+            "seconds": 3.7098405830038246,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 30,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 32,
+                  "tokens": 49,
+                  "graph_size": 2,
+                  "graph_replays": 30,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 465,
+                  "tokens": 496,
+                  "graph_size": 1,
+                  "graph_replays": 495,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.495903460888639
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "warmup",
+            "seconds": 3.019517608001479,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 61,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 64,
+                  "tokens": 98,
+                  "graph_size": 2,
+                  "graph_replays": 62,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 930,
+                  "tokens": 992,
+                  "graph_size": 1,
+                  "graph_replays": 991,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.2175474225812415
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 3.0024886979954317,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 92,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 96,
+                  "tokens": 147,
+                  "graph_size": 2,
+                  "graph_replays": 94,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 1395,
+                  "tokens": 1488,
+                  "graph_size": 1,
+                  "graph_replays": 1487,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.2106809266110612
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 3.0262786259991117,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 123,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 128,
+                  "tokens": 196,
+                  "graph_size": 2,
+                  "graph_replays": 126,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 1860,
+                  "tokens": 1984,
+                  "graph_size": 1,
+                  "graph_replays": 1983,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.220273639515771
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 3.0183832140028244,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 154,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 160,
+                  "tokens": 245,
+                  "graph_size": 2,
+                  "graph_replays": 158,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 2325,
+                  "tokens": 2480,
+                  "graph_size": 1,
+                  "graph_replays": 2479,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.2170900056463
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 3.0004065280081704,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 185,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 192,
+                  "tokens": 294,
+                  "graph_size": 2,
+                  "graph_replays": 190,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 2790,
+                  "tokens": 2976,
+                  "graph_size": 1,
+                  "graph_replays": 2975,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.2098413419387783
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "steady",
+            "seconds": 3.0109302299970295,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 216,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 224,
+                  "tokens": 343,
+                  "graph_size": 2,
+                  "graph_replays": 222,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 3255,
+                  "tokens": 3472,
+                  "graph_size": 1,
+                  "graph_replays": 3471,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "rtf": 1.2140847701600925
+          },
+          {
+            "id": "Chinese-0",
+            "language": "Chinese",
+            "reference": "你好，欢迎使用语音助手。",
+            "phase": "quality",
+            "seconds": 2.986326411002665,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 247,
+            "audio_seconds": 2.48,
+            "samples": 59520,
+            "generation_steps": 32,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 256,
+                  "tokens": 392,
+                  "graph_size": 2,
+                  "graph_replays": 254,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 3720,
+                  "tokens": 3968,
+                  "graph_size": 1,
+                  "graph_replays": 3967,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-7.wav",
+            "rtf": 1.2041638754043003
+          },
+          {
+            "id": "Chinese-1",
+            "language": "Chinese",
+            "reference": "请把杯子放在桌子上。",
+            "phase": "quality",
+            "seconds": 2.700136316008866,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 270,
+            "audio_seconds": 1.84,
+            "samples": 44160,
+            "generation_steps": 24,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 280,
+                  "tokens": 432,
+                  "graph_size": 2,
+                  "graph_replays": 270,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 4065,
+                  "tokens": 4336,
+                  "graph_size": 1,
+                  "graph_replays": 4335,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-8.wav",
+            "rtf": 1.4674653891352532
+          },
+          {
+            "id": "Chinese-2",
+            "language": "Chinese",
+            "reference": "前方有人，请减慢速度。",
+            "phase": "quality",
+            "seconds": 5.7800350390025415,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 333,
+            "audio_seconds": 5.04,
+            "samples": 120960,
+            "generation_steps": 64,
+            "cap_reached": true,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 344,
+                  "tokens": 513,
+                  "graph_size": 2,
+                  "graph_replays": 333,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 5010,
+                  "tokens": 5344,
+                  "graph_size": 1,
+                  "graph_replays": 5343,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-9.wav",
+            "rtf": 1.1468323490084407
+          },
+          {
+            "id": "Chinese-3",
+            "language": "Chinese",
+            "reference": "任务完成，现在返回充电。",
+            "phase": "quality",
+            "seconds": 3.4412329019978642,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 369,
+            "audio_seconds": 2.88,
+            "samples": 69120,
+            "generation_steps": 37,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 381,
+                  "tokens": 567,
+                  "graph_size": 2,
+                  "graph_replays": 370,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 5550,
+                  "tokens": 5920,
+                  "graph_size": 1,
+                  "graph_replays": 5919,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-10.wav",
+            "rtf": 1.194872535415925
+          },
+          {
+            "id": "Chinese-4",
+            "language": "Chinese",
+            "reference": "今天天气很好，我们出发吧。",
+            "phase": "quality",
+            "seconds": 3.7450628349906765,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 405,
+            "audio_seconds": 2.88,
+            "samples": 69120,
+            "generation_steps": 37,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 418,
+                  "tokens": 622,
+                  "graph_size": 2,
+                  "graph_replays": 405,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 6090,
+                  "tokens": 6496,
+                  "graph_size": 1,
+                  "graph_replays": 6495,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-11.wav",
+            "rtf": 1.3003690399273182
+          },
+          {
+            "id": "English-0",
+            "language": "English",
+            "reference": "Hello, welcome to the voice assistant.",
+            "phase": "quality",
+            "seconds": 3.292609212003299,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 440,
+            "audio_seconds": 2.8,
+            "samples": 67200,
+            "generation_steps": 36,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 454,
+                  "tokens": 676,
+                  "graph_size": 2,
+                  "graph_replays": 441,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 6615,
+                  "tokens": 7056,
+                  "graph_size": 1,
+                  "graph_replays": 7055,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-12.wav",
+            "rtf": 1.1759318614297498
+          },
+          {
+            "id": "English-1",
+            "language": "English",
+            "reference": "Please put the cup on the table.",
+            "phase": "quality",
+            "seconds": 5.818446702003712,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 503,
+            "audio_seconds": 5.04,
+            "samples": 120960,
+            "generation_steps": 64,
+            "cap_reached": true,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 518,
+                  "tokens": 758,
+                  "graph_size": 2,
+                  "graph_replays": 505,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 7560,
+                  "tokens": 8064,
+                  "graph_size": 1,
+                  "graph_replays": 8063,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-13.wav",
+            "rtf": 1.1544537107150221
+          },
+          {
+            "id": "English-2",
+            "language": "English",
+            "reference": "Someone is ahead. Please slow down.",
+            "phase": "quality",
+            "seconds": 4.052864147990476,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 546,
+            "audio_seconds": 3.44,
+            "samples": 82560,
+            "generation_steps": 44,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 562,
+                  "tokens": 820,
+                  "graph_size": 2,
+                  "graph_replays": 549,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 8205,
+                  "tokens": 8752,
+                  "graph_size": 1,
+                  "graph_replays": 8751,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-14.wav",
+            "rtf": 1.178158182555371
+          },
+          {
+            "id": "English-3",
+            "language": "English",
+            "reference": "The task is complete. Return to the charger.",
+            "phase": "quality",
+            "seconds": 6.1216794770007255,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 609,
+            "audio_seconds": 5.04,
+            "samples": 120960,
+            "generation_steps": 64,
+            "cap_reached": true,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 626,
+                  "tokens": 904,
+                  "graph_size": 2,
+                  "graph_replays": 609,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 9150,
+                  "tokens": 9760,
+                  "graph_size": 1,
+                  "graph_replays": 9759,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-15.wav",
+            "rtf": 1.2146189438493502
+          },
+          {
+            "id": "English-4",
+            "language": "English",
+            "reference": "The weather is nice today. Let us go.",
+            "phase": "quality",
+            "seconds": 3.880607956001768,
+            "decode_graph_identity": [
+              4,
+              3
+            ],
+            "decode_replays": 650,
+            "audio_seconds": 3.28,
+            "samples": 78720,
+            "generation_steps": 42,
+            "cap_reached": false,
+            "execution": {
+              "components": {
+                "talker": {
+                  "calls": 668,
+                  "tokens": 966,
+                  "graph_size": 2,
+                  "graph_replays": 651,
+                  "graph_invariant_ok": true
+                },
+                "predictor": {
+                  "calls": 9765,
+                  "tokens": 10416,
+                  "graph_size": 1,
+                  "graph_replays": 10415,
+                  "graph_invariant_ok": true
+                }
+              }
+            },
+            "equal_before_eviction_change": true,
+            "audio": "/home/agi/rhinoforge_audio_runtime/optimization_20261010/tts-evict/speech-16.wav",
+            "rtf": 1.183112181707856
+          }
+        ]
+      },
+      "stages": {
+        "task": "tts",
+        "threads": 8,
+        "runs": [
+          {
+            "phase": "warmup",
+            "seconds": 3.7322062680032104,
+            "stage_seconds": {
+              "reference_read": 0.001262395002413541,
+              "speaker": 0.21968685399042442,
+              "talker_decoder": 0.7094704010087298,
+              "output_heads": 0.21965446189278737,
+              "predictor_decoder": 1.102941697143251,
+              "codec_decode": 1.246368763007922,
+              "generation_glue": 0.22782780896523036,
+              "other": 0.004993886992451735
+            },
+            "calls": {
+              "reference_read": 1,
+              "speaker": 1,
+              "talker_decoder": 32,
+              "output_heads": 497,
+              "predictor_decoder": 465,
+              "autoregressive_total": 1,
+              "codec_decode": 1
+            }
+          },
+          {
+            "phase": "warmup",
+            "seconds": 3.0144891060044756,
+            "stage_seconds": {
+              "reference_read": 0.0010018929897341877,
+              "talker_decoder": 0.32675720000406727,
+              "output_heads": 0.21488901213160716,
+              "predictor_decoder": 1.1161952700058464,
+              "codec_decode": 1.1245386389928171,
+              "generation_glue": 0.22894691885448992,
+              "other": 0.0021601730259135365
+            },
+            "calls": {
+              "reference_read": 1,
+              "talker_decoder": 32,
+              "output_heads": 497,
+              "predictor_decoder": 465,
+              "autoregressive_total": 1,
+              "codec_decode": 1
+            }
+          },
+          {
+            "phase": "measured",
+            "seconds": 2.97645529100555,
+            "stage_seconds": {
+              "reference_read": 0.0010194700007559732,
+              "talker_decoder": 0.31818532303441316,
+              "output_heads": 0.21070969082938973,
+              "predictor_decoder": 1.0865218590042787,
+              "codec_decode": 1.1415452039946103,
+              "generation_glue": 0.21636768913595006,
+              "other": 0.002106055006152019
+            },
+            "calls": {
+              "reference_read": 1,
+              "talker_decoder": 32,
+              "output_heads": 497,
+              "predictor_decoder": 465,
+              "autoregressive_total": 1,
+              "codec_decode": 1
+            }
+          },
+          {
+            "phase": "measured",
+            "seconds": 2.9520358590089018,
+            "stage_seconds": {
+              "reference_read": 0.0011862789979204535,
+              "talker_decoder": 0.31965318096627016,
+              "output_heads": 0.21192109389812686,
+              "predictor_decoder": 1.0910831797809806,
+              "codec_decode": 1.1087962789897574,
+              "generation_glue": 0.21703367235022597,
+              "other": 0.002362174025620334
+            },
+            "calls": {
+              "reference_read": 1,
+              "talker_decoder": 32,
+              "output_heads": 497,
+              "predictor_decoder": 465,
+              "autoregressive_total": 1,
+              "codec_decode": 1
+            }
+          },
+          {
+            "phase": "measured",
+            "seconds": 2.943426557001658,
+            "stage_seconds": {
+              "reference_read": 0.0010764699982246384,
+              "talker_decoder": 0.3169231189531274,
+              "output_heads": 0.21163993306981865,
+              "predictor_decoder": 1.0902926220587688,
+              "codec_decode": 1.1035372740007006,
+              "generation_glue": 0.2176466959208483,
+              "other": 0.002310443000169471
+            },
+            "calls": {
+              "reference_read": 1,
+              "talker_decoder": 32,
+              "output_heads": 497,
+              "predictor_decoder": 465,
+              "autoregressive_total": 1,
+              "codec_decode": 1
+            }
+          },
+          {
+            "phase": "measured",
+            "seconds": 2.9558846589934547,
+            "stage_seconds": {
+              "reference_read": 0.001024393000989221,
+              "talker_decoder": 0.3149539459554944,
+              "output_heads": 0.21054120115877595,
+              "predictor_decoder": 1.0867446119809756,
+              "codec_decode": 1.1246717570029432,
+              "generation_glue": 0.215808271910646,
+              "other": 0.0021404779836302623
+            },
+            "calls": {
+              "reference_read": 1,
+              "talker_decoder": 32,
+              "output_heads": 497,
+              "predictor_decoder": 465,
+              "autoregressive_total": 1,
+              "codec_decode": 1
+            }
+          },
+          {
+            "phase": "measured",
+            "seconds": 3.004402406993904,
+            "stage_seconds": {
+              "reference_read": 0.00097962400468532,
+              "talker_decoder": 0.3186958619917277,
+              "output_heads": 0.21476620298926719,
+              "predictor_decoder": 1.0965559400210623,
+              "codec_decode": 1.1517094420123613,
+              "generation_glue": 0.21959751099348068,
+              "other": 0.002097824981319718
+            },
+            "calls": {
+              "reference_read": 1,
+              "talker_decoder": 32,
+              "output_heads": 497,
+              "predictor_decoder": 465,
+              "autoregressive_total": 1,
+              "codec_decode": 1
+            }
+          }
+        ],
+        "mean_seconds": 2.9664409546006936,
+        "stage_mean_seconds": {
+          "reference_read": 0.0010572472005151213,
+          "talker_decoder": 0.31768228618020655,
+          "output_heads": 0.21191562438907569,
+          "predictor_decoder": 1.0902396425692131,
+          "codec_decode": 1.1260519912000746,
+          "generation_glue": 0.2172907680622302,
+          "other": 0.002203394999378361
+        },
+        "stats": {
+          "head_calls": [
+            224,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217,
+            217
+          ],
+          "components": {
+            "talker": {
+              "calls": 224,
+              "tokens": 343,
+              "graph_size": 2,
+              "graph_replays": 222,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 3255,
+              "tokens": 3472,
+              "graph_size": 1,
+              "graph_replays": 3471,
+              "graph_invariant_ok": true
+            }
+          }
+        }
+      }
+    },
+    "quality_reuse": "Final eviction-only change reproduces all 10 scored waveforms exactly; no re-scoring identical audio.",
+    "limitations": "Predictor sequential prefill and eager heads retained; no MOS/voice-similarity/streaming/long-text/concurrency certification"
+  },
+  "deployment": {
+    "backup": "/home/agi/rhinoforge_audio_runtime/backup_40e4574_audio_v2_20261010",
+    "deployed_sha256": {
+      "python/rpu_backend/api/qwen3_asr.py": "d25c0c3b53ad8a9a3227c12fab0795e193a6205cd0c4bdc5cf1ab9f01d84b9a7",
+      "python/rpu_backend/api/qwen3_tts.py": "cf2cba3762c659fd569a6448ec856631733bf7b35cc889013e1ddd81bacf5ff1",
+      "python/rpu_backend/adapters/qwen3_tts/codec.py": "4cc516578968e8b2e4f737eb6c2526a36cff01ee45563ee378965af053b6cf26",
+      "examples/benchmark_qwen3_audio.py": "5062681299115be4b8cbdc617f1f5220edc6be56343ede7cfb9b8afec91584e9"
+    }
+  }
+}

@@ -128,11 +128,13 @@ def test_close_retires_before_releasing_and_is_idempotent(monkeypatch):
     model._closed = False
     model._text = SimpleNamespace(_rpu_decoder_retirement_state=SimpleNamespace(retire=lambda: events.append("retire")))
     model._head_weight = object()
+    model._language_model = object()
     model.close()
     model.close()
     assert events == ["retire", "release"]
     assert model._text is None
     assert model._head_weight is None
+    assert model._language_model is None
     with pytest.raises(RuntimeError, match="closed"):
         model.transcribe(np.zeros(8000, dtype=np.float32))
     with pytest.raises(RuntimeError, match="closed"):
@@ -248,6 +250,40 @@ def test_request_reuses_kv_storage_and_resets_position_after_failure(monkeypatch
         with pytest.raises(RuntimeError, match="interrupted request"):
             model._generate(inputs, 64)
     assert len(allocations) == 1
+
+
+@pytest.mark.parametrize("invalid", [None, float("nan"), float("inf")])
+def test_causal_lm_logits_keep_finite_rejection_and_eos(monkeypatch, invalid):
+    from rpu_backend.api import cache as cache_module
+
+    cache = SimpleNamespace(reset_to_position=lambda pos: None, get_seq_length=lambda: 0)
+    monkeypatch.setattr(cache_module, "RPUCache", lambda *args, **kwargs: cache)
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda tensor, *args, **kwargs:
+        tensor if args == ("rpu",) else original_to(tensor, *args, **kwargs))
+    monkeypatch.setattr(torch.nn.functional, "embedding", lambda ids, weight:
+        torch.zeros(*ids.shape, 1024, dtype=torch.float16))
+    model = Qwen3ASRModel()
+    model._audio = lambda *args, **kwargs: SimpleNamespace(
+        last_hidden_state=torch.zeros(1, 1024, dtype=torch.float16))
+    logits = torch.zeros(1, 1, 151646, dtype=torch.float16)
+    logits[0, 0, 151645] = 1
+    if invalid is not None:
+        logits[0, 0, 0] = invalid
+    def forward(**kwargs):
+        assert kwargs["logits_to_keep"] == 1 and kwargs["return_dict"]
+        assert kwargs["past_key_values"] is cache
+        return SimpleNamespace(logits=logits)
+    model._language_model = forward
+    model._tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "<asr_text>done")
+    inputs = dict(feature_lens=torch.tensor([1]), input_features=torch.zeros(1, 128, 1),
+                  input_ids=torch.tensor([[151676]]), attention_mask=torch.ones(1, 1))
+    if invalid is None:
+        result = model._generate(inputs, 64)
+        assert result.token_ids == (151645,) and result.text == "done"
+    else:
+        with pytest.raises(FloatingPointError, match="non-finite ASR logits"):
+            model._generate(inputs, 64)
 
 
 def test_attention_head_padding_preserves_real_heads_and_projection():

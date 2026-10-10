@@ -429,6 +429,9 @@ RPU model/policy per process. Loading validates frozen assets before weight
 transformation. ASR uses FP16 weights and boundaries, with CPU convolutions
 computed in FP32 from those rounded weights; its vocabulary head runs on RPU
 with FP32 accumulation while the tied input embedding remains on CPU.
+CPU convolution inputs and weights use channels-last storage. Decode fuses the
+vocabulary head into the shared causal-LM Graph; prefill projects only the last
+hidden position. CPU finite checks and greedy token selection remain explicit.
 Its 18 audio encoder blocks, final LayerNorm and first projection execute in
 one fused RPU Graph with FP32 linear accumulation. The fourteen 64-wide heads
 are padded to sixteen without changing the 896-wide residual/LayerNorm math.
@@ -439,7 +442,8 @@ TTS keeps CPU components in FP32
 and casts RPU boundaries to FP16. Its heads consume the current single-token
 RPU decoder output directly when available; host hidden states remain available
 to generation. Codec transposed convolutions use equivalent CPU FP32 matrix
-multiplication and overlap-add, preserving the original output length.
+multiplication and bounded adjacent-block overlap-add; admitted 1x1 convolutions
+use matrix multiplication. Both preserve the original output length.
 Unsupported precisions fail before loading.
 Both loaders select the common caching allocator before RPU materialization;
 a process already frozen to the direct allocator must be restarted.
@@ -451,8 +455,12 @@ so it resets on a shape switch. The ASR encoder separately retains one Graph
 for the current audio-token length; `audio_graph_size`, `audio_graph_replays`
 and `audio_graph_invariant_ok` report that cache. `audio_linear_calls` counts
 logical projections, including the 109 projections within the fused encoder.
-TTS keeps one fixed decode Graph per component,
-processing short prefills token by token. Output storage is independent of replay.
+TTS Talker keeps the current prompt length's prefill Graph and one decode Graph.
+A prompt-length change evicts only the old prefill, retaining decode and the
+bounded prepared-plan cache. It reuses the Qwen3 28-layer/1024 prefill envelope,
+bounded by its 128-position cache; physical padding never advances logical KV
+position. Predictor keeps one fixed decode Graph, processing its two-token
+prefill sequentially. Output storage is independent of replay.
 Both APIs retain private KV storage and reset its logical position for each new
 sequence. TTS retains only the latest speaker embedding, keyed by decoded audio
 content; every request still reads and validates the reference file. Reference

@@ -207,6 +207,7 @@ class Qwen3ASRModel:
         self._closed = True
         self._audio = self._text = self._embedding_weight = None
         self._head_weight = None
+        self._language_model = None
         self._audio_linear_calls = {}
         self._audio_encoder = None
         self._decoder_calls = 0
@@ -234,7 +235,7 @@ class Qwen3ASRModel:
         return model
 
     def _install_rpu(self):
-        from rpu_backend.adapters.qwen3 import lookup_causal_decoder
+        from rpu_backend.adapters.qwen3 import lookup_causal_decoder, _apply_fused_lm_head_for_rpu
         from rpu_backend.runtime.decoder import _install_causal_decoder_forward
         from rpu_backend.runtime.topology import resolve_decoder_topology
         from rpu_backend.runtime.weights import convert_linear_weights_inplace, transform_linear_weight
@@ -255,16 +256,27 @@ class Qwen3ASRModel:
             execution_config={"model": {"num_cores": 8}, "prefill": {"linear_acc32": True}},
             _graph_cache_max_entries=2)
         self._head_weight = transform_linear_weight(self._embedding_weight, 1, 8).to("rpu")
+        # Reuse the causal-LM output contract; the base decoder must still return hidden states.
+        self._language_model = torch.nn.Module()
+        self._language_model.model = self._text
+        self._language_model.config = self._text.config
+        head = torch.nn.Module()
+        head.weight = torch.nn.Parameter(self._head_weight, requires_grad=False)
+        head._rpu_linear_num_cores, head._rpu_linear_partition = 8, 1
+        head.forward = self._project_logits
+        self._language_model.lm_head = head
+        _apply_fused_lm_head_for_rpu(self._language_model)
         counters = self._audio_linear_calls
         for name, module in self._audio.named_modules():
             if isinstance(module, torch.nn.Conv2d):
                 self._restore_forwards.append((module, module.forward))
-                weight = module.weight.detach().float()
+                weight = module.weight.detach().float().contiguous(memory_format=torch.channels_last)
                 bias = module.bias.detach().float() if module.bias is not None else None
 
                 def convolution(owner, hidden, weight=weight, bias=bias):
                     # CPU FP16 convolution dominates on R1; retain FP16 boundaries.
-                    return torch.nn.functional.conv2d(hidden.float(), weight, bias,
+                    hidden = hidden.float().contiguous(memory_format=torch.channels_last)
+                    return torch.nn.functional.conv2d(hidden, weight, bias,
                         owner.stride, owner.padding, owner.dilation, owner.groups).half()
 
                 module.forward = types.MethodType(convolution, module)
@@ -339,11 +351,12 @@ class Qwen3ASRModel:
         for _ in range(max_new_tokens):
             start = cache.get_seq_length()
             positions = torch.arange(start, start + hidden.shape[1])
-            output = self._text(inputs_embeds=hidden.contiguous().to("rpu"),
+            output = self._language_model(inputs_embeds=hidden.contiguous().to("rpu"),
                 position_ids=positions.unsqueeze(0), cache_position=positions,
-                attention_mask=attention_mask, past_key_values=cache, use_cache=True)
+                attention_mask=attention_mask, past_key_values=cache, use_cache=True,
+                logits_to_keep=1, return_dict=True)
             self._decoder_calls += 1
-            logits = self._project_logits(output.last_hidden_state[:, -1:])
+            logits = output.logits.cpu()
             if not torch.isfinite(logits).all():
                 raise FloatingPointError("non-finite ASR logits")
             token = logits[:, -1].argmax(-1, keepdim=True)
@@ -402,6 +415,7 @@ class Qwen3ASRModel:
                 vars(self._text).pop("forward", None)
             self._audio = self._text = self._embedding_weight = None
             self._head_weight = None
+            self._language_model = None
             self._cache = None
             self._closed = True
             _release_live_instance(self)

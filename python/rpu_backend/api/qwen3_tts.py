@@ -148,7 +148,16 @@ class Qwen3TTSModel:
                 sin = sin.squeeze(0)[:, :64].contiguous().to("rpu")
                 norm = core.norm.weight.detach().half().to("rpu")
             part["storage"] = (groups, cos, sin, norm)
+            part["planner"] = core
+            core._rpu_decoder_handle = handle
+            core._rpu_decoder_graph_cache = graph
             torch.ops.rpu.causal_decoder_set_weights(handle, *groups, cos, sin, norm, 16, 8, 128, 1024, 3072, 1e-6, True)
+            if name == "talker":
+                from rpu_backend.adapters.qwen3 import lookup_causal_decoder
+
+                envelope = lookup_causal_decoder("qwen3", part["layers"], 1024)
+                torch.ops.rpu.causal_decoder_set_chunk_envelope(
+                    handle, min(part["capacity"], envelope.max_kv_len), envelope.chunk)
             descriptor = list(torch.ops.rpu.causal_decoder_resolve_decode_stage_descriptor(handle))
             part["descriptor"] = descriptor
             part["signature"] = GraphSignature(op_id="qwen3_tts_" + name, shapes=[1, 1, 1024],
@@ -346,22 +355,43 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
     part.pop("head_hidden", None)
     part.pop("head_device", None)
     chunks = []
-    # shortcut: short prompts use the proved decode plan one token at a time; profile longer prompts separately.
-    for index in range(count):
-        half_input = hidden[:, index:index + 1].half().contiguous()
+    # shortcut: Predictor keeps decode until its five-layer prefill envelope is measured.
+    sizes = [count] if count > 1 and part["name"] == "talker" else [1] * count
+    offset = 0
+    for size in sizes:
+        half_input = hidden[:, offset:offset + size].half().contiguous()
         if not torch.isfinite(half_input).all():
             raise FloatingPointError("TTS input exceeds FP16 range")
+        descriptor, signature = part["descriptor"], part["signature"]
+        if size > 1:
+            from rpu_backend.graph import GraphSignature
+            from rpu_backend.runtime.decoder import _text_prefill_execution_plan, prefill_position_key
+
+            execution_len, _, plan = _text_prefill_execution_plan(
+                part["planner"], part["handle"], cache, size)
+            descriptor = plan.selected.stage_tuple.physical_descriptor
+            signature = GraphSignature(op_id="qwen3_tts_prefill_" + part["name"],
+                shapes=[1, size, execution_len, 1024],
+                dyn_dims=[part["handle"], prefill_position_key(execution_len, cache.position),
+                          *plan.graph_key_words()], dtypes=[torch.float16])
+            previous = part.get("prefill_signature")
+            if previous is not None and previous != signature:
+                part["graph"].evict(previous)
+            if execution_len > size:
+                half_input = torch.nn.functional.pad(half_input, (0, 0, 0, execution_len - size))
         device_input = half_input.to("rpu")
-        with part["graph"].capture(part["signature"]):
+        with part["graph"].capture(signature):
             raw = torch.ops.rpu.causal_decoder_forward(part["handle"], device_input,
                 cache.k_caches, cache.v_caches, None, cache.position, True,
-                planned_stage_descriptor=part["descriptor"])
-        value = raw.cpu().float()
-        if value.shape != (1, 1, 1024) or not torch.isfinite(value).all():
+                planned_stage_descriptor=descriptor)
+        if size > 1:
+            part["prefill_signature"] = signature
+        value = raw[:, :size].cpu().float()
+        if value.shape != (1, size, 1024) or not torch.isfinite(value).all():
             raise FloatingPointError("non-finite or invalid TTS RPU hidden state")
-        # CPU copies own their storage across the next component and Graph replay.
         chunks.append(value)
-        cache.update_position(1)
+        cache.update_position(size)
+        offset += size
     part["calls"] += 1
     part["tokens"] += count
     result = torch.cat(chunks, dim=1)

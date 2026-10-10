@@ -121,3 +121,5 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
   resident head inputs, CPU codec convolution paths, timings and content checks.
 - [Qwen3 speech next optimization assessment](../docs/qwen3_audio_next_optimization.zh.md):
   ASR frontend layout microbenchmark, TTS codec attribution and candidate priorities.
+- [Qwen3 speech second optimization results](../docs/qwen3_audio_optimization_v2_r1.zh.md):
+  ASR channels-last and fused head, TTS overlap-add and retained Talker prefill/decode.

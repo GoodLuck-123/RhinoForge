@@ -111,14 +111,21 @@ Its x-vector-only profile does not consume reference codec tokens. ASR CPU
 convolutions accumulate FP16-rounded weights in FP32 and round outputs back to
 FP16; preserve this boundary in reference comparisons. See the
 [speech optimization evidence](../docs/qwen3_audio_optimization_r1.zh.md).
-ASR now keeps a separately transformed RPU vocabulary head and projects only the
-last hidden position, retaining the CPU input embedding. Retire the decoder
+ASR uses channels-last CPU convolution storage without changing FP16 boundaries.
+Its causal-LM wrapper reuses the shared fused decode head and projects only the
+last prefill hidden position, retaining the CPU input embedding. Do not enable
+that head on a base-model caller expecting hidden outputs. Retire the decoder
 before releasing that head. TTS Predictor's fixed 15-step greedy loop resets KV
 per frame; Talker still owns stopping and repetition penalties. Compare full
 tokens/waveforms when changing either route. CPU codec thread tuning belongs to
 the caller/CLI, not a hidden process-wide change inside the API.
 TTS output-head reuse is bound to the exact current CPU hidden object and is
 consumed once; never reuse a stale RPU decoder output after another replay.
-Codec optimization replaces only the admitted FP32 transposed convolutions
-with matrix multiplication and overlap-add; ordinary convolutions keep their
-original path. Keep generation lengths and content checks alongside timings.
+Talker prefill reuses the measured 28-layer/1024 envelope within 128 positions;
+evict only its old prefill Graph on a prompt-length change, retain decode and
+bounded prepared plans, and advance KV by logical tokens, excluding padding.
+Predictor retains its single decode Graph.
+Codec optimization replaces admitted FP32 transposed convolutions with matrix
+multiplication and adjacent-block overlap-add, plus 1x1 convolutions with matrix
+multiplication. Other convolutions retain their original path. Keep generation
+lengths and content checks alongside timings.

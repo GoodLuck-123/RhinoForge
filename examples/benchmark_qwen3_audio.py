@@ -138,7 +138,8 @@ def main():
             else:
                 wave, rate = result
                 assert rate == 24000 and wave.ndim == 1 and np.isfinite(wave).all() and len(wave)
-                assert all(c["graph_size"] == 1 and c["graph_invariant_ok"] for c in stats["components"].values())
+                assert all(c["graph_size"] == (2 if name == "talker" else 1)
+                           and c["graph_invariant_ok"] for name, c in stats["components"].items())
                 assert all(a > b for a,b in zip(stats["head_calls"], before["head_calls"]))
                 calls = stats["head_calls"][0] - before["head_calls"][0]
                 item.update(audio_seconds=len(wave)/rate, samples=len(wave), generation_steps=calls,

@@ -347,6 +347,53 @@ def test_head_reuses_only_current_single_token_device_output():
     assert part == {}
 
 
+def test_talker_prefill_padding_positions_shape_switch_and_owned_outputs(monkeypatch):
+    from contextlib import nullcontext
+    from rpu_backend.api import cache as cache_module
+    from rpu_backend.runtime import decoder
+
+    class Cache:
+        def __init__(self, *args):
+            self.position = 0
+            self.k_caches = self.v_caches = []
+        def reset_to_position(self, position):
+            self.position = position
+        def update_position(self, count):
+            self.position += count
+    monkeypatch.setattr(cache_module, "RPUCache", Cache)
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda tensor, *args, **kwargs:
+        tensor if args == ("rpu",) else original_to(tensor, *args, **kwargs))
+    captures, evicted, calls = [], [], []
+    def capture(signature):
+        captures.append(signature)
+        return nullcontext()
+    graph = SimpleNamespace(capture=capture, evict=evicted.append,
+                            clear=lambda: pytest.fail("decode Graph must be retained"))
+    plan = SimpleNamespace(selected=SimpleNamespace(stage_tuple=SimpleNamespace(physical_descriptor=(7,))),
+                           graph_key_words=lambda: (7,))
+    monkeypatch.setattr(decoder, "_text_prefill_execution_plan", lambda *args: (16, 16, plan))
+    buffer = torch.empty(1, 16, 1024, dtype=torch.float16)
+    def forward(handle, hidden, k, v, mask, position, causal, **kwargs):
+        calls.append((position, hidden.clone(), kwargs["planned_stage_descriptor"]))
+        return buffer[:, :hidden.shape[1]].copy_(hidden)
+    monkeypatch.setattr(torch.ops.rpu, "causal_decoder_forward", forward, raising=False)
+    part = dict(layers=28, capacity=128, generation_limit=64, name="talker", handle=1,
+                descriptor=(1,), signature=None, graph=graph, planner=object(), calls=0, tokens=0)
+    first = tts._decoder_forward(part, torch.ones(1, 3, 1024), None, None, None, None, True)
+    cache = first.past_key_values
+    assert cache.position == 3 and first.last_hidden_state.shape == (1, 3, 1024)
+    assert calls[0][1][:, 3:].eq(0).all() and calls[0][2] == (7,)
+    second = tts._decoder_forward(part, torch.full((1, 1, 1024), 9.), cache, None, None, None, False)
+    assert cache.position == 4 and calls[1][0] == 3 and calls[1][2] == (1,)
+    assert first.last_hidden_state.eq(1).all() and second.last_hidden_state.eq(9).all()
+    for _ in range(2):
+        third = tts._decoder_forward(part, torch.zeros(1, 5, 1024), None, None, None, None, False)
+        assert third.past_key_values is cache and cache.position == 5
+    assert evicted == [captures[0]] and calls[2][0] == calls[3][0] == 0
+    assert captures[0] != captures[2] and captures[2] == captures[3]
+
+
 @pytest.mark.parametrize("kernel,stride", [(2, 2), (16, 8)])
 def test_codec_convolution_paths_match_fp32(kernel, stride):
     from rpu_backend.adapters.qwen3_tts.codec import install_codec_convolutions
