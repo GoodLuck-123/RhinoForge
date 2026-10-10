@@ -4,6 +4,8 @@
 
 **R1 ASR 耗时从 0.639 秒降到 0.426 秒（−33.3%）；TTS 从 3.836 秒降到 3.588 秒（−6.5%），使用 8 个 CPU 线程后为 3.402 秒（−11.3%）。20 条 ASR token 不变，10 条 TTS 波形逐点一致。TTS 仍慢于播放速度。**
 
+2026-10-10 补充：[Thor TensorRT 实测](qwen3_audio_thor_tensorrt.zh.md)，包含同日 PyTorch 对照、完整请求耗时和质量核验；下文保留 10 月 9 日的原始结果。
+
 ## 测量口径
 
 - R1：8 RPU cores；PyTorch 2.10.0+cpu、Transformers 5.3.0，沿用原生库、Launch v1.1.0 与原算子资产。只有 Python 适配/示例改变。

@@ -112,3 +112,6 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
   R1 vocabulary-head and Predictor optimization, CPU codec threads, Thor quality-aware comparison.
 - [Qwen3 speech optimization](../docs/qwen3_audio_optimization_r1.zh.md): RhinoVLA
   storage reuse, CPU convolution boundary, speaker reuse and baseline comparison.
+
+- [Qwen3 speech Thor TensorRT measurements](../docs/qwen3_audio_thor_tensorrt.zh.md):
+  decoder engine boundaries, same-day PyTorch comparison, stage timing and task quality.
