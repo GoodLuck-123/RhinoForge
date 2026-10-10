@@ -1,0 +1,185 @@
+{
+  "date": "2026-10-10",
+  "baseline_commit": "40e4574",
+  "branch": "feat/qwen3-audio-rpu",
+  "scope": "assessment only; no new inference implementation or deployment",
+  "units": "seconds unless specified",
+  "asr_frontend": {
+    "device": "R1 CPU",
+    "threads": 4,
+    "warmups": 2,
+    "measured_iterations": 5,
+    "audio_seconds": 4.2039375,
+    "input_shape": [
+      5,
+      1,
+      128,
+      100
+    ],
+    "scope": "three FP32 convolutions with FP16 boundaries, GELU and final layout; excludes model loading, weight preparation and encoder",
+    "script_on_r1": "/home/agi/rhinoforge_audio_runtime/opportunity_20261010/asr_frontend_probe.py",
+    "stages_mean_order": [
+      "conv1",
+      "gelu1",
+      "conv2",
+      "gelu2",
+      "conv3",
+      "gelu3",
+      "final_layout"
+    ],
+    "candidates": [
+      {
+        "mode": "baseline",
+        "shape": [
+          5,
+          13,
+          480,
+          16
+        ],
+        "times": [
+          0.13560127399978228,
+          0.12437040600343607,
+          0.1274099719885271,
+          0.12018886899750214,
+          0.11982232799346093
+        ],
+        "median": 0.12437040600343607,
+        "stages_mean": [
+          0.02419540619594045,
+          0.015139702800661325,
+          0.06565250299754552,
+          0.002586068998789415,
+          0.016997665399685502,
+          0.0006961678009247407,
+          0.0001825629937229678
+        ],
+        "equal": true,
+        "mse": 0.0,
+        "max_abs": 0.0
+      },
+      {
+        "mode": "channels_last",
+        "shape": [
+          5,
+          13,
+          480,
+          16
+        ],
+        "times": [
+          0.10213697899598628,
+          0.09448410400364082,
+          0.09181658099987544,
+          0.09058468400326092,
+          0.10309148801025003
+        ],
+        "median": 0.09448410400364082,
+        "stages_mean": [
+          0.009358405802049673,
+          0.013633405198925174,
+          0.05426797940162942,
+          0.0025614304002374412,
+          0.01571018500253558,
+          0.0007018445961875841,
+          0.0001600165996933356
+        ],
+        "equal": true,
+        "mse": 0.0,
+        "max_abs": 0.0
+      },
+      {
+        "mode": "first_gelu_fp32",
+        "shape": [
+          5,
+          13,
+          480,
+          16
+        ],
+        "times": [
+          0.11257080199720804,
+          0.11282972799381241,
+          0.10896357799356338,
+          0.1180318510014331,
+          0.115268017994822
+        ],
+        "median": 0.11282972799381241,
+        "stages_mean": [
+          0.021178440997027793,
+          0.011209752599825151,
+          0.0584545240009902,
+          0.0026091537991305815,
+          0.01883557379769627,
+          0.0008422998012974859,
+          0.0003744341986021027
+        ],
+        "equal": false,
+        "mse": 1.1064918946368518e-11,
+        "max_abs": 0.00048828125
+      }
+    ],
+    "channels_last_median_reduction": 0.02988630199979525,
+    "channels_last_reduction_fraction": 0.2403007512813744,
+    "limitation": "single fixed recording, candidates run sequentially; no candidate end-to-end timing or recognition quality run"
+  },
+  "tts_codec_profile": {
+    "checkpoint": "Qwen3-TTS-12Hz-0.6B-Base",
+    "revision": "40e4574",
+    "threads": 8,
+    "decoder": "final frozen transpose-only CPU FP32 codec",
+    "warmup_seconds": [
+      1.278189869990456,
+      1.063844860997051
+    ],
+    "profiled_seconds": 1.1348709710000549,
+    "profiled_includes_instrumentation": true,
+    "waveform_exact": true,
+    "samples": 59520,
+    "fixed_code_frames": 31,
+    "measured_iterations": 1,
+    "script_on_r1": "/home/agi/rhinoforge_audio_runtime/tts_chain_20261010/evaluation_codec.py",
+    "exclusive_module_seconds": {
+      "Conv1d": 0.5463903939817101,
+      "ConvTranspose1d": 0.212137205991894,
+      "SnakeBeta": 0.129980503974366,
+      "Linear": 0.1154403649707092,
+      "other_leaf": 0.009804009081562981,
+      "non_leaf_and_instrumentation": 0.12111849299981259
+    },
+    "conv1d_seconds_by_kernel": {
+      "1": 0.13594782797736116,
+      "3": 0.001203740990604274,
+      "7": 0.40923882501374464
+    },
+    "overlapping_operator_observations": [
+      {
+        "name": "aten::copy_",
+        "calls": 193,
+        "self_cpu_us": 142823.9550000006,
+        "total_cpu_us": 142823.9550000006,
+        "self_memory_bytes": 0,
+        "total_memory_bytes": 0
+      },
+      {
+        "name": "aten::col2im",
+        "calls": 6,
+        "self_cpu_us": 72988.87499999997,
+        "total_cpu_us": 104383.29199999987,
+        "self_memory_bytes": -98279424,
+        "total_memory_bytes": 98279424
+      },
+      {
+        "name": "aten::sin",
+        "calls": 30,
+        "self_cpu_us": 57444.24399999977,
+        "total_cpu_us": 57444.24399999977,
+        "self_memory_bytes": 342081280,
+        "total_memory_bytes": 342081280
+      }
+    ],
+    "limitation": "instrumented attribution only; operator observations overlap module timing and must not be added; memory observations are cumulative, not resident/peak memory"
+  },
+  "formal_baseline_evidence": [
+    "../qwen3_asr_resident_r1/summary.json",
+    "../qwen3_tts_chain_optimization_r1/summary.json"
+  ],
+  "formal_baseline_unchanged": true
+}

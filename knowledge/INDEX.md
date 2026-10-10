@@ -119,3 +119,5 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
   fused audio blocks, CPU/RPU boundaries, convolution-path evaluation and quality.
 - [Qwen3 TTS output head and codec optimization](../docs/qwen3_tts_chain_optimization_r1.zh.md):
   resident head inputs, CPU codec convolution paths, timings and content checks.
+- [Qwen3 speech next optimization assessment](../docs/qwen3_audio_next_optimization.zh.md):
+  ASR frontend layout microbenchmark, TTS codec attribution and candidate priorities.
