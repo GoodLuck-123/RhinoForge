@@ -1106,6 +1106,7 @@ TORCH_LIBRARY(rpu, m) {
   // SigLIPModel All-Layers-Once (Phase 5: FusedModelBase migration)
   m.def("siglip_create(bool? linear_acc32=None) -> int", TORCH_FN(rpu_siglip_create));
   m.def("siglip_set_audio_mode", TORCH_FN(rpu_siglip_set_audio_mode));
+  m.def("siglip_set_audio_projection", TORCH_FN(rpu_siglip_set_audio_projection));
   m.def("siglip_set_execution_core_count", TORCH_FN(rpu_siglip_set_execution_core_count));
   m.def("siglip_get_execution_topology", TORCH_FN(rpu_siglip_get_execution_topology));
   m.def("siglip_destroy", TORCH_FN(rpu_siglip_destroy));

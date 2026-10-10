@@ -1,5 +1,7 @@
 # ASR / TTS：扩大 RPU 驻留范围
 
+后续将 ASR 末尾 GELU/proj2 纳入现有 GraphCache 的结果见[音频图优化报告](qwen3_asr_graph_tail.zh.md)。本页保留本轮原始数据。
+
 2026-10-10，分支 `feat/qwen3-audio-rpu`，起点 `f8f0d9f`。沿用冻结的
 Qwen3-ASR-0.6B 和 Qwen3-TTS-12Hz-0.6B-Base 检查点、已审核上游源码及 R1
 RhinoForge-runtime-v1.1.0 资产包。未新增设备程序或依赖；新增 host 包装复用已有算子。

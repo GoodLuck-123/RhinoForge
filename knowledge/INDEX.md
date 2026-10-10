@@ -128,3 +128,6 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
   ASR frontend boundaries, TTS codec frontend, explicit CPU fallback and final measurements.
 - [Qwen3 TTS codec RPU assessment](../docs/qwen3_tts_rpu_coverage.zh.md):
   FP16 frontend recipe, per-head K RoPE fix and remaining FP32 operator limits.
+
+- [Qwen3 ASR Graph tail optimization](../docs/qwen3_asr_graph_tail.zh.md):
+  extending the existing audio Graph, replay ownership, measured scope and recognition checks.

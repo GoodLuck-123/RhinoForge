@@ -101,7 +101,12 @@ padded to sixteen, 896-wide residuals, ERF GELU, original FP16 clamp and head
 scale. Its separate single-entry Graph is keyed by audio length and physical
 plan. Convolution remains CPU; conv_out, positions, valid-row selection, final
 ERF GELU/proj2 and prefill text/audio assembly retain features on RPU. Rebuild the
-native extension for the explicit GELU and assembly interfaces. TTS owns
+native extension for the explicit audio-tail installation and assembly interfaces.
+The existing audio Graph includes ERF GELU and proj2 after proj1; its native
+profile hash and physical route manifest include that tail. Model-owned DDR
+staging stays stable, and the final output uses a refreshed mutable DMA base
+every call. Do not put the eager-only GELU/Linear wrappers directly in capture.
+TTS owns
 the Talker/Predictor decoder handles and, when the native per-head K RoPE capability
 is present, a third codec-frontend handle under one process owner. Retire all
 Graphs before their handles and weights. Preserve original CPU FP32 codec weights

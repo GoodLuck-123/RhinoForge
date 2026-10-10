@@ -101,6 +101,7 @@ constexpr int64_t SIGLIP_FC1_LINEAR_SITE = 628733187506223803LL;
 constexpr int64_t SIGLIP_FC2_LINEAR_SITE = 2130098820486441137LL;
 constexpr int64_t SIGLIP_MLP_ALL_REDUCE_SITE = 2323671932454929043LL;
 constexpr int64_t SIGLIP_PROJECTOR_LINEAR_SITE = 2282358810048681094LL;
+constexpr int64_t SIGLIP_AUDIO_OUTPUT_LINEAR_SITE = 2282358810048681095LL;
 constexpr int64_t SIGLIP_PATCH_INPUT_DMA_SITE = 1143336462482724752LL;
 constexpr int64_t SIGLIP_PATCH_POSITION_DMA_SITE = 1099468962711310446LL;
 constexpr int64_t SIGLIP_PATCH_LINEAR_SITE = 6500914803307480014LL;
@@ -428,6 +429,21 @@ public:
         audio_mode_ = true;
         // Two zero heads pad the original fourteen; the head dimension stays 64.
         orig_head_dim_ = 64;
+        invalidate_model_state();
+    }
+
+    void set_audio_projection(const at::Tensor& weight, const at::Tensor& bias) {
+        TORCH_CHECK(audio_mode_ && !audio_proj2_w_.defined(),
+                    "audio projection requires an unconfigured ASR audio tail");
+        TORCH_CHECK(weight.device().type() == at::kPrivateUse1 &&
+                        bias.device() == weight.device() &&
+                        weight.scalar_type() == at::kHalf && bias.scalar_type() == at::kHalf &&
+                        weight.is_contiguous() && bias.is_contiguous() &&
+                        weight.dim() == 2 && weight.size(0) == 1024 && weight.size(1) == 896 &&
+                        bias.dim() == 1 && bias.size(0) == 1024,
+                    "audio projection requires RPU FP16 swizzled [1024,896] weight and [1024] bias");
+        audio_proj2_w_ = weight;
+        audio_proj2_b_ = bias;
         invalidate_model_state();
     }
 
@@ -1157,7 +1173,8 @@ public:
         // owner-local mutable DMA base before FMB can take that skip path.
         // Otherwise a retained previous Vision return is overwritten by the
         // next request even though its Tensor/DDR owner is still alive.
-        projector_output_ = allocate_tracked_output({1, seq_len_, projection_dim_});
+        projector_output_ = allocate_tracked_output(
+            {1, seq_len_, audio_proj2_w_.defined() ? 1024 : projection_dim_});
         projector_out_live_base_ =
             ::rhino_lkn::RpuGetDevAddr(projector_output_.data_ptr());
 
@@ -1407,6 +1424,9 @@ protected:
                 pi05_vision_owner_ln_opt_in_ ? pi05_vision_owner_ln_arguments(true, chunk.len) :
                     std::vector<int64_t>{}, chunk.idx);
             append_linear(SIGLIP_PROJECTOR_LINEAR_SITE, chunk.idx);
+            if (audio_proj2_w_.defined()) {
+                append_linear(SIGLIP_AUDIO_OUTPUT_LINEAR_SITE, chunk.idx);
+            }
         }
         if (planning_external_patch_prologue_) {
             TORCH_CHECK(
@@ -2223,11 +2243,25 @@ protected:
             // aliases projector_output_'s storage; .contiguous() would be a no-op
             // here but in general could detach into a fresh copy whose write
             // would NOT land in projector_output_. Pass the aliasing view.
-            at::Tensor proj_out_chunk =
+            const bool audio_tail = audio_proj2_w_.defined();
+            at::Tensor final_out_chunk =
                 (chunk.len == seq_len_)
                     ? projector_output_
                     : projector_output_.slice(1, chunk.offset,
                                               chunk.offset + chunk.len);
+            at::Tensor proj_out_chunk = final_out_chunk;
+            const uint64_t* proj_dst = &projector_out_live_base_;
+            int64_t proj_offset = chunk.offset * projection_dim_ * sizeof(c10::Half);
+            if (audio_tail) {
+                auto& staging = audio_proj1_slots_[seq_len];
+                if (!staging.first.defined()) {
+                    staging.first = at::empty({seq_len, projection_dim_}, slot.options());
+                    staging.second = ::rhino_lkn::RpuGetDevAddr(staging.first.data_ptr());
+                }
+                proj_out_chunk = staging.first;
+                proj_dst = &staging.second;
+                proj_offset = 0;
+            }
             // The DDR launcher consumes matrices. This view removes only the
             // singleton batch axis and preserves storage and the row offset.
             proj_out_chunk = proj_out_chunk.view({seq_len, projection_dim_});
@@ -2255,10 +2289,27 @@ protected:
             rpu_launch_linear_ddr_kernel(
                 slot, proj_w_, proj_out_chunk, proj_b_,
                 /*has_bias=*/true, /*partition=*/1,
-                &projector_out_live_base_,
-                /*dst_offset_bytes=*/chunk.offset * projection_dim_
-                                     * (int64_t)sizeof(c10::Half),
+                proj_dst, proj_offset,
                 &projector_bias_live_base, num_cores(), {}, configured_linear_acc32_);
+            if (audio_tail) {
+                // Reuse the last layer's dead norm scratch; staging DDR stays model-owned.
+                rpu_launch_ddr_broadcast_spm_dma(
+                    proj_out_chunk.data_ptr<c10::Half>(), seq_len * h,
+                    addr(0, "input_norm"), 1);
+                rpu_launch_eltwise_unary_spm_kernel(
+                    addr(0, "input_norm"), addr(0, "input_norm"), seq_len * h,
+                    ValuOpType::ADD, GeluMode::ERF, 1);
+                rpu_launch_spm_copy_ddr_dma(
+                    addr(0, "input_norm"), slot.data_ptr<c10::Half>(), seq_len * h);
+                final_out_chunk = final_out_chunk.view({seq_len, 1024});
+                consume_manifest_route(
+                    FmbRouteFamily::LINEAR, SIGLIP_AUDIO_OUTPUT_LINEAR_SITE,
+                    static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE), chunk.idx);
+                rpu_launch_linear_ddr_kernel(
+                    slot, audio_proj2_w_, final_out_chunk, audio_proj2_b_, true, 1,
+                    &projector_out_live_base_, chunk.offset * 1024 * sizeof(c10::Half),
+                    nullptr, num_cores(), {}, true);
+            }
         }
     }
 
@@ -2925,7 +2976,8 @@ private:
             2,0,pi05_vision_fc_arguments(second),chunk.idx);
     }
     int64_t subclass_layout_hash() const override {
-        if (audio_mode_) return detail::layout_mix(0x415352, linear_acc32_ ? 32 : 16);
+        if (audio_mode_) return detail::layout_mix(
+            detail::layout_mix(0x415352, linear_acc32_ ? 32 : 16), audio_proj2_w_.defined());
         if (num_cores() != 8) {
             int64_t hash = 0;
             for (const auto value : core_profile_arguments()) hash = detail::layout_mix(hash, value);
@@ -3041,6 +3093,8 @@ private:
     // Global weights
     at::Tensor post_ln_w_, post_ln_b_;
     at::Tensor proj_w_, proj_b_;
+    at::Tensor audio_proj2_w_, audio_proj2_b_;
+    std::map<int64_t, std::pair<at::Tensor, uint64_t>> audio_proj1_slots_;
 
     // Intermediate DDR staging buffer (post-LN → DDR → projector). Shape-gated
     // reuse is SAFE here because this tensor is a class member that never
@@ -3200,6 +3254,12 @@ int64_t rpu_siglip_create(const std::optional<bool>& linear_acc32) {
 
 void rpu_siglip_set_audio_mode(int64_t handle) {
     SigLIPRegistry::get(handle, "rpu_siglip_set_audio_mode")->set_audio_mode();
+}
+
+void rpu_siglip_set_audio_projection(int64_t handle, const at::Tensor& weight,
+                                    const at::Tensor& bias) {
+    SigLIPRegistry::get(handle, "rpu_siglip_set_audio_projection")
+        ->set_audio_projection(weight, bias);
 }
 
 void rpu_siglip_destroy(int64_t handle) {

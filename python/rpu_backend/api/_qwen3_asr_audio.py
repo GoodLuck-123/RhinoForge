@@ -60,6 +60,9 @@ class ResidentAudioEncoder:
             transform_linear_weight(a.proj1.weight.detach(), 1, 8).to("rpu"),
             a.proj1.bias.detach().to("rpu"), 16, 64, 896, 3584, 896, 1e-5)
         torch.ops.rpu.siglip_set_audio_mode(self.handle)
+        torch.ops.rpu.siglip_set_audio_projection(self.handle,
+            transform_linear_weight(a.proj2.weight.detach(), 1, 8).to("rpu"),
+            a.proj2.bias.detach().to("rpu"))
         self.cache = RPUCache(18, 1, 128, 16, 64, dtype=torch.float16, attn_tp=8)
         self.graph = torch.rpu.GraphCache(max_entries=1)
         self.positions = a.positional_embedding.positional_embedding[:13].unsqueeze(0).expand(8, -1, -1).contiguous().to("rpu")
@@ -87,7 +90,7 @@ class ResidentAudioEncoder:
         finally:
             torch.ops.rpu.spm_alloc_reset_temporary()
         for name in self.counters:
-            if name.startswith("layers.") or name == "proj1":
+            if name.startswith("layers.") or name in ("proj1", "proj2"):
                 self.counters[name] += 1
         self.calls += 1
         return result
@@ -114,7 +117,6 @@ class ResidentAudioEncoder:
         tokens = sum((chunk.shape[0] + 7) // 8 for chunk in chunks)
         hidden = hidden.reshape(-1, 896)[:tokens]
         hidden = self.encode(hidden)
-        hidden = a.proj2(torch.ops.rpu.gelu_erf(hidden.contiguous()))
         return BaseModelOutputWithPooling(last_hidden_state=hidden)
 
     def close(self):

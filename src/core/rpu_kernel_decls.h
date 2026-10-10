@@ -4215,6 +4215,8 @@ at::Tensor rpu_siglip_fused_encoder_forward_legacy(
 
 int64_t rpu_siglip_create(const std::optional<bool>& linear_acc32);
 void rpu_siglip_set_audio_mode(int64_t handle);
+void rpu_siglip_set_audio_projection(int64_t handle, const at::Tensor& weight,
+                                    const at::Tensor& bias);
 void rpu_siglip_set_execution_core_count(int64_t handle, int64_t cores);
 std::vector<int64_t> rpu_siglip_get_execution_topology(int64_t handle);
 void rpu_siglip_destroy(int64_t handle);

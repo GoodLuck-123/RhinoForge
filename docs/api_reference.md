@@ -433,14 +433,15 @@ decode embedding lookup remains on CPU because its immediate RPU launch is slowe
 CPU convolution inputs and weights use channels-last storage. Decode fuses the
 vocabulary head into the shared causal-LM Graph; prefill projects only the last
 hidden position. CPU finite checks and greedy token selection remain explicit.
-Its 18 audio encoder blocks, final LayerNorm and first projection execute in
-one fused RPU Graph with FP32 linear accumulation. The fourteen 64-wide heads
+Its 18 audio encoder blocks, final LayerNorm, both output projections and the
+intervening ERF GELU execute in one fused RPU Graph with FP32 linear accumulation. The fourteen 64-wide heads
 are padded to sixteen without changing the 896-wide residual/LayerNorm math.
 The convolution stack and its activations/layout remain on CPU. From `conv_out`,
 position addition, valid-row selection and the encoder through the final ERF GELU
 and `proj2`, features remain on RPU. A CPU finite check reads the final features
 before RPU text/audio assembly. This path requires a rebuilt native extension
-exposing `siglip_set_audio_mode`, `gelu_erf` and `assemble_inputs_embeds`; older
+exposing `siglip_set_audio_mode`, `siglip_set_audio_projection` and
+`assemble_inputs_embeds`; older
 binaries fail preflight.
 TTS keeps CPU components in FP32
 and casts RPU boundaries to FP16. Its heads consume the current single-token
@@ -469,7 +470,7 @@ old length rebuilds it. `graph_replays` counts the currently cached entries,
 so it resets on a shape switch. The ASR encoder separately retains one Graph
 for the current audio-token length; `audio_graph_size`, `audio_graph_replays`
 and `audio_graph_invariant_ok` report that cache. `audio_linear_calls` counts
-logical projections, including the 109 projections within the fused encoder.
+logical projections, including the 110 projections within the fused encoder and its output tail.
 TTS Talker keeps the current prompt length's prefill Graph and one decode Graph.
 A prompt-length change evicts only the old prefill, retaining decode and the
 bounded prepared-plan cache. It reuses the Qwen3 28-layer/1024 prefill envelope,

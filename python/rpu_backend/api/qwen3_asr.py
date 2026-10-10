@@ -94,7 +94,7 @@ def _preflight(checkpoint: Path, dtype) -> dict:
     if any((checkpoint / name).exists() for name in ("tokenizer.json", "special_tokens_map.json", "added_tokens.json")):
         raise UnsupportedModelError("Qwen3-ASR frozen profile uses the original tokenizer files")
     if any(not hasattr(torch.ops.rpu, name) for name in (
-            "siglip_set_audio_mode", "gelu_erf", "assemble_inputs_embeds")):
+            "siglip_set_audio_mode", "siglip_set_audio_projection", "assemble_inputs_embeds")):
         raise UnsupportedModelError("Qwen3-ASR resident audio requires the rebuilt native backend")
     return json.loads((checkpoint / "config.json").read_text())["thinker_config"]
 
@@ -285,7 +285,7 @@ class Qwen3ASRModel:
             if not isinstance(module, torch.nn.Linear):
                 continue
             counters[name] = 0
-            if name.startswith("layers.") or name == "proj1":
+            if name.startswith("layers.") or name in ("proj1", "proj2"):
                 continue
             if module.in_features % 16 or module.out_features % 128:
                 raise UnsupportedModelError(f"unaligned ASR audio Linear: {name}")

@@ -332,6 +332,34 @@ def test_resident_audio_rejects_multiple_utterances_before_execution():
         encoder.forward(torch.zeros(128, 100, dtype=torch.float16), feature_lens=torch.tensor([50, 50]))
 
 
+def test_resident_graph_returns_final_projection_and_counts_both_projections(monkeypatch):
+    from contextlib import nullcontext
+    from rpu_backend.adapters import siglip
+    from rpu_backend.api._qwen3_asr_audio import ResidentAudioEncoder
+
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda value, *args, **kwargs:
+        value if args == ("rpu",) else original_to(value, *args, **kwargs))
+    cleared = []
+    encoder = ResidentAudioEncoder(None, {"layers.0.fc1": 0, "proj1": 0, "proj2": 0, "conv_out": 0})
+    encoder.handle = 1
+    encoder.graph = SimpleNamespace(clear=lambda: cleared.append(True), capture=lambda signature: nullcontext())
+    encoder.cache = SimpleNamespace(k_caches=[], v_caches=[])
+    plan = SimpleNamespace(selected=SimpleNamespace(stage_tuple=SimpleNamespace(physical_descriptor=[1])),
+                           graph_key_words=lambda: [1])
+    monkeypatch.setattr(siglip, "_siglip_component_execution_plan", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(torch.rpu, "GraphSignature", lambda **kwargs: kwargs, raising=False)
+    monkeypatch.setattr(torch.ops, "rpu", SimpleNamespace(
+        siglip_forward=lambda handle, inputs, *args: inputs[:, :, :1].expand(-1, -1, 1024).clone(),
+        spm_alloc_reset_temporary=lambda: None))
+    first = encoder.encode(torch.ones(7, 896, dtype=torch.float16))
+    second = encoder.encode(torch.full((7, 896), 2, dtype=torch.float16))
+    assert first.shape == second.shape == (7, 1024)
+    assert torch.all(first == 1) and torch.all(second == 2)
+    assert cleared == [True] and encoder.calls == 2
+    assert encoder.counters == {"layers.0.fc1": 2, "proj1": 2, "proj2": 2, "conv_out": 0}
+
+
 def test_device_embedding_assembly_and_decode(monkeypatch):
     monkeypatch.setattr(asr, "_AUDIO_TOKEN_ID", 4)
     original_to = torch.Tensor.to
@@ -381,7 +409,6 @@ def test_resident_frontend_keeps_only_the_valid_chunk_prefix(monkeypatch, frames
     monkeypatch.setattr(torch.Tensor, "to", lambda value, *args, **kwargs:
         value if args == ("rpu",) else original_to(value, *args, **kwargs))
     monkeypatch.setattr(torch.nn.functional, "gelu", lambda value: value)
-    monkeypatch.setattr(torch.ops, "rpu", SimpleNamespace(gelu_erf=lambda value: value))
     def convolution(value):
         batch, width = value.shape[0], (value.shape[-1] + 7) // 8
         return torch.arange(batch * width, dtype=torch.float16).reshape(batch, 1, 1, width).expand(-1, 896, 1, -1)
