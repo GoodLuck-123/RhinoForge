@@ -169,10 +169,14 @@ class Qwen3TTSModel:
             weight = transform_linear_weight(head.weight.detach().half(), 1, 8).to("rpu")
             self._head_weights.append(weight)
             self._restore.append((head, head.forward))
+            part = self._components["talker" if index == 0 else "predictor"]
 
-            def linear(owner, hidden, weight=weight, index=index):
+            def linear(owner, hidden, weight=weight, index=index, part=part):
+                device_hidden = _take_head_input(part, hidden)
+                if device_hidden is None:
+                    device_hidden = hidden.half().contiguous().to("rpu")
                 result = torch.ops.rpu.linear_with_accumulation(
-                    hidden.reshape(-1, 1024).half().contiguous().to("rpu"), weight, None, 1, 8, False).cpu().float()
+                    device_hidden.reshape(-1, 1024), weight, None, 1, 8, False).cpu().float()
                 if not torch.isfinite(result).all():
                     raise FloatingPointError("non-finite TTS RPU logits")
                 calls[index] += 1
@@ -181,6 +185,9 @@ class Qwen3TTSModel:
         predictor = talker.code_predictor
         self._restore_generate = (predictor, predictor.generate)
         predictor.generate = types.MethodType(_greedy_predictor_generate, predictor)
+        from rpu_backend.adapters.qwen3_tts.codec import install_codec_convolutions
+
+        install_codec_convolutions(self._wrapper.model.speech_tokenizer.model.decoder, self._restore)
 
     def synthesize(self, text, *, reference_audio, language="Chinese", max_new_tokens=64):
         """Return an independent float32 mono waveform and sample rate (24 kHz).
@@ -298,6 +305,12 @@ class Qwen3TTSModel:
             pass
 
 
+def _take_head_input(part, hidden):
+    previous = part.pop("head_hidden", None)
+    device_hidden = part.pop("head_device", None)
+    return device_hidden if hidden is previous and hidden.shape[1] == 1 else None
+
+
 def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_position, output_hidden_states):
     from transformers.modeling_outputs import BaseModelOutputWithPast
     from .cache import RPUCache
@@ -330,6 +343,8 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
             raise ValueError("TTS positions must match the contiguous cache range")
     if cache_position is not None and not torch.equal(cache_position.cpu().reshape(-1), expected):
         raise ValueError("TTS cache_position differs from the contiguous cache range")
+    part.pop("head_hidden", None)
+    part.pop("head_device", None)
     chunks = []
     # shortcut: short prompts use the proved decode plan one token at a time; profile longer prompts separately.
     for index in range(count):
@@ -350,6 +365,9 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
     part["calls"] += 1
     part["tokens"] += count
     result = torch.cat(chunks, dim=1)
+    if count == 1:
+        # The head immediately consumes this exact result before another decoder replay.
+        part["head_hidden"], part["head_device"] = result, raw
     # The upstream speech wrapper consumes only the final normalized hidden state.
     return BaseModelOutputWithPast(last_hidden_state=result, past_key_values=cache,
         hidden_states=(result,) if output_hidden_states else None)

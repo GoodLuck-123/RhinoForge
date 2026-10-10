@@ -94,8 +94,13 @@ and TTS reviewed-source hashes before loading; do not install the upstream
 package over the pinned Transformers runtime. Normal CPU construction plus
 strict safetensors loading preserves TTS weights and nonpersistent RoPE buffers.
 Speech is a dedicated API, not a generic CausalLM/VLM registry alias. ASR prompt
-length changes clear the old Graph pair before eager audio Linear execution,
-leaving launch arena capacity; same-length requests replay the pair. TTS owns
+length changes clear the old Graph pair before audio execution,
+leaving launch arena capacity; same-length requests replay the pair. ASR audio
+blocks reuse the SigLIP fused host path with an exact ASR mode: fourteen heads
+padded to sixteen, 896-wide residuals, ERF GELU, original FP16 clamp and head
+scale. Its separate single-entry Graph is keyed by audio length and physical
+plan. Keep convolution and the final activation boundary explicit; rebuild the
+native extension before using the resident-audio API. TTS owns
 two decoder handles under one process owner. Retire both Graphs before handles
 and weights. Test retained outputs and close/reload across component handoffs.
 Speech loaders select the common caching allocator before device allocation.
@@ -112,3 +117,8 @@ before releasing that head. TTS Predictor's fixed 15-step greedy loop resets KV
 per frame; Talker still owns stopping and repetition penalties. Compare full
 tokens/waveforms when changing either route. CPU codec thread tuning belongs to
 the caller/CLI, not a hidden process-wide change inside the API.
+TTS output-head reuse is bound to the exact current CPU hidden object and is
+consumed once; never reuse a stale RPU decoder output after another replay.
+Codec optimization replaces only the admitted FP32 transposed convolutions
+with matrix multiplication and overlap-add; ordinary convolutions keep their
+original path. Keep generation lengths and content checks alongside timings.

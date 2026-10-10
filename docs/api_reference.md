@@ -429,15 +429,29 @@ RPU model/policy per process. Loading validates frozen assets before weight
 transformation. ASR uses FP16 weights and boundaries, with CPU convolutions
 computed in FP32 from those rounded weights; its vocabulary head runs on RPU
 with FP32 accumulation while the tied input embedding remains on CPU.
+Its 18 audio encoder blocks, final LayerNorm and first projection execute in
+one fused RPU Graph with FP32 linear accumulation. The fourteen 64-wide heads
+are padded to sixteen without changing the 896-wide residual/LayerNorm math.
+Convolution, frontend activation/layout/positions and the activation between
+the final two projections remain on CPU. This path requires a rebuilt native
+extension exposing `siglip_set_audio_mode`; older binaries fail preflight.
 TTS keeps CPU components in FP32
-and casts RPU boundaries to FP16. Unsupported precisions fail before loading.
+and casts RPU boundaries to FP16. Its heads consume the current single-token
+RPU decoder output directly when available; host hidden states remain available
+to generation. Codec transposed convolutions use equivalent CPU FP32 matrix
+multiplication and overlap-add, preserving the original output length.
+Unsupported precisions fail before loading.
 Both loaders select the common caching allocator before RPU materialization;
 a process already frozen to the direct allocator must be restarted.
 
 ASR retains at most the current prompt length's prefill/decode Graph pair.
 Changing that length clears the pair before audio execution; returning to an
 old length rebuilds it. `graph_replays` counts the currently cached entries,
-so it resets on a shape switch. TTS keeps one fixed decode Graph per component,
+so it resets on a shape switch. The ASR encoder separately retains one Graph
+for the current audio-token length; `audio_graph_size`, `audio_graph_replays`
+and `audio_graph_invariant_ok` report that cache. `audio_linear_calls` counts
+logical projections, including the 109 projections within the fused encoder.
+TTS keeps one fixed decode Graph per component,
 processing short prefills token by token. Output storage is independent of replay.
 Both APIs retain private KV storage and reset its logical position for each new
 sequence. TTS retains only the latest speaker embedding, keyed by decoded audio

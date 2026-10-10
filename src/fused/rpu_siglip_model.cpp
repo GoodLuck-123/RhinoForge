@@ -410,6 +410,27 @@ private:
     }
 public:
 
+    void set_audio_mode() {
+        TORCH_CHECK(num_cores() == 8 && num_layers() == 18 && hidden_size() == 896 &&
+                        num_q_heads() == 16 && head_dim() == 64 &&
+                        intermediate_size() == 3584 && projection_dim_ == 896 && eps_ == 1e-5 &&
+                        !has_patch_emb_,
+                    "audio mode requires the frozen Qwen3-ASR-0.6B encoder geometry");
+        for (const auto& layer : layer_weights_) {
+            TORCH_CHECK(layer.q_w.scalar_type() == at::kHalf &&
+                            layer.k_w.scalar_type() == at::kHalf &&
+                            layer.v_w.scalar_type() == at::kHalf &&
+                            layer.o_w.scalar_type() == at::kHalf &&
+                            layer.fc1_w.scalar_type() == at::kHalf &&
+                            layer.fc2_w.scalar_type() == at::kHalf,
+                        "audio mode requires FP16 weights");
+        }
+        audio_mode_ = true;
+        // Two zero heads pad the original fourteen; the head dimension stays 64.
+        orig_head_dim_ = 64;
+        invalidate_model_state();
+    }
+
     void set_execution_cores(int64_t cores) {
         TORCH_CHECK(cores == 4 || cores == 8,
                     "SigLIP execution cores must be 4 or 8");
@@ -534,6 +555,7 @@ public:
         at::TensorList v_ws_list, at::TensorList o_ws_list,
         at::TensorList fc1_ws_list, at::TensorList fc2_ws_list)
     {
+        TORCH_CHECK(!audio_mode_, "audio weights are immutable after profile installation");
         int64_t N = static_cast<int64_t>(q_w_list.size());
         TORCH_CHECK(N > 0, "siglip_set_weights: empty weight lists");
         TORCH_CHECK(num_heads > 0 && head_dim > 0 && hidden_size > 0
@@ -2100,7 +2122,8 @@ protected:
         }
         rpu_launch_eltwise_unary_spm_kernel(
             addr(0, "fc1"), addr(0, "fc1"),
-            seq_len * local_inter, ValuOpType::ADD, GeluMode::TANH, num_cores());
+            seq_len * local_inter, ValuOpType::ADD,
+            audio_mode_ ? GeluMode::ERF : GeluMode::TANH, num_cores());
 
         // Phase 6: fc2 (row-partition, with bias) + AllReduce + Residual
         // Round 9: final output goes to "residual1" instead of "oproj" so the
@@ -2141,6 +2164,12 @@ protected:
         // ----------------------------------------------------------------
         // SPM→DDR output DMA or post-LN+projector (last layer)
         // ----------------------------------------------------------------
+        if (audio_mode_) {
+            rpu_launch_eltwise_unary_spm_kernel(
+                addr(0, "residual1"), addr(0, "residual1"), seq_len * h,
+                ValuOpType::CLIP, GeluMode::NONE, num_cores(),
+                RpuUnaryPrecision::BASE, -64504.0, 64504.0);
+        }
         if (layer_idx < static_cast<int>(num_layers()) - 1) {
             // Standard layer: write this chunk's Phase-6 output ("residual1")
             // to the inter-layer chain. In single-chunk AUTO→SPM_RESIDENT mode
@@ -2896,6 +2925,7 @@ private:
             2,0,pi05_vision_fc_arguments(second),chunk.idx);
     }
     int64_t subclass_layout_hash() const override {
+        if (audio_mode_) return detail::layout_mix(0x415352, linear_acc32_ ? 32 : 16);
         if (num_cores() != 8) {
             int64_t hash = 0;
             for (const auto value : core_profile_arguments()) hash = detail::layout_mix(hash, value);
@@ -3061,6 +3091,7 @@ private:
     double eps_ = 1e-6;
     int64_t projection_dim_ = 0;
     int64_t orig_head_dim_ = 0;  // SigLIP head_dim=72, padded to 80
+    bool audio_mode_ = false;
 
     // Site5 (KV_FIRST state) — mirror GemmaModel. Stages Q across the two phases
     // (Phase 1 scatters Q→DDR, Phase 2 gathers DDR→SPM "q_comp"). local_q_heads_ =
@@ -3165,6 +3196,10 @@ std::vector<int64_t> rpu_siglip_get_execution_topology(int64_t handle) {
 
 int64_t rpu_siglip_create(const std::optional<bool>& linear_acc32) {
     return SigLIPRegistry::create(linear_acc32);
+}
+
+void rpu_siglip_set_audio_mode(int64_t handle) {
+    SigLIPRegistry::get(handle, "rpu_siglip_set_audio_mode")->set_audio_mode();
 }
 
 void rpu_siglip_destroy(int64_t handle) {

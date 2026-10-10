@@ -1,6 +1,6 @@
 # Qwen3 ASR / TTS：R1 混合推理评估与迁移
 
-本次先用仓库 `rhinoforge-port` 完成真实权重运行评估及独立复核，两个模型均归类为 `Adapter-only`，随后才从 `c5712839cecf11cef942876765ed35f1e5b9e261` 创建 `feat/qwen3-audio-rpu` 分支实施。沿用现有 RPU 算子、decoder 和 Graph，没有新增 C++ 或设备程序。
+首轮先用仓库 `rhinoforge-port` 完成真实权重运行评估及独立复核，两个模型均归类为 `Adapter-only`，随后才从 `c5712839cecf11cef942876765ed35f1e5b9e261` 创建 `feat/qwen3-audio-rpu` 分支实施。首轮沿用现有 RPU 算子、decoder 和 Graph。后续 [ASR 连续驻留优化](qwen3_asr_resident_r1.zh.md) 增加了小范围 C++ host 扩展，需要重编译 native；没有新增设备程序。
 
 这是有限输入范围内的运行验证，不是通用语音质量认证。ASR 是语音识别；TTS Base 是借助参考音频生成短句，必须提供参考音频。
 
@@ -16,7 +16,7 @@
 | 正式依赖 | Python 3.12.13、PyTorch 2.10.0+cpu、Transformers 5.3.0；音频依赖见 `pyproject.toml` 的 `audio` extra |
 | Launch | 1.0.0，commit `613f2da`；SDK `EA_R1SDK_2025_51T-cf33df86`，API `2026-06-17` |
 | Operator assets | `RhinoForge-runtime-v1.1.0/rhinoOpLib_rhinoforge_v1.1.0.ref` 及配套 `.kernels` |
-| Native 构建 | 上述 base commit，wheel SHA256 `9a72cdb8228d7372332d4b301d47e8e72a5c442a55ac567d4250b95b3cd0e782`；本分支增加 Python 适配 |
+| Native 构建 | 首轮为上述 base commit，wheel SHA256 `9a72cdb8228d7372332d4b301d47e8e72a5c442a55ac567d4250b95b3cd0e782`；连续驻留版本的 native 身份见后续 ASR 报告 |
 
 checkpoint 配置、分词器和原始权重 SHA256 均由加载器固定校验。ASR 身份清单在 [`qwen3_asr.py`](../python/rpu_backend/api/qwen3_asr.py)，TTS 在 [`_manifest.py`](../python/rpu_backend/adapters/qwen3_tts/_manifest.py)。不接受改名模型、其他精度、其他大小或分词器覆盖文件。校验在完整权重加载及转换前执行；转换失败需关闭后重新加载干净模型。
 
@@ -26,7 +26,7 @@ checkpoint 配置、分词器和原始权重 SHA256 均由加载器固定校验�
 
 | | RPU | CPU | 当前输入限制 |
 |---|---|---|---|
-| ASR | FP16，28 层文本 decoder、输出头；音频 encoder 的 111 个 Linear | 卷积用 FP16 权重提升至 FP32 计算，输出回 FP16；音频 attention/norm/激活、embedding 为 FP16；音频预处理 | batch 1，单声道 16 kHz，0.5–8 秒，最多生成 64 token |
+| ASR | FP16，28 层文本 decoder、输出头；音频 18 层 attention/norm/ERF GELU/残差及 111 个 Linear，其中 109 个 Linear 与编码器连续执行 | 卷积用 FP16 权重提升至 FP32 计算，输出回 FP16；卷积后激活、布局/位置处理、最终两投影间激活、embedding、音频预处理 | batch 1，单声道 16 kHz，0.5–8 秒，最多生成 64 token |
 | TTS | FP16，28 层 Talker、5 层 Code Predictor、16 个输出头 | FP32 embedding/text projection、speaker encoder、音频 codec、组合和采样 | batch 1，中/英文，非流式、greedy、仅 speaker embedding 克隆；文本 ≤128 字符且 ≤32 tokenizer token；参考音频单声道 24 kHz、0.5–20 秒；生成 2–64 token |
 
 ASR 初始适配（输出头尚在 CPU）的官方中文样本按 Linear/Conv2d 实际调用统计，RPU 占 **66.59%** MAC；该统计不含 QK/AV、norm、激活或数据搬运，不是性能占比。TTS 的自回归生成主体全部在 RPU；CPU codec 仍有较大计算量，不能将此描述为整个冷请求的大多数 MAC 均在 RPU。
@@ -35,7 +35,7 @@ ASR 不提供 context、时间戳或流式识别。TTS 不提供 ICL transcript 
 
 一个进程只允许一个存活的 RPU 模型/策略，ASR/TTS 共用该所有权规则。请求、状态查询和关闭必须串行。`with` 或 `close()` 先释放 Graph，再释放模型；返回结果不引用可被下一次 REPLAY 改写的存储。若底层资源清理失败，保留其依赖并阻止当前进程继续加载新模型，需重启进程。
 
-## 运行证据与已解决问题
+## 首轮运行证据与已解决问题
 
 主机检查共 65 项通过：ASR 34、TTS 24、TTS 源码准备/准入 7；包含无板卡输入拒绝、生命周期故障注入和输出独立存储。
 
@@ -53,7 +53,7 @@ ASR 不提供 context、时间戳或流式识别。TTS 不提供 ICL transcript 
 
 后续按 2 次预热、5 次固定输入测量及中英文多输入协议完成了[速度与识别质量评测](qwen3_audio_benchmark_r1.zh.md)。该报告包含 RTF、加载/推理耗时、ASR CER/WER、CPU 对照及 TTS 内容一致性，替代上文零散耗时观察作为本次性能结论。
 
-最新性能与计算位置见 [Thor 对比及分阶段优化](qwen3_audio_thor_stages.zh.md)：ASR 输出头已迁至 RPU，TTS 使用固定 Predictor 生成循环，并提供 CPU 线程配置。
+最新性能与计算位置见 [ASR 连续驻留](qwen3_asr_resident_r1.zh.md)及 [TTS 输出头与 codec 优化](qwen3_tts_chain_optimization_r1.zh.md)。此前 [Thor 对比及分阶段优化](qwen3_audio_thor_stages.zh.md)记录 ASR 输出头迁至 RPU、TTS 固定 Predictor 生成循环和 CPU 线程配置。
 
 首轮优化参考 RhinoVLA 复用分配器和 KV 存储，减少无用计算；ASR 卷积精度边界按上表更新。该轮速度与原样本质量对比见[推理优化报告](qwen3_audio_optimization_r1.zh.md)，前述迁移记录和首次性能报告保留为历史基线。两模型加载前需要尚未固定为 direct allocator 的新进程。
 

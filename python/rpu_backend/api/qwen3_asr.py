@@ -1,4 +1,4 @@
-"""Frozen Qwen3-ASR-0.6B: RPU audio Linear and text decoder, explicit CPU glue.
+"""Frozen Qwen3-ASR-0.6B: resident RPU audio blocks and text decoder, CPU glue.
 
 Audio length and placeholder semantics follow QwenLM/Qwen3-ASR commit
 7c6daf77a2421100f5fb066495372c00129d39ff (Apache-2.0).
@@ -93,6 +93,8 @@ def _preflight(checkpoint: Path, dtype) -> dict:
         raise UnsupportedModelError("Qwen3-ASR requires its original model.safetensors")
     if any((checkpoint / name).exists() for name in ("tokenizer.json", "special_tokens_map.json", "added_tokens.json")):
         raise UnsupportedModelError("Qwen3-ASR frozen profile uses the original tokenizer files")
+    if not hasattr(torch.ops.rpu, "siglip_set_audio_mode"):
+        raise UnsupportedModelError("Qwen3-ASR resident audio requires the rebuilt native backend")
     return json.loads((checkpoint / "config.json").read_text())["thinker_config"]
 
 
@@ -206,6 +208,7 @@ class Qwen3ASRModel:
         self._audio = self._text = self._embedding_weight = None
         self._head_weight = None
         self._audio_linear_calls = {}
+        self._audio_encoder = None
         self._decoder_calls = 0
         self._restore_forwards = []
         self._graph_prompt_length = None
@@ -268,6 +271,9 @@ class Qwen3ASRModel:
                 continue
             if not isinstance(module, torch.nn.Linear):
                 continue
+            counters[name] = 0
+            if name.startswith("layers.") or name == "proj1":
+                continue
             if module.in_features % 16 or module.out_features % 128:
                 raise UnsupportedModelError(f"unaligned ASR audio Linear: {name}")
             weight = transform_linear_weight(module.weight.detach().contiguous(), 1, 8).to("rpu")
@@ -285,6 +291,12 @@ class Qwen3ASRModel:
             module.forward = types.MethodType(forward, module)
         if len(counters) != 111:
             raise UnsupportedModelError("ASR audio projection count differs")
+        from ._qwen3_asr_audio import ResidentAudioEncoder
+
+        self._audio_encoder = ResidentAudioEncoder(self._audio, counters)
+        self._audio_encoder.install()
+        self._restore_forwards.append((self._audio, self._audio.forward))
+        self._audio.forward = self._audio_encoder.forward
 
     def transcribe(self, audio, *, sample_rate=16000, max_new_tokens=64) -> ASRTranscription:
         """Transcribe one waveform; accepts CPU float Tensor or numpy samples."""
@@ -357,7 +369,12 @@ class Qwen3ASRModel:
             if self._closed:
                 raise RuntimeError("Qwen3-ASR model is closed")
             graph = self._text._rpu_decoder_graph_cache
+            audio_graph = self._audio_encoder.graph
             return {"audio_linear_calls": dict(self._audio_linear_calls), "decoder_calls": self._decoder_calls,
+                    "audio_resident_calls": self._audio_encoder.calls,
+                    "audio_graph_size": audio_graph.size(),
+                    "audio_graph_replays": sum(e.replay_count for e in audio_graph.snapshot()),
+                    "audio_graph_invariant_ok": audio_graph.cache_invariant_ok(),
                     "graph_size": graph.size(), "graph_replays": sum(e.replay_count for e in graph.snapshot()),
                     "graph_invariant_ok": graph.cache_invariant_ok()}
         finally:
@@ -375,6 +392,9 @@ class Qwen3ASRModel:
             resource = getattr(self._text, "_rpu_decoder_retirement_state", None)
             if resource is not None:
                 resource.retire()
+            if self._audio_encoder is not None:
+                self._audio_encoder.close()
+                self._audio_encoder = None
             for module, forward in reversed(self._restore_forwards):
                 module.forward = forward
             self._restore_forwards.clear()

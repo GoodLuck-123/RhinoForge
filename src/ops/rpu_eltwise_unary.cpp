@@ -5,6 +5,7 @@
 #include "rpu_ops.h"
 #include "rpu_spm_allocator.h"
 #include <algorithm>
+#include <cmath>
 #include <c10/util/Half.h>
 #include <stdlib.h> // for uint16_t, setenv, unsetenv
 #include <string.h> // for memcpy
@@ -167,11 +168,18 @@ void rpu_launch_eltwise_unary_spm_kernel(
     ValuOpType op_type,
     GeluMode gelu_mode,
     int num_cores,                     // number of cores
-    RpuUnaryPrecision precision)
+    RpuUnaryPrecision precision, double clip_lower, double clip_upper)
 {
   TORCH_CHECK(num_cores >= 1 && num_cores <= 8,
               "Unary SPM num_cores must be in [1,8]");
   TORCH_CHECK(num_elements > 0, "Unary SPM element count must be positive");
+  TORCH_CHECK(std::isfinite(clip_lower) && std::isfinite(clip_upper) &&
+                  clip_lower <= clip_upper && clip_lower >= -65504 && clip_upper <= 65504,
+              "Unary SPM clip bounds must be ordered finite FP16 values");
+  TORCH_CHECK((clip_lower == 0.0 && clip_upper == 0.0) ||
+                  (op_type == ValuOpType::CLIP && gelu_mode == GeluMode::NONE &&
+                   precision == RpuUnaryPrecision::BASE),
+              "Unary SPM clip bounds require the CLIP route");
   TORCH_CHECK(precision == RpuUnaryPrecision::BASE ||
                   precision == RpuUnaryPrecision::HIGH,
               "Unknown unary precision ", static_cast<int>(precision));
@@ -231,8 +239,8 @@ void rpu_launch_eltwise_unary_spm_kernel(
   c10::Half scale_a = 1.0;
   c10::Half scale_b = 1.0;
   c10::Half scale_r = 1.0;
-  c10::Half clip_min = 0.0;
-  c10::Half clip_max = 0.0;
+  c10::Half clip_min = static_cast<c10::Half>(clip_lower);
+  c10::Half clip_max = static_cast<c10::Half>(clip_upper);
 
   if (op_type == ValuOpType::HARDSIGMOID) {
     scale_a = 0.16666666666666666;

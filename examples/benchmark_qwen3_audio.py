@@ -123,12 +123,15 @@ def main():
             item = dict(id=row["id"], language=row["language"], reference=row["text"], phase=phase, seconds=elapsed)
             if args.task == "asr":
                 assert stats["graph_invariant_ok"] and stats["graph_size"] <= 2
+                assert stats["audio_graph_invariant_ok"] and stats["audio_graph_size"] == 1
                 assert all(stats["audio_linear_calls"][k] > before["audio_linear_calls"][k] for k in stats["audio_linear_calls"])
                 item.update(hypothesis=result.text, token_ids=result.token_ids,
                             score=errors(row["text"], result.text, row["language"]),
                             audio_seconds=len(inputs[row["id"]]) / 16000,
                             cap_reached=len(result.token_ids) == 64 and result.token_ids[-1] not in (151643,151645),
-                            graph_size=stats["graph_size"], graph_replays=stats["graph_replays"])
+                            graph_size=stats["graph_size"], graph_replays=stats["graph_replays"],
+                            audio_graph_size=stats["audio_graph_size"],
+                            audio_graph_replays=stats["audio_graph_replays"])
                 if phase in ("warmup", "steady"):
                     if held is None: held = result
                     assert result == held
@@ -156,6 +159,7 @@ def main():
         if args.task == "asr":
             assert len({r["graph_size"] for r in steady}) == 1
             assert all(a["graph_replays"] < b["graph_replays"] for a,b in zip(steady,steady[1:]))
+            assert all(a["audio_graph_replays"] < b["audio_graph_replays"] for a,b in zip(steady,steady[1:]))
         else:
             for name in ("talker", "predictor"):
                 assert all(a["execution"]["components"][name]["graph_replays"] < b["execution"]["components"][name]["graph_replays"] for a,b in zip(steady,steady[1:]))

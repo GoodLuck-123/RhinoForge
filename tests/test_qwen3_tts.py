@@ -330,3 +330,50 @@ def test_predictor_reuses_kv_with_fresh_positions_inputs_and_owned_outputs(monke
     second = tts._decoder_forward(part, torch.zeros(1, 1, 1024), None, None, None, None, False)
     assert len(allocations) == 1 and positions == [0, 1, 0]
     assert first.last_hidden_state.eq(1).all() and second.last_hidden_state.eq(0).all()
+
+
+def test_head_reuses_only_current_single_token_device_output():
+    hidden = torch.zeros(1, 1, 1024)
+    device = object()
+    part = {"head_hidden": hidden, "head_device": device}
+    assert tts._take_head_input(part, hidden.clone()) is None
+    assert part == {}
+    part.update(head_hidden=hidden, head_device=device)
+    assert tts._take_head_input(part, hidden) is device
+    assert tts._take_head_input(part, hidden) is None
+    prompt = torch.zeros(1, 2, 1024)
+    part.update(head_hidden=prompt, head_device=device)
+    assert tts._take_head_input(part, prompt) is None
+    assert part == {}
+
+
+@pytest.mark.parametrize("kernel,stride", [(2, 2), (16, 8)])
+def test_codec_convolution_paths_match_fp32(kernel, stride):
+    from rpu_backend.adapters.qwen3_tts.codec import install_codec_convolutions
+
+    torch.manual_seed(12)
+    module = torch.nn.ConvTranspose1d(8, 8, kernel, stride=stride).eval()
+    inputs = [torch.randn(1, 8, n) for n in (70, 91)]
+    with torch.inference_mode():
+        expected = [module(x) for x in inputs]
+        restore = []
+        original = module.forward
+        install_codec_convolutions(module, restore)
+        for x, reference in zip(inputs, expected):
+            result = module(x)
+            assert result.dtype == torch.float32 and torch.isfinite(result).all()
+            torch.testing.assert_close(result, reference, rtol=1e-5, atol=2e-6)
+        assert restore == [(module, original)]
+        module.forward = restore[0][1]
+        assert torch.equal(module(inputs[0]), expected[0])
+
+
+def test_codec_geometry_rejected_before_any_patch():
+    from rpu_backend.adapters.qwen3_tts.codec import install_codec_convolutions
+
+    modules = torch.nn.Sequential(torch.nn.ConvTranspose1d(4, 4, 2, stride=2), torch.nn.ConvTranspose1d(4, 4, 3, padding=1))
+    originals = [m.forward for m in modules]
+    restore = []
+    with pytest.raises(ValueError, match="geometry"):
+        install_codec_convolutions(modules, restore)
+    assert restore == [] and [m.forward for m in modules] == originals

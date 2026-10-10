@@ -33,6 +33,15 @@ def test_tokenizer_overrides_rejected_before_loading(tmp_path, monkeypatch, extr
         asr._preflight(tmp_path, torch.float16)
 
 
+def test_old_native_rejected_before_loading(tmp_path, monkeypatch):
+    monkeypatch.setattr(asr, "_IDENTITIES", {})
+    monkeypatch.setattr(asr, "_WEIGHT_SIZE", 0)
+    monkeypatch.setattr(torch.ops, "rpu", SimpleNamespace())
+    (tmp_path / "model.safetensors").touch()
+    with pytest.raises(UnsupportedModelError, match="rebuilt native backend"):
+        asr._preflight(tmp_path, torch.float16)
+
+
 @pytest.mark.parametrize("audio,rate,tokens", [
     (np.zeros(7999, dtype=np.float32), 16000, 64),
     (np.zeros(128001, dtype=np.float32), 16000, 64),
@@ -239,3 +248,49 @@ def test_request_reuses_kv_storage_and_resets_position_after_failure(monkeypatch
         with pytest.raises(RuntimeError, match="interrupted request"):
             model._generate(inputs, 64)
     assert len(allocations) == 1
+
+
+def test_attention_head_padding_preserves_real_heads_and_projection():
+    from rpu_backend.api._qwen3_asr_audio import _pad_attention
+
+    torch.manual_seed(1)
+    hidden = torch.randn(3, 896)
+    qkv = []
+    padded_qkv = []
+    for _ in range(3):
+        weight, bias = torch.randn(896, 896) * 0.02, torch.randn(896) * 0.02
+        padded_weight, padded_bias = _pad_attention(weight, bias)
+        qkv.append(torch.nn.functional.linear(hidden, weight, bias).view(3, 14, 64).transpose(0, 1))
+        padded_qkv.append(torch.nn.functional.linear(hidden, padded_weight, padded_bias).view(3, 16, 64).transpose(0, 1))
+        assert torch.count_nonzero(padded_weight[896:]) == 0
+        assert torch.count_nonzero(padded_bias[896:]) == 0
+    weight, bias = torch.randn(896, 896) * 0.02, torch.randn(896) * 0.02
+    padded_weight, padded_bias = _pad_attention(weight, bias, output=True)
+    reference = torch.nn.functional.scaled_dot_product_attention(*qkv).transpose(0, 1).reshape(3, 896)
+    padded = torch.nn.functional.scaled_dot_product_attention(*padded_qkv).transpose(0, 1).reshape(3, 1024)
+    torch.testing.assert_close(torch.nn.functional.linear(padded, padded_weight, padded_bias),
+                               torch.nn.functional.linear(reference, weight, bias))
+
+
+def test_audio_retirement_failure_preserves_owner(monkeypatch):
+    from rpu_backend.api import causal_lm
+
+    released = []
+    monkeypatch.setattr(causal_lm, "_release_live_instance", lambda owner: released.append(owner))
+    model = Qwen3ASRModel()
+    model._closed = False
+    def fail():
+        raise RuntimeError("audio retirement failed")
+    model._audio_encoder = SimpleNamespace(close=fail)
+    with pytest.raises(RuntimeError, match="audio retirement"):
+        model.close()
+    assert not released and not model._closed and model._audio_encoder is not None
+    model._closed = True
+
+
+def test_resident_audio_rejects_multiple_utterances_before_execution():
+    from rpu_backend.api._qwen3_asr_audio import ResidentAudioEncoder
+
+    encoder = ResidentAudioEncoder(None, {})
+    with pytest.raises(ValueError, match="one CPU FP16 mel"):
+        encoder.forward(torch.zeros(128, 100, dtype=torch.float16), feature_lens=torch.tensor([50, 50]))
