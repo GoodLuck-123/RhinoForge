@@ -107,12 +107,15 @@ profile hash and physical route manifest include that tail. Model-owned DDR
 staging stays stable, and the final output uses a refreshed mutable DMA base
 every call. Do not put the eager-only GELU/Linear wrappers directly in capture.
 TTS owns
-the Talker/Predictor decoder handles and, when the native per-head K RoPE capability
-is present, a third codec-frontend handle under one process owner. Retire all
+the Talker/Predictor decoder handles and, when the native
+`causal_decoder_set_tts_codec_mode` setter is present, a third codec-frontend handle
+under one process owner. Enable that mode only on the installed codec handle;
+its default-off state preserves other models' K RoPE parameters and layout hash.
+Retire all
 Graphs before their handles and weights. Preserve original CPU FP32 codec weights
 and fold LayerScale only into the new FP16 frontend copies; keep the original
 FP32 rotary frequencies. The frontend is limited to 1–63 frames, below its
-72-frame sliding window. Missing native capability selects CPU; arbitrary
+72-frame sliding window. Missing native setter selects CPU; arbitrary
 execution failures must remain visible. TTS declares five arenas before the first
 device allocation (four retained Graphs plus one immediate-launch slot), using
 the existing owner runtime policy. An incompatible frozen process plan requires
@@ -123,8 +126,7 @@ the causal path overwrites live rows before reading them. TTS speaker reuse is
 bounded to the latest decoded audio content, never just a file path or mtime.
 Its x-vector-only profile does not consume reference codec tokens. ASR CPU
 convolutions accumulate FP16-rounded weights in FP32 and round outputs back to
-FP16; preserve this boundary in reference comparisons. See the
-[speech optimization evidence](../docs/qwen3_audio_optimization_r1.zh.md).
+FP16; preserve this boundary in reference comparisons.
 ASR uses channels-last CPU convolution storage without changing FP16 boundaries.
 Its causal-LM wrapper reuses the shared fused decode head and projects only the
 last prefill hidden position, retaining CPU single-token embedding lookup because

@@ -46,8 +46,8 @@ def install_codec_transformer(owner, core):
     from rpu_backend.runtime.weights import transform_linear_weight
 
     _validate_core(core)
-    capability = getattr(torch.ops.rpu, "causal_decoder_has_per_head_k_rope", None)
-    if capability is None or not capability():
+    set_codec_mode = getattr(torch.ops.rpu, "causal_decoder_set_tts_codec_mode", None)
+    if set_codec_mode is None:
         return False
     graph = GraphCache(runtime_policy=getattr(owner, "_graph_runtime_policy", None))
     handle = torch.ops.rpu.causal_decoder_create()
@@ -80,6 +80,7 @@ def install_codec_transformer(owner, core):
     part["storage"] = (groups, cos, sin, norm)
     torch.ops.rpu.causal_decoder_set_weights(handle, *groups, cos, sin, norm,
                                             16, 16, 64, 512, 1024, 1e-5, True)
+    set_codec_mode(handle)
     torch.ops.rpu.causal_decoder_set_linear_acc32(handle, True)
     # This codec's own bounded profile; it is not a Qwen3/Llama registry alias.
     torch.ops.rpu.causal_decoder_set_chunk_envelope(handle, 64, 64)

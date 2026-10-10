@@ -58,4 +58,4 @@ source preparation, commands, CPU boundaries and limits.
 
 `benchmark_qwen3_audio.py` measures complete speech requests from a local JSON
 manifest, using two warmups and five fixed-input repeats followed by up to
-20 distinct inputs. See the [speech measurement protocol](../docs/qwen3_audio_benchmark_r1.zh.md).
+20 distinct inputs. See the [speech measurement protocol](../docs/qwen3_audio_r1.zh.md).

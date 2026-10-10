@@ -449,13 +449,16 @@ RPU decoder output directly when available; host hidden states remain available
 to generation. Codec transposed convolutions use equivalent CPU FP32 matrix
 multiplication and bounded adjacent-block overlap-add; admitted 1x1 convolutions
 use matrix multiplication. Both preserve the original output length.
-With the native per-head K RoPE capability, the codec frontend (input/output
+With the native `causal_decoder_set_tts_codec_mode` interface, the codec frontend (input/output
 projections and eight Transformer layers) runs on RPU FP16 with FP32 linear
 accumulation. Its LayerScale is folded in FP32 before rounding, while RoPE phases
 retain the original FP32 frequency buffer. This explicitly changes frontend
 precision; the codebook, convolutions and waveform output stay CPU FP32. The
 frontend accepts 1–63 frames, below the original 72-frame sliding window. Native
-binaries without that capability keep this frontend on CPU. Other execution
+binaries without that setter keep this frontend on CPU. The codec explicitly enables
+its per-head K RoPE on its own handle after weight installation; the native mode
+defaults to off and preserves other decoders' existing RoPE parameters and layout hash.
+Other execution
 errors remain visible; they are not silently retried on CPU.
 Unsupported precisions fail before loading.
 Both loaders select the common caching allocator before RPU materialization;

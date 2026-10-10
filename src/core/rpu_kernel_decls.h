@@ -1920,6 +1920,7 @@ int64_t rpu_causal_decoder_create(
 
 // Destroy a CausalDecoderModel instance. Called when Python model is torn down.
 void rpu_causal_decoder_destroy(int64_t handle);
+void rpu_causal_decoder_set_tts_codec_mode(int64_t handle);
 std::vector<int64_t> rpu_causal_decoder_topology(int64_t handle);
 
 // Set model weights on the given instance (marks C++ preload/allocation state dirty;

@@ -353,8 +353,11 @@ def test_head_reuses_only_current_single_token_device_output():
 
 def test_talker_prefill_padding_positions_shape_switch_and_owned_outputs(monkeypatch):
     from contextlib import nullcontext
+    import rpu_backend.graph as graph_module
     from rpu_backend.api import cache as cache_module
     from rpu_backend.runtime import decoder
+
+    monkeypatch.setattr(graph_module, "GraphSignature", lambda **kwargs: kwargs)
 
     class Cache:
         def __init__(self, *args):

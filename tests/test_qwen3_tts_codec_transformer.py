@@ -63,7 +63,7 @@ def test_layerscale_fold_is_fp32_before_half_and_keeps_source():
     assert actual.dtype == torch.float16 and actual.data_ptr() != linear.weight.data_ptr()
 
 
-@pytest.mark.parametrize("capability", [None, lambda: False])
+@pytest.mark.parametrize("capability", [None, lambda: False, lambda: True])
 def test_old_native_falls_back_without_allocation(monkeypatch, capability):
     native = SimpleNamespace()
     if capability is not None:

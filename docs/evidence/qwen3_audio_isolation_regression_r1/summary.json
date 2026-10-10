@@ -1,0 +1,454 @@
+{
+  "date": "2026-10-10",
+  "scope": "定向回归；非全模型或任务质量重新认证",
+  "source_base": "e1f890f92a1a313f8274dfc7b91e7670bcb94675",
+  "change": "显式 TTS codec 模式；默认 decoder RoPE 恢复原参数；文档合并",
+  "host": {
+    "passed": 161,
+    "command": "PYTHONPATH=python:/tmp/audio-branch-review-deps /home/zc/RhinoForge/.venv/bin/python -m pytest -q tests/test_causal_decoder_no_qknorm_rope.py tests/test_qwen3_asr.py tests/test_qwen3_tts.py tests/test_qwen3_tts_codec.py tests/test_qwen3_tts_codec_transformer.py tests/test_qwen3_tts_source.py tests/test_siglip_attention_eligibility.py tests/test_causal_preload_manifest_routes.py"
+  },
+  "native": {
+    "build": "PASS; CMake Release; R1 aarch64; Python 3.12; PyTorch 2.10.0; Launch 1.0.0",
+    "candidate_sha256": "7fa92b92c6ffacff6182969c86d82c7593f9855b0231228250a7c9c2fee7ac3f",
+    "baseline_sha256": "d2cd78227982c68d3576de06f26712763b26af6b7283f3107b55cd2a9f4521f4",
+    "baseline": "R1 backup_f8f0d9f_audio_coverage_20261010; before global per-head K RoPE change",
+    "isolated_build": true,
+    "deployment_replaced": false
+  },
+  "asr": {
+    "cases": [
+      {
+        "case": "zh",
+        "token_ids_equal_baseline": true,
+        "stats": {
+          "decoder_calls": 11,
+          "audio_resident_calls": 1,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 9,
+          "graph_invariant_ok": true
+        }
+      },
+      {
+        "case": "en_same_shape",
+        "token_ids_equal_baseline": true,
+        "stats": {
+          "decoder_calls": 32,
+          "audio_resident_calls": 2,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 1,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 30,
+          "graph_invariant_ok": true
+        }
+      },
+      {
+        "case": "lower_0_5s",
+        "token_ids_equal_baseline": true,
+        "stats": {
+          "decoder_calls": 38,
+          "audio_resident_calls": 3,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 4,
+          "graph_invariant_ok": true
+        }
+      },
+      {
+        "case": "upper_8s",
+        "token_ids_equal_baseline": true,
+        "stats": {
+          "decoder_calls": 69,
+          "audio_resident_calls": 4,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 29,
+          "graph_invariant_ok": true
+        }
+      },
+      {
+        "case": "zh",
+        "token_ids_equal_baseline": true,
+        "stats": {
+          "decoder_calls": 80,
+          "audio_resident_calls": 5,
+          "audio_graph_size": 1,
+          "audio_graph_replays": 0,
+          "audio_graph_invariant_ok": true,
+          "graph_size": 2,
+          "graph_replays": 9,
+          "graph_invariant_ok": true
+        }
+      }
+    ],
+    "reload_exact": true
+  },
+  "tts": {
+    "cases": [
+      {
+        "id": "Chinese-0",
+        "samples": 59520,
+        "stats": {
+          "head_calls": [
+            32,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31,
+            31
+          ],
+          "components": {
+            "talker": {
+              "calls": 32,
+              "tokens": 49,
+              "graph_size": 2,
+              "graph_replays": 30,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 465,
+              "tokens": 496,
+              "graph_size": 1,
+              "graph_replays": 495,
+              "graph_invariant_ok": true
+            },
+            "codec_transformer": {
+              "calls": 1,
+              "tokens": 31,
+              "graph_size": 1,
+              "graph_replays": 0,
+              "graph_invariant_ok": true
+            }
+          },
+          "codec_frontend": {
+            "device": "rpu",
+            "fallback_reason": null
+          }
+        }
+      },
+      {
+        "id": "same-length-alternate",
+        "samples": 57600,
+        "stats": {
+          "head_calls": [
+            63,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61,
+            61
+          ],
+          "components": {
+            "talker": {
+              "calls": 63,
+              "tokens": 97,
+              "graph_size": 2,
+              "graph_replays": 61,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 915,
+              "tokens": 976,
+              "graph_size": 1,
+              "graph_replays": 975,
+              "graph_invariant_ok": true
+            },
+            "codec_transformer": {
+              "calls": 2,
+              "tokens": 61,
+              "graph_size": 1,
+              "graph_replays": 0,
+              "graph_invariant_ok": true
+            }
+          },
+          "codec_frontend": {
+            "device": "rpu",
+            "fallback_reason": null
+          }
+        }
+      },
+      {
+        "id": "Chinese-0",
+        "samples": 59520,
+        "stats": {
+          "head_calls": [
+            95,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92,
+            92
+          ],
+          "components": {
+            "talker": {
+              "calls": 95,
+              "tokens": 146,
+              "graph_size": 2,
+              "graph_replays": 93,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 1380,
+              "tokens": 1472,
+              "graph_size": 1,
+              "graph_replays": 1471,
+              "graph_invariant_ok": true
+            },
+            "codec_transformer": {
+              "calls": 3,
+              "tokens": 92,
+              "graph_size": 1,
+              "graph_replays": 0,
+              "graph_invariant_ok": true
+            }
+          },
+          "codec_frontend": {
+            "device": "rpu",
+            "fallback_reason": null
+          }
+        }
+      },
+      {
+        "id": "English-0",
+        "samples": 67200,
+        "stats": {
+          "head_calls": [
+            131,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127,
+            127
+          ],
+          "components": {
+            "talker": {
+              "calls": 131,
+              "tokens": 200,
+              "graph_size": 2,
+              "graph_replays": 126,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 1905,
+              "tokens": 2032,
+              "graph_size": 1,
+              "graph_replays": 2031,
+              "graph_invariant_ok": true
+            },
+            "codec_transformer": {
+              "calls": 4,
+              "tokens": 127,
+              "graph_size": 1,
+              "graph_replays": 0,
+              "graph_invariant_ok": true
+            }
+          },
+          "codec_frontend": {
+            "device": "rpu",
+            "fallback_reason": null
+          }
+        }
+      },
+      {
+        "id": "Chinese-0",
+        "samples": 59520,
+        "stats": {
+          "head_calls": [
+            163,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158,
+            158
+          ],
+          "components": {
+            "talker": {
+              "calls": 163,
+              "tokens": 249,
+              "graph_size": 2,
+              "graph_replays": 157,
+              "graph_invariant_ok": true
+            },
+            "predictor": {
+              "calls": 2370,
+              "tokens": 2528,
+              "graph_size": 1,
+              "graph_replays": 2527,
+              "graph_invariant_ok": true
+            },
+            "codec_transformer": {
+              "calls": 5,
+              "tokens": 158,
+              "graph_size": 1,
+              "graph_replays": 0,
+              "graph_invariant_ok": true
+            }
+          },
+          "codec_frontend": {
+            "device": "rpu",
+            "fallback_reason": null
+          }
+        }
+      }
+    ],
+    "checks": {
+      "reload_equal": true,
+      "return_to_first_equal": true,
+      "previous_waveform_exact": true
+    },
+    "baseline": "previous tts-final-v2/speech-7.wav; FLOAT WAV; 59520 samples at 24000 Hz"
+  },
+  "codec": {
+    "waveform_vs_cpu_fp32": {
+      "mse": 6.840958537881971e-07,
+      "max_abs": 0.024488352239131927,
+      "relative_l2": 0.004850762881974053
+    },
+    "matching_fp16_reference": [
+      {
+        "frames": 31,
+        "diff": {
+          "mse": 9.357913324165561e-10,
+          "max_abs": 0.00018310546875,
+          "relative_l2": 0.0017665497701872543
+        },
+        "graph_size": 1,
+        "graph_replays": 5,
+        "exact_replay": true
+      },
+      {
+        "frames": 1,
+        "diff": {
+          "mse": 1.1530960318528738e-09,
+          "max_abs": 0.000244140625,
+          "relative_l2": 0.0021806870274375676
+        },
+        "graph_size": 1,
+        "graph_replays": 1,
+        "exact_replay": true
+      },
+      {
+        "frames": 63,
+        "diff": {
+          "mse": 9.196319948942677e-10,
+          "max_abs": 0.0003662109375,
+          "relative_l2": 0.0017054026564724718
+        },
+        "graph_size": 1,
+        "graph_replays": 1,
+        "exact_replay": true
+      },
+      {
+        "frames": 31,
+        "diff": {
+          "mse": 8.938430800851534e-10,
+          "max_abs": 0.00030517578125,
+          "relative_l2": 0.001663581759272499
+        },
+        "graph_size": 1,
+        "graph_replays": 1,
+        "exact_replay": true
+      }
+    ],
+    "reload_exact": true,
+    "numerical_policy": "数值差异仅作观测，不设任意质量阈值"
+  },
+  "default_decoder": {
+    "profile": "固定 GQA 算子用例：8 层、hidden 512、Q heads 16、KV heads 8、head_dim 64、31 行；无 Q/K norm；未开启 codec 模式。不是完整其他模型测试。",
+    "protocol": "每个二进制每条调度运行 3 次：1 BUILD + 2 REPLAY；输出确定且新旧逐元素一致；错误几何调用 codec setter 被拒绝。",
+    "cases": [
+      {
+        "schedule": "kv",
+        "shape": [
+          1,
+          31,
+          1024
+        ],
+        "baseline_exact": true,
+        "execution_len": 31,
+        "noncodec_mode_rejected": true,
+        "graph_size": 1,
+        "graph_invariant": true,
+        "graph_replays": 2
+      },
+      {
+        "schedule": "seq",
+        "shape": [
+          1,
+          31,
+          1024
+        ],
+        "baseline_exact": true,
+        "execution_len": 31,
+        "noncodec_mode_rejected": true,
+        "graph_size": 1,
+        "graph_invariant": true,
+        "graph_replays": 2
+      }
+    ]
+  },
+  "not_retested": [
+    "全模型支持矩阵",
+    "Thor",
+    "完整性能及识别率语料",
+    "MOS/音色相似度",
+    "并发压力"
+  ]
+}

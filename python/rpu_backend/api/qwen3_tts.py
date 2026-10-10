@@ -258,7 +258,7 @@ class Qwen3TTSModel:
             result = {"head_calls": list(self._head_calls), "components": {}}
             codec_rpu = "codec_transformer" in self._components
             result["codec_frontend"] = {"device": "rpu" if codec_rpu else "cpu",
-                "fallback_reason": None if codec_rpu else "native lacks per-head K RoPE capability"}
+                "fallback_reason": None if codec_rpu else "native lacks explicit TTS codec mode"}
             for name, part in self._components.items():
                 graph = part["graph"]
                 result["components"][name] = {"calls": part["calls"], "tokens": part["tokens"],

@@ -2738,6 +2738,11 @@ std::vector<int64_t> rpu_causal_decoder_topology(int64_t handle) {
         ->execution_topology();
 }
 
+void rpu_causal_decoder_set_tts_codec_mode(int64_t handle) {
+    CausalDecoderRegistry::get(handle, "rpu_causal_decoder_set_tts_codec_mode")
+        ->set_tts_codec_mode();
+}
+
 void rpu_causal_decoder_destroy(int64_t handle) {
     v3::wall_oss_z1_internal::check_text_destroy_allowed(handle);
     v3::qwen3vl_pooler_z1_internal::check_text_destroy_allowed(handle);

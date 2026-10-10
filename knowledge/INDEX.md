@@ -102,32 +102,6 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
 
 ## Speech inference
 
-- [Qwen3 ASR/TTS profile and R1 evidence](../docs/qwen3_audio_r1.zh.md): exact
-  weights, reviewed source preparation, CPU/RPU boundaries, bounded Graphs,
-  dependency compatibility, CLI usage and remaining quality limits.
-
-- [Qwen3 speech measurements](../docs/qwen3_audio_benchmark_r1.zh.md): fixed-input
-  timing, corpus-weighted CER/WER, CPU reference and TTS content-consistency scope.
-- [Qwen3 speech Thor comparison and stage timing](../docs/qwen3_audio_thor_stages.zh.md):
-  R1 vocabulary-head and Predictor optimization, CPU codec threads, Thor quality-aware comparison.
-- [Qwen3 speech optimization](../docs/qwen3_audio_optimization_r1.zh.md): RhinoVLA
-  storage reuse, CPU convolution boundary, speaker reuse and baseline comparison.
-
-- [Qwen3 speech Thor TensorRT measurements](../docs/qwen3_audio_thor_tensorrt.zh.md):
-  decoder engine boundaries, same-day PyTorch comparison, stage timing and task quality.
-- [Qwen3 ASR resident audio encoder](../docs/qwen3_asr_resident_r1.zh.md):
-  fused audio blocks, CPU/RPU boundaries, convolution-path evaluation and quality.
-- [Qwen3 TTS output head and codec optimization](../docs/qwen3_tts_chain_optimization_r1.zh.md):
-  resident head inputs, CPU codec convolution paths, timings and content checks.
-- [Qwen3 speech next optimization assessment](../docs/qwen3_audio_next_optimization.zh.md):
-  ASR frontend layout microbenchmark, TTS codec attribution and candidate priorities.
-- [Qwen3 speech second optimization results](../docs/qwen3_audio_optimization_v2_r1.zh.md):
-  ASR channels-last and fused head, TTS overlap-add and retained Talker prefill/decode.
-
-- [Qwen3 speech RPU coverage](../docs/qwen3_audio_rpu_coverage.zh.md): resident
-  ASR frontend boundaries, TTS codec frontend, explicit CPU fallback and final measurements.
-- [Qwen3 TTS codec RPU assessment](../docs/qwen3_tts_rpu_coverage.zh.md):
-  FP16 frontend recipe, per-head K RoPE fix and remaining FP32 operator limits.
-
-- [Qwen3 ASR Graph tail optimization](../docs/qwen3_asr_graph_tail.zh.md):
-  extending the existing audio Graph, replay ownership, measured scope and recognition checks.
+- [Qwen3 ASR/TTS current profile](../docs/qwen3_audio_r1.zh.md): frozen assets,
+  installation, CPU/RPU boundaries, owner-scoped Graphs and codec mode, latest
+  measurement scope, quality limits and reproduction commands.

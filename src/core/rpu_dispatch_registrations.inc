@@ -141,7 +141,7 @@ TORCH_LIBRARY(rpu, m) {
   m.def("gather_embedding(Tensor vocab, Tensor ids) -> Tensor",
         TORCH_FN(rpu_gather_embedding));
   m.def("gelu_erf(Tensor input) -> Tensor", TORCH_FN(rpu_gelu_erf));
-  m.def("causal_decoder_has_per_head_k_rope() -> bool", []() { return true; });
+  m.def("causal_decoder_set_tts_codec_mode", TORCH_FN(rpu_causal_decoder_set_tts_codec_mode));
   m.def("assemble_inputs_embeds(Tensor vocab, Tensor ids, Tensor merged, int img_start) -> Tensor",
         TORCH_FN(rpu_assemble_inputs_embeds));
   m.def("assemble_inputs_embeds_rev(Tensor vocab, Tensor ids, Tensor merged_window, Tensor rev_idx, Tensor runs) -> Tensor",
