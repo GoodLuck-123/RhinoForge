@@ -72,6 +72,7 @@ enum class GeluMode : uint8_t {
 // model before it records a graph or mutates installed state.
 void rpu_require_high_precision_math_kernels();
 void rpu_require_high_precision_fusion_kernels();
+at::Tensor rpu_gelu_erf(const at::Tensor& input);
 void rpu_launch_rhinovla_newton_norm_shift_spm_kernel(
     uint32_t input, uint32_t output, uint32_t scale, uint32_t shift,
     int64_t rows, double eps, int cores = 8);
@@ -92,7 +93,8 @@ void rpu_launch_eltwise_unary_spm_kernel(
     ValuOpType op_type,
     GeluMode gelu_mode = GeluMode::NONE,
     int num_cores = 8,
-    RpuUnaryPrecision precision = RpuUnaryPrecision::BASE);
+    RpuUnaryPrecision precision = RpuUnaryPrecision::BASE,
+    double clip_min = 0.0, double clip_max = 0.0);
 // Preserve source compatibility for non-GELU call sites that still pass a
 // boolean explicitly.  A true value meant tanh-approximate GELU historically;
 // route it to the formula-specific replacement rather than the legacy symbol.
@@ -1918,6 +1920,7 @@ int64_t rpu_causal_decoder_create(
 
 // Destroy a CausalDecoderModel instance. Called when Python model is torn down.
 void rpu_causal_decoder_destroy(int64_t handle);
+void rpu_causal_decoder_set_tts_codec_mode(int64_t handle);
 std::vector<int64_t> rpu_causal_decoder_topology(int64_t handle);
 
 // Set model weights on the given instance (marks C++ preload/allocation state dirty;
@@ -4212,6 +4215,9 @@ at::Tensor rpu_siglip_fused_encoder_forward_legacy(
 // =============================================================================
 
 int64_t rpu_siglip_create(const std::optional<bool>& linear_acc32);
+void rpu_siglip_set_audio_mode(int64_t handle);
+void rpu_siglip_set_audio_projection(int64_t handle, const at::Tensor& weight,
+                                    const at::Tensor& bias);
 void rpu_siglip_set_execution_core_count(int64_t handle, int64_t cores);
 std::vector<int64_t> rpu_siglip_get_execution_topology(int64_t handle);
 void rpu_siglip_destroy(int64_t handle);

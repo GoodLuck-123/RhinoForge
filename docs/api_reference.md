@@ -403,3 +403,91 @@ normal inference. Chunk size is a per-handle `rpu_execution` setting, not a
 process-global `torch.rpu` setter. Internal `torch.ops.rpu.*` schemas are host
 wrapper interfaces used by adapters; unless a function is documented here or
 in a model example, treat it as an implementation detail.
+
+## Bounded speech APIs
+
+`from rpu_backend.api import Qwen3ASRModel, Qwen3TTSModel`
+
+- `Qwen3ASRModel.from_pretrained(checkpoint, dtype=torch.float16)` accepts the
+  frozen local ASR checkpoint. `transcribe(audio, sample_rate=16000,
+  max_new_tokens=64)` takes one finite CPU floating-point waveform, mono 16 kHz,
+  0.5–8 seconds, and returns `ASRTranscription(text, raw_text, token_ids)`.
+  The generation limit is 1–64 tokens. No context prompt, timestamps or streaming.
+- `Qwen3TTSModel.from_pretrained(checkpoint, source=prepared_package,
+  dtype=torch.float16)` accepts the frozen local Base checkpoint and explicitly
+  prepared upstream source. `synthesize(text, reference_audio=local_file,
+  language="Chinese", max_new_tokens=64)` returns an independent float32 mono
+  waveform and sample rate 24000. Text must have 1–128 characters and at most
+  32 tokenizer tokens; language is `Chinese` or `English`. Reference audio is
+  mono 24 kHz, 0.5–20 seconds. The token limit is 2–64 and may truncate speech.
+  Only non-streaming, greedy, speaker-embedding-only voice cloning is admitted.
+  Talker prompt plus requested generation must fit 128 positions.
+
+Both classes support context managers, explicit idempotent `close()`, and
+`execution_stats()`. Requests, statistics and close are serial, with one live
+RPU model/policy per process. Loading validates frozen assets before weight
+transformation. ASR uses FP16 weights and boundaries, with CPU convolutions
+computed in FP32 from those rounded weights; its vocabulary head runs on RPU
+with FP32 accumulation. Prefill embedding/audio assembly runs on RPU; single-token
+decode embedding lookup remains on CPU because its immediate RPU launch is slower.
+CPU convolution inputs and weights use channels-last storage. Decode fuses the
+vocabulary head into the shared causal-LM Graph; prefill projects only the last
+hidden position. CPU finite checks and greedy token selection remain explicit.
+Its 18 audio encoder blocks, final LayerNorm, both output projections and the
+intervening ERF GELU execute in one fused RPU Graph with FP32 linear accumulation. The fourteen 64-wide heads
+are padded to sixteen without changing the 896-wide residual/LayerNorm math.
+The convolution stack and its activations/layout remain on CPU. From `conv_out`,
+position addition, valid-row selection and the encoder through the final ERF GELU
+and `proj2`, features remain on RPU. A CPU finite check reads the final features
+before RPU text/audio assembly. This path requires a rebuilt native extension
+exposing `siglip_set_audio_mode`, `siglip_set_audio_projection` and
+`assemble_inputs_embeds`; older
+binaries fail preflight.
+TTS keeps CPU components in FP32
+and casts RPU boundaries to FP16. Its heads consume the current single-token
+RPU decoder output directly when available; host hidden states remain available
+to generation. Codec transposed convolutions use equivalent CPU FP32 matrix
+multiplication and bounded adjacent-block overlap-add; admitted 1x1 convolutions
+use matrix multiplication. Both preserve the original output length.
+With the native `causal_decoder_set_tts_codec_mode` interface, the codec frontend (input/output
+projections and eight Transformer layers) runs on RPU FP16 with FP32 linear
+accumulation. Its LayerScale is folded in FP32 before rounding, while RoPE phases
+retain the original FP32 frequency buffer. This explicitly changes frontend
+precision; the codebook, convolutions and waveform output stay CPU FP32. The
+frontend accepts 1–63 frames, below the original 72-frame sliding window. Native
+binaries without that setter keep this frontend on CPU. The codec explicitly enables
+its per-head K RoPE on its own handle after weight installation; the native mode
+defaults to off and preserves other decoders' existing RoPE parameters and layout hash.
+Other execution
+errors remain visible; they are not silently retried on CPU.
+Unsupported precisions fail before loading.
+Both loaders select the common caching allocator before RPU materialization;
+a process already frozen to the direct allocator must be restarted. TTS also
+prepares an owner-specific five-arena plan before the first device allocation:
+four retained Graphs and one serialized immediate-launch slot. A process already
+frozen to an incompatible arena plan must be restarted; the loader fails explicitly.
+
+ASR retains at most the current prompt length's prefill/decode Graph pair.
+Changing that length clears the pair before audio execution; returning to an
+old length rebuilds it. `graph_replays` counts the currently cached entries,
+so it resets on a shape switch. The ASR encoder separately retains one Graph
+for the current audio-token length; `audio_graph_size`, `audio_graph_replays`
+and `audio_graph_invariant_ok` report that cache. `audio_linear_calls` counts
+logical projections, including the 110 projections within the fused encoder and its output tail.
+TTS Talker keeps the current prompt length's prefill Graph and one decode Graph.
+A prompt-length change evicts only the old prefill, retaining decode and the
+bounded prepared-plan cache. It reuses the Qwen3 28-layer/1024 prefill envelope,
+bounded by its 128-position cache; physical padding never advances logical KV
+position. Predictor keeps one fixed decode Graph, processing its two-token
+prefill sequentially. The optional codec frontend keeps one Graph for its current
+frame count and evicts it on a length change. All three components share the
+owner arena policy. `execution_stats()` reports `codec_frontend.device` and a
+missing-native-capability fallback reason. Output storage is independent of replay.
+Both APIs retain private KV storage and reset its logical position for each new
+sequence. TTS retains only the latest speaker embedding, keyed by decoded audio
+content; every request still reads and validates the reference file. Reference
+codec encoding is omitted because this profile consumes no reference codec tokens.
+The frozen TTS Predictor uses a fixed 15-step greedy loop; Talker retains its
+EOS and repetition-penalty handling. The TTS CLI accepts `--threads` (default 4)
+for CPU codec tuning without changing the Python API's process-wide thread setting.
+See the [speech profile and examples](qwen3_audio_r1.zh.md).

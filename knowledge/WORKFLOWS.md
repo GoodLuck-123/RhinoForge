@@ -86,3 +86,63 @@ implementation. Treat model-support status as profile-specific. Use the entry
 points and runtime boundaries linked from [Examples](../docs/model_support.md)
 and follow [model validation policy](../docs/validation_policy.md). Update stale
 knowledge in the same change; do not preserve conflicting summaries.
+
+
+For the bounded Qwen3 speech APIs, start with the
+[speech profile](../docs/qwen3_audio_r1.zh.md). Keep the frozen checkpoint guards
+and TTS reviewed-source hashes before loading; do not install the upstream
+package over the pinned Transformers runtime. Normal CPU construction plus
+strict safetensors loading preserves TTS weights and nonpersistent RoPE buffers.
+Speech is a dedicated API, not a generic CausalLM/VLM registry alias. ASR prompt
+length changes clear the old Graph pair before audio execution,
+leaving launch arena capacity; same-length requests replay the pair. ASR audio
+blocks reuse the SigLIP fused host path with an exact ASR mode: fourteen heads
+padded to sixteen, 896-wide residuals, ERF GELU, original FP16 clamp and head
+scale. Its separate single-entry Graph is keyed by audio length and physical
+plan. Convolution remains CPU; conv_out, positions, valid-row selection, final
+ERF GELU/proj2 and prefill text/audio assembly retain features on RPU. Rebuild the
+native extension for the explicit audio-tail installation and assembly interfaces.
+The existing audio Graph includes ERF GELU and proj2 after proj1; its native
+profile hash and physical route manifest include that tail. Model-owned DDR
+staging stays stable, and the final output uses a refreshed mutable DMA base
+every call. Do not put the eager-only GELU/Linear wrappers directly in capture.
+TTS owns
+the Talker/Predictor decoder handles and, when the native
+`causal_decoder_set_tts_codec_mode` setter is present, a third codec-frontend handle
+under one process owner. Enable that mode only on the installed codec handle;
+its default-off state preserves other models' K RoPE parameters and layout hash.
+Retire all
+Graphs before their handles and weights. Preserve original CPU FP32 codec weights
+and fold LayerScale only into the new FP16 frontend copies; keep the original
+FP32 rotary frequencies. The frontend is limited to 1–63 frames, below its
+72-frame sliding window. Missing native setter selects CPU; arbitrary
+execution failures must remain visible. TTS declares five arenas before the first
+device allocation (four retained Graphs plus one immediate-launch slot), using
+the existing owner runtime policy. An incompatible frozen process plan requires
+a fresh process. Test retained outputs and close/reload across component handoffs.
+Speech loaders select the common caching allocator before device allocation.
+Reuse private KV storage with `reset_to_position(0)` at each new sequence;
+the causal path overwrites live rows before reading them. TTS speaker reuse is
+bounded to the latest decoded audio content, never just a file path or mtime.
+Its x-vector-only profile does not consume reference codec tokens. ASR CPU
+convolutions accumulate FP16-rounded weights in FP32 and round outputs back to
+FP16; preserve this boundary in reference comparisons.
+ASR uses channels-last CPU convolution storage without changing FP16 boundaries.
+Its causal-LM wrapper reuses the shared fused decode head and projects only the
+last prefill hidden position, retaining CPU single-token embedding lookup because
+its RPU launch costs more than the lookup. Prefill assembly stays on RPU. Do not enable
+that head on a base-model caller expecting hidden outputs. Retire the decoder
+before releasing that head. TTS Predictor's fixed 15-step greedy loop resets KV
+per frame; Talker still owns stopping and repetition penalties. Compare full
+tokens/waveforms when changing either route. CPU codec thread tuning belongs to
+the caller/CLI, not a hidden process-wide change inside the API.
+TTS output-head reuse is bound to the exact current CPU hidden object and is
+consumed once; never reuse a stale RPU decoder output after another replay.
+Talker prefill reuses the measured 28-layer/1024 envelope within 128 positions;
+evict only its old prefill Graph on a prompt-length change, retain decode and
+bounded prepared plans, and advance KV by logical tokens, excluding padding.
+Predictor retains its single decode Graph.
+Codec optimization replaces admitted FP32 transposed convolutions with matrix
+multiplication and adjacent-block overlap-add, plus 1x1 convolutions with matrix
+multiplication. Other convolutions retain their original path. Keep generation
+lengths and content checks alongside timings.

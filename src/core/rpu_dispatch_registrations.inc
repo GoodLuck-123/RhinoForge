@@ -140,6 +140,8 @@ TORCH_LIBRARY(rpu, m) {
   // Wall-OSS on-device embed/cast ops.
   m.def("gather_embedding(Tensor vocab, Tensor ids) -> Tensor",
         TORCH_FN(rpu_gather_embedding));
+  m.def("gelu_erf(Tensor input) -> Tensor", TORCH_FN(rpu_gelu_erf));
+  m.def("causal_decoder_set_tts_codec_mode", TORCH_FN(rpu_causal_decoder_set_tts_codec_mode));
   m.def("assemble_inputs_embeds(Tensor vocab, Tensor ids, Tensor merged, int img_start) -> Tensor",
         TORCH_FN(rpu_assemble_inputs_embeds));
   m.def("assemble_inputs_embeds_rev(Tensor vocab, Tensor ids, Tensor merged_window, Tensor rev_idx, Tensor runs) -> Tensor",
@@ -1103,6 +1105,8 @@ TORCH_LIBRARY(rpu, m) {
   // by direct-handle SigLIPModel below (siglip_create / set_weights / forward).
   // SigLIPModel All-Layers-Once (Phase 5: FusedModelBase migration)
   m.def("siglip_create(bool? linear_acc32=None) -> int", TORCH_FN(rpu_siglip_create));
+  m.def("siglip_set_audio_mode", TORCH_FN(rpu_siglip_set_audio_mode));
+  m.def("siglip_set_audio_projection", TORCH_FN(rpu_siglip_set_audio_projection));
   m.def("siglip_set_execution_core_count", TORCH_FN(rpu_siglip_set_execution_core_count));
   m.def("siglip_get_execution_topology", TORCH_FN(rpu_siglip_get_execution_topology));
   m.def("siglip_destroy", TORCH_FN(rpu_siglip_destroy));

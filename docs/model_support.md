@@ -16,6 +16,14 @@ it does not validate the checkpoint or certify model quality. See
 
 ## General runtime limits
 
+The dedicated `Qwen3ASRModel` and `Qwen3TTSModel` APIs provide bounded CPU/RPU
+speech inference. Their exact checkpoint revisions, CPU boundaries, input limits
+and latest R1 measurement scope are recorded in the [current speech guide](qwen3_audio_r1.zh.md),
+including the resident ASR path, bounded FP16 TTS codec frontend, explicit
+codec-only native mode, five-arena cold-process requirement and CPU FP32 stages.
+They are separate from `run_model.py` and the CausalLM/VLM registry. These checks
+do not certify multilingual recognition quality, voice similarity or real-time use.
+
 Runtime admission checks remain authoritative for each checkpoint and request.
 A configuration file does not imply support for other model sizes, precisions,
 core counts, image counts, or input lengths. Source-only and controlled examples

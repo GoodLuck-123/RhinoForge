@@ -1,0 +1,425 @@
+"""Host-only admission, preprocessing and ownership checks for the ASR profile."""
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import torch
+
+from rpu_backend.api import Qwen3ASRModel
+from rpu_backend.api import qwen3_asr as asr
+from rpu_backend.api.errors import RPUSingleHandleError, RPUUnsupportedDtypeError, UnsupportedModelError
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, "fp16"])
+def test_dtype_rejected_before_checkpoint_access(tmp_path, dtype):
+    with pytest.raises(RPUUnsupportedDtypeError):
+        Qwen3ASRModel.from_pretrained(tmp_path / "missing", dtype=dtype)
+
+
+def test_unreviewed_config_rejected_before_loading(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text('{"model_type":"qwen3_asr"}')
+    monkeypatch.setattr(asr, "_load_components", lambda *a: pytest.fail("weights loaded"))
+    with pytest.raises(UnsupportedModelError, match="config.json"):
+        Qwen3ASRModel.from_pretrained(tmp_path)
+
+
+@pytest.mark.parametrize("extra", ["tokenizer.json", "added_tokens.json", "special_tokens_map.json"])
+def test_tokenizer_overrides_rejected_before_loading(tmp_path, monkeypatch, extra):
+    monkeypatch.setattr(asr, "_IDENTITIES", {})
+    monkeypatch.setattr(asr, "_WEIGHT_SIZE", 0)
+    (tmp_path / "model.safetensors").touch()
+    (tmp_path / extra).write_text("{}")
+    with pytest.raises(UnsupportedModelError, match="original tokenizer files"):
+        asr._preflight(tmp_path, torch.float16)
+
+
+def test_old_native_rejected_before_loading(tmp_path, monkeypatch):
+    monkeypatch.setattr(asr, "_IDENTITIES", {})
+    monkeypatch.setattr(asr, "_WEIGHT_SIZE", 0)
+    monkeypatch.setattr(torch.ops, "rpu", SimpleNamespace())
+    (tmp_path / "model.safetensors").touch()
+    with pytest.raises(UnsupportedModelError, match="rebuilt native backend"):
+        asr._preflight(tmp_path, torch.float16)
+
+
+@pytest.mark.parametrize("audio,rate,tokens", [
+    (np.zeros(7999, dtype=np.float32), 16000, 64),
+    (np.zeros(128001, dtype=np.float32), 16000, 64),
+    (np.zeros((1, 16000), dtype=np.float32), 16000, 64),
+    (np.zeros(16000, dtype=np.int16), 16000, 64),
+    (np.full(16000, np.nan), 16000, 64),
+    (np.full(16000, np.inf), 16000, 64),
+    (np.zeros(16000, dtype=np.float32), 24000, 64),
+    (np.zeros(16000, dtype=np.float32), 16000, 65),
+    (np.zeros(16000, dtype=np.float32), 16000, True),
+    (np.zeros(16000, dtype=np.float32), 16000, 1.5),
+])
+def test_invalid_audio_rejected_without_inference(audio, rate, tokens):
+    with pytest.raises(ValueError):
+        asr._validate_audio(audio, rate, tokens)
+
+
+@pytest.mark.parametrize("samples", [8000, 67263, 128000])
+def test_valid_audio_boundaries(samples):
+    value = asr._validate_audio(torch.zeros(samples), 16000, 64)
+    assert value.shape == (samples,)
+    assert value.dtype == np.float32
+
+
+@pytest.mark.parametrize("frames,expected", [(50, 7), (99, 13), (100, 13), (101, 14), (420, 55), (800, 104)])
+def test_audio_tokens_respect_chunk_boundary(frames, expected):
+    assert asr._audio_token_length(frames) == expected
+
+
+def test_preprocessor_checks_feature_placeholder_agreement():
+    def extractor(*args, **kwargs):
+        return {"attention_mask": torch.ones(1, 420, dtype=torch.long),
+                "input_features": torch.zeros(1, 128, 420)}
+
+    def tokenizer(prompts, **kwargs):
+        assert prompts == ["prefix" + "<|audio_pad|>" * 55]
+        return {"input_ids": torch.tensor([[151676] * 54]), "attention_mask": torch.ones(1, 54)}
+
+    with pytest.raises(ValueError, match="placeholder count"):
+        asr._prepare_inputs(tokenizer, extractor, "prefix<|audio_pad|>", np.zeros(67263, dtype=np.float32))
+
+
+def test_failed_load_releases_owner_and_does_not_install(tmp_path, monkeypatch):
+    from rpu_backend.api import causal_lm
+
+    events = []
+    monkeypatch.setattr(asr, "_preflight", lambda *args: {})
+    monkeypatch.setattr(asr, "_load_processor", lambda *args: (None, None, ""))
+    monkeypatch.setattr(causal_lm, "_claim_live_instance", lambda owner: events.append("claim"))
+    monkeypatch.setattr(causal_lm, "_release_live_instance", lambda owner: events.append("release"))
+    monkeypatch.setattr(Qwen3ASRModel, "_install_rpu", lambda self: pytest.fail("RPU accessed"))
+
+    def fail(*args):
+        events.append("load")
+        raise ValueError("invalid weights")
+
+    monkeypatch.setattr(asr, "_load_components", fail)
+    with pytest.raises(ValueError, match="invalid weights"):
+        Qwen3ASRModel.from_pretrained(tmp_path)
+    assert events == ["claim", "load", "release"]
+
+
+def test_occupied_owner_rejects_before_processor_or_weights(tmp_path, monkeypatch):
+    from rpu_backend.api import causal_lm
+
+    monkeypatch.setattr(asr, "_preflight", lambda *args: {})
+    monkeypatch.setattr(asr, "_load_processor", lambda *args: pytest.fail("processor loaded"))
+    monkeypatch.setattr(asr, "_load_components", lambda *args: pytest.fail("weights loaded"))
+
+    def occupied(owner):
+        raise RPUSingleHandleError("occupied")
+
+    monkeypatch.setattr(causal_lm, "_claim_live_instance", occupied)
+    with pytest.raises(RPUSingleHandleError, match="occupied"):
+        Qwen3ASRModel.from_pretrained(tmp_path)
+
+
+def test_close_retires_before_releasing_and_is_idempotent(monkeypatch):
+    from rpu_backend.api import causal_lm
+
+    events = []
+    monkeypatch.setattr(causal_lm, "_release_live_instance", lambda owner: events.append("release"))
+    model = Qwen3ASRModel()
+    model._closed = False
+    model._text = SimpleNamespace(_rpu_decoder_retirement_state=SimpleNamespace(retire=lambda: events.append("retire")))
+    model._head_weight = object()
+    model._language_model = object()
+    model.close()
+    model.close()
+    assert events == ["retire", "release"]
+    assert model._text is None
+    assert model._head_weight is None
+    assert model._language_model is None
+    with pytest.raises(RuntimeError, match="closed"):
+        model.transcribe(np.zeros(8000, dtype=np.float32))
+    with pytest.raises(RuntimeError, match="closed"):
+        model.execution_stats()
+
+
+def test_close_cannot_release_an_active_request():
+    model = Qwen3ASRModel()
+    model._lock.acquire()
+    try:
+        with pytest.raises(RuntimeError, match="serial"):
+            model.close()
+        with pytest.raises(RuntimeError, match="serial"):
+            model.execution_stats()
+    finally:
+        model._lock.release()
+
+
+def test_failed_retirement_does_not_release_owner(monkeypatch):
+    from rpu_backend.api import causal_lm
+
+    events = []
+    monkeypatch.setattr(causal_lm, "_release_live_instance", lambda owner: events.append("release"))
+    model = Qwen3ASRModel()
+    model._closed = False
+
+    def fail():
+        raise RuntimeError("retirement failed")
+
+    model._text = SimpleNamespace(_rpu_decoder_retirement_state=SimpleNamespace(retire=fail))
+    head = model._head_weight = object()
+    with pytest.raises(RuntimeError, match="retirement failed"):
+        model.close()
+    assert events == [] and not model._closed and model._text is not None
+    assert model._head_weight is head
+    # No real native resource exists in this host test.
+    model._closed = True
+
+
+def test_decoder_install_bounds_graphs_to_leave_audio_launch_capacity(monkeypatch):
+    from rpu_backend.runtime import decoder, topology, weights
+
+    captured = {}
+    model = Qwen3ASRModel()
+    table = torch.zeros(1, 512, 128, dtype=torch.float16)
+    model._text = SimpleNamespace(
+        rotary_emb=lambda *args: (table, table),
+        embed_tokens=SimpleNamespace(weight=torch.zeros(1, 1024, dtype=torch.float16)),
+        to=lambda device: None,
+    )
+    monkeypatch.setattr(topology, "resolve_decoder_topology", lambda **kwargs: object())
+    monkeypatch.setattr(weights, "convert_linear_weights_inplace", lambda model: None)
+
+    def install(model, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop before audio installation")
+
+    monkeypatch.setattr(decoder, "_install_causal_decoder_forward", install)
+    with pytest.raises(RuntimeError, match="stop before audio"):
+        model._install_rpu()
+    assert captured["_graph_cache_max_entries"] == 2
+
+
+def test_shape_switch_releases_graphs_before_audio_and_same_shape_replays(monkeypatch):
+    events = []
+    graphs = set()
+
+    def clear():
+        events.append("clear")
+        graphs.clear()
+
+    model = Qwen3ASRModel()
+    model._closed = False
+    model._tokenizer = model._feature_extractor = model._prompt = None
+    model._text = SimpleNamespace(_rpu_decoder_graph_cache=SimpleNamespace(clear=clear))
+    monkeypatch.setattr(asr, "_prepare_inputs", lambda *args: {
+        "input_ids": torch.zeros(1, args[-1].size // 100, dtype=torch.long)})
+
+    def generate(inputs, max_new_tokens):
+        events.append("audio")
+        graphs.add(("prefill", inputs["input_ids"].shape[1]))
+        graphs.add(("decode", 1))
+        assert len(graphs) <= 2
+        return asr.ASRTranscription("", "", ())
+
+    model._generate = generate
+    try:
+        for samples in (8000, 8000, 16000, 8000):
+            model.transcribe(np.zeros(samples, dtype=np.float32))
+        assert events == ["audio", "audio", "clear", "audio", "clear", "audio"]
+    finally:
+        model.close()
+
+
+def test_request_reuses_kv_storage_and_resets_position_after_failure(monkeypatch):
+    from rpu_backend.api import cache as cache_module
+
+    allocations = []
+    cache = SimpleNamespace(position=0)
+    cache.reset_to_position = lambda pos: setattr(cache, "position", pos)
+    def allocate(*args, **kwargs):
+        allocations.append(cache)
+        return cache
+    monkeypatch.setattr(cache_module, "RPUCache", allocate)
+    model = Qwen3ASRModel()
+    def audio(*args, **kwargs):
+        assert cache.position == 0
+        cache.position = 17
+        raise RuntimeError("interrupted request")
+    model._audio = audio
+    inputs = {"feature_lens": torch.tensor([50]), "input_features": torch.zeros(1, 128, 50)}
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="interrupted request"):
+            model._generate(inputs, 64)
+    assert len(allocations) == 1
+
+
+@pytest.mark.parametrize("invalid", [None, float("nan"), float("inf")])
+def test_causal_lm_logits_keep_finite_rejection_and_eos(monkeypatch, invalid):
+    from rpu_backend.api import cache as cache_module
+
+    cache = SimpleNamespace(reset_to_position=lambda pos: None, get_seq_length=lambda: 0)
+    monkeypatch.setattr(cache_module, "RPUCache", lambda *args, **kwargs: cache)
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda tensor, *args, **kwargs:
+        tensor if args == ("rpu",) else original_to(tensor, *args, **kwargs))
+    monkeypatch.setattr(Qwen3ASRModel, "_embed_tokens", lambda self, ids, features=None:
+        torch.zeros(*ids.shape, 1024, dtype=torch.float16))
+    model = Qwen3ASRModel()
+    model._audio = lambda *args, **kwargs: SimpleNamespace(
+        last_hidden_state=torch.zeros(1, 1024, dtype=torch.float16))
+    logits = torch.zeros(1, 1, 151646, dtype=torch.float16)
+    logits[0, 0, 151645] = 1
+    if invalid is not None:
+        logits[0, 0, 0] = invalid
+    def forward(**kwargs):
+        assert kwargs["logits_to_keep"] == 1 and kwargs["return_dict"]
+        assert kwargs["past_key_values"] is cache
+        return SimpleNamespace(logits=logits)
+    model._language_model = forward
+    model._tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "<asr_text>done")
+    inputs = dict(feature_lens=torch.tensor([1]), input_features=torch.zeros(1, 128, 1),
+                  input_ids=torch.tensor([[151676]]), attention_mask=torch.ones(1, 1))
+    if invalid is None:
+        result = model._generate(inputs, 64)
+        assert result.token_ids == (151645,) and result.text == "done"
+    else:
+        with pytest.raises(FloatingPointError, match="non-finite ASR logits"):
+            model._generate(inputs, 64)
+
+
+def test_attention_head_padding_preserves_real_heads_and_projection():
+    from rpu_backend.api._qwen3_asr_audio import _pad_attention
+
+    torch.manual_seed(1)
+    hidden = torch.randn(3, 896)
+    qkv = []
+    padded_qkv = []
+    for _ in range(3):
+        weight, bias = torch.randn(896, 896) * 0.02, torch.randn(896) * 0.02
+        padded_weight, padded_bias = _pad_attention(weight, bias)
+        qkv.append(torch.nn.functional.linear(hidden, weight, bias).view(3, 14, 64).transpose(0, 1))
+        padded_qkv.append(torch.nn.functional.linear(hidden, padded_weight, padded_bias).view(3, 16, 64).transpose(0, 1))
+        assert torch.count_nonzero(padded_weight[896:]) == 0
+        assert torch.count_nonzero(padded_bias[896:]) == 0
+    weight, bias = torch.randn(896, 896) * 0.02, torch.randn(896) * 0.02
+    padded_weight, padded_bias = _pad_attention(weight, bias, output=True)
+    reference = torch.nn.functional.scaled_dot_product_attention(*qkv).transpose(0, 1).reshape(3, 896)
+    padded = torch.nn.functional.scaled_dot_product_attention(*padded_qkv).transpose(0, 1).reshape(3, 1024)
+    torch.testing.assert_close(torch.nn.functional.linear(padded, padded_weight, padded_bias),
+                               torch.nn.functional.linear(reference, weight, bias))
+
+
+def test_audio_retirement_failure_preserves_owner(monkeypatch):
+    from rpu_backend.api import causal_lm
+
+    released = []
+    monkeypatch.setattr(causal_lm, "_release_live_instance", lambda owner: released.append(owner))
+    model = Qwen3ASRModel()
+    model._closed = False
+    def fail():
+        raise RuntimeError("audio retirement failed")
+    model._audio_encoder = SimpleNamespace(close=fail)
+    with pytest.raises(RuntimeError, match="audio retirement"):
+        model.close()
+    assert not released and not model._closed and model._audio_encoder is not None
+    model._closed = True
+
+
+def test_resident_audio_rejects_multiple_utterances_before_execution():
+    from rpu_backend.api._qwen3_asr_audio import ResidentAudioEncoder
+
+    encoder = ResidentAudioEncoder(None, {})
+    with pytest.raises(ValueError, match="one CPU FP16 mel"):
+        encoder.forward(torch.zeros(128, 100, dtype=torch.float16), feature_lens=torch.tensor([50, 50]))
+
+
+def test_resident_graph_returns_final_projection_and_counts_both_projections(monkeypatch):
+    from contextlib import nullcontext
+    from rpu_backend.adapters import siglip
+    from rpu_backend.api._qwen3_asr_audio import ResidentAudioEncoder
+
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda value, *args, **kwargs:
+        value if args == ("rpu",) else original_to(value, *args, **kwargs))
+    cleared = []
+    encoder = ResidentAudioEncoder(None, {"layers.0.fc1": 0, "proj1": 0, "proj2": 0, "conv_out": 0})
+    encoder.handle = 1
+    encoder.graph = SimpleNamespace(clear=lambda: cleared.append(True), capture=lambda signature: nullcontext())
+    encoder.cache = SimpleNamespace(k_caches=[], v_caches=[])
+    plan = SimpleNamespace(selected=SimpleNamespace(stage_tuple=SimpleNamespace(physical_descriptor=[1])),
+                           graph_key_words=lambda: [1])
+    monkeypatch.setattr(siglip, "_siglip_component_execution_plan", lambda *args, **kwargs: plan)
+    monkeypatch.setattr(torch.rpu, "GraphSignature", lambda **kwargs: kwargs, raising=False)
+    monkeypatch.setattr(torch.ops, "rpu", SimpleNamespace(
+        siglip_forward=lambda handle, inputs, *args: inputs[:, :, :1].expand(-1, -1, 1024).clone(),
+        spm_alloc_reset_temporary=lambda: None))
+    first = encoder.encode(torch.ones(7, 896, dtype=torch.float16))
+    second = encoder.encode(torch.full((7, 896), 2, dtype=torch.float16))
+    assert first.shape == second.shape == (7, 1024)
+    assert torch.all(first == 1) and torch.all(second == 2)
+    assert cleared == [True] and encoder.calls == 2
+    assert encoder.counters == {"layers.0.fc1": 2, "proj1": 2, "proj2": 2, "conv_out": 0}
+
+
+def test_device_embedding_assembly_and_decode(monkeypatch):
+    monkeypatch.setattr(asr, "_AUDIO_TOKEN_ID", 4)
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda value, *args, **kwargs:
+        value if args == ("rpu",) else original_to(value, *args, **kwargs))
+    weight = torch.arange(8 * 1024, dtype=torch.float32).reshape(8, 1024).half()
+    model = Qwen3ASRModel()
+    model._text = SimpleNamespace(embed_tokens=SimpleNamespace(weight=weight))
+    model._embedding_weight = weight
+    calls = []
+    def gather(table, ids):
+        assert table is weight and ids.dtype == torch.int32
+        calls.append("gather")
+        return table[ids.long()].clone()
+    def assemble(table, ids, features, start):
+        result = gather(table, ids)
+        result[start:start + len(features)] = features
+        calls.append("assemble")
+        return result
+    monkeypatch.setattr(torch.ops, "rpu", SimpleNamespace(
+        gather_embedding=gather, assemble_inputs_embeds=assemble))
+    ids = torch.tensor([[1, 4, 4, 7]])
+    features = torch.full((2, 1024), -3, dtype=torch.float16)
+    value = model._embed_tokens(ids, features)
+    expected = weight[ids].clone()
+    expected[:, 1:3] = features
+    assert torch.equal(value, expected)
+    saved = value.clone()
+    assert torch.equal(model._embed_tokens(torch.tensor([[3]])), weight[3:4].unsqueeze(0))
+    assert torch.equal(value, saved)
+    assert calls == ["gather", "assemble"]
+
+    for invalid in (torch.tensor([[-1]]), torch.tensor([[8]]), torch.tensor([[1.0]])):
+        with pytest.raises(ValueError, match="valid CPU token IDs"):
+            model._embed_tokens(invalid)
+    for invalid in (torch.tensor([[4, 1, 4]]), torch.tensor([[1, 2, 3]])):
+        with pytest.raises(ValueError, match="contiguous audio placeholder"):
+            model._embed_tokens(invalid, features)
+    assert calls == ["gather", "assemble"]
+
+
+@pytest.mark.parametrize("frames", [50, 99, 100, 101, 420, 800])
+def test_resident_frontend_keeps_only_the_valid_chunk_prefix(monkeypatch, frames):
+    from rpu_backend.api._qwen3_asr_audio import ResidentAudioEncoder
+
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda value, *args, **kwargs:
+        value if args == ("rpu",) else original_to(value, *args, **kwargs))
+    monkeypatch.setattr(torch.nn.functional, "gelu", lambda value: value)
+    def convolution(value):
+        batch, width = value.shape[0], (value.shape[-1] + 7) // 8
+        return torch.arange(batch * width, dtype=torch.float16).reshape(batch, 1, 1, width).expand(-1, 896, 1, -1)
+    audio = SimpleNamespace(conv2d1=lambda value: value, conv2d2=lambda value: value,
+                            conv2d3=convolution, conv_out=lambda value: value, proj2=lambda value: value)
+    encoder = ResidentAudioEncoder(audio, {})
+    encoder.positions = torch.arange(13, dtype=torch.float16).reshape(1, 13, 1).expand(8, 13, 896).contiguous()
+    encoder.encode = lambda value: value
+    result = encoder.forward(torch.zeros(128, frames, dtype=torch.float16),
+                             feature_lens=torch.tensor([frames])).last_hidden_state
+    width = (min(frames, 100) + 7) // 8
+    expected = [i * width + 2 * j for i, start in enumerate(range(0, frames, 100))
+                for j in range((min(100, frames - start) + 7) // 8)]
+    assert torch.equal(result, torch.tensor(expected, dtype=torch.float16)[:, None].expand(-1, 896))

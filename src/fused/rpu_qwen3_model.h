@@ -375,6 +375,18 @@ public:
     // build_layer_subgraph branches on this explicit flag (not the
     // (nkv >= NUM_CORES) heuristic which incorrectly fired for Llama nkv==8).
     bool has_qk_norm_ = false;
+    bool tts_codec_mode_ = false;
+
+    void set_tts_codec_mode() {
+        TORCH_CHECK(!tts_codec_mode_ && !RpuKernelGraph::has_active() &&
+                        num_cores() == 8 && num_layers() == 8 && hidden_size() == 512 &&
+                        intermediate_size() == 1024 && num_q_heads() == 16 &&
+                        num_kv_heads() == 16 && head_dim() == 64 &&
+                        !has_qk_norm_ && !has_qkv_bias_ && !adarms_ && use_silu_,
+                    "TTS codec mode requires its frozen eight-layer frontend");
+        tts_codec_mode_ = true;
+        invalidate_model_state();
+    }
 
     // Optional QKV bias presence (Qwen2.5 / Wall-OSS-0.5). All three bias lists
     // empty -> has_qkv_bias_=false (Qwen3 / Llama, unchanged). All three size==N
@@ -755,6 +767,7 @@ public:
         // ─────────────────────────────────────────────────────────────────────
         // Basic sanity
         // ─────────────────────────────────────────────────────────────────────
+        TORCH_CHECK(!tts_codec_mode_, "TTS codec weights are immutable after profile installation");
         int64_t N = static_cast<int64_t>(q_w_list.size());
         TORCH_CHECK(N > 0, "causal_decoder_set_weights: empty weight lists");
         TORCH_CHECK(num_q_heads > 0 && num_kv_heads > 0 && head_dim > 0
@@ -3518,6 +3531,7 @@ protected:
     int64_t subclass_layout_hash() const override {
         int64_t h = detail::layout_mix(
             0, deepstack_lang_layers_.empty() ? 0 : 1);
+        if (tts_codec_mode_) h = detail::layout_mix(h, 0x545453);
         if (rhinovla_high_precision_) {
             h = detail::layout_mix(h, RHINOVLA_TEXT_HIGH_RMSNORM_SITE);
             h = detail::layout_mix(h, rhinovla_high_precision_fusions_);
@@ -5587,7 +5601,8 @@ protected:
             emit_qk_rope("input_norm", "k", local_kv_heads, hd, seq_len, cos_sin_start, tp);
         } else {
             emit_qk_rope("q_kv", "q_kv", local_q_heads, hd, seq_len, cos_sin_start, tp);
-            emit_qk_rope("k", "k", 1, local_kv_dim, seq_len, cos_sin_start, tp);
+            emit_qk_rope("k", "k", tts_codec_mode_ ? nkv / tp : 1,
+                         tts_codec_mode_ ? hd : local_kv_dim, seq_len, cos_sin_start, tp);
         }
 
         auto& k_cache = (*ctx().k_caches)[layer_idx];
@@ -6136,7 +6151,8 @@ protected:
             {
                 emit_qk_rope("q", "q", bs * local_q_heads, hd, seq_len,
                              cos_sin_start, tp);
-                emit_qk_rope("k", "k", bs, local_kv_dim, seq_len,
+                emit_qk_rope("k", "k", tts_codec_mode_ ? bs * (nkv / tp) : bs,
+                             tts_codec_mode_ ? hd : local_kv_dim, seq_len,
                              cos_sin_start, tp);
             }
         }
