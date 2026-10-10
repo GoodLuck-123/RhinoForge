@@ -162,7 +162,7 @@ def main():
             assert all(a["graph_replays"] < b["graph_replays"] for a,b in zip(steady,steady[1:]))
             assert all(a["audio_graph_replays"] < b["audio_graph_replays"] for a,b in zip(steady,steady[1:]))
         else:
-            for name in ("talker", "predictor"):
+            for name in steady[0]["execution"]["components"]:
                 assert all(a["execution"]["components"][name]["graph_replays"] < b["execution"]["components"][name]["graph_replays"] for a,b in zip(steady,steady[1:]))
         report["steady"] = timing_summary(steady)
         report["languages"] = {}

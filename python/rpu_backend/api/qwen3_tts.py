@@ -66,7 +66,8 @@ class Qwen3TTSModel:
     """Frozen 0.6B Base, short non-streaming voice cloning, batch one.
 
     Talker, Code Predictor and their output heads execute FP16 on RPU.
-    Embedding, speaker encoder, speech codec and composition use CPU FP32.
+    The codec frontend also uses RPU FP16 when the native RoPE contract is available.
+    Embedding, speaker encoder, remaining codec and composition use CPU FP32.
     Only speech output is exposed; internal per-layer traces are not an API.
     """
 
@@ -106,13 +107,17 @@ class Qwen3TTSModel:
         return model
 
     def _install_rpu(self):
-        from rpu_backend.graph import GraphCache, GraphSignature
+        from rpu_backend.graph import GraphCache, GraphSignature, GraphRuntimePolicy
         from rpu_backend.runtime.weights import transform_linear_weight
         from rpu_backend.runtime._native_retirement import _InstalledNativeResource
 
+        # Four retained Graphs plus one serialized immediate-launch arena.
+        self._graph_runtime_policy = GraphRuntimePolicy.from_environment(graph_arena_count=5)
+        if not self._graph_runtime_policy.prepare_arenas():
+            raise RuntimeError("TTS requires its cold five-arena Graph plan")
         talker = self._wrapper.model.talker
         for name, core in (("talker", talker.model), ("predictor", talker.code_predictor.model)):
-            graph = GraphCache()
+            graph = GraphCache(runtime_policy=self._graph_runtime_policy)
             handle = torch.ops.rpu.causal_decoder_create()
             part = {"handle": handle, "graph": graph, "calls": 0, "tokens": 0,
                     "capacity": 128 if name == "talker" else 32, "layers": len(core.layers),
@@ -197,6 +202,9 @@ class Qwen3TTSModel:
         from rpu_backend.adapters.qwen3_tts.codec import install_codec_convolutions
 
         install_codec_convolutions(self._wrapper.model.speech_tokenizer.model.decoder, self._restore)
+        from rpu_backend.adapters.qwen3_tts.codec_transformer import install_codec_transformer
+
+        install_codec_transformer(self, self._wrapper.model.speech_tokenizer.model.decoder.pre_transformer)
 
     def synthesize(self, text, *, reference_audio, language="Chinese", max_new_tokens=64):
         """Return an independent float32 mono waveform and sample rate (24 kHz).
@@ -248,6 +256,9 @@ class Qwen3TTSModel:
             if self._retirement_error is not None:
                 raise RuntimeError("TTS retirement failed; restart the process") from self._retirement_error
             result = {"head_calls": list(self._head_calls), "components": {}}
+            codec_rpu = "codec_transformer" in self._components
+            result["codec_frontend"] = {"device": "rpu" if codec_rpu else "cpu",
+                "fallback_reason": None if codec_rpu else "native lacks per-head K RoPE capability"}
             for name, part in self._components.items():
                 graph = part["graph"]
                 result["components"][name] = {"calls": part["calls"], "tokens": part["tokens"],

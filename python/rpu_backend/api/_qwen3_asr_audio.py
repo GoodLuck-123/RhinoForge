@@ -23,6 +23,7 @@ class ResidentAudioEncoder:
         self.cache = None
         self.last_length = None
         self.calls = 0
+        self.positions = None
 
     def install(self):
         a = self.audio
@@ -61,6 +62,7 @@ class ResidentAudioEncoder:
         torch.ops.rpu.siglip_set_audio_mode(self.handle)
         self.cache = RPUCache(18, 1, 128, 16, 64, dtype=torch.float16, attn_tp=8)
         self.graph = torch.rpu.GraphCache(max_entries=1)
+        self.positions = a.positional_embedding.positional_embedding[:13].unsqueeze(0).expand(8, -1, -1).contiguous().to("rpu")
 
     def encode(self, hidden):
         from rpu_backend.adapters.siglip import _siglip_component_execution_plan
@@ -81,8 +83,7 @@ class ResidentAudioEncoder:
             with self.graph.capture(signature):
                 result = torch.ops.rpu.siglip_forward(self.handle, inputs,
                     list(self.cache.k_caches), list(self.cache.v_caches), descriptor)
-            # Publish an independent host result after graph execution completes.
-            result = result.cpu()[0]
+            result = result[0]
         finally:
             torch.ops.rpu.spm_alloc_reset_temporary()
         for name in self.counters:
@@ -107,11 +108,13 @@ class ResidentAudioEncoder:
         hidden = F.gelu(a.conv2d2(hidden))
         hidden = F.gelu(a.conv2d3(hidden))
         b, c, f, t = hidden.shape
-        hidden = a.conv_out(hidden.permute(0, 3, 1, 2).contiguous().view(b, t, c * f))
-        hidden = hidden + a.positional_embedding.positional_embedding[:t].to(hidden.dtype).unsqueeze(0)
-        hidden = torch.cat([hidden[i, :(chunk.shape[0] + 7) // 8] for i, chunk in enumerate(chunks)])
+        hidden = a.conv_out(hidden.permute(0, 3, 1, 2).contiguous().view(b, t, c * f).to("rpu"))
+        hidden = hidden + self.positions[:b, :t]
+        # Only the final 100-frame chunk has padding, so valid rows form one prefix.
+        tokens = sum((chunk.shape[0] + 7) // 8 for chunk in chunks)
+        hidden = hidden.reshape(-1, 896)[:tokens]
         hidden = self.encode(hidden)
-        hidden = a.proj2(a.act(hidden))
+        hidden = a.proj2(torch.ops.rpu.gelu_erf(hidden.contiguous()))
         return BaseModelOutputWithPooling(last_hidden_state=hidden)
 
     def close(self):
@@ -121,3 +124,4 @@ class ResidentAudioEncoder:
             torch.ops.rpu.siglip_destroy(self.handle)
             self.handle = None
         self.cache = self.graph = None
+        self.positions = None

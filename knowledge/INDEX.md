@@ -123,3 +123,8 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
   ASR frontend layout microbenchmark, TTS codec attribution and candidate priorities.
 - [Qwen3 speech second optimization results](../docs/qwen3_audio_optimization_v2_r1.zh.md):
   ASR channels-last and fused head, TTS overlap-add and retained Talker prefill/decode.
+
+- [Qwen3 speech RPU coverage](../docs/qwen3_audio_rpu_coverage.zh.md): resident
+  ASR frontend boundaries, TTS codec frontend, explicit CPU fallback and final measurements.
+- [Qwen3 TTS codec RPU assessment](../docs/qwen3_tts_rpu_coverage.zh.md):
+  FP16 frontend recipe, per-head K RoPE fix and remaining FP32 operator limits.

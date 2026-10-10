@@ -1,4 +1,5 @@
 # ASR / TTS：卷积布局、输出头和预填充优化
+后续增加 RPU 驻留范围的结果见[最新覆盖与实测报告](qwen3_audio_rpu_coverage.zh.md)；本页保留原轮次数据。
 
 2026-10-10，在 `feat/qwen3-audio-rpu` 分支落实[上一轮优化空间评估](qwen3_audio_next_optimization.zh.md)。基线代码为 `40e4574`；沿用冻结 checkpoint、精度、输入范围、8 RPU cores 和已有 native，不新增设备程序或依赖。ASR 使用 4 CPU 线程，TTS 使用 8 CPU 线程，全部测速及独立评分持 R1 共享设备锁串行执行。
 

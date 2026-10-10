@@ -19,6 +19,9 @@ it does not validate the checkpoint or certify model quality. See
 The dedicated `Qwen3ASRModel` and `Qwen3TTSModel` APIs provide bounded CPU/RPU
 speech inference. Their exact checkpoint revisions, CPU boundaries, input limits
 and R1 runtime evidence are recorded in the [speech port report](qwen3_audio_r1.zh.md).
+The [current RPU coverage report](qwen3_audio_rpu_coverage.zh.md) describes the
+resident ASR boundaries and the bounded FP16 TTS codec frontend, including its
+five-arena cold-process requirement and remaining CPU FP32 stages.
 They are separate from `run_model.py` and the CausalLM/VLM registry. These checks
 do not certify multilingual recognition quality, voice similarity or real-time use.
 

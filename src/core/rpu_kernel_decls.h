@@ -72,6 +72,7 @@ enum class GeluMode : uint8_t {
 // model before it records a graph or mutates installed state.
 void rpu_require_high_precision_math_kernels();
 void rpu_require_high_precision_fusion_kernels();
+at::Tensor rpu_gelu_erf(const at::Tensor& input);
 void rpu_launch_rhinovla_newton_norm_shift_spm_kernel(
     uint32_t input, uint32_t output, uint32_t scale, uint32_t shift,
     int64_t rows, double eps, int cores = 8);

@@ -261,7 +261,7 @@ def test_causal_lm_logits_keep_finite_rejection_and_eos(monkeypatch, invalid):
     original_to = torch.Tensor.to
     monkeypatch.setattr(torch.Tensor, "to", lambda tensor, *args, **kwargs:
         tensor if args == ("rpu",) else original_to(tensor, *args, **kwargs))
-    monkeypatch.setattr(torch.nn.functional, "embedding", lambda ids, weight:
+    monkeypatch.setattr(Qwen3ASRModel, "_embed_tokens", lambda self, ids, features=None:
         torch.zeros(*ids.shape, 1024, dtype=torch.float16))
     model = Qwen3ASRModel()
     model._audio = lambda *args, **kwargs: SimpleNamespace(
@@ -330,3 +330,69 @@ def test_resident_audio_rejects_multiple_utterances_before_execution():
     encoder = ResidentAudioEncoder(None, {})
     with pytest.raises(ValueError, match="one CPU FP16 mel"):
         encoder.forward(torch.zeros(128, 100, dtype=torch.float16), feature_lens=torch.tensor([50, 50]))
+
+
+def test_device_embedding_assembly_and_decode(monkeypatch):
+    monkeypatch.setattr(asr, "_AUDIO_TOKEN_ID", 4)
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda value, *args, **kwargs:
+        value if args == ("rpu",) else original_to(value, *args, **kwargs))
+    weight = torch.arange(8 * 1024, dtype=torch.float32).reshape(8, 1024).half()
+    model = Qwen3ASRModel()
+    model._text = SimpleNamespace(embed_tokens=SimpleNamespace(weight=weight))
+    model._embedding_weight = weight
+    calls = []
+    def gather(table, ids):
+        assert table is weight and ids.dtype == torch.int32
+        calls.append("gather")
+        return table[ids.long()].clone()
+    def assemble(table, ids, features, start):
+        result = gather(table, ids)
+        result[start:start + len(features)] = features
+        calls.append("assemble")
+        return result
+    monkeypatch.setattr(torch.ops, "rpu", SimpleNamespace(
+        gather_embedding=gather, assemble_inputs_embeds=assemble))
+    ids = torch.tensor([[1, 4, 4, 7]])
+    features = torch.full((2, 1024), -3, dtype=torch.float16)
+    value = model._embed_tokens(ids, features)
+    expected = weight[ids].clone()
+    expected[:, 1:3] = features
+    assert torch.equal(value, expected)
+    saved = value.clone()
+    assert torch.equal(model._embed_tokens(torch.tensor([[3]])), weight[3:4].unsqueeze(0))
+    assert torch.equal(value, saved)
+    assert calls == ["gather", "assemble"]
+
+    for invalid in (torch.tensor([[-1]]), torch.tensor([[8]]), torch.tensor([[1.0]])):
+        with pytest.raises(ValueError, match="valid CPU token IDs"):
+            model._embed_tokens(invalid)
+    for invalid in (torch.tensor([[4, 1, 4]]), torch.tensor([[1, 2, 3]])):
+        with pytest.raises(ValueError, match="contiguous audio placeholder"):
+            model._embed_tokens(invalid, features)
+    assert calls == ["gather", "assemble"]
+
+
+@pytest.mark.parametrize("frames", [50, 99, 100, 101, 420, 800])
+def test_resident_frontend_keeps_only_the_valid_chunk_prefix(monkeypatch, frames):
+    from rpu_backend.api._qwen3_asr_audio import ResidentAudioEncoder
+
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda value, *args, **kwargs:
+        value if args == ("rpu",) else original_to(value, *args, **kwargs))
+    monkeypatch.setattr(torch.nn.functional, "gelu", lambda value: value)
+    monkeypatch.setattr(torch.ops, "rpu", SimpleNamespace(gelu_erf=lambda value: value))
+    def convolution(value):
+        batch, width = value.shape[0], (value.shape[-1] + 7) // 8
+        return torch.arange(batch * width, dtype=torch.float16).reshape(batch, 1, 1, width).expand(-1, 896, 1, -1)
+    audio = SimpleNamespace(conv2d1=lambda value: value, conv2d2=lambda value: value,
+                            conv2d3=convolution, conv_out=lambda value: value, proj2=lambda value: value)
+    encoder = ResidentAudioEncoder(audio, {})
+    encoder.positions = torch.arange(13, dtype=torch.float16).reshape(1, 13, 1).expand(8, 13, 896).contiguous()
+    encoder.encode = lambda value: value
+    result = encoder.forward(torch.zeros(128, frames, dtype=torch.float16),
+                             feature_lens=torch.tensor([frames])).last_hidden_state
+    width = (min(frames, 100) + 7) // 8
+    expected = [i * width + 2 * j for i, start in enumerate(range(0, frames, 100))
+                for j in range((min(100, frames - start) + 7) // 8)]
+    assert torch.equal(result, torch.tensor(expected, dtype=torch.float16)[:, None].expand(-1, 896))

@@ -145,7 +145,11 @@ def test_graph_creation_failure_does_not_create_native_handle(monkeypatch):
     model._wrapper = SimpleNamespace(model=SimpleNamespace(
         talker=SimpleNamespace(model=core, code_predictor=SimpleNamespace(model=core))))
 
-    def fail_graph():
+    prepared = []
+    monkeypatch.setattr(graph.GraphRuntimePolicy, "prepare_arenas",
+                        lambda policy: prepared.append(policy.graph_arena_count) or True)
+    def fail_graph(*, runtime_policy):
+        assert prepared == [5] and runtime_policy.graph_arena_count == 5
         raise RuntimeError("graph allocation failed")
 
     monkeypatch.setattr(graph, "GraphCache", fail_graph)

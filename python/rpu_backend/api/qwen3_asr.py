@@ -93,7 +93,8 @@ def _preflight(checkpoint: Path, dtype) -> dict:
         raise UnsupportedModelError("Qwen3-ASR requires its original model.safetensors")
     if any((checkpoint / name).exists() for name in ("tokenizer.json", "special_tokens_map.json", "added_tokens.json")):
         raise UnsupportedModelError("Qwen3-ASR frozen profile uses the original tokenizer files")
-    if not hasattr(torch.ops.rpu, "siglip_set_audio_mode"):
+    if any(not hasattr(torch.ops.rpu, name) for name in (
+            "siglip_set_audio_mode", "gelu_erf", "assemble_inputs_embeds")):
         raise UnsupportedModelError("Qwen3-ASR resident audio requires the rebuilt native backend")
     return json.loads((checkpoint / "config.json").read_text())["thinker_config"]
 
@@ -294,11 +295,11 @@ class Qwen3ASRModel:
             self._restore_forwards.append((module, module.forward))
 
             def forward(owner, hidden, weight=weight, bias=bias, name=name):
-                if hidden.device.type != "cpu" or hidden.dtype != torch.float16:
-                    raise ValueError("ASR audio Linear requires CPU FP16 input")
-                result = torch.ops.rpu.linear_with_core_count(hidden.contiguous().to("rpu"), weight, bias, 1, 8).cpu()
+                if hidden.device.type not in ("cpu", "rpu") or hidden.dtype != torch.float16:
+                    raise ValueError("ASR audio Linear requires CPU or RPU FP16 input")
+                result = torch.ops.rpu.linear_with_core_count(hidden.contiguous().to("rpu"), weight, bias, 1, 8)
                 counters[name] += 1
-                return result
+                return result.cpu() if hidden.device.type == "cpu" else result
 
             module.forward = types.MethodType(forward, module)
         if len(counters) != 111:
@@ -342,10 +343,9 @@ class Qwen3ASRModel:
                                feature_lens=length).last_hidden_state
         ids = inputs["input_ids"]
         mask = ids == _AUDIO_TOKEN_ID
-        if features.shape != (int(mask.sum()), 1024) or not torch.isfinite(features).all():
+        if features.shape != (int(mask.sum()), 1024) or not torch.isfinite(features.cpu()).all():
             raise ValueError("ASR audio features violate the placeholder/finite contract")
-        hidden = torch.nn.functional.embedding(ids, self._embedding_weight)
-        hidden = hidden.masked_scatter(mask.unsqueeze(-1).expand_as(hidden), features)
+        hidden = self._embed_tokens(ids, features)
         attention_mask = inputs["attention_mask"]
         generated = []
         for _ in range(max_new_tokens):
@@ -363,12 +363,30 @@ class Qwen3ASRModel:
             generated.append(int(token.item()))
             if generated[-1] in (151645, 151643):
                 break
-            hidden = torch.nn.functional.embedding(token, self._embedding_weight)
+            hidden = self._embed_tokens(token)
             attention_mask = torch.cat((attention_mask, torch.ones((1, 1), dtype=attention_mask.dtype)), dim=1)
         raw = self._tokenizer.decode(generated, skip_special_tokens=True, clean_up_tokenization_spaces=False)
         # Preserve raw output for diagnostics; expose the text after ASR metadata.
         text = raw.split("<asr_text>", 1)[-1].strip()
         return ASRTranscription(text=text, raw_text=raw, token_ids=tuple(generated))
+
+    def _embed_tokens(self, ids, features=None):
+        weight = self._text.embed_tokens.weight
+        if (ids.device.type != "cpu" or ids.dtype != torch.long or ids.ndim != 2 or
+                ids.shape[0] != 1 or ids.numel() == 0 or
+                bool((ids < 0).any()) or bool((ids >= weight.shape[0]).any())):
+            raise ValueError("ASR embedding requires one row of valid CPU token IDs")
+        # Single-token CPU lookup is faster than an immediate RPU gather launch.
+        if features is None:
+            return torch.nn.functional.embedding(ids, self._embedding_weight).to("rpu")
+        positions = (ids[0] == _AUDIO_TOKEN_ID).nonzero().flatten()
+        if (positions.numel() == 0 or features.shape != (positions.numel(), 1024) or
+                not torch.equal(positions, torch.arange(int(positions[0]), int(positions[0]) + positions.numel()))):
+            raise ValueError("ASR requires one contiguous audio placeholder block")
+        device_ids = ids.flatten().to(torch.int32).to("rpu")
+        hidden = torch.ops.rpu.assemble_inputs_embeds(
+            weight, device_ids, features.contiguous().to("rpu"), int(positions[0]))
+        return hidden.unsqueeze(0)
 
     def _project_logits(self, hidden):
         return torch.ops.rpu.linear_with_accumulation(

@@ -14,6 +14,32 @@
 
 using namespace ::rhino_lkn;
 
+at::Tensor rpu_gelu_erf(const at::Tensor& input) {
+  TORCH_CHECK(input.device().type() == at::kPrivateUse1 &&
+                  input.scalar_type() == at::kHalf && input.is_contiguous(),
+              "gelu_erf requires contiguous RPU FP16 input");
+  TORCH_CHECK(input.numel() > 0 && input.numel() % 8 == 0,
+              "gelu_erf requires a positive 16-byte-aligned byte count");
+  TORCH_CHECK(!graph_dma::active(),
+              "gelu_erf is PASSTHROUGH only; fused graphs use the SPM launcher");
+  auto output = at::empty(input.sizes(), input.options());
+  if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
+  SpmAllocator::ScopedTemporary temporary;
+  constexpr int64_t block = 25600;
+  const uint32_t spm = SPM_ALLOC.addr(0, SPM_ALLOC.alloc_temporary(
+      std::min(input.numel(), block) * sizeof(c10::Half)));
+  for (int64_t offset = 0; offset < input.numel(); offset += block) {
+    const int64_t count = std::min(input.numel() - offset, block);
+    rpu_launch_ddr_broadcast_spm_dma_immediate(
+        input.data_ptr<c10::Half>() + offset, count, spm, 1);
+    rpu_launch_eltwise_unary_spm_kernel(
+        spm, spm, count, ValuOpType::ADD, GeluMode::ERF, 1);
+    rpu_launch_spm_copy_ddr_dma_immediate(
+        spm, output.data_ptr<c10::Half>() + offset, count);
+  }
+  return output;
+}
+
 void rpu_require_high_precision_math_kernels() {
   const auto& cache = KernelCache::instance();
   for (const auto id : {KernelId::UNARY_SILU_HIGH_PRECISION,

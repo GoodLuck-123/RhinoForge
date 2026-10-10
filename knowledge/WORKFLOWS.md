@@ -99,10 +99,19 @@ leaving launch arena capacity; same-length requests replay the pair. ASR audio
 blocks reuse the SigLIP fused host path with an exact ASR mode: fourteen heads
 padded to sixteen, 896-wide residuals, ERF GELU, original FP16 clamp and head
 scale. Its separate single-entry Graph is keyed by audio length and physical
-plan. Keep convolution and the final activation boundary explicit; rebuild the
-native extension before using the resident-audio API. TTS owns
-two decoder handles under one process owner. Retire both Graphs before handles
-and weights. Test retained outputs and close/reload across component handoffs.
+plan. Convolution remains CPU; conv_out, positions, valid-row selection, final
+ERF GELU/proj2 and prefill text/audio assembly retain features on RPU. Rebuild the
+native extension for the explicit GELU and assembly interfaces. TTS owns
+the Talker/Predictor decoder handles and, when the native per-head K RoPE capability
+is present, a third codec-frontend handle under one process owner. Retire all
+Graphs before their handles and weights. Preserve original CPU FP32 codec weights
+and fold LayerScale only into the new FP16 frontend copies; keep the original
+FP32 rotary frequencies. The frontend is limited to 1–63 frames, below its
+72-frame sliding window. Missing native capability selects CPU; arbitrary
+execution failures must remain visible. TTS declares five arenas before the first
+device allocation (four retained Graphs plus one immediate-launch slot), using
+the existing owner runtime policy. An incompatible frozen process plan requires
+a fresh process. Test retained outputs and close/reload across component handoffs.
 Speech loaders select the common caching allocator before device allocation.
 Reuse private KV storage with `reset_to_position(0)` at each new sequence;
 the causal path overwrites live rows before reading them. TTS speaker reuse is
@@ -113,7 +122,8 @@ FP16; preserve this boundary in reference comparisons. See the
 [speech optimization evidence](../docs/qwen3_audio_optimization_r1.zh.md).
 ASR uses channels-last CPU convolution storage without changing FP16 boundaries.
 Its causal-LM wrapper reuses the shared fused decode head and projects only the
-last prefill hidden position, retaining the CPU input embedding. Do not enable
+last prefill hidden position, retaining CPU single-token embedding lookup because
+its RPU launch costs more than the lookup. Prefill assembly stays on RPU. Do not enable
 that head on a base-model caller expecting hidden outputs. Retire the decoder
 before releasing that head. TTS Predictor's fixed 15-step greedy loop resets KV
 per frame; Talker still owns stopping and repetition penalties. Compare full

@@ -5566,7 +5566,6 @@ protected:
         // write inside the KvInsert subgraph. local_q_heads*hd <= h, so the
         // LayerWide input_norm slot is always large enough.
         int64_t local_q_heads = nq / tp;
-        int64_t local_kv_dim  = nkv * hd / tp;
         bool has_qk_head_norm = has_qk_norm_;
         // RoPE 经 emit_qk_rope 单一真相源:自动含 partial_mrope 叶,
         // 与 build_layer_subgraph 同枝 → KV_FIRST 不再漏抄 RoPE 分支。Q-split:Phase-1 Q
@@ -5587,7 +5586,7 @@ protected:
             emit_qk_rope("input_norm", "k", local_kv_heads, hd, seq_len, cos_sin_start, tp);
         } else {
             emit_qk_rope("q_kv", "q_kv", local_q_heads, hd, seq_len, cos_sin_start, tp);
-            emit_qk_rope("k", "k", 1, local_kv_dim, seq_len, cos_sin_start, tp);
+            emit_qk_rope("k", "k", nkv / tp, hd, seq_len, cos_sin_start, tp);
         }
 
         auto& k_cache = (*ctx().k_caches)[layer_idx];
@@ -6136,7 +6135,7 @@ protected:
             {
                 emit_qk_rope("q", "q", bs * local_q_heads, hd, seq_len,
                              cos_sin_start, tp);
-                emit_qk_rope("k", "k", bs, local_kv_dim, seq_len,
+                emit_qk_rope("k", "k", bs * (nkv / tp), hd, seq_len,
                              cos_sin_start, tp);
             }
         }
