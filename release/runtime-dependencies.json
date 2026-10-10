@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "launch_kernel": {
+    "commit": "bdc0dae56a6176c2fed6ae94f7c8c38a42bc7f06",
+    "version": "1.0.0"
+  },
+  "artifacts": {
+    "rhino_ops_main": {
+      "path": "rhinoOpLib_current.ref",
+      "sha256": "32539098de8ab4468da0b073db6f4da02592fa63c1d2511dd8a33bc12aa96365",
+      "commit": "a89573dfd4a7e89acc60a5cc67c53b31737eeba2"
+    },
+    "rhino_ops_expansion": {
+      "path": "rhinoExpansionOpLib_current.ref",
+      "sha256": "192cf67ccd8ebf88f38c1bbc295a961bad21068afce77de3fcd236b3361e84e8",
+      "commit": "f8d6b94b67d1be9416e35e79b5f8f94b03e7fab2"
+    }
+  }
+}

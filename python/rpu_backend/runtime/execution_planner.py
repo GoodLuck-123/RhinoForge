@@ -165,7 +165,7 @@ class PlannerCostScope:
 class PlannerCostCertificate:
     scope: PlannerCostScope
     domain_digest: str
-    # Exact native-candidate digest -> same-session median device time (ns).
+    # Exact native-candidate digest -> same-session media device time (ns).
     candidate_costs: tuple[tuple[str, int], ...]
     receipt_sha256: str
     sealed: bool = False
@@ -569,7 +569,7 @@ def planner_cost_domain(
             (int(length), replace(row, physical_metadata=tuple(
                 (name, value) for name, value in row.physical_metadata
                 if name not in {"execution_generation", "component_generation"}
-            )).identity()), "RPU-COST-CANDIDATE-V1",
+            )).identity()), "device-COST-CANDIDATE-V1",
         )
         for length, rows in domain.items()
         for row in (StageTuple.from_value(item) for item in rows)
@@ -589,7 +589,7 @@ def planner_cost_domain(
         "graph_mode": graph_mode,
         "raw_candidates": raw_keys,
         "candidates": sorted(set(keys.values())),
-    }, "RPU-COST-DOMAIN-V1")
+    }, "device-COST-DOMAIN-V1")
     return digest, keys
 
 
@@ -1160,7 +1160,7 @@ def plan_a6(
             sorted((int(key), str(value)) for key, value in (domain_rejections or {}).items())
         ),
     }
-    domain_digest = _digest(domain_payload, "RPU-A6-DOMAIN-V1")
+    domain_digest = _digest(domain_payload, "device-A6-DOMAIN-V1")
     candidates: list[A6Candidate] = []
     selected: A6Candidate | None = None
     feasible_count = 0
@@ -1296,10 +1296,10 @@ def plan_a6(
         "execution_len": selected.execution_len,
         "selected_stage_identity": selected.stage_tuple.identity(),
     }
-    physical_digest = _digest(physical_payload, "RPU-PHYS-V1")
+    physical_digest = _digest(physical_payload, "device-PHYS-V1")
     plan_digest = _digest(
         {"physical": physical_digest, "request": request.as_dict(), "optimality": optimality},
-        "RPU-A6P-V1",
+        "device-A6P-V1",
     )
     result = A6PlanResult(
         "ACCEPTED", request, selected, tuple(candidates), total_candidate_count, feasible_count,
@@ -1339,7 +1339,7 @@ def plan_prefill(
     """Jointly search execution length and the native three-stage domain.
 
     Production callers supply ``resolve_stage_domain``.  The callback returns
-    the domain-v1 ``int[]`` returned by the RPU ops, including each candidate's
+    the domain-v1 ``int[]`` returned by the device ops, including each candidate's
     complete input/QKV/compute schedules, spans, and boundary policies.  Tests
     may also supply structured :class:`StageTuple` rows.  This proves exact
     enumeration only for the three-stage chunk domain:
@@ -1407,7 +1407,7 @@ def plan_prefill(
         max_lengths=MAX_EXECUTION_LENGTH_CANDIDATES,
     )
 
-    # Materialise the full search once. A cost-bound winner from an earlier
+    # Materialise the full search once. A native winner from an earlier
     # length is re-admitted after selection, without changing the search, so
     # the native latest-oracle proof describes the candidate being dispatched.
     domain: dict[int, tuple[tuple[int, int, int], ...]] = {}
@@ -1610,7 +1610,7 @@ def plan_prefill(
                 "cost_receipt": cost_certificate.receipt_sha256 if cost_certificate else None,
                 "cost_domain": cost_domain_digest or None,
                 "selection_scope": selection_scope,
-            }, "RPU-A6P-V1"),
+            }, "device-A6P-V1"),
         )
     if calibration_selection is not None:
         if ((result.request.mode != REQUEST_AUTO and not (
@@ -1629,7 +1629,12 @@ def plan_prefill(
         candidate = matches[0]
     else:
         candidate = result.selected
-    if cost_scope is not None and candidate.execution_len != lengths[-1]:
+    if (candidate.stage_tuple.physical_descriptor or cost_scope is not None) and (
+        candidate.execution_len != lengths[-1]
+    ):
+        # Native admission is stateful even without a cost certificate. A later
+        # padding probe (including a rejection) replaces the owner's latest
+        # oracle; restore the selected length before its descriptor is consumed.
         current = read_domain(candidate.execution_len, MAX_A6_PAIRS)
         if current != raw_domain[candidate.execution_len]:
             raise ValueError("selected native domain changed during actual re-admission")
@@ -1648,14 +1653,14 @@ def plan_prefill(
             "graph_mode": graph_mode, "queue_owner_id": int(queue_owner_id),
             "lease_owner_id": int(lease_owner_id), "execution_len": candidate.execution_len,
             "selected_stage_identity": candidate.stage_tuple.identity(),
-        }, "RPU-PHYS-V1")
+        }, "device-PHYS-V1")
         result = replace(
             result, selected=candidate, optimality="P7_CALIBRATION_ONLY",
             selection_scope="P7_CALIBRATION_ONLY", cost_certificate=None,
             selected_cost_candidate_digest=calibration_selection.candidate_digest,
             physical_plan_digest=physical_digest,
             plan_digest=_digest({"physical": physical_digest, "request": result.request.as_dict(),
-                                 "selection_scope": "P7_CALIBRATION_ONLY"}, "RPU-A6P-V1"))
+                                 "selection_scope": "P7_CALIBRATION_ONLY"}, "device-A6P-V1"))
     if logger is not None:
         logger({
             "request_id": request_id,
@@ -1683,7 +1688,7 @@ def capability_selected(
                 "optimality": optimality,
                 "selection_scope": selection_scope,
             },
-            "RPU-A6P-V1",
+            "device-A6P-V1",
         ),
     )
 

@@ -1,4 +1,4 @@
-// rpu_eltwise_binary.cpp - Elementwise binary operations for RPU backend
+// rpu_eltwise_binary.cpp - Elementwise binary operations for device backend
 #include "rhino_launch_buffer.h"
 #include "rhino_launch_queue.h"
 
@@ -54,7 +54,7 @@ static at::Tensor binary_op_impl(
   const bool inplace = (out_opt != nullptr);
 
   TORCH_CHECK(a.device().type() == c10::DeviceType::PrivateUse1,
-              "binary_op: a not on RPU");
+              "binary_op: a not on device");
 
   // 1. 非 Half dtype: fallback to CPU (零拷贝)
   // Note: must handle broadcast correctly — a and b may have different shapes
@@ -1260,7 +1260,7 @@ at::Tensor &rpu_sub_(at::Tensor &self, const at::Tensor &other,
 at::Tensor &rpu_sub_scalar_(at::Tensor &self, const c10::Scalar &other,
                             const c10::Scalar &alpha) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_sub_scalar_: self not on RPU");
+              "rpu_sub_scalar_: self not on device");
 
   if (self.scalar_type() != at::kHalf) {
     auto self_cpu = rpu_to_cpu_zerocopy(self);
@@ -1287,9 +1287,9 @@ at::Tensor &rpu_div_(at::Tensor &self, const at::Tensor &other) {
 
 at::Tensor rpu_div_scalar(const at::Tensor &a, const c10::Scalar &b) {
   TORCH_CHECK(a.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_div_scalar: a not on RPU");
+              "rpu_div_scalar: a not on device");
 
-  // Only Half is supported by RPU kernel - 使用零拷贝优化
+  // Only Half is supported by device kernel - 使用零拷贝优化
   if (a.scalar_type() != at::kHalf) {
     auto a_cpu = rpu_to_cpu_zerocopy(a);
     auto result = at::empty_like(a);
@@ -1322,9 +1322,9 @@ at::Tensor rpu_mul(const at::Tensor &a, const at::Tensor &b) {
 
 at::Tensor rpu_mul_scalar(const at::Tensor &a, const c10::Scalar &b) {
   TORCH_CHECK(a.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_mul_scalar: a not on RPU");
+              "rpu_mul_scalar: a not on device");
 
-  // Only Half is supported by RPU kernel - 使用零拷贝优化
+  // Only Half is supported by device kernel - 使用零拷贝优化
   if (a.scalar_type() != at::kHalf) {
     auto a_cpu = rpu_to_cpu_zerocopy(a);
     auto result = at::empty_like(a);
@@ -1356,9 +1356,9 @@ at::Tensor &rpu_mul_(at::Tensor &self, const at::Tensor &other) {
 
 at::Tensor &rpu_mul_scalar_(at::Tensor &self, const c10::Scalar &other) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_mul_scalar_: self not on RPU");
+              "rpu_mul_scalar_: self not on device");
 
-  // Only Half is supported by RPU kernel - 使用零拷贝优化
+  // Only Half is supported by device kernel - 使用零拷贝优化
   if (self.scalar_type() != at::kHalf) {
     auto self_cpu = rpu_to_cpu_zerocopy(self);
     self_cpu.mul_(other);
@@ -1377,7 +1377,7 @@ at::Tensor &rpu_mul_scalar_(at::Tensor &self, const c10::Scalar &other) {
 // ------------------------ neg ------------------------
 at::Tensor rpu_neg(const at::Tensor &self) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_neg: self must be on RPU");
+              "rpu_neg: self must be on device");
 
   // neg(x) = -1 * x
   return rpu_mul_scalar(self, c10::Scalar(-1.0f));
@@ -1386,9 +1386,9 @@ at::Tensor rpu_neg(const at::Tensor &self) {
 // ------------------------ pow ------------------------
 at::Tensor rpu_pow_tensor_scalar(const at::Tensor &self, const c10::Scalar &exponent) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_pow: self must be on RPU");
+              "rpu_pow: self must be on device");
 
-  // Only Half is supported by RPU kernel - 使用零拷贝优化
+  // Only Half is supported by device kernel - 使用零拷贝优化
   if (self.scalar_type() != at::kHalf) {
     auto cpu_self = rpu_to_cpu_zerocopy(self);
     auto result = at::empty_like(self);
@@ -1416,9 +1416,9 @@ at::Tensor rpu_pow_tensor_scalar(const at::Tensor &self, const c10::Scalar &expo
 
 at::Tensor rpu_pow_tensor_tensor(const at::Tensor &self, const at::Tensor &exponent) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_pow: self must be on RPU");
+              "rpu_pow: self must be on device");
 
-  // Only Half is supported by RPU kernel - 使用零拷贝优化
+  // Only Half is supported by device kernel - 使用零拷贝优化
   if (self.scalar_type() != at::kHalf) {
     auto cpu_self = rpu_to_cpu_zerocopy(self);
     auto cpu_exp = (exponent.device().type() == c10::DeviceType::PrivateUse1)
@@ -1470,9 +1470,9 @@ at::Tensor rpu_pow_tensor_tensor(const at::Tensor &self, const at::Tensor &expon
 
 at::Tensor rpu_pow_scalar_tensor(const c10::Scalar &self, const at::Tensor &exponent) {
   TORCH_CHECK(exponent.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_pow: exponent must be on RPU");
+              "rpu_pow: exponent must be on device");
 
-  // Only Half is supported by RPU kernel - 使用零拷贝优化
+  // Only Half is supported by device kernel - 使用零拷贝优化
   if (exponent.scalar_type() != at::kHalf) {
     auto cpu_exp = rpu_to_cpu_zerocopy(exponent);
     auto result = at::empty_like(exponent);
@@ -1574,6 +1574,122 @@ void rpu_launch_pi05_gated_residual_spm_kernel(
   std::vector<uint8_t> core_ids;
   for (int core = 0; core < cores; ++core) core_ids.push_back(core);
   queue->enqueu_kernel(*kernel, {uint16_t(blocks), 1, 1}, core_ids);
+}
+
+// Exact FP16 round(sub) -> round(mul) -> add; original Pi gate/ADD arithmetic.
+void rpu_launch_g05_sub_gated_residual_spm_kernel(
+    uint32_t input_spm, uint32_t residual_spm, uint32_t gate_spm,
+    uint32_t output_spm, int64_t rows, int cores) {
+  TORCH_CHECK(rows >= 1 && rows <= 64 && (cores == 1 || cores == 8),
+              "G05 SUB-gated residual requires H1024, M1..64, cores1/8");
+  TORCH_CHECK(SPM_ALLOC.is_initialized(), "G05 SUB-gated residual requires live SPM");
+  constexpr uint64_t row_bytes = 2048;
+  const uint64_t bytes = rows * row_bytes, base = SPM_ALLOC.addr(0, 0);
+  auto checked = [base](uint32_t address, uint64_t size) {
+    return address % 256 == 0 && address >= base &&
+        uint64_t(address) - base + size <= SpmAllocator::SPM_USABLE;
+  };
+  TORCH_CHECK(checked(input_spm, bytes) && checked(residual_spm, bytes) &&
+                  checked(output_spm, bytes) && checked(gate_spm, row_bytes),
+              "G05 SUB-gated residual requires complete aligned absolute SPM operands");
+  auto disjoint = [](uint32_t a, uint64_t as, uint32_t b, uint64_t bs) {
+    return uint64_t(a) + as <= b || uint64_t(b) + bs <= a;
+  };
+  TORCH_CHECK((output_spm == input_spm || disjoint(output_spm, bytes, input_spm, bytes)) &&
+                  (output_spm == residual_spm || disjoint(output_spm, bytes, residual_spm, bytes)) &&
+                  disjoint(output_spm, bytes, gate_spm, row_bytes),
+              "G05 SUB-gated residual rejects partial output alias or gate overwrite");
+  // Balance <=16-row tiles: M50 uses 13/13/13/11 rows and four warps.
+  const int64_t blocks = CeilDiv(rows, int64_t(16));
+  const int64_t normal_rows = CeilDiv(rows, blocks);
+  const int64_t last_rows = rows - normal_rows * (blocks - 1);
+  TORCH_CHECK(KernelCache::instance().has_loaded(KernelId::G05_SUB_GATED_RESIDUAL_H1024),
+              "G05 SUB-gated-residual optional payload is unavailable");
+  auto* kernel = GET_KERNEL(KernelId::G05_SUB_GATED_RESIDUAL_H1024);
+  TORCH_CHECK(kernel, "G05 SUB-gated-residual expansion kernel is unavailable");
+  kernel->reset_regs();
+  kernel->set_regs(0, uint16_t(normal_rows));
+  kernel->set_regs(2, uint16_t(last_rows));
+  for (auto entry : {std::pair<uint32_t, uint32_t>{4, gate_spm},
+                     {6, input_spm}, {8, output_spm}, {14, residual_spm}}) {
+    kernel->set_regs(entry.first, uint16_t(entry.second & 0xffff));
+    kernel->set_regs(entry.first + 1, uint16_t(entry.second >> 16));
+  }
+  kernel->set_regs(10, uint16_t(normal_rows * 2));
+  kernel->set_regs(11, uint16_t(0));
+  kernel->set_regs(12, uint16_t(4));  // 1024 / 256 elements per VLM entry
+  kernel->set_regs(13, uint16_t(64)); // matrix VLM, disjoint from residual[0,64)
+  for (int reg : {56, 57, 58}) kernel->set_regs(reg, uint16_t(0x3c00));
+  kernel->set_regs(59, uint16_t(0));
+  kernel->set_regs(60, uint16_t(0));
+  kernel->set_regs(61, uint16_t(1));
+  kernel->set_regs(62, uint16_t(0x0492)); // FP16 MUL, alpha=1, no custom op
+  kernel->set_regs(63, uint16_t(0));
+  auto* queue = GET_QUEUE(cores);
+  queue->set_broadcast_mode(true);
+  std::vector<uint8_t> core_ids;
+  for (int core = 0; core < cores; ++core) core_ids.push_back(core);
+  queue->enqueu_kernel(*kernel, {uint16_t(blocks), 1, 1}, core_ids);
+}
+
+// Two RTC gate variants in one launch, with unchanged FP16 retirement.
+void rpu_launch_g05_rtc_sub_gated_residual_spm_kernel(
+    uint32_t input_spm, uint32_t residual_spm, uint32_t clean_gate_spm,
+    uint32_t noisy_gate_spm, uint32_t output_spm, int64_t clean_rows, int cores) {
+  TORCH_CHECK(clean_rows >= 0 && clean_rows <= 32 && cores == 8,
+              "G05 SUB-gated residual requires H1024, M32, clean_rows0..32, cores8");
+  TORCH_CHECK(SPM_ALLOC.is_initialized(), "G05 SUB-gated residual requires live SPM");
+  constexpr uint64_t row_bytes = 2048;
+  const uint64_t bytes = 32 * row_bytes, base = SPM_ALLOC.addr(0, 0);
+  auto checked = [base](uint32_t address, uint64_t size) {
+    return address % 256 == 0 && address >= base &&
+        uint64_t(address) - base + size <= SpmAllocator::SPM_USABLE;
+  };
+  TORCH_CHECK(checked(input_spm, bytes) && checked(residual_spm, bytes) &&
+                  checked(output_spm, bytes) && checked(clean_gate_spm, row_bytes) && checked(noisy_gate_spm, row_bytes),
+              "G05 SUB-gated residual requires complete aligned absolute SPM operands");
+  auto disjoint = [](uint32_t a, uint64_t as, uint32_t b, uint64_t bs) {
+    return uint64_t(a) + as <= b || uint64_t(b) + bs <= a;
+  };
+  TORCH_CHECK((output_spm == input_spm || disjoint(output_spm, bytes, input_spm, bytes)) &&
+                  (output_spm == residual_spm || disjoint(output_spm, bytes, residual_spm, bytes)) &&
+                  disjoint(output_spm, bytes, clean_gate_spm, row_bytes) &&
+                  disjoint(output_spm, bytes, noisy_gate_spm, row_bytes),
+              "G05 SUB-gated residual rejects partial output alias or gate overwrite");
+  // Preserve each segment's old balanced <=16-row tiles. Empty tiles exit.
+  auto tiles = [](int64_t rows) {
+    return rows <= 16 ? std::pair<int64_t,int64_t>{rows,0}
+                      : std::pair<int64_t,int64_t>{(rows+1)/2,rows/2};
+  };
+  const auto clean = tiles(clean_rows), noisy = tiles(32-clean_rows);
+  TORCH_CHECK(KernelCache::instance().has_loaded(KernelId::G05_RTC_SUB_GATED_RESIDUAL_M32H1024),
+              "G05 SUB-gated-residual optional payload is unavailable");
+  auto* kernel = GET_KERNEL(KernelId::G05_RTC_SUB_GATED_RESIDUAL_M32H1024);
+  TORCH_CHECK(kernel, "G05 SUB-gated-residual expansion kernel is unavailable");
+  kernel->reset_regs();
+  kernel->set_regs(0, uint16_t(clean.first));
+  kernel->set_regs(2, uint16_t(clean.second));
+  for (auto entry : {std::pair<uint32_t, uint32_t>{4, clean_gate_spm},
+                     {6, input_spm}, {8, output_spm}, {14, residual_spm}, {18, noisy_gate_spm}}) {
+    kernel->set_regs(entry.first, uint16_t(entry.second & 0xffff));
+    kernel->set_regs(entry.first + 1, uint16_t(entry.second >> 16));
+  }
+  kernel->set_regs(16, uint16_t(clean_rows));
+  kernel->set_regs(20, uint16_t(noisy.first));
+  kernel->set_regs(22, uint16_t(noisy.second));
+  kernel->set_regs(12, uint16_t(4));  // 1024 / 256 elements per VLM entry
+  kernel->set_regs(13, uint16_t(64)); // matrix VLM, disjoint from residual[0,64)
+  for (int reg : {56, 57, 58}) kernel->set_regs(reg, uint16_t(0x3c00));
+  kernel->set_regs(59, uint16_t(0));
+  kernel->set_regs(60, uint16_t(0));
+  kernel->set_regs(61, uint16_t(1));
+  kernel->set_regs(62, uint16_t(0x0492)); // FP16 MUL, alpha=1, no custom op
+  kernel->set_regs(63, uint16_t(0));
+  auto* queue = GET_QUEUE(cores);
+  queue->set_broadcast_mode(true);
+  std::vector<uint8_t> core_ids;
+  for (int core = 0; core < cores; ++core) core_ids.push_back(core);
+  queue->enqueu_kernel(*kernel, {4, 1, 1}, core_ids);
 }
 
 // ==================== Sameshape SPM Kernel ====================
@@ -1926,7 +2042,7 @@ void rpu_launch_eltwise_binary_1xC_NxC_spm_kernel(
     std::string kname = std::string("binary_1xC_NxC_") +
                         (tile_c ? "tileC" : "tileN") + (is_bopa ? "_bopa" : "");
     // Graph-aware fetch (NOT raw KernelCache::get_kernel) so the launch records
-    // into the fused graph. See [[spm-kernel-graph-recordable-fetch]].
+    // into the fused graph.
     Kernel_t* kernel = RpuKernelGraph::active().get_kernel_reset(kname);
     TORCH_CHECK(kernel != nullptr, "Failed to get ", kname, " kernel");
 
@@ -2115,7 +2231,7 @@ void rpu_launch_eltwise_binary_Bx1xC_BxNxC_spm_kernel(
                       (use_tileN ? "tileN" : "tileC") + (is_bopa ? "_bopa" : "");
   // Graph-aware fetch (NOT raw KernelCache::get_kernel) so the launch records into the
   // fused graph; the raw fetch breaks recording -> "kernel launched without KernelId
-  // or kernel_name path" -> PASSTHROUGH fallback. See [[spm-kernel-graph-recordable-fetch]].
+  // or kernel_name path" -> PASSTHROUGH fallback.
   Kernel_t* kernel = RpuKernelGraph::active().get_kernel_reset(kname);
   TORCH_CHECK(kernel != nullptr, "Failed to get ", kname, " kernel");
 
@@ -2176,7 +2292,7 @@ at::Tensor rpu_eltwise_bx1xc_test(const at::Tensor& a, const at::Tensor& b,
               "bx1xc_test: a/b must be fp16");
   TORCH_CHECK(a.device().type() == at::kPrivateUse1 &&
                   b.device().type() == at::kPrivateUse1,
-              "bx1xc_test: tensors must be on RPU");
+              "bx1xc_test: tensors must be on device");
   TORCH_CHECK(a.dim() == 3 && b.dim() == 3 && a.size(0) == b.size(0) &&
                   a.size(1) == 1 && a.size(2) == b.size(2),
               "bx1xc_test: need a=[B,1,C], b=[B,N,C]");

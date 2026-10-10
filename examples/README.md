@@ -1,61 +1,87 @@
-# 模型示例 / Model examples
+# Model examples
 
-配置统一按模型归档，每种版本、组件、精度和工作量只保留一份当前模板。完整目录见[配置索引](configs/README.md)。
+[简体中文](README.zh.md) · [Config index](configs/CONFIGURATIONS.md) · [Conversion commands](configs/WEIGHTS.md#quantization) · [Weight sources](configs/WEIGHTS.md) · [Support matrix](../docs/model_support.md)
 
-```sh
-python examples/run_model.py --config examples/configs/qwen3_5/vl/2b/fp16.toml --check-config
-python examples/run_model.py --config examples/configs/qwen3_vl/vl/4b/w8a16.toml
-```
+Choose a model and recommended TOML, then prepare weights and inputs using its guide. Current model templates use [`run.py`](run.py); `--config` is required.
 
-`--check-config` 只检查配置，不加载模型或访问板卡。运行前安装对应依赖并配置运行时资产。TOML 中的模型、图片、batch 和输出路径相对启动命令的工作目录解析；`/path/to/...` 需要替换成调用方本地文件。配置不包含权重或私有输入。
+Legacy model scripts remain compatibility wrappers. See the [v1.2.0 upgrade guide](../docs/upgrading_1_2.md) for old paths and input migrations; `python examples/migrate_config.py --help` lists the migration CLI.
 
-| 模型 | 配置组织 |
+## Choose a model
+
+| Model and config guide | Recommended config |
 |---|---|
-| [Qwen3](configs/qwen3/README.md) | `qwen3/text/<尺寸>/<精度>.toml` |
-| [Qwen3-VL](configs/qwen3_vl/README.md) | `qwen3_vl/{text,vision,vl}/<尺寸>/` |
-| [Qwen3.5](configs/qwen3_5/README.md) | `qwen3_5/{text,vl,legacy}/<尺寸>/` |
-| [Pi0.5](configs/pi05/README.md) | `pi05/{2cam,3cam}/`，仅 8 核配置 |
-| LingBot | `lingbot/v2/6b_<精度>.toml`，仅 v2 |
-| [RhinoVLA](configs/rhinovla/README.md) | `rhinovla/{v1,v3}/` |
-| [Wall-OSS](configs/wall_oss/README.md) | `wall_oss/base/`，公开基础 checkpoint |
-| 其他 | DINOv3、Gemma4、Llama、Hy-Embodied、HALO 等均在各自模型目录下 |
+| [DINOv3](configs/dinov3/README.md) | [ViT-B FP16](configs/dinov3/vit_b/fp16.toml) |
+| [G0.5](configs/g05/README.md) | [3cam FP16](configs/g05/3cam/fp16.toml) |
+| [Gemma4](configs/gemma4/README.md) | [E4B FP16](configs/gemma4/e4b/fp16.toml) |
+| [GR00T](configs/gr00t/README.md) | [224 FP16](configs/gr00t/n1_7_droid/fp16.toml) |
+| [HyVLA](configs/hy_vla/README.md) | [3cam FP16](configs/hy_vla/3cam/fp16.toml) |
+| [HY Embodied UMI](configs/hy_embodied/README.md) | [UMI FP16](configs/hy_embodied/umi/fp16.toml) |
+| [Llama](configs/llama/README.md) | [3.2-1B FP16](configs/llama/3_2_1b/fp16.toml) |
+| [Pi0.5](configs/pi05/README.md) | [3cam W8A16](configs/pi05/3cam/w8a16.toml) |
+| [Qwen3](configs/qwen3/README.md) | [0.6B FP16](configs/qwen3/text/0_6b/fp16.toml) |
+| [Qwen3.5 text](configs/qwen3_5/README.md) | [0.8B FP16](configs/qwen3_5/text/0_8b/fp16.toml) |
+| [Qwen3.5 vision](configs/qwen3_5/README.md) | [2B FP16](configs/qwen3_5/vl/2b/fp16.toml) |
+| [Qwen3-VL](configs/qwen3_vl/README.md) | [2B FP16](configs/qwen3_vl/vl/2b/fp16.toml) |
+| [RhinoVLA](configs/rhinovla/README.md) | [v1 FP16](configs/rhinovla/v1/official_fp16.toml) |
+| [Wall-OSS base](configs/wall_oss/README.md) | [3cam 224 FP16](configs/wall_oss/base/3cam/224/fp16.toml) |
+| [Wall-OSS RTC](configs/wall_oss/rtc/README.md) | [FP16](configs/wall_oss/rtc/fp16.toml) |
+| [Wall-OSS sorting](configs/wall_oss/sorting/README.md) | [W8A16](configs/wall_oss/sorting/w8a16.toml) |
+| [InternVLA](configs/internvla/README.md) | [NavDP FP16](configs/internvla/navdp/fp16.toml) |
+| [LingBot v2](configs/lingbot/v2/README.md) | [3cam T3 W8A16](configs/lingbot/v2/3cam_t3/w8a16.toml) |
+| [LingBot v1 (deferred)](configs/lingbot/README.md) | [4B mixed](configs/lingbot/v1/4b_mixed.toml) |
+| [HALO (deferred)](configs/halo/README.md) | [FP16 Expert](configs/halo/action_expert/fp16.toml) |
 
-同一个配置可交给统一入口或对应模型脚本，例如 `examples/qwen3_5_vision.py --config ...`。Qwen 和策略示例使用 `[example/input/run]`，Pi 使用 `[pi05/input/run]`。少数独立集成入口使用 `[runner/model/request]`；不要混用字段，详见[运行时配置](../docs/runtime_config.zh.md)。
+HALO and LingBot v1 remain deferred. Qwen3.5 35B MoE uses its controlled profiles.
 
-短测可复制目标配置，将 `[run]` 的 `warmup` 设为 1、`runs` 设为 2 或 3；生成模型把 `[input].decode_steps` 设为 32，确保 `warmup_decode_steps` 不超过它。保留原精度、核数、prefill、图像及 policy 步数，记录实际输入和计时模式。`decode_steps` 是 prefill 首 token 之后的 decode 调用数，EOS 可提前终止。D4096 文件不会自动执行。
+## Run
 
-`[run].profile = true` 或 `--profile` 会在计时后单独采集一次 Torch trace，结果写到 `run.output_dir` 下的独立目录，包含配置、样本时延和输出。`hwperf=true` 不由公开示例导出；结果不代表数值或任务质量认证。普通修改的检查预算见[验证说明](../docs/validation_policy.zh.md)。
+Install the backend, copy the chosen TOML, and fill in asset paths, inputs, and `run.output_dir` as described in the model guide.
 
-## Qwen3-VL 精度
-
-FP16、runtime W8、Text AWQ 与 runtime W4 的 checkpoint 格式不同，各尺寸必须使用自己的转换产物：
-
-```sh
-python -m rpu_backend.quant.convert_qwen3_vl --bits 8 --src /path/to/public-fp16 --dst /path/to/runtime-w8
-python -m rpu_backend.quant.convert_qwen3_vl --bits 4 --src /path/to/public-awq --dst /path/to/awq-runtime-w4
+```bash
+cp examples/configs/g05/3cam/fp16.toml /tmp/g05.toml
+# Edit paths and parameters as described in the config guide
+python examples/run.py --config /tmp/g05.toml --check-config
+python examples/run.py --config /tmp/g05.toml
 ```
 
-AWQ 源须符合 symmetric G32 compressed-tensors 格式。FP16 源经 `--bits 4` 得到 RTN W4，不能作为 AWQ。各模板的 projection recipe 和量化元数据由加载器检查，见[Qwen3-VL 配置说明](configs/qwen3_vl/README.md)。
+`--check-config` validates configuration without importing Torch or accessing a device; `--help` lists the unified CLI options. Edit supported ACC, text length, CPU threads, and sample counts in the same TOML; the model guide lists legal values.
 
-## Pi0.5 精度与输入
+<a id="logging-and-performance-output"></a>
+## Logging
 
-当前模板均为 B1、TP8、T32、动作长度 50、10 个 denoise step，通过公开 `optimized_profile` 选择融合、缓存和 AdaRMS 预计算。两相机、三相机各提供 FP16、W8、Action NVFP4、Prefill A8 + Action NVFP4；真实相机槽位和输入预处理必须匹配 checkpoint。
+Add this top-level table beside `[run]`; these are also the defaults:
 
-NVFP4 需要独立离线 checkpoint，使用 `striped_v2`、block16，Action Q/O/Gate/Up/Down 为 NVFP4，K/V 和 VLM 为 W8。Prefill A8 只改变指定 GateUp/GeGLU 路径。不得将旧 INT4 checkpoint 改名当作 NVFP4，详见[Pi 配置说明](configs/pi05/README.md)。
+```toml
+[logging]
+level = "ERROR"
+summary = true
+```
 
-## 公开 Wall-OSS 与 RhinoVLA
+`level` accepts the uppercase values below. It filters diagnostics; `summary=true` keeps `[MODEL]` configuration and `[PERF]` runtime summaries at every level.
 
-Wall-OSS 使用公开 [wall-oss-0.5](https://huggingface.co/x-square-robot/wall-oss-0.5) 底座的 processor、normalizer、state bins 和动作定义；配置集中在 `base/`。RhinoVLA 按 v1、v3 选择调用方信任的 factory 与请求输入；版本目录不代表内置了模型仓库的私有装配代码。
+| Level | Diagnostics shown |
+|---|---|
+| `CRITICAL` | Fatal errors only; ordinary ERROR messages are hidden |
+| `ERROR` | ERROR and CRITICAL; default |
+| `WARNING` | Warnings, including tagged fallback and Graph messages, plus errors |
+| `INFO` | Loading, ordinary `print()` output and generated text, plus warnings/errors |
+| `DEBUG` | Existing Graph diagnostics, complete reports and native TRACE output |
+
+Ordinary `print()` is INFO; recognized tags select their own level. Exceptions propagate. `summary=false` hides only `[MODEL]` and `[PERF]`. There is no `logging.file` field. Native output is saved as `native-*.stdout.log` / `native-*.stderr.log` under `run.output_dir` and replayed with the selected filter when the process finishes. `report.json` is saved at every level.
+
+`[MODEL]` lists precision, inputs, device settings, CPU threads, warmup/runs and output location. `[PERF]` labels the runner's actual call boundary and separates complete-model, component and diagnostic calls. LLM/VLM summaries use actual input tokens, decode calls and output counts; prefill produces the first output token. Unmeasured Vision or TTFT fields are omitted.
+
+## Results
+
+`run.output_dir` selects the output location; some profiles create subdirectories. Read `report.json` for timings, checks, and actual artifact paths. Multi-length G05 results use one `text_N/` directory per length.
+
+[Runtime setup](../docs/runtime_assets.md)
 
 ## Qwen3 speech
 
-- `qwen3_asr.py`: local mono 16 kHz PCM16 WAV → transcript.
-- `qwen3_tts.py`: short Chinese/English text + mono 24 kHz reference → WAV.
+- [`qwen3_asr.py`](qwen3_asr.py): local mono 16 kHz PCM16 WAV to transcript.
+- [`qwen3_tts.py`](qwen3_tts.py): short Chinese/English text and mono 24 kHz reference audio to WAV.
 
-These dedicated APIs use a bounded CPU/RPU profile. See the
-[speech setup and R1 evidence](../docs/qwen3_audio_r1.zh.md) for pinned assets,
-source preparation, commands, CPU boundaries and limits.
-
-`benchmark_qwen3_audio.py` measures complete speech requests from a local JSON
-manifest, using two warmups and five fixed-input repeats followed by up to
-20 distinct inputs. See the [speech measurement protocol](../docs/qwen3_audio_r1.zh.md).
+Install the `audio` extra and follow the [speech guide](../docs/qwen3_audio.md)
+for pinned weights, source preparation, commands and input limits. These scripts
+use dedicated APIs, separate from the TOML runner.

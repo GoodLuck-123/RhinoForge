@@ -1,32 +1,56 @@
-# Public model configurations
+# 示例配置
 
-每个模型只保留一套当前配置目录，按版本、组件、尺寸和精度区分。文件名中的不同精度、相机数、P/D 长度表示不同工作量，不是新旧格式的重复副本。
+[完整配置索引](CONFIGURATIONS.md) · [权重与转换](WEIGHTS.md) · [登记支持矩阵](../../docs/model_support.zh.md) · [所有入口](../README.zh.md)
 
-| 模型 | 唯一配置目录 | 内容 |
+从模型指南选择模板，查看配置差别和输入限制，再填写资产路径运行。
+
+## 按模型选择
+
+| 模型族 | 配置说明 | 主要区别 |
 |---|---|---|
-| Qwen3 | [qwen3/text](qwen3/README.md) | 尺寸、FP16/W8、W4/G32 与 LM-head recipe |
-| Qwen3-VL | [qwen3_vl/{text,vision,vl}](qwen3_vl/README.md) | 独立 Text、Vision、图文及精度/长度组合 |
-| Qwen3.5 | [qwen3_5/{text,vl,legacy}](qwen3_5/README.md) | Dense、MoE、精度、核数和长度；legacy 是独立 checkpoint 格式 |
-| Pi0.5 | [pi05/{2cam,3cam}](pi05/README.md) | 8 核 FP16、W8、Action NVFP4、Prefill A8 + Action NVFP4 |
-| LingBot | [lingbot/v2](lingbot/v2) | 6B FP16、W8A16；只保留 v2 配置 |
-| RhinoVLA | [rhinovla/{v1,v3}](rhinovla/README.md) | 按版本选择调用方提供的 trusted runtime factory |
-| Wall-OSS | [wall_oss/base](wall_oss/README.md) | 公开基础模型的四种精度配置 |
-| DINOv3 | [dinov3/vit_b](dinov3/vit_b) | ViT-B FP16 |
-| Gemma4 | [gemma4/e4b](gemma4/e4b) | E4B FP16 |
-| Llama | [llama/3_2_1b](llama/3_2_1b) | Llama 3.2 1B FP16 |
-| Hy-Embodied | [hy_embodied/umi](hy_embodied/umi) | 公开 UMI 配置 |
-| HALO | [halo/action_expert](halo/action_expert) | Action expert 单步组件 |
-| 其他集成入口 | [g05/base](g05/base)、[gr00t/n1_7_droid](gr00t/n1_7_droid)、[internvla/navdp](internvla/navdp)、[siglip/pi05_component](siglip/pi05_component) | 各自公开模型/组件合同 |
+| G0.5 | [g05](g05/README.md) | 2/3cam × FP16、W8、W8+Action NVFP4；ACC/text 在文件内修改 |
+| Pi0.5 | [pi05](pi05/README.md) | 2/3cam × 四精度；TP8 优化与 TP4/6 基线分组 |
+| HyVLA | [hy_vla](hy_vla/README.md) | 2/3cam × 三精度；当前优化入口为 TP8 |
+| Wall-OSS | [wall_oss](wall_oss/README.md) | base 按相机/分辨率/精度；RTC 与分拣为不同负载 |
+| GR00T | [gr00t](gr00t/README.md) | 224/256 × FP16/W8，text 在文件内修改 |
+| RhinoVLA | [rhinovla](rhinovla/README.md) | v1、v3 factory、独立验证片段分别使用 |
+| Qwen3 | [qwen3](qwen3/README.md) | 模型大小、精度、Instruct / lm_head recipe |
+| Qwen3.5 | [qwen3_5](qwen3_5/README.md) | text/VL、Dense/MoE、精度、固定 P/D 复现 |
+| Qwen3-VL | [qwen3_vl](qwen3_vl/README.md) | text/VL、模型大小、精度、固定 P/D 复现 |
+| DINOv3 | [dinov3](dinov3/README.md) | ViT-B FP16 图像编码 |
+| Gemma4 | [gemma4](gemma4/README.md) | E4B FP16 |
+| Llama | [llama](llama/README.md) | 3.2-1B FP16 |
+| HY Embodied | [hy_embodied](hy_embodied/README.md) | 原 UMI fixture；优化模板见 HyVLA |
+| HALO | [halo](halo/README.md) | Action expert；延期状态保留 |
+| InternVLA | [internvla](internvla/README.md) | NavDP fixture |
+| LingBot | [lingbot](lingbot/README.md) | v1/v2 分开；v1 延期状态保留 |
 
-```sh
-python examples/run_model.py --config examples/configs/qwen3_5/vl/2b/fp16.toml --check-config
-python examples/run_model.py --config examples/configs/qwen3_5/vl/2b/fp16.toml
+## 目录与模板规则
+
+统一使用 `<模型族>/<版本、组件或模型大小>/<确实不同的输入几何>/<精度>.toml`；没有这些维度时省略对应层。
+模型身份、权重 recipe、相机/尺寸等实质差异决定模板路径。ACC、text len、CPU、warmup/runs、AUTO chunk 等支持的参数直接修改文件，不复制每种参数组合。
+
+| 分组 | 用途 |
+|---|---|
+| 普通模型目录 | 可选运行模板；推荐配置见模型指南 |
+| 固定 P/D 模板 | 输入生成、profile 或计时方式不同的固定负载运行；保留原路径 |
+| `legacy/` 或 legacy 文件 | 历史输入与接口兼容，具体限制见同族说明 |
+| `controlled/` | 受控验证；Rhino v3 的 `[env]` 片段使用独立验证入口 |
+| `unoptimized/` | 未启用对应优化的执行配置 |
+
+## 参数与运行
+
+统一运行命令为 `python examples/run.py --config <TOML>`，`--config` 必填。CPU 线程使用 `[cpu].threads`；省略时使用对应 runner 的默认值。ACC、文本长度和采样次数的合法值见模型指南，在同一文件修改。
+
+```bash
+python examples/run.py --config examples/configs/g05/3cam/fp16.toml --check-config
+python examples/run.py --config examples/configs/g05/3cam/fp16.toml
 ```
 
-从仓库根目录运行。`--check-config` 不加载权重或访问板卡。alias 在 `RPU_MODEL_CACHE` 下解析，默认根目录为 `~/.cache/rhinoforge/models`；相对输入路径以进程工作目录为基准。
+按模型 README 替换资产、输入和库路径。`--check-config` 无需 Torch/设备，只检查语法及身份；不加载权重或访问设备。
+REF 依赖使用 [当前两份正式库](../../docs/runtime_assets.md)，配置不依赖实验 REF。
 
-模型配置使用 `[example]`、`[input]`、`[run]` 和可选 `[rpu_execution]`，Pi 使用 `[pi05]`。`example.profile_id` 对应 [profiles.json](profiles.json) 中实际被模板引用的精度、组件和冷态约束。G0.5、GR00T、NavDP、SigLIP 的单个集成模板使用 `[runner/model/request]`；调用方自有的旧格式文件仍可运行，目录中不另放兼容副本。
+<a id="本轮路径迁移"></a>
+Rhino v3 新命令使用 [expert_w8a16.toml](rhinovla/v3/expert_w8a16.toml)，旧 `w8a16.toml` 保留为兼容别名。完整路径映射与输入迁移见 [v1.2.0 升级指南](../../docs/upgrading_1_2.zh.md)。
 
-短测请复制目标配置，保留 `run.warmup=2`，将 `run.runs=2` 或 `3`，生成模型的 `input.decode_steps=32`，省略 `warmup_decode_steps` 或使其等于正式 decode 长度；`warmup >= 2` 时拒绝更短的预热。两次预热覆盖固定 signature 的 BUILD 和真实 REPLAY；预热耗时单独记录为 `warmup_wall_ms_runs`。显式零次或一次预热可用于冷路径诊断，但不代表稳态。保留需要比较的其他输入、精度和执行设置。长 P/D 配置仅在显式选择时运行。
-
-`assets/example.ppm` 是公开示意图片，不是历史性能或质量报告的原始输入。权重、batch、预处理 tensor 和应用请求由调用方提供。配置存在不扩大运行时准入或声明质量认证；本目录不包含客户模型、私有 fixture 或部署定制。
+`[logging]` 与 `[run]` 同级，默认 `level="ERROR"`、`summary=true`。等级和输出文件见[日志说明](../README.zh.md#logging-and-performance-output)。

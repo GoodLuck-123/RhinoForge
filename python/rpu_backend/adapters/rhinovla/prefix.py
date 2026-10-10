@@ -1,4 +1,4 @@
-"""CPU-only prefix assembly shared by production and legacy diagnostics."""
+"""CPU-only prefix composition shared by production and legacy diagnostics."""
 import torch
 
 
@@ -19,8 +19,8 @@ def scatter_visual_embeds_to_dense_cpu(visual_embeds, visual_pos_mask, seq_len, 
     return dense_list
 
 def prepare_prefix_inputs_from_vision_outputs(model, qin, vision_output):
-    """Backend-free assembly: splice pooler + get_rope_index + deepstack-dense.
-    `vision_output` may come from CPU or (later) RPU vision; its pooler_output /
+    """Backend-free composition: splice pooler + get_rope_index + deepstack-dense.
+    `vision_output` may come from CPU or (later) device vision; its pooler_output /
     deepstack_features are CPU fp32 with shapes [n_vis, hidden] either way."""
     iface = model.qwen if hasattr(model, "qwen") else model.qwen_vl_interface
     top = iface.model

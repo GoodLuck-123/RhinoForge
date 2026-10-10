@@ -41,12 +41,12 @@ def _cpp():
 # AMP support
 # -------------------------------
 def get_amp_supported_dtype() -> list:
-    """Return list of dtypes supported by AMP on RPU."""
+    """Return list of dtypes supported by AMP on device."""
     return [torch.float16]
 
 
 def is_autocast_available() -> bool:
-    """Check if autocast is available for RPU."""
+    """Check if autocast is available for device."""
     return True
 
 
@@ -54,7 +54,7 @@ def is_autocast_available() -> bool:
 # Availability check
 # -------------------------------
 def is_available() -> bool:
-    """Return whether the native backend and RPU runtime are usable.
+    """Return whether the native backend and device runtime are usable.
 
     ``torch.rpu`` is always scaffolded by the Python package.  Loading the
     extension alone is insufficient: the current process must retain access to
@@ -74,7 +74,7 @@ def is_available() -> bool:
 # Caching allocator
 # -------------------------------
 def set_caching_allocator(enabled: bool) -> None:
-    """Select the process allocator before the first non-empty RPU tensor.
+    """Select the process allocator before the first non-empty device tensor.
 
     The first call or allocation freezes the choice. Repeating the same value
     is safe; selecting the other mode requires a fresh Python process.
@@ -91,13 +91,13 @@ def get_caching_allocator() -> bool:
 
 
 def empty_cache() -> None:
-    """Release cached RPU allocator blocks back to the runtime."""
+    """Release cached device allocator blocks back to the runtime."""
     if _cpp_loaded() and hasattr(_cpp(), "empty_cache"):
         _cpp().empty_cache()
 
 
 def get_memory_stats() -> dict:
-    """Return RPU caching allocator stats when available."""
+    """Return device caching allocator stats when available."""
     if _cpp_loaded() and hasattr(_cpp(), "get_memory_stats"):
         return dict(_cpp().get_memory_stats())
     return {}
@@ -109,13 +109,13 @@ def memory_stats() -> dict:
 
 
 def reset_peak_memory_stats() -> None:
-    """Reset current peak counters in the RPU caching allocator."""
+    """Reset current peak counters in the device caching allocator."""
     if _cpp_loaded() and hasattr(_cpp(), "reset_peak_memory_stats"):
         _cpp().reset_peak_memory_stats()
 
 
 def reset_accumulated_memory_stats() -> None:
-    """Reset accumulated allocation/free counters in the RPU caching allocator."""
+    """Reset accumulated allocation/free counters in the device caching allocator."""
     if _cpp_loaded() and hasattr(_cpp(), "reset_accumulated_memory_stats"):
         _cpp().reset_accumulated_memory_stats()
 
@@ -124,10 +124,10 @@ def reset_accumulated_memory_stats() -> None:
 # DDR flush
 # -------------------------------
 def set_ddr_flush(enabled: bool) -> None:
-    """Enable/disable internal RPU kernel-to-kernel DDR flush (default: disabled).
+    """Enable/disable internal device kernel-to-kernel DDR flush (default: disabled).
 
-    Controls intra-RPU sync points that are redundant when data never leaves
-    DDR/SPM. CPU<->RPU boundary coherency is controlled separately by
+    Controls intra-device sync points that are redundant when data never leaves
+    DDR/SPM. CPU<->device boundary coherency is controlled separately by
     set_ddr_flush_force.
     """
     if _cpp_loaded():
@@ -142,7 +142,7 @@ def get_ddr_flush() -> bool:
 
 
 def set_ddr_flush_force(enabled: bool) -> None:
-    """Enable/disable CPU<->RPU boundary force DDR flush (default: enabled).
+    """Enable/disable CPU<->device boundary force DDR flush (default: enabled).
 
     Required for cache coherency at zero-copy views, cross-device copies, and
     CPU fallback boundaries. Disabling is unsafe in production but useful for

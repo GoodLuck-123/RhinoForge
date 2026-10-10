@@ -1,5 +1,6 @@
-# Public configuration; provide your own checkpoint and input assets.
-
+# Original Text-only W4: seven decoder projections only; head/Vision FP16.
+# This recipe is separate from runtime W8/W4 and uses its own evidence.
+# 31 decode calls + the prefill token = 32 output tokens.
 [example]
 profile_id = "qwen3-vl-4b-text-awq-w4a16.w4a16.text"
 registry_alias = "qwen3-vl-4b-text-awq-w4a16"
@@ -23,8 +24,6 @@ inference_mode = false
 hwperf = false
 profile = false
 seed = 0
-
-[rpu_execution]
 
 [rpu_execution.model]
 num_cores = 8

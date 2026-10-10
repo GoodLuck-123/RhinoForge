@@ -145,7 +145,7 @@ def _expected_checkpoint_shapes() -> dict[str, tuple[int, ...]]:
 
 
 def _validate_checkpoint_profile(key_to_reader) -> None:
-    """Reject missing/mismatched/non-fp32 weights before RPU materialization."""
+    """Reject missing/mismatched/non-fp32 weights before device materialization."""
     errors = []
     for prefix, expected_depth in (
         (VLM_P + "layers.", VLM_LAYERS),

@@ -272,6 +272,8 @@ class _HyVlaNativeOwnerConfig:
     mot_norm_nomerge: int = 0
     q_inplace: bool = False
     rmsnorm_capability: int = _RMSNORM_CAP_BASE
+    prefill_kv_only: bool = False
+    kv_spm_only: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -314,6 +316,9 @@ class _HyVlaNativeColdSnapshot:
                 q_inplace=_parse_bool(
                     source, "RPU_HY_VLA_Q_INPLACE", empty=False
                 ),
+                kv_spm_only=_parse_bool(
+                    source, "RPU_HY_VLA_VISION_KV_SPM_ONLY", empty=False
+                ),
             ),
             vlm=_HyVlaNativeOwnerConfig(
                 fast_replay=selected("RPU_HY_VLA_FAST_REPLAY", "vlm"),
@@ -325,6 +330,9 @@ class _HyVlaNativeColdSnapshot:
                 partial_rope=selected("RPU_HY_VLA_PARTIAL_ROPE", "vlm"),
                 mot_norm_nomerge=_hyvla_mot_norm_nomerge(source),
                 rmsnorm_capability=_rmsnorm_capability_from_env(source),
+                prefill_kv_only=_parse_bool(
+                    source, "RPU_HY_VLA_PREFILL_KV_ONLY", empty=False
+                ),
             ),
             expert=_HyVlaNativeOwnerConfig(
                 fast_replay=selected("RPU_HY_VLA_FAST_REPLAY", "expert"),
@@ -436,10 +444,15 @@ def prepare_hy_vla_cold_plan(
         effective.update({str(key): str(value) for key, value in overrides.items()})
     for key, value in _HY_VLA_ENV_DEFAULTS.items():
         effective.setdefault(key, value)
+    native = _HyVlaNativeColdSnapshot.from_environment(effective)
+    weights = _HyVlaWeightColdPlan.from_environment(effective)
+    runner = _HyVlaRunnerColdSnapshot.from_environment(effective)
+    if weights.gateup_resident and (not runner.unroll or not native.expert.silu_mul):
+        raise ValueError("RPU_HY_VLA_EXPERT_GATEUP_RESIDENT requires ten-step unroll and expert SILU_MUL")
     return _HyVlaColdPlan(
-        native=_HyVlaNativeColdSnapshot.from_environment(effective),
-        weights=_HyVlaWeightColdPlan.from_environment(effective),
-        runner=_HyVlaRunnerColdSnapshot.from_environment(effective),
+        native=native,
+        weights=weights,
+        runner=runner,
         caching_allocator=_parse_bool(
             effective, "RPU_HY_VLA_CACHING_ALLOC", empty=True
         ),
@@ -463,6 +476,17 @@ MASK_NEG = -50000.0   # fp16 安全的 additive mask 常量。vendor 用 -2.38e3
 
 def _rpu16(t: torch.Tensor) -> torch.Tensor:
     return t.to(dtype=torch.float16, device="rpu").contiguous()
+
+
+def _rpu16_images(images: Sequence[torch.Tensor]) -> List[torch.Tensor]:
+    # The packed native entry still receives one mutable-DMA view per camera.
+    # CPU cameras can share one upload; each view keeps that request's owner alive.
+    if (images and images[0].ndim == 4 and images[0].shape[0] == 1
+            and all(im.device.type == "cpu" and im.shape == images[0].shape
+                    for im in images)):
+        packed = _rpu16(torch.cat([im.to(dtype=torch.float16) for im in images]))
+        return list(packed.split(1))
+    return [_rpu16(im) for im in images]
 
 
 class _Sub:
@@ -557,7 +581,7 @@ class HyVlaRunner:
     `RPU_HY_VLA_PERSIST_HANDLES=1`（默认）使三座子系统跨帧存活。
     prompt-layout 改变时，`_cached` 更新常量并作废旧图；复用前提见 `_sub`。
     设为 `0` 则每帧重建三座，并重新将权重从 DDR preload 到 SPM。
-    权重本身只在 `build_hy_vla()` 时 swizzle 一次，常驻 RPU DDR。
+    权重本身只在 `build_hy_vla()` 时 swizzle 一次，常驻 device DDR。
     """
     w: HyVlaWeights
     prefix_len: int                 # S = ceil16(有效 prefix 行数)
@@ -580,6 +604,8 @@ class HyVlaRunner:
     _const_val: tuple = dataclasses.field(repr=False, default=None)
     _prefix_key: tuple = dataclasses.field(repr=False, default=None)
     _prefix_val: tuple = dataclasses.field(repr=False, default=None)
+    _device_prefix_key: tuple = dataclasses.field(repr=False, default=None)
+    _device_prefix_val: tuple = dataclasses.field(repr=False, default=None)
     _psubs: dict = dataclasses.field(repr=False, default=None)
     _uw: tuple = dataclasses.field(repr=False, default=None)
     _ux0: torch.Tensor = dataclasses.field(repr=False, default=None)
@@ -1030,6 +1056,7 @@ class HyVlaRunner:
         if self._closed:
             return
         self._drop_psubs()
+        self._device_prefix_key = self._device_prefix_val = None
         self._closed = True
 
     def close(self) -> None:
@@ -1056,7 +1083,7 @@ class HyVlaRunner:
         它们是 `prefill_pos` / `prefill_mask` / `modality_mask` / `denoise_mask` /
         `suffix_pos` 的纯函数，而这几个输入在同一条 prompt 上跨帧不变 —— 但**不能
         假定**不变（prompt 变了长度就变了），所以用 `torch.equal` 按内容比对。
-        命中时复用常量及其 RPU 张量；失配时重建相关常量并使旧图失效。
+        命中时复用常量及其 device 张量；失配时重建相关常量并使旧图失效。
         """
         prev = self._const_key.get(tag)
         if prev is not None and all(
@@ -1101,7 +1128,11 @@ class HyVlaRunner:
             parts.append(grid.reshape(g * (g + 1), D))
             parts.append(tok[c.tok_vision_end][None])
         parts.append(tok[lang_tokens.long()])
-        return torch.cat(parts, 0)[None]
+        prefix = torch.cat(parts, 0)[None]
+        if prefix.shape[1] < self.prefix_len:
+            prefix = torch.nn.functional.pad(
+                prefix, (0, 0, 0, self.prefix_len - prefix.shape[1]))
+        return prefix
 
     def _prefix_tmpl(self, n_img: int, lang_tokens: torch.Tensor):
         """按图像数及语言 token 内容缓存 prefix 常量骨架和图像行视图。
@@ -1119,9 +1150,11 @@ class HyVlaRunner:
                 rows = g + 1                       # 每行 7 个 patch + 1 个 split
                 per = g * rows                     # 每图 56 行
                 lang = tok[lang_tokens.long()]
-                # prefix 骨架直接采用其消费者所需的 FP16，避免每帧再转换常量部分。
-                # 逐元素转换不依赖这些行是在拼接前还是拼接后转换。
-                buf = torch.empty((1, 2 + n_img * (per + 2) + lang.shape[0], D),
+                # Store the cached prefix in its consumer's FP16 dtype.
+                # Elementwise conversion preserves the same values whether it
+                # happens before or after assembling the prefix.
+                logical_rows = 2 + n_img * (per + 2) + lang.shape[0]
+                buf = torch.empty((1, max(logical_rows, self.prefix_len), D),
                                   dtype=torch.float16)
                 buf[0, 0] = tok[c.tok_bos]
                 buf[0, 1] = tok[c.tok_user]
@@ -1133,10 +1166,59 @@ class HyVlaRunner:
                     blk[:, g] = tok[c.tok_vision_split]     # 每行末尾的 split
                     slots.append(blk[:, :g])                # ← 逐帧只写这个视图
                     buf[0, base + 1 + per] = tok[c.tok_vision_end]
-                buf[0, 2 + n_img * (per + 2):] = lang
+                buf[0, 2 + n_img * (per + 2):logical_rows] = lang
+                buf[0, logical_rows:] = 0
                 self._prefix_key = (n_img, lang_tokens.clone())
                 self._prefix_val = (buf, slots, per)
         return self._prefix_val
+
+    def _assemble_device_prefix(self, img_embs: Sequence[torch.Tensor],
+                                lang_tokens: torch.Tensor) -> torch.Tensor:
+        """Insert fresh merger rows into a published, immutable token skeleton."""
+        c, tok = self.w.cfg, self.w.tok_emb
+        g, D, S, n_img = c.grid, c.proj_dim, self.prefix_len, len(img_embs)
+        special = (c.tok_bos, c.tok_user, c.tok_vision_start,
+                   c.tok_vision_split, c.tok_vision_end)
+        # Checkpoint materialization may run under inference_mode; those CPU
+        # owners have no version counter, so their consumed bytes are authority.
+        version = None if torch.is_inference(tok) else tok._version
+        key = (n_img, g, D, S, special, id(tok), tok.data_ptr(), version,
+               tuple(tok.shape), tok.dtype, tuple(lang_tokens.long().tolist()))
+        token_ids = torch.tensor((*special, *key[-1]), dtype=torch.long)
+        selected = tok[token_ids].to(dtype=torch.float16).contiguous()
+        saved = self._device_prefix_val
+        # Compare the consumed FP16 bytes too: an untracked CPU alias can write
+        # token values without advancing the tensor's version counter.
+        if (key != self._device_prefix_key or saved is None
+                or not torch.equal(selected.view(torch.int16),
+                                   saved[1].view(torch.int16))):
+            with torch.inference_mode(False), torch.no_grad():
+                skeleton = torch.zeros((S, D), dtype=torch.float16)
+                skeleton[0], skeleton[1] = selected[0], selected[1]
+                per = g * (g + 1)
+                runs = []
+                for camera in range(n_img):
+                    base = 2 + camera * (per + 2)
+                    skeleton[base] = selected[2]
+                    for row in range(g):
+                        start = base + 1 + row * (g + 1)
+                        runs.append((start, g))
+                        skeleton[start + g] = selected[3]
+                    skeleton[base + 1 + per] = selected[4]
+                lang_start = 2 + n_img * (per + 2)
+                lang_rows = min(len(key[-1]), S - lang_start)
+                skeleton[lang_start:lang_start + lang_rows] = selected[5:5 + lang_rows]
+                published = _rpu16(skeleton)
+                ids = torch.arange(S, dtype=torch.int32).to("rpu")
+                runs_cpu = torch.tensor(runs, dtype=torch.int64)
+                # Retain the token owner as well as its content snapshot; a
+                # replacement must not recycle an earlier identity/address.
+                saved = (tok, selected.clone(), published, ids, runs_cpu)
+                self._device_prefix_key, self._device_prefix_val = key, saved
+        parts = [image.reshape(g, g, D)[row]
+                 for image in img_embs for row in range(g)]
+        return torch.ops.rpu.assemble_inputs_embeds_parts(
+            saved[2], saved[3], parts, saved[4], True).unsqueeze(0)
 
     # ── 三段 ──────────────────────────────────────────────────────────────
     def _prepare_vit(self, n_img: int) -> _Sub:
@@ -1176,7 +1258,10 @@ class HyVlaRunner:
                 h, w.vit_patch_gemm_w, w.vit_pos_fused, 16, 16)
 
         vit_seq = c.vit_seq * (n_img if self._vit_packed else 1)
-        return self._sub("vit", torch.ops.rpu.hyvit2_create,
+        create_vit = (torch.ops.rpu.hyvit2_create_kv_spm_only
+                      if self._native_cold.vit.kv_spm_only
+                      else torch.ops.rpu.hyvit2_create)
+        return self._sub("vit", create_vit,
                         torch.ops.rpu.hyvit2_destroy, bind,
                         rpu_backend.graph.GraphSignature(
                        op_id="hyvit2_vision_compute",
@@ -1202,19 +1287,22 @@ class HyVlaRunner:
             spans=[{"offset": image * span_len, "length": span_len,
                     "group": image, "boundary": "KEEP_LOCAL"}
                    for image in range(image_count)],
-            kv_route="DDR_REQUIRED",
-            route_reason="DDR_KV_CACHE_STORAGE_REQUIRED",
+            kv_route="RAW_SPM" if self._native_cold.vit.kv_spm_only else "DDR_REQUIRED",
+            route_reason=("VISION_RAW_SPM_ONLY" if self._native_cold.vit.kv_spm_only
+                          else "DDR_KV_CACHE_STORAGE_REQUIRED"),
             plan_signature=(int(image_count), bool(self._vit_packed and self._pe_in_graph)),
         )
 
-    def _run_vit(self, images: Sequence[torch.Tensor]) -> List[torch.Tensor]:
+    def _run_vit(self, images: Sequence[torch.Tensor], *,
+                 return_device: bool = False) -> List[torch.Tensor]:
         c, cache, n_img = self.w.cfg, self._vit_cache, len(images)
         sub = self._prepare_vit(n_img)
 
         def fwd(img):
             cache.reset_to_position(0)
-            # 逐图路径在 ViT capture 外执行 patch embedding。
-            hid = torch.ops.rpu.hyvit2_patch_embed(sub.handle, _rpu16(img))
+            # Prepare patch embeddings before encoder capture.
+            hid = torch.ops.rpu.hyvit2_patch_embed(
+                sub.handle, _rpu16(img), img.device.type == "cpu")
             with sub.gc.capture(vision_sig):
                 return torch.ops.rpu.hyvit2_forward(
                     sub.handle, hid,
@@ -1247,17 +1335,18 @@ class HyVlaRunner:
                 # _pe_in_graph 控制 patch embedding 是否进入 capture，多核权重布局
                 # 由同一份 cold 配置绑定。H2D 输入准备仍在 capture 外完成。
                 cache.reset_to_position(0)
-                imgs_rpu = [_rpu16(im) for im in images]
+                imgs_rpu = _rpu16_images(images)
+                inputs_published = all(im.device.type == "cpu" for im in images)
                 kc = [cache.k_caches[i] for i in range(c.vit_layers)]
                 vc = [cache.v_caches[i] for i in range(c.vit_layers)]
                 if self._pe_in_graph:
                     with sub.gc.capture(vision_sig):
                         o = torch.ops.rpu.hyvit2_forward_multi(
                             sub.handle, imgs_rpu, kc, vc,
-                            vision_descriptor)
+                            vision_descriptor, inputs_published)
                 else:
                     hid = torch.ops.rpu.hyvit2_patch_embed_multi(
-                        sub.handle, imgs_rpu)
+                        sub.handle, imgs_rpu, inputs_published)
                     with sub.gc.capture(vision_sig):
                         o = torch.ops.rpu.hyvit2_forward_packed(
                             sub.handle, hid, n_img, kc, vc,
@@ -1287,7 +1376,10 @@ class HyVlaRunner:
                 torch.ops.rpu.spm_alloc_reset_temporary()
                 with sub.gc.capture(self._merger_sig(n_img)):
                     emb_rpu = self._merger_rest(stacked)
-                embs = emb_rpu.cpu()
+                # The private fused prefix path consumes this fresh DDR output
+                # directly. Public/CPU callers retain their readback boundary.
+                embs = (emb_rpu if return_device and self._fused_merger
+                        and self._prefix_template else emb_rpu.cpu())
             else:
                 embs = self._merger_rest(stacked).cpu()
             if not self._prefix_template:
@@ -1320,15 +1412,15 @@ class HyVlaRunner:
         """merger 余部：DwPooler group-softmax → GELU → proj2。
 
         batch 维对应相机数。普通路径在 host 完成组轴重排、mean、softmax
-        和加权求和，在 RPU 执行 GEMM，避免在组轴归约间反复切换设备。
+        和加权求和，在 device 执行 GEMM，避免在组轴归约间反复切换设备。
         host 张量保持 FP16，归约使用 FP32 累加；因此末尾 sum 的舍入路径
         与逐次 FP16 加法不同。融合路径使用其专用的 member-major 布局。"""
         M, D = self.w.merger_rest, self.w.cfg.proj_dim
         B0 = proj1_out.shape[0] if proj1_out.dim() == 3 else 1
         if self._merger_in_graph:
             # 融合 op 在同一图内执行 Linear、GELU、pool 与 combine，减少 eager 派发。
-            assert self._fused_merger, \
-                "RPU_HY_VLA_MERGER_IN_GRAPH 需要 member-major 布局，必须同时开 " \
+            assert self._fused_merger,\
+                "RPU_HY_VLA_MERGER_IN_GRAPH 需要 member-major 布局，必须同时开 "\
                 "RPU_HY_VLA_FUSED_MERGER"
             # proj1 进图 ⇒ 输入是 [4,G,vit_hidden]，权重/偏置多传两条；
             # 关掉时传 None，走与落地前逐位相同的老链路。
@@ -1445,16 +1537,58 @@ class HyVlaRunner:
         w = self.w
         assert (state is None) != (state_emb is None), "state / state_emb 二选一"
 
+        # Weight quantization does not change the fused merger's FP16 output.
+        # Keep new quantized admission within the measured T32/D10 profiles;
+        # arbitrary mixed/W4 installs retain their previous host prefix path.
+        quantized_prefix = (
+            bool(w.vit.get("qw"))
+            and all(branch.get(key) and all(t.dtype == torch.int8 for t in branch[key])
+                for branch, key in ((w.vit, "qw"), (w.vlm_text, "q_w"),
+                                    (w.vlm_vision, "q_w")))
+            and bool(w.expert.get("q_w"))
+            and all(t.dtype == (torch.uint8 if w.expert_nvfp4 is not None else torch.int8)
+                    for t in w.expert["q_w"])
+            and w.cfg.num_steps == 10 and w.tok_emb.device.type == "cpu"
+            and lang_tokens.ndim == 1 and lang_tokens.numel() == 64
+            and torch.is_tensor(prefill_mask)
+            and prefill_mask.device.type == "cpu" and prefill_mask.ndim == 2
+            and min(prefill_mask.shape) >= self.prefix_len
+            and (len(images), self.prefix_len) in ((2, 160), (3, 208))
+            and bool(prefill_mask[:2 + len(images) * 58 + 32].bool().any(-1).all())
+            and not bool(prefill_mask[2 + len(images) * 58 + 32:].bool().any()))
+        device_prefix = (
+            self._vit_packed and self._fused_merger and self._merger_in_graph
+            and self._prefix_template and (w.cfg.grid, w.cfg.proj_dim) == (7, 2048)
+            and ((len(images), self.prefix_len) == (3, 208)
+                 or ((len(images), self.prefix_len) == (2, 160)
+                     and (not w.vlm_vision["q_ws"] or quantized_prefix)
+                     and torch.is_tensor(prefill_mask)
+                     and prefill_mask.device.type == "cpu" and prefill_mask.ndim == 2
+                     and min(prefill_mask.shape) >= 160
+                     # Two-camera T32 has 118 image/special + 32 valid language rows.
+                     and bool(prefill_mask[:150].bool().any(-1).all())
+                     and not bool(prefill_mask[150:].bool().any())))
+            and lang_tokens.device.type == "cpu"
+            and ((not w.vit["qws"] and not w.vlm_text["q_ws"]
+                  and not w.expert["q_ws"] and w.expert_nvfp4 is None)
+                 or quantized_prefix))
+
         # ── 1) ViT ────────────────────────────────────────────────────────
-        img_embs = self._run_vit(images)
+        img_embs = (self._run_vit(images, return_device=True) if device_prefix
+                    else self._run_vit(images))
 
         # ── 2) 组装 prefix（host）──────────────────────────────────────────
-        prefix = self.assemble_prefix(img_embs, lang_tokens)
+        prefix = (self._assemble_device_prefix(img_embs, lang_tokens)
+                  if device_prefix else self.assemble_prefix(img_embs, lang_tokens))
 
         # ── 3) VLM prefill ────────────────────────────────────────────────
         cache, total = self._cache, self._total
-        self._run_vlm_prefill(cache, prefix, prefill_pos, prefill_mask,
-                              modality_mask)
+        if device_prefix:
+            self._run_vlm_prefill(cache, prefix, prefill_pos, prefill_mask,
+                                  modality_mask, inputs_published=True)
+        else:
+            self._run_vlm_prefill(cache, prefix, prefill_pos, prefill_mask,
+                                  modality_mask)
 
         # ── 4) expert denoise ×10 ─────────────────────────────────────────
         st = (state_emb if state_emb is not None else
@@ -1478,7 +1612,7 @@ class HyVlaRunner:
             for i in range(S):
                 if not valid[i]:
                     vm[i, i] = True  # padding 行开对角口：CPU softmax 对全 -inf 行
-                                     # 退化成均匀分布，RPU kernel 未必；因果性保证
+                                     # 退化成均匀分布，device kernel 未必；因果性保证
                                      # 这些行的值流不回有效行。
             return (vcos, vsin,
                     _rpu16(torch.where(vm, 0.0, MASK_NEG).reshape(1, 1, S, S)),
@@ -1534,7 +1668,10 @@ class HyVlaRunner:
             else:
                 torch.ops.rpu.hyvla_vlm_set_moe_weights(*margs)
 
-        vlm = self._sub("vlm", torch.ops.rpu.hyvla_vlm_create,
+        create_vlm = (torch.ops.rpu.hyvla_vlm_create_kv_only
+                      if self._native_cold.vlm.prefill_kv_only
+                      else torch.ops.rpu.hyvla_vlm_create)
+        vlm = self._sub("vlm", create_vlm,
                         torch.ops.rpu.hyvla_vlm_destroy, bind_vlm,
                         rpu_backend.graph.GraphSignature(
                        op_id="hyvla_vlm_prefill", shapes=[S, c.vlm_hidden],
@@ -1563,19 +1700,24 @@ class HyVlaRunner:
 
     def _run_vlm_prefill(self, cache: RPUCache, prefix: torch.Tensor,
                          prefill_pos: torch.Tensor, prefill_mask: torch.Tensor,
-                         modality_mask: torch.Tensor) -> None:
+                         modality_mask: torch.Tensor, *,
+                         inputs_published: bool = False) -> None:
         """MoT 双权重 prefill —— 把 prefix KV 写进 `cache` 的 `[0,S)`。"""
         c, S = self.w.cfg, self.prefix_len
         vlm, (vcos, vsin, vmask) = self._prepare_vlm(
             prefill_pos, prefill_mask, modality_mask)
         x_prefix = _rpu16(prefix[:, :S])
+        native_prefill = (torch.ops.rpu.hyvla_vlm_prefill_kv_only
+                          if self._native_cold.vlm.prefill_kv_only
+                          else torch.ops.rpu.hyvla_vlm_step_forward)
 
         def prefill():
             cache.reset_to_position(0)
             with vlm.gc.capture(vlm_sig):
-                torch.ops.rpu.hyvla_vlm_step_forward(
+                native_prefill(
                     vlm.handle, x_prefix, cache.k_caches, cache.v_caches,
-                    vcos, vsin, vmask, 0, vlm_descriptor)
+                    vcos, vsin, vmask, 0, vlm_descriptor,
+                    prefix.device.type == "cpu" or inputs_published)
             native_chunk = int(
                 torch.ops.rpu.hyvla_vlm_get_resolved_chunk_size(vlm.handle)
             )
@@ -1647,8 +1789,14 @@ class HyVlaRunner:
                      ecos, esin, w.expert_final_norm,
                      c.num_q_heads, w.kv_heads_rpu, c.head_dim, c.expert_hidden,
                      c.expert_inter, c.eps, L, w.action_mlp_cores)
-            if w.expert["q_ws"]:
-                # unroll 的 encoder/out_proj 权重保持浮点，不随 expert 量化选择改变。
+            if getattr(w, "expert_nvfp4", None) is not None:
+                # Explicit Expert NVFP4 profile: FP8 blockscale tensor lists
+                # followed by seven owned FP32 projection-family tables.
+                names = ("q", "k", "v", "o", "gate", "up", "down")
+                torch.ops.rpu.hyvla_expert_set_weights_nvfp4(
+                    *eargs, *[w.expert[name + "_ws"] for name in names],
+                    *[w.expert[name + "_ts"][0] for name in names])
+            elif w.expert["q_ws"]:
                 torch.ops.rpu.hyvla_expert_set_weights_w8a16(
                     *eargs, *[w.expert[k] for k in ("q_ws", "k_ws", "v_ws",
                                                     "o_ws", "gate_ws", "up_ws",
@@ -1658,6 +1806,9 @@ class HyVlaRunner:
             if self._unroll:
                 torch.ops.rpu.hyvla_expert_set_action_weights(
                     h, *self._uw, c.action_dim, c.num_steps)
+            if w.expert.get("gateup_resident"):
+                torch.ops.rpu.hyvla_expert_set_gateup_resident_weights(
+                    h, w.expert["gateup_resident"][0], w.expert_o_resident_layers)
 
         exp = self._sub("expert", torch.ops.rpu.hyvla_expert_create,
                         torch.ops.rpu.hyvla_expert_destroy, bind_exp,
@@ -1705,7 +1856,14 @@ class HyVlaRunner:
         if self._unroll:
             # 一次 forward 跑完 10 步。cache 只在进图前 reset 一次 —— 图内每个 body
             # 都以 position=S 插 KV，覆写同一段 51 行，与逐步 reset 等价。
-            self._ux0[:, 1:, :].copy_(_rpu16(noise))
+            # Native can publish both CPU inputs together after writing their
+            # final DMA sources. Device-owned inputs retain the copy_ boundary.
+            noise_cpu = None
+            if noise.device.type == "cpu" and st.device.type == "cpu":
+                noise_cpu = noise.to(dtype=torch.float16).contiguous()
+            else:
+                self._ux0[:, 1:, :].copy_(
+                    noise if noise.device.type == "cpu" else _rpu16(noise))
             with exp:
                 action_plan, action_descriptor, _action_chunk, action_details = (
                     self._plan_action_execution(exp)
@@ -1724,8 +1882,11 @@ class HyVlaRunner:
                 with exp.gc.capture(action_sig):
                     torch.ops.rpu.hyvla_expert_unroll_forward(
                         exp.handle, self._ux0, cache.k_caches, cache.v_caches,
-                        _rpu16(st.reshape(-1)), ecos, esin, emask,
-                        self._utraj, dt, S, c.num_steps, action_descriptor)
+                        (st.reshape(-1).to(dtype=torch.float16).contiguous()
+                         if st.device.type == "cpu" else _rpu16(st.reshape(-1))),
+                        ecos, esin, emask,
+                        self._utraj, dt, S, c.num_steps, action_descriptor, True,
+                        noise_cpu)
                 native_chunk = int(
                     torch.ops.rpu.hyvla_expert_get_resolved_chunk_size(
                         exp.handle
@@ -1740,7 +1901,7 @@ class HyVlaRunner:
                     native_chunk=native_chunk,
                     details=action_details,
                 )
-                out = self._utraj[-1:].cpu().float()   # 读回早于 reset_temporary
+                out = self._utraj[-1:].to(device="cpu", dtype=torch.float32)
                 torch.ops.rpu.spm_alloc_reset_temporary()
             return out[:, 1:, :]
 
@@ -1765,7 +1926,7 @@ class HyVlaRunner:
                 native_chunk=native_chunk,
                 details=action_details,
             )
-            so = o.float().cpu()              # capture 退出后立刻读回
+            so = o.to(device="cpu", dtype=torch.float32)  # capture 退出后立刻读回
             torch.ops.rpu.spm_alloc_reset_temporary()
             up = torch.addmm(self._out_proj_b, so[0, -c.n_action:],
                              self._out_proj_wt)          # 见 `__post_init__`
@@ -1810,7 +1971,7 @@ def build_hy_vla(
     _owner: object | None = None,
     _cold_plan: _HyVlaColdPlan | None = None,
 ) -> HyVlaRunner:
-    """装载 Hy-VLA：权重一次性全部上 RPU，返回可反复调用的 runner。
+    """装载 Hy-VLA：权重一次性全部上 device，返回可反复调用的 runner。
 
     Args:
         pos_embedding: ViT 位置编码。**默认 `None` = 从 ckpt 自己的 `pos_embed`
@@ -1823,7 +1984,7 @@ def build_hy_vla(
             显式传 `ceil16(有效行数)`。
 
         ⚠️ 这是低层入口，但不是生命周期逃生口。一旦开始原生权重物化，
-        该 Python 进程同样不能再构建另一个 RPU runner/model；需要重启进程。
+        该 Python 进程同样不能再构建另一个 device runner/model；需要重启进程。
     """
     cold_plan = (
         prepare_hy_vla_cold_plan()
@@ -1847,7 +2008,7 @@ def build_hy_vla(
     if not Path(ckpt_path).is_file():
         raise FileNotFoundError(f"Hy-VLA 权重不存在: {ckpt_path}")
     # Validate the complete safetensors schema before claiming or poisoning the
-    # process-wide RPU owner.  The loader repeats this check on its live handle.
+    # process-wide device owner.  The loader repeats this check on its live handle.
     preflight_hy_vla_checkpoint(ckpt_path, cfg)
     from rpu_backend.api.causal_lm import (
         _claim_live_instance,

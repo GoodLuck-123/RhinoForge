@@ -73,7 +73,7 @@ def test_check_config_uses_metadata_without_importing_runtime_or_opening_device(
     assert "2.10.0" in output
     assert BACKEND_ORIGIN in output
     assert "api=" not in output
-    assert "RPU ready" not in output
+    assert "device ready" not in output
 
 
 @pytest.mark.parametrize(

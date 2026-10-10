@@ -82,7 +82,7 @@ def set_hw_perf_trace(
     output_dir: str = ".rpu-hw-perf",
     max_dumps: int = 32,
 ) -> None:
-    """Enable RPU HW cycle-precision kernel/DMA Chrome trace dump.
+    """Enable device HW cycle-precision kernel/DMA Chrome trace dump.
 
     Generates one JSON per BUILD and per REPLAY of every cached fused-decoder
     subgraph, up to ``max_dumps`` files per process. File names:

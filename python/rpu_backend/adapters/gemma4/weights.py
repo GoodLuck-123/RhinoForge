@@ -3,7 +3,7 @@
 Builds the per-layer weight lists + dual RoPE tables + per-layer int arrays for
 ``torch.ops.rpu.gemma4_set_weights`` from a (swizzled) HF Gemma4 text model.
 
-Mixed geometry (PLAN.md §D T1d):
+Mixed geometry:
   * per-layer q/o projections have layer-dependent width (sliding nq*256 / global
     nq*512); ``convert_linear_weights_inplace`` swizzles each nn.Linear by its own
     (in,out) so a single ``attn_num_cores = min(8, num_kv_heads)`` (=2 for E4B)
@@ -69,10 +69,10 @@ def extract_decoder_weight_lists(layers, geom) -> dict[str, list]:
 
 def make_rope_tables(text_config, max_pos: int, device: str = "rpu", dtype=None):
     """Two KERNEL-FORMAT cos/sin tables (sliding, global) via HF, ready for the
-    RPU SPM RoPE kernel. Returns (cos_sliding, sin_sliding, cos_global, sin_global)
+    device SPM RoPE kernel. Returns (cos_sliding, sin_sliding, cos_global, sin_global)
     each ``[max_pos, head_dim/2]``. Needs the isolated transformers with Gemma4.
 
-    T2 (verified against golden + ``src/ops/rpu_rope.cpp``): the RPU ``llama_rope``
+    T2 (verified against golden + ``src/ops/rpu_rope.cpp``): the device ``llama_rope``
     kernel uses NeoX d/2-split pairing — identical to HF Gemma4 — and reads cos/sin
     in the half-width KERNEL format ``[max_pos, head_dim/2]`` (the unique half; the
     fused C++ feeds the stored pointer straight to the kernel with NO slicing). HF

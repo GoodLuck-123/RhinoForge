@@ -14,9 +14,11 @@
 #include "rpu_ops.h"
 #include "rpu_spm_allocator.h"
 #include <c10/util/Half.h>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <utility>
 
 using namespace at;
 using namespace ::rhino_lkn;
@@ -274,4 +276,79 @@ void rpu_launch_sdpa_spm_minibatch_kernel(
     wq->set_broadcast_mode(true);
     wq->set_flush_icache(false);
     wq->enqueu_kernel(*kernel, {grid_dim_x, grid_dim_y, grid_dim_z}, core_list);
+}
+
+void rpu_launch_lingbot2_vision_sdpa_spm_kernel(
+    uint32_t q_addr, uint32_t k_addr, uint32_t vt_addr,
+    uint32_t output_addr, uint32_t tmp_addr) {
+    // Cold owner admission fixes B3/S256/QKV16/D64/TP8. Preserve the original
+    // 32b minibatch M128/N64/K256 register ABI; only K/V input staging changes.
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "Lingbot2 Vision SPM SDPA requires initialized SPM");
+    constexpr uint64_t kOperandBytes = 3 * 256 * 2 * 64 * 2;
+    constexpr uint64_t kTmpBytes = 393216;
+    const uint64_t base = SPM_ALLOC.addr(0, 0);
+    const std::array<std::pair<uint32_t, uint64_t>, 5> ranges{{
+        {q_addr, kOperandBytes}, {k_addr, kOperandBytes},
+        {vt_addr, kOperandBytes}, {output_addr, kOperandBytes},
+        {tmp_addr, kTmpBytes}}};
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const auto [address, bytes] = ranges[i];
+        TORCH_CHECK(address >= base && (address & 31u) == 0 &&
+                        bytes <= SpmAllocator::SPM_USABLE &&
+                        uint64_t{address} - base <= SpmAllocator::SPM_USABLE - bytes &&
+                        uint64_t{address} + bytes <= (uint64_t{1} << 32),
+                    "Lingbot2 Vision SPM SDPA requires complete aligned absolute SPM intervals");
+        for (size_t j = 0; j < i; ++j) {
+            TORCH_CHECK(uint64_t{address} + bytes <= ranges[j].first ||
+                            uint64_t{ranges[j].first} + ranges[j].second <= address,
+                        "Lingbot2 Vision SPM SDPA Q/K/Vt/output/tmp must be disjoint");
+        }
+    }
+    // Validate every physical core before looking up/resetting the kernel.
+    std::array<std::array<uint32_t, 5>, 8> addresses_v16{};
+    for (int core = 0; core < 8; ++core) {
+        const uint64_t core_base = SPM_ALLOC.addr(core, 0);
+        for (size_t i = 0; i < ranges.size(); ++i) {
+            const uint64_t address = core_base + ranges[i].first - base;
+            TORCH_CHECK((address & 31u) == 0 &&
+                            address + ranges[i].second <= (uint64_t{1} << 32),
+                        "Lingbot2 Vision SPM SDPA per-core address exceeds aligned u32 storage");
+            addresses_v16[core][i] = static_cast<uint32_t>(address >> 5);
+        }
+    }
+    constexpr KernelId id = KernelId::LINGBOT2_VISION_SDPA_SPM_B3S256H16D64_32B;
+    TORCH_CHECK(KernelCache::instance().has_loaded(id),
+                "Lingbot2 Vision SPM SDPA optional payload is absent");
+    auto* queue = GET_QUEUE(8);
+    TORCH_CHECK(queue != nullptr, "Lingbot2 Vision SPM SDPA eight-core queue is absent");
+    auto* kernel = GET_KERNEL(id);
+    TORCH_CHECK(kernel != nullptr, "Lingbot2 Vision SPM SDPA kernel is absent");
+    kernel->reset_regs();
+    // Same setup as the ordinary wrapper with default tile_m_override=0.
+    // DDR address registers 50..53 remain zero and are unused by this payload.
+    const std::pair<uint16_t, uint16_t> parameters[] = {
+        {0, 256}, {2, 768}, {3, 48}, {6, 16}, {7, 16}, {8, 2}, {9, 2},
+        {10, 64}, {11, 64}, {12, 64}, {13, 4}, {14, 4}, {15, 4},
+        {18, 8}, {19, 1}, {20, 128}, {21, 64}, {22, 16}, {23, 2},
+        {24, 8}, {25, 2}, {26, 16}, {27, 4},
+        {28, 16}, {29, 16}, {30, 16}, {31, 16}, {32, 1}, {34, 3},
+        {41, 0x3e00}, {42, 1},
+        {58, 128}, {59, 64}, {60, 256}, {61, 8}, {62, 4}, {63, 16},
+        {64, 6}, {65, 2}, {66, 1}};
+    for (const auto& [reg, value] : parameters) kernel->set_regs(reg, value);
+    for (int core = 0; core < 8; ++core) {
+        const int old_base = SCM_REG_OFFSET + core * 8;
+        const int kv_base = SCM_REG_OFFSET + 64 + core * 4;
+        const auto& a = addresses_v16[core];
+        rpu_set_scm_u32_checked(kernel, old_base, a[0], "Lingbot2 Vision Q");
+        rpu_set_scm_u32_checked(kernel, old_base + 2, a[4], "Lingbot2 Vision tmp");
+        rpu_set_scm_u32_checked(kernel, old_base + 4, 0, "Lingbot2 Vision no mask");
+        rpu_set_scm_u32_checked(kernel, old_base + 6, a[3], "Lingbot2 Vision output");
+        rpu_set_scm_u32_checked(kernel, kv_base, a[1], "Lingbot2 Vision K");
+        rpu_set_scm_u32_checked(kernel, kv_base + 2, a[2], "Lingbot2 Vision V transpose");
+    }
+    queue->set_broadcast_mode(true);
+    queue->set_flush_icache(false);
+    queue->enqueu_kernel(*kernel, {6, 2, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
 }

@@ -1,4 +1,4 @@
-"""FX GraphModule partitioner — split materialization ops out of RPU sub-graphs.
+"""FX GraphModule partitioner — split materialization ops out of device sub-graphs.
 
 Background
 ==========
@@ -11,11 +11,11 @@ materialization 出空 buffer。
 Solution
 ========
 在 backend 收到 FX gm 之后 partition:
-  - RPU-safe nodes → 各自 sub-GraphModule,backend g.begin/end 包,正常 capture/replay
+  - device-safe nodes → 各自 sub-GraphModule,backend g.begin/end 包,正常 capture/replay
   - Materialization nodes → 独立 single-node sub-GraphModule,**保持 eager 跑**
 
   Result:gm 切成 [rpu_seg_0, mat_0, rpu_seg_1, mat_1, ...] chain。Eager 段
-  在前一 RPU 段 g.end() 之后跑,data 已 flush,materialization 拿到正确数据。
+  在前一 device 段 g.end() 之后跑,data 已 flush,materialization 拿到正确数据。
 
 Materialization detection
 =========================
@@ -25,7 +25,7 @@ Materialization detection
   - `aten._to_copy.default`     — 当且仅当 device 改变 (跨 device 必 break)
   - `aten.copy_.default`        — 总是切 (in-place,跨 RECORDING 边界语义复杂)
 
-未来可以扩展 conditional break (e.g. RPU→RPU 同 dtype `_to_copy` 不切)。
+未来可以扩展 conditional break (e.g. device→device 同 dtype `_to_copy` 不切)。
 
 
 This frontend is frozen and is not exported from the top-level package.
@@ -59,11 +59,11 @@ def _is_to_copy_cross_device(node: torch.fx.Node) -> bool:
     # kwargs may include device / dtype / layout / memory_format
     device_kw = node.kwargs.get("device")
     # If device is changing (e.g. rpu → cpu), this is a cross-device
-    # materialization and must be broken out of the RPU graph.
+    # materialization and must be broken out of the device graph.
     if device_kw is not None:
         return True
-    # If only dtype changes but device stays RPU,_to_copy is still a real
-    # copy but the output lives on RPU — can stay inside RPU graph deferred.
+    # If only dtype changes but device stays device,_to_copy is still a real
+    # copy but the output lives on device — can stay inside device graph deferred.
     # 保守起见:如果有 dtype 改变,先切(防 Python lifecycle 不可见的 sync)。
     if "dtype" in node.kwargs and node.kwargs["dtype"] is not None:
         return True
@@ -102,7 +102,7 @@ def _is_to_method_cross_device(node: torch.fx.Node) -> bool:
 
 
 def is_materialization_node(node: torch.fx.Node) -> bool:
-    """True if this FX node must be broken out of an RPU sub-graph."""
+    """True if this FX node must be broken out of an device sub-graph."""
     if node.op == "call_function":
         if node.target in _MATERIALIZATION_TARGETS:
             return True
@@ -124,9 +124,9 @@ def _make_partition_callback(
     materialization_nodes: List[torch.fx.Node],
 ) -> Callable[[torch.fx.Node], int]:
     """Assign each FX node a partition id:
-        - RPU runs of non-materialization nodes share the same id (e.g. 0)
+        - device runs of non-materialization nodes share the same id (e.g. 0)
         - Each materialization node gets its own unique id
-        - The next RPU run gets a new id (so adjacent rpu/eager/rpu segments
+        - The next device run gets a new id (so adjacent rpu/eager/rpu segments
           are separated even if eager partition has only one node)
     """
     mat_set = {id(n) for n in materialization_nodes}
@@ -171,7 +171,7 @@ def partition_gm(
     )
 
     # Walk split_gm.graph in topological order to find submodule call order
-    # and infer whether each is RPU-safe (no materialization inside) or a
+    # and infer whether each is device-safe (no materialization inside) or a
     # materialization step (single node).
     info: List[Tuple[str, bool]] = []
     for node in split_gm.graph.nodes:

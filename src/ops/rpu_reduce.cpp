@@ -1,4 +1,4 @@
-// rpu_reduce.cpp - Reduce operations for RPU backend (DDR version)
+// rpu_reduce.cpp - Reduce operations for device backend (DDR version)
 #include "rhino_launch_buffer.h"
 #include "rhino_launch_program.h"
 #include "rhino_launch_queue.h"
@@ -130,7 +130,7 @@ at::Tensor rpu_mean_dim(const at::Tensor &self, at::OptionalIntArrayRef dim,
                         bool keepdim, c10::optional<at::ScalarType> dtype) {
     // Check device
     TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-                "rpu_mean_dim: input must be on RPU device");
+                "rpu_mean_dim: input must be on device");
 
     // Only support fp16
     if (self.scalar_type() != at::kHalf) {

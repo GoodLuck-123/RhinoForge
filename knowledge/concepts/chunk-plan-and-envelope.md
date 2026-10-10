@@ -26,7 +26,7 @@ when the physical plan uses more rows.
 
 1. Reject a model or request outside the exact public profile before loading or
    transforming weights.
-2. Bind `rpu_execution` before RPU installation and the first Graph BUILD. A
+2. Bind `rpu_execution` before device installation and the first Graph BUILD. A
    later change requires a new model or policy.
 3. Evaluate only deterministic candidates. A fused subsystem's
    `declare_buffers` and chunk-validity hooks must not launch work or depend on
@@ -44,8 +44,7 @@ when the physical plan uses more rows.
 A sticky prefill chunk override resolves to a capacity of 16 for a single-token
 decode. Both scalar EXACT and COMPLETE descriptor admission compare that
 request-local capacity without rewriting the stored prefill override; multi-token
-requests retain strict equality.
-[Fused planning implementation](../../src/core/fused_model_base.cpp)
+requests retain strict equality. [Fused planning implementation](../../src/core/fused_model_base.cpp)
 
 ## Stop conditions
 
@@ -57,7 +56,7 @@ profile.
 
 ## Sources
 
-- [Runtime configuration: TOML and `rpu_execution`](../../docs/runtime_config.md#toml-parameter-catalog)
+- [Runtime configuration: TOML and `rpu_execution`](../../docs/runtime_config.md#configuration-and-execution)
 - [Architecture: planning and invalidation](../../docs/architecture.md#planning-and-invalidation-lifecycle)
 - [Architecture: SPM design](../../docs/architecture.md#spm-design)
 - [Examples](../../docs/model_support.md)

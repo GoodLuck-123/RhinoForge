@@ -84,7 +84,7 @@ def compute_side_input(
     projection_norm_weight: torch.Tensor, num_layers: int, hidden_size: int,
     ple_dim: int, eps: float,
 ) -> torch.Tensor:
-    """T6a PLE side-input -> core-major fp16 rpu tensor [num_layers, NUM_CORES, S, ple_dim/NUM_CORES].
+    """T6a PLE side-input -> core-major fp16 CPU tensor [num_layers, NUM_CORES, S, ple_dim/NUM_CORES].
 
     side = (proj_norm(per_layer_model_projection(embeds) * H^-0.5)
             + embed_tokens_per_layer(ids) * sqrt(ple_dim)) * 2^-0.5
@@ -108,7 +108,7 @@ def compute_side_input(
     pc = PD // NUM_CORES
     return (side[0].permute(1, 0, 2)                       # [L,S,PD]
             .reshape(L, S, NUM_CORES, pc).permute(0, 2, 1, 3)   # [L,NUM_CORES,S,pc]
-            .contiguous().to(torch.float16).to("rpu"))
+            .contiguous().to(torch.float16))
 
 
 def softcap_lm_logits(hidden: torch.Tensor, embed_weight: torch.Tensor,

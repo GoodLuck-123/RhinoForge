@@ -1,6 +1,6 @@
 ---
 name: rhinoforge-port
-description: Port or assess a Hugging Face inference model for the RhinoForge RPU PyTorch backend. Use for model capability reviews, adapter work, profile admission, operator-gap classification, Graph/SPM/DMA planning, and release-profile verification.
+description: Port or assess a Hugging Face inference model for the RhinoForge device PyTorch backend. Use for model capability reviews, adapter work, profile admission, operator-gap classification, Graph/SPM/DMA planning, and release-profile verification.
 ---
 
 # Assess or port a model to RhinoForge
@@ -87,7 +87,7 @@ change.
 ## Verify before claiming support
 
 Run the board-free checks and, when explicitly authorized and available, the
-exact-board gates in [model porting](../../../docs/model_porting.md#8-verification-gates).
+exact-board gates in [model porting](../../../docs/model_porting.md#8-focused-verification).
 At minimum,
 verify early rejection, configuration validation, clean build/import, the
 profile's hard semantic, same-dtype, FP32-anchor, and task-quality gates,

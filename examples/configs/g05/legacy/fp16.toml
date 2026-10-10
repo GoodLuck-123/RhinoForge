@@ -1,0 +1,39 @@
+[example]
+profile_id = "g05-base.fp16.k1-rtc-fm"
+registry_alias = "g05-base"
+target = "g05"
+dtype = "fp16"
+
+[example.opt_in]
+
+[input]
+checkpoint = "/path/to/vla_rtc_release/checkpoint"
+release_root = "/path/to/vla_rtc_release"
+batch = "/path/to/g05_k1_rtc_batch.pt"
+seed = 7
+
+[run]
+warmup = 2
+runs = 3
+hwperf = false
+profile = false
+seed = 7
+
+[rpu_execution]
+
+[rpu_execution.components]
+
+[rpu_execution.components.vision_encoder]
+
+[rpu_execution.components.vision_encoder.vision]
+chunk_size = "auto"
+
+[rpu_execution.components.language_model]
+
+[rpu_execution.components.language_model.prefill]
+chunk_size = "auto"
+
+[rpu_execution.components.action_expert]
+
+[rpu_execution.components.action_expert.action]
+chunk_size = "auto"

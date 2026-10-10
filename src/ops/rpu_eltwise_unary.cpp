@@ -5,6 +5,7 @@
 #include "rpu_ops.h"
 #include "rpu_spm_allocator.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <c10/util/Half.h>
 #include <stdlib.h> // for uint16_t, setenv, unsetenv
@@ -17,7 +18,7 @@ using namespace ::rhino_lkn;
 at::Tensor rpu_gelu_erf(const at::Tensor& input) {
   TORCH_CHECK(input.device().type() == at::kPrivateUse1 &&
                   input.scalar_type() == at::kHalf && input.is_contiguous(),
-              "gelu_erf requires contiguous RPU FP16 input");
+              "gelu_erf requires contiguous device FP16 input");
   TORCH_CHECK(input.numel() > 0 && input.numel() % 8 == 0,
               "gelu_erf requires a positive 16-byte-aligned byte count");
   TORCH_CHECK(!graph_dma::active(),
@@ -80,7 +81,7 @@ void rpu_launch_eltwise_unary_kernel(const at::Tensor &input,
                     output.scalar_type() == at::kHalf &&
                     input.is_contiguous() && output.is_contiguous() &&
                     input.sizes() == output.sizes(),
-                "DDR HIGH unary requires matching contiguous RPU FP16 tensors");
+                "DDR HIGH unary requires matching contiguous device FP16 tensors");
     const int64_t count = input.numel();
     TORCH_CHECK(count > 0 && count % 8 == 0,
                 "DDR HIGH unary needs a positive 16-byte-aligned byte count");
@@ -312,6 +313,122 @@ void rpu_launch_eltwise_unary_spm_kernel(
                     core_list);
 }
 
+void rpu_launch_g05_attn_sigmoid_round_mul_spm_kernel(uint32_t gate, uint32_t output) {
+  // Exact G05 Action M32/localD256. Preserve the complete original Sigmoid
+  // output in gate, then the independently rounded product in output.
+  auto& graph = RpuKernelGraph::active();
+  TORCH_CHECK(graph.state() == RpuKernelGraph::State::RECORDING ||
+                  graph.state() == RpuKernelGraph::State::REPLAYING,
+              "G05 attention Sigmoid/Mul requires a retained Graph");
+  TORCH_CHECK(SPM_ALLOC.is_initialized(), "G05 attention Sigmoid/Mul requires live SPM");
+  constexpr uint64_t bytes = 32 * 256 * sizeof(c10::Half);
+  const uint64_t base = SPM_ALLOC.addr(0, 0);
+  for (const auto address : {gate, output}) {
+    TORCH_CHECK(address % 256 == 0 && address >= base &&
+                    uint64_t(address) - base + bytes <= SpmAllocator::SPM_USABLE,
+                "G05 attention Sigmoid/Mul requires complete aligned SPM roots");
+  }
+  TORCH_CHECK(uint64_t(gate) + bytes <= output || uint64_t(output) + bytes <= gate,
+              "G05 attention Sigmoid/Mul requires disjoint gate/output roots");
+  constexpr auto id = KernelId::G05_ATTN_SIGMOID_ROUND_MUL_M32D256;
+  TORCH_CHECK(KernelCache::instance().has_loaded(id),
+              "G05 attention Sigmoid/Mul optional payload is unavailable");
+  // Like the original unary/binary launchers, this ABI has only absolute SPM
+  // operands. It introduces no DDR owner/register or new census policy.
+  auto* kernel = GET_KERNEL(id);
+  TORCH_CHECK(kernel, "G05 attention Sigmoid/Mul payload missing");
+  kernel->reset_regs();
+  const auto set = [&](uint32_t reg, uint16_t value) {
+    TORCH_CHECK(kernel->set_regs(reg, value) == kKernelRegOk,
+                "G05 attention Sigmoid/Mul rejected register ", reg);
+  };
+  const auto pair = [&](uint32_t reg, uint32_t value) {
+    set(reg, uint16_t(value)); set(reg + 1, uint16_t(value >> 16));
+  };
+  set(0, 1024); set(1, 1024);
+  pair(4, gate); pair(6, gate); pair(8, 2048); pair(12, output);
+  for (uint32_t reg : {56, 57, 58}) set(reg, c10::Half(1.0).x);
+  set(59, 0); set(60, 0); set(61, 1);
+  set(62, 0x2692); set(63, 0); // original BASE Sigmoid op19/custom0
+  auto* queue = GET_QUEUE(8);
+  queue->set_broadcast_mode(true);
+  queue->enqueu_kernel(*kernel, {8, 1, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
+}
+
+void rpu_launch_g05_silu_round_mul_spm_kernel(uint32_t gate, uint32_t up) {
+  constexpr uint64_t bytes = 32 * 512 * sizeof(c10::Half);
+  TORCH_CHECK(SPM_ALLOC.is_initialized(), "G05 rounded SiLU/Mul requires live SPM");
+  const uint64_t base = SPM_ALLOC.addr(0, 0);
+  const auto valid = [=](uint32_t address) {
+    return address % 256 == 0 && address >= base &&
+        uint64_t(address) - base + bytes <= SpmAllocator::SPM_USABLE;
+  };
+  TORCH_CHECK(valid(gate) && valid(up) &&
+                  (uint64_t(gate) + bytes <= up || uint64_t(up) + bytes <= gate),
+              "G05 rounded SiLU/Mul requires two disjoint aligned SPM operands");
+  TORCH_CHECK(KernelCache::instance().has_loaded(KernelId::G05_SILU_ROUND_MUL_M32N512),
+              "G05 rounded SiLU/Mul payload is unavailable");
+  auto* kernel = GET_KERNEL(KernelId::G05_SILU_ROUND_MUL_M32N512);
+  TORCH_CHECK(kernel, "G05 rounded SiLU/Mul kernel is unavailable");
+  kernel->reset_regs();
+  kernel->set_regs(0, uint16_t(2048));
+  kernel->set_regs(1, uint16_t(2048));
+  for (const auto& field : {std::pair<uint32_t,uint32_t>{4,gate}, {6,gate},
+                            {8,4096}, {12,up}}) {
+    kernel->set_regs(field.first, uint16_t(field.second));
+    kernel->set_regs(field.first + 1, uint16_t(field.second >> 16));
+  }
+  for (int reg : {56,57,58}) kernel->set_regs(reg, c10::Half(1.0).x);
+  for (int reg : {59,60}) kernel->set_regs(reg, uint16_t(0));
+  kernel->set_regs(61, uint16_t(1));
+  const auto& op = get_valu_op_info(ValuOpType::SILU);
+  kernel->set_regs(62, uint16_t((op.op << 9) | FP16_RAB_DATA_TYPE_CFG));
+  kernel->set_regs(63, uint16_t(op.custom_op));
+  auto* queue = GET_QUEUE(8);
+  queue->set_broadcast_mode(true);
+  queue->enqueu_kernel(*kernel, {8,1,1}, {0,1,2,3,4,5,6,7});
+}
+
+void rpu_launch_g05_text_silu_round_mul_spm_kernel(
+    uint32_t gate,uint32_t up,uint32_t product) {
+  auto& graph=RpuKernelGraph::active();
+  TORCH_CHECK(graph.state()==RpuKernelGraph::State::RECORDING ||
+      graph.state()==RpuKernelGraph::State::REPLAYING,
+      "G05 Text rounded SiLU/MUL requires a retained Graph");
+  TORCH_CHECK(SPM_ALLOC.is_initialized(),"G05 Text rounded SiLU/MUL requires live SPM");
+  constexpr uint64_t part=256*768*sizeof(c10::Half),full=256*2048*sizeof(c10::Half);
+  const uint64_t base=SPM_ALLOC.addr(0,0);
+  const std::array<std::pair<uint32_t,uint64_t>,3> spans{{{gate,part},{up,part},{product,full}}};
+  for (const auto& s:spans)
+    TORCH_CHECK(s.first%256==0 && s.first>=base &&
+        uint64_t(s.first)-base+s.second<=SpmAllocator::SPM_USABLE,
+        "G05 Text rounded SiLU/MUL requires complete aligned SPM roots");
+  for (size_t i=0;i<spans.size();++i) for (size_t j=i+1;j<spans.size();++j)
+    TORCH_CHECK(uint64_t(spans[i].first)+spans[i].second<=spans[j].first ||
+        uint64_t(spans[j].first)+spans[j].second<=spans[i].first,
+        "G05 Text rounded SiLU/MUL SPM roots overlap");
+  constexpr auto id=KernelId::G05_SILU_ROUND_MUL_M32N512;
+  TORCH_CHECK(KernelCache::instance().has_loaded(id),
+      "G05 Text rounded SiLU/MUL optional payload is unavailable");
+  // Same intrinsic no-DDR boundary as ordinary unary/binary and Action rounded
+  // SiLU. Only absolute SPM operands; no new census enum or DDR register.
+  auto* kernel=GET_KERNEL(id);TORCH_CHECK(kernel,"G05 Text rounded SiLU/MUL payload missing");
+  kernel->reset_regs();
+  const auto set=[&](uint32_t reg,uint16_t value) {
+    TORCH_CHECK(kernel->set_regs(reg,value)==kKernelRegOk,
+        "G05 Text rounded SiLU/MUL rejected register ",reg);
+  };
+  set(0,25600);set(1,17408);
+  for (const auto& p:{std::pair<uint32_t,uint32_t>{4,gate},{6,product},{8,51200},{12,up}}) {
+    set(p.first,uint16_t(p.second));set(p.first+1,uint16_t(p.second>>16));
+  }
+  for (int reg:{56,57,58})set(reg,c10::Half(1.0).x);
+  for (int reg:{59,60})set(reg,0);
+  set(61,1);set(62,0x3e92);set(63,134);
+  auto* queue=GET_QUEUE(8);queue->set_broadcast_mode(true);
+  queue->enqueu_kernel(*kernel,{8,1,1},{0,1,2,3,4,5,6,7});
+}
+
 void rpu_launch_silu_mul_exact_strided_spm_kernel(
     uint32_t packed_spm_addr,
     uint32_t out_spm_addr,
@@ -323,9 +440,11 @@ void rpu_launch_silu_mul_exact_strided_spm_kernel(
               "exact strided silu_mul requires 1..8 cores");
   TORCH_CHECK(rows > 0 && rows <= UINT16_MAX,
               "exact strided silu_mul rows out of range: ", rows);
-  // The row loop is signed 16-bit and operates on full 256-element blocks.
+  // The signed row loop masks vector lanes in its final 256-element block.
+  // Lingbot grouped Gate/Up uses 64 channels per core; the existing Qwen
+  // route uses 768. Require 64-channel row alignment for these paths.
   TORCH_CHECK(row_elements > 0 && row_elements <= INT16_MAX &&
-                  row_elements % 256 == 0,
+                  row_elements % 64 == 0,
               "exact strided silu_mul row_elements out of range: ", row_elements);
   const uint32_t up_spm_addr = packed_spm_addr +
       static_cast<uint32_t>(row_elements * sizeof(c10::Half));
@@ -349,6 +468,134 @@ void rpu_launch_silu_mul_exact_strided_spm_kernel(
   for (int i = 0; i < num_cores; ++i) core_list.push_back(i);
   wq->enqueu_kernel(*kernel,
                     {static_cast<uint16_t>(rows), 1, 1}, core_list);
+}
+
+// Exact shared Gate/Up profile. Keep the existing custom SiLU math and consume
+// per-row [gate96,up96], with a separate compact [51,96] output on every core.
+void rpu_launch_lingbot2_shared_silu_d96_spm_kernel(
+    uint32_t packed_spm_addr, uint32_t output_spm_addr,
+    int64_t rows, int num_cores) {
+  TORCH_CHECK(rows == 51 && num_cores == 8,
+              "Lingbot2 shared SiLU requires M51/D96/TP8");
+  TORCH_CHECK(SPM_ALLOC.is_initialized(),
+              "Lingbot2 shared SiLU requires initialized SPM");
+  const uint64_t base = SPM_ALLOC.addr(0, 0);
+  constexpr uint64_t packed_bytes = 51 * 192 * 2;
+  constexpr uint64_t output_bytes = 51 * 96 * 2;
+  const auto valid = [base](uint32_t address, uint64_t bytes) {
+    return address >= base && address % 32 == 0 &&
+        bytes <= SpmAllocator::SPM_USABLE &&
+        uint64_t(address) - base <= SpmAllocator::SPM_USABLE - bytes;
+  };
+  TORCH_CHECK(valid(packed_spm_addr, packed_bytes) &&
+                  valid(output_spm_addr, output_bytes),
+              "Lingbot2 shared SiLU requires complete 32-byte-aligned absolute SPM intervals");
+  TORCH_CHECK(uint64_t(packed_spm_addr) + packed_bytes <= output_spm_addr ||
+                  uint64_t(output_spm_addr) + output_bytes <= packed_spm_addr,
+              "Lingbot2 shared SiLU input and output must be disjoint");
+  auto* kernel = GET_KERNEL(KernelId::QWEN3VL_SILU_MUL_EXACT_STRIDED);
+  TORCH_CHECK(kernel != nullptr,
+              "Lingbot2 shared SiLU required exact-strided payload is absent");
+  kernel->reset_regs();
+  kernel->set_regs(0, static_cast<uint16_t>(96));
+  kernel->set_regs(1, static_cast<uint16_t>(96));
+  const auto address = [kernel](int reg, uint32_t value) {
+    kernel->set_regs(reg, static_cast<uint16_t>(value));
+    kernel->set_regs(reg + 1, static_cast<uint16_t>(value >> 16));
+  };
+  address(4, packed_spm_addr);
+  address(6, packed_spm_addr + 192);
+  address(8, output_spm_addr);
+  auto* queue = GET_QUEUE(num_cores);
+  queue->set_broadcast_mode(true);
+  queue->enqueu_kernel(*kernel, {51, 1, 1}, {0,1,2,3,4,5,6,7});
+}
+
+// Same custom SiLU arithmetic, flattened 16-half vectors over twenty warps.
+void rpu_launch_lingbot2_shared_silu_t51_d96_vector_spm_kernel(
+    uint32_t packed_spm_addr, uint32_t output_spm_addr,
+    int64_t rows, int num_cores) {
+  TORCH_CHECK(rows == 51 && num_cores == 8,
+              "Lingbot2 shared SiLU requires M51/D96/TP8");
+  TORCH_CHECK(SPM_ALLOC.is_initialized(),
+              "Lingbot2 shared SiLU requires initialized SPM");
+  const uint64_t base = SPM_ALLOC.addr(0, 0);
+  constexpr uint64_t packed_bytes = 51 * 192 * 2;
+  constexpr uint64_t output_bytes = 51 * 96 * 2;
+  const auto valid = [base](uint32_t address, uint64_t bytes) {
+    return address >= base && address % 32 == 0 &&
+        bytes <= SpmAllocator::SPM_USABLE &&
+        uint64_t(address) - base <= SpmAllocator::SPM_USABLE - bytes &&
+        uint64_t(address) + bytes <= (uint64_t{1} << 32);
+  };
+  TORCH_CHECK(valid(packed_spm_addr, packed_bytes) &&
+                  valid(output_spm_addr, output_bytes),
+              "Lingbot2 shared SiLU requires complete 32-byte-aligned absolute SPM intervals");
+  TORCH_CHECK(uint64_t(packed_spm_addr) + packed_bytes <= output_spm_addr ||
+                  uint64_t(output_spm_addr) + output_bytes <= packed_spm_addr,
+              "Lingbot2 shared SiLU input and output must be disjoint");
+  auto* queue = GET_QUEUE(num_cores);
+  TORCH_CHECK(queue != nullptr, "Lingbot2 shared SiLU eight-core queue is absent");
+  auto* kernel = GET_KERNEL(KernelId::LINGBOT2_SHARED_SILU_T51_D96_VECTOR);
+  TORCH_CHECK(kernel != nullptr,
+              "Lingbot2 shared SiLU optional compact-vector payload is absent");
+  kernel->reset_regs();
+  kernel->set_regs(0, static_cast<uint16_t>(96));
+  kernel->set_regs(1, static_cast<uint16_t>(96));
+  const auto address = [kernel](int reg, uint32_t value) {
+    kernel->set_regs(reg, static_cast<uint16_t>(value));
+    kernel->set_regs(reg + 1, static_cast<uint16_t>(value >> 16));
+  };
+  address(4, packed_spm_addr);
+  address(6, packed_spm_addr + 192);
+  address(8, output_spm_addr);
+  queue->set_broadcast_mode(true);
+  queue->enqueu_kernel(*kernel, {20, 1, 1}, {0,1,2,3,4,5,6,7});
+}
+
+// Fixed sparse TP8 profile. Preserve FP16 SiLU*Up retirement before applying
+// the routed row weight. The caller owns valid raw U16 token/expert IDs.
+void rpu_launch_lingbot2_swiglu_route_r204_d64_spm_kernel(
+    uint32_t packed_spm_addr, uint32_t routes_spm_addr,
+    uint32_t token_ids_spm_addr, uint32_t expert_ids_spm_addr,
+    uint32_t output_spm_addr) {
+  TORCH_CHECK(SPM_ALLOC.is_initialized(), "lingbot2_swiglu_route: uninitialized SPM");
+  const uint32_t base = SPM_ALLOC.addr(0, 0);
+  const std::array<std::pair<uint32_t, uint32_t>, 5> ranges{{
+      {packed_spm_addr, 204 * 128 * 2}, {routes_spm_addr, 64 * 32 * 2},
+      {token_ids_spm_addr, 256 * 2}, {expert_ids_spm_addr, 256 * 2},
+      {output_spm_addr, 204 * 64 * 2}}};
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    const auto [address, bytes] = ranges[i];
+    TORCH_CHECK(address >= base && address % 32 == 0 &&
+                    uint64_t(address) - base <= uint64_t(SpmAllocator::SPM_USABLE) - bytes,
+                "lingbot2_swiglu_route: invalid aligned absolute SPM interval");
+    for (size_t j = 0; j < i; ++j)
+      TORCH_CHECK(uint64_t(address) + bytes <= ranges[j].first ||
+                      uint64_t(ranges[j].first) + ranges[j].second <= address,
+                  "lingbot2_swiglu_route: SPM operands must be disjoint");
+  }
+  auto* kernel = GET_KERNEL(KernelId::LINGBOT2_SWIGLU_ROUTE_R204_D64);
+  TORCH_CHECK(kernel != nullptr, "lingbot2_swiglu_route: optional payload missing");
+  kernel->reset_regs();
+  auto address = [kernel](int index, uint32_t value) {
+    kernel->set_regs(index, static_cast<uint16_t>(value));
+    kernel->set_regs(index + 1, static_cast<uint16_t>(value >> 16));
+  };
+  kernel->set_regs(0, static_cast<uint16_t>(64));
+  kernel->set_regs(1, static_cast<uint16_t>(64));
+  address(4, packed_spm_addr);
+  address(6, packed_spm_addr + 128);
+  address(8, output_spm_addr);
+  address(10, token_ids_spm_addr);
+  address(12, expert_ids_spm_addr);
+  address(14, routes_spm_addr);
+  kernel->set_regs(64, static_cast<uint16_t>(51));
+  kernel->set_regs(65, static_cast<uint16_t>(1));
+  kernel->set_regs(66, static_cast<uint16_t>(1));
+  auto* queue = GET_QUEUE(8);
+  queue->set_broadcast_mode(true);
+  queue->enqueu_kernel(*kernel, {51, 1, 1}, {0,1,2,3,4,5,6,7});
 }
 
 // SwiGLU activation fusion: out = silu(x) * y, flat per-core elementwise.

@@ -1,6 +1,6 @@
 """Manual capture frontend (M0 skeleton).
 
-Per `docs/manual_frontend.md` M0, this module provides a thin Python
+This module provides a thin Python
 wrapper around `torch.rpu.GraphCache.capture(sig)` that hides
 SignaturePlanner construction, exposes a CUDA-Graph-style
 `g.replay(*args)` entry, and refuses to silently recapture on
@@ -16,11 +16,9 @@ Boundary against the Dynamo frontend (`dynamo_backend.py`):
   - Reuses `SignaturePlanner` for sig construction so the two
     frontends share signature semantics.
 
-M1 (fast replay via `dynamic_inputs`) is intentionally not in this
-file yet — it requires backend RECORDING-time patch identification
-that has to be designed to be reusable by Dynamo fast replay
-(`docs/manual_frontend.md` "Fast replay 集成").  M0 raises
-`NotImplementedError` if `dynamic_inputs` is supplied.
+Non-empty `dynamic_inputs` requires backend capture-time patch identification
+and raises `NotImplementedError`. Public capture usage is documented in
+`docs/api_reference.md`.
 """
 
 from __future__ import annotations
@@ -70,7 +68,7 @@ class GraphCapture:
                 "GraphCapture: dynamic_inputs is the M1 fast-replay path. "
                 "It requires backend RECORDING-time patch identification "
                 "and is not implemented in this M0 build. See "
-                "docs/manual_frontend.md M1 for the planned API."
+                "docs/api_reference.md for the supported capture API."
             )
         if example_kwargs is None:
             example_kwargs = {}
@@ -193,7 +191,7 @@ class GraphCapture:
     def replayable(self) -> bool:
         """True iff the backend graph is in BUILT state without a
         non_replayable_reason. False for PASSTHROUGH-degraded entries
-        (e.g., RPU strided copy in the captured op stream)."""
+        (e.g., device strided copy in the captured op stream)."""
         entry = self._snapshot_entry()
         if entry is None:
             return False
@@ -201,7 +199,7 @@ class GraphCapture:
 
     def non_replayable_reason(self) -> str:
         """Empty string if replayable; otherwise the backend's
-        actionable diagnostic (e.g. `rpu_copy: RPU strided copy in
+        actionable diagnostic (e.g. `rpu_copy: device strided copy in
         graph uses eager sync_point; replay unsupported`)."""
         entry = self._snapshot_entry()
         return entry.non_replayable_reason if entry is not None else ""
@@ -320,7 +318,7 @@ def capture(
     `GraphCapture` instances are independent unless the caller
     passes a shared one explicitly. Mixing manual and Dynamo
     frontends on the same cache is supported but not recommended;
-    see `docs/manual_frontend.md` "与 Dynamo 前端共存".
+    see `docs/api_reference.md`.
     """
     if args is not None or kwargs is not None:
         if example_inputs is not None:

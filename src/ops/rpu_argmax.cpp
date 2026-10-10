@@ -1,4 +1,4 @@
-// rpu_argmax.cpp - Argmax/Argmin kernel implementation for RPU
+// rpu_argmax.cpp - Argmax/Argmin kernel implementation for device
 #include "rhino_launch_buffer.h"
 
 #include "rhino_launch_program.h"
@@ -484,7 +484,7 @@ at::Tensor rpu_argmax(const at::Tensor &self, c10::optional<int64_t> dim,
                       bool keepdim) {
     // Check device
     TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-                "rpu_argmax: input must be on RPU device");
+                "rpu_argmax: input must be on device");
 
     // Convert to FP16 if needed
     at::Tensor input = self;
@@ -646,7 +646,7 @@ at::Tensor rpu_argmin(const at::Tensor &self, c10::optional<int64_t> dim,
                       bool keepdim) {
     // Same logic as argmax, just use argmin kernel
     TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-                "rpu_argmin: input must be on RPU device");
+                "rpu_argmin: input must be on device");
 
     at::Tensor input = self;
     if (self.scalar_type() != at::ScalarType::Half) {

@@ -773,10 +773,11 @@ def test_prefill_enumerates_full_native_stage_domain_without_claiming_route_opti
         logger=records.append,
     )
 
-    assert seen == [100, 104]
     assert result.candidate_count == 4
     assert result.search_complete is True
     assert result.selected is not None
+    # Re-admit the winning domain after the last probe updated native state.
+    assert seen == [100, 104, result.selected.execution_len]
     assert result.selected.score == min(
         candidate.score for candidate in result.candidates if candidate.feasible
     )
@@ -1285,6 +1286,73 @@ def test_native_calibration_readmits_the_winner_and_keeps_original_cost_key():
                              resolve_stage_domain=changed)
 
 
+@pytest.mark.parametrize("last_length_rejected", [False, True])
+def test_native_capability_selection_restores_the_latest_oracle(last_length_rejected):
+    visits = []
+    latest = None
+    records = []
+
+    def domain(length):
+        nonlocal latest
+        visits.append(length)
+        # Match native begin-oracle behavior: every query replaces authority,
+        # including one that fails before publishing a READY candidate.
+        latest = None
+        if length in (288, 304) or (length == 336 and last_length_rejected):
+            raise _MODULE.PlannerRejectError(
+                "NO_FEASIBLE", requested=length, detail="native domain rejected",
+            )
+        raw = _native_domain_v2(length, (length,) * 3, logical_len=278)
+        latest = tuple(raw[3:])
+        return raw
+
+    result = _MODULE.plan_prefill(
+        278, 512, 63, alignment=16, resolve_stage_domain=domain,
+        logger=records.append,
+    )
+    assert visits == [288, 304, 320, 336, 320]
+    assert result.cost_scope is None and result.cost_certificate is None
+    assert result.selected.execution_len == 320
+    assert result.selected.stage_tuple.as_tuple() == (320,) * 3
+    # The downstream priming contract consumes the actual latest READY
+    # descriptor, rather than treating a saved selection as native authority.
+    assert latest == result.selected.stage_tuple.physical_descriptor
+    assert result.optimality == "CAPABILITY_SELECTED"
+    assert result.candidate_count == len(set(visits))
+    assert result.feasible_count == (1 if last_length_rejected else 2)
+    assert result.rejected_count == (3 if last_length_rejected else 2)
+    assert records[-1]["status"] == "ACCEPTED"
+    assert records[-1]["selected"]["execution_len"] == 320
+
+
+def test_native_capability_readmission_rejects_a_changed_domain():
+    visits = []
+    records = []
+
+    def domain(length):
+        visits.append(length)
+        if length != 320:
+            raise _MODULE.PlannerRejectError(
+                "NO_FEASIBLE", requested=length, detail="native domain rejected",
+            )
+        # Geometry remains identical, but a changed physical route cannot gain
+        # authority by replacing the winner after the search has been frozen.
+        selector = 1 if visits.count(320) == 1 else 2
+        descriptor = _native_candidate_v2(
+            320, (320,) * 3, logical_len=278,
+            routes=((1, 101, selector, 0, (), 0),),
+        )
+        return (1, 1, len(descriptor), *descriptor)
+
+    with pytest.raises(ValueError, match="changed during actual re-admission"):
+        _MODULE.plan_prefill(
+            278, 512, 63, alignment=16, resolve_stage_domain=domain,
+            logger=records.append,
+        )
+    assert visits == [288, 304, 320, 336, 320]
+    assert not any(record.get("status") == "ACCEPTED" for record in records)
+
+
 @pytest.mark.parametrize("fault", [None, "outer_exact", "domain", "infeasible_candidate", "mint_topology"])
 def test_native_exact_calibration_retains_request_and_never_claims_automatic_optimality(fault):
     scope = _MODULE.PlannerCostScope("a" * 64, "b" * 64, "c" * 64)
@@ -1565,7 +1633,8 @@ def test_long_prefill_selects_admitted_boundary_with_room_for_decode(
     assert result.selected.stage_tuple.physical_descriptor
     if padding_rows == "auto":
         assert max(seen) > 4096  # Cache room does not expand native admission.
-        assert result.rejected_count == len(seen) - 1
+        assert seen[-1] == 4096  # Restore this native winner after later rejects.
+        assert result.rejected_count == len(set(seen)) - 1
     else:
         assert seen == [4096]
 

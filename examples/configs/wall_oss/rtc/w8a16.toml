@@ -1,0 +1,36 @@
+[example]
+profile_id = "wall-oss-0.5-w8a16.w8a16.rtc-controlled"
+registry_alias = "wall-oss-0.5-w8a16"
+target = "wall_oss_rtc"
+dtype = "w8a16"
+
+[example.opt_in]
+RPU_WALL_OSS_RTC_ALLOW_NUMERIC_BLOCKED = "1"
+
+[input]
+checkpoint = "/path/to/wrc_sf_v728-w8a16"
+images = ["/path/to/face.png", "/path/to/left_wrist.png", "/path/to/right_wrist.png"]
+instruction = "Move the object to the target."
+proprioception = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+prefix_length_range = [599, 640]
+inference_delay = 0
+seed = 0
+fp16_checkpoint = "/path/to/wrc_sf_v728"
+
+[run]
+warmup = 2
+runs = 3
+hwperf = false
+profile = false
+seed = 0
+
+[rpu_execution]
+
+[rpu_execution.prefill]
+chunk_size = "auto"
+
+[rpu_execution.vision]
+chunk_size = "auto"
+
+[rpu_execution.action]
+chunk_size = "auto"

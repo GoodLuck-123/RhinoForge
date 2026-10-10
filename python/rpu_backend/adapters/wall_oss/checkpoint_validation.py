@@ -131,3 +131,34 @@ def validate_w8_nvfp4_checkpoint_pair(
         label="W8A16",
     )
     return w8_config, fp16_config
+
+
+def validate_rtc_w4_checkpoint_pair(
+    w4_ckpt_dir: str | Path,
+    fp16_ckpt_dir: str | Path,
+) -> tuple[dict, dict]:
+    """Validate the exact group-32 W4/INT8/FP16 composition used by RTC."""
+    w4_config, fp16_config, quant = _validate_quantized_checkpoint_pair(
+        w4_ckpt_dir,
+        fp16_ckpt_dir,
+        expected_method="w4a16",
+        label="RTC W4A16",
+    )
+    int8_suffixes = quant.get("int8_suffixes")
+    required_int8 = "moe.experts.0.down_proj.weight"
+    required_int4 = [
+        suffix for suffix in WALL_OSS_QUANT_SUFFIXES
+        if suffix != required_int8
+    ]
+    if (
+        quant.get("mode") != "group_wise_symmetric"
+        or quant.get("group_size") != 32
+        or int8_suffixes != [required_int8]
+        or quant.get("int4_suffixes") != required_int4
+    ):
+        raise ValueError(
+            "Wall-OSS RTC W4A16 requires the exact seven group-wise INT4 "
+            "projection suffixes with group_size=32 and expert-0 down_proj "
+            "retained as INT8"
+        )
+    return w4_config, fp16_config

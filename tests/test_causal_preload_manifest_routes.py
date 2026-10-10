@@ -351,6 +351,7 @@ struct Harness {
     at::Tensor gate_nvfp4_tensor_scales_{15}, up_nvfp4_tensor_scales_{16};
     at::Tensor down_nvfp4_tensor_scales_{17};
     Context context;
+    bool lingbot_folded_rmsnorm_=false, lingbot_prefill_kv_only_=false;
 
     int64_t hidden_size() const { return h; }
     int64_t head_dim() const { return hd; }

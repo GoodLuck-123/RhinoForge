@@ -41,6 +41,11 @@ enum class GraphHostOpDeferMode : uint8_t {
     ForceOn = 2,
 };
 
+enum class GraphBatchSnapshotMode : uint8_t {
+    Auto = 0,
+    Off = 1,
+};
+
 // Immutable policy copied into each Graph when its owning Python Graph or
 // GraphCache is created.  Runtime execution must never consult process
 // environment selectors after this snapshot is bound.
@@ -66,6 +71,12 @@ struct GraphRuntimePolicy {
     // Opt-in cold pool of uniform SDK-sized instruction arenas. Zero leaves
     // ordinary allocation unchanged; the legacy 27B owner retains three slots.
     size_t graph_arena_count = 0;
+    // Per-instance optional SDK replay. AUTO also requires trusted program
+    // contracts from the actual loaded operator package; it is not a bypass.
+    GraphBatchSnapshotMode batch_snapshot_mode = GraphBatchSnapshotMode::Auto;
+    // Official uniform-quantized 27B owner; its Text/Vision lifecycle reserves
+    // four arenas. This does not inherit the legacy text-only loading policy.
+    bool qwen35_dense_27b_sdk_budget = false;
 };
 
 // =============================================================================
@@ -683,6 +694,10 @@ public:
         size_t prepared_segment_hit_total = 0;
         size_t prepared_segment_miss_total = 0;
         size_t hw_batch_submit_total = 0;
+        std::string batch_snapshot_mode;
+        bool batch_snapshot_available = false;
+        uint32_t batch_snapshot_effective_contracts = 0;
+        std::string batch_snapshot_fallback_reason;
         size_t host_callback_tier1_count = 0;
         size_t host_callback_tier2_count = 0;
         size_t host_callback_tier3_count = 0;

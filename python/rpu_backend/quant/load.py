@@ -725,7 +725,7 @@ def _validate_staged_w8a16_imagetext(model: nn.Module) -> _W8A16ImageTextLoadPla
     non_meta = [name for name, param in model.named_parameters() if not param.is_meta]
     if non_meta:
         raise RuntimeError(
-            "Qwen3-VL W8A16 staged model was materialized before RPU ownership: "
+            "Qwen3-VL W8A16 staged model was materialized before device ownership: "
             f"{non_meta[:8]}"
         )
     non_host_buffers = [
@@ -734,7 +734,7 @@ def _validate_staged_w8a16_imagetext(model: nn.Module) -> _W8A16ImageTextLoadPla
     ]
     if non_host_buffers:
         raise RuntimeError(
-            "Qwen3-VL W8A16 staged model owns non-host buffers before RPU ownership: "
+            "Qwen3-VL W8A16 staged model owns non-host buffers before device ownership: "
             f"{non_host_buffers[:8]}"
         )
     if len(model.model.language_model.layers) != len(plan.layer_tensor_names):
@@ -758,7 +758,7 @@ def stage_w8a16_imagetext_for_rpu(
     """Validate metadata and return an unmaterialized controlled 4B/32B model.
 
     Tensor loading is deliberately deferred until the Qwen3-VL adapter owns the
-    process-wide RPU slot and has published its irreversible-install poison.
+    process-wide device slot and has published its irreversible-install poison.
     """
     if not (is_qwen3_vl_32b_w8a16_config(config) or is_qwen3_vl_4b_w8a16_config(config)):
         raise ValueError("W8A16 metadata-only staging requires exact Qwen3-VL-4B/32B; use the CPU loader for 2B")
@@ -830,10 +830,10 @@ def _swizzle_and_move_decoder_layer(
                     or target.dtype != dtype or not target.is_contiguous()):
                 raise ValueError(f"Invalid swizzled projection storage: {name}")
             # copy_ publishes only this view's bytes through the existing sized
-            # CPU->RPU flush. Do not create a per-projection RPU allocation.
+            # CPU->device flush. Do not create a per-projection device allocation.
             target.copy_(source)
             module.weight = nn.Parameter(target, requires_grad=False)
-    # Packed weights already reside on RPU; only FP16 norms/scales still move.
+    # Packed weights already reside on device; only FP16 norms/scales still move.
     layer.to("rpu")
 
 
@@ -901,7 +901,7 @@ def _move_materialized_decoder_for_rpu(
 
 
 def _materialize_staged_w8a16_imagetext_for_rpu(model: nn.Module) -> None:
-    """Consume a metadata-only plan after the adapter owns and poisons RPU state."""
+    """Consume a metadata-only plan after the adapter owns and poisons device state."""
     plan = _validate_staged_w8a16_imagetext(model)
     if vars(model).get("_rpu_swizzle_started") is not True:
         raise RuntimeError(

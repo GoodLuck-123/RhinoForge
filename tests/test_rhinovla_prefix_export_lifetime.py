@@ -14,7 +14,7 @@ def _export_method():
                if isinstance(node, ast.ClassDef) and node.name == "RhinoVLAOnRPU")
     methods = [node for node in cls.body if isinstance(node, ast.FunctionDef)
                and node.name in {"_export_text_prefix_kv_cpu", "export_last_prefix_kv_cpu"}]
-    scope = {"get_cache_layer": lambda cache, index: cache[index]}
+    scope = {"torch": torch, "get_cache_layer": lambda cache, index: cache[index]}
     exec(compile(ast.Module(body=methods, type_ignores=[]), str(path), "exec"), scope)
     return scope
 
@@ -30,6 +30,7 @@ def test_export_has_caller_lifetime_and_preserves_inference_state(previous):
     owner._export_text_prefix_kv_cpu = lambda: methods["_export_text_prefix_kv_cpu"](owner)
     exported = methods["export_last_prefix_kv_cpu"](owner)
     assert owner._last_prefix_kv is previous
+
     assert len(exported) == 2
     for index, pair in enumerate(exported, 1):
         for kind, tensor in enumerate(pair):
@@ -43,3 +44,26 @@ def test_export_has_caller_lifetime_and_preserves_inference_state(previous):
     del pair, tensor, exported
     assert all(ref() is None for ref in refs)
     assert owner._last_prefix_kv is previous
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+def test_inference_export_supports_denoise_reuse_and_tracks_mutation(dtype):
+    from test_rhinovla_prefix_version_guard import _helpers
+
+    snapshot, matches = _helpers()
+    methods = _export_method()
+    with torch.inference_mode():
+        layers = [(torch.ones(1, 2, 3, 4, dtype=dtype),
+                   torch.full((1, 2, 3, 4), 2.0, dtype=dtype))]
+        owner = SimpleNamespace(
+            _text_cache=SimpleNamespace(position=3, to_dynamic_cache=lambda device: layers),
+            prefix_layer_offset=0, cfg=SimpleNamespace(depth=1))
+        exported = methods["_export_text_prefix_kv_cpu"](owner)
+        assert all(not torch.is_inference(t) for pair in exported for t in pair)
+        before = snapshot(exported, 0, exported)
+        assert matches(before, snapshot(exported, 0, exported))
+        layers[0][0].add_(9)
+        assert torch.equal(exported[0][0], torch.ones_like(exported[0][0]))
+        assert matches(before, snapshot(exported, 0, exported))
+        exported[0][0].add_(1)
+        assert not matches(before, snapshot(exported, 0, exported))

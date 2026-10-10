@@ -3,14 +3,13 @@
 简体中文 | [English](getting_started.md)
 
 本指南在独立 Python 环境安装当前 RhinoForge 源码，并运行公开的 Qwen3-0.6B 示例。
-模型和运行时资产分别获取。[示例目录](../examples/README.md)说明配置和用法，
-模板不构成模型质量认证。
+模型和运行时资产分别获取。[示例目录](../examples/README.md)说明配置和用法。
 
 ## 1. 准备运行时和独立环境
 
 需要 Python 3.12、C++17 编译器和已配置的板卡 SDK/runtime。按
 [运行时资产](runtime_assets.zh.md)获取匹配的外部资产，并设置
-`RHINO_LAUNCH_ROOT`、`RPU_KERNEL_LIB_PATH` 及动态库路径。
+`RHINO_LAUNCH_ROOT`、`RPU_KERNEL_LIB_PATH`、`RPU_KERNEL_LIB_PATH_EXPANSION` 及动态库路径。
 
 为当前 checkout 创建新环境，与其他 RhinoForge 或 `rpu_backend` 安装隔离。
 在同一个 shell 中运行：
@@ -32,10 +31,11 @@ python examples/verify_install.py --check-config
 ```
 
 `--check-config` 只检查安装元数据和模块位置，不导入 Torch 或 RhinoForge，
-不加载原生运行时，也不访问 RPU；它不验证原生库兼容性或设备是否可用。
+不加载原生运行时，也不访问设备。原生库和设备检查在实际运行时完成。
 
 项目依赖以 [pyproject.toml](../pyproject.toml) 为准。视觉模型安装命令中的 `.` 改为
-`'.[vision]'`，策略模型改为 `'.[vla]'`。可编辑安装和 wheel 构建参考
+`'.[vision]'`，策略模型改为 `'.[vla]'`，[语音模型](qwen3_audio.zh.md)改为 `'.[audio]'`。
+可编辑安装和 wheel 构建参考
 [源码构建指南](development_build.md)。
 
 ## 2. 准备公开模型
@@ -49,24 +49,31 @@ hf download Qwen/Qwen3-0.6B \
   --revision c1899de289a04d12100db370d81485cdf75e47ca \
   --local-dir "$RPU_MODEL_CACHE/Qwen3-0.6B"
 cp examples/configs/qwen3/text/0_6b/fp16.toml qwen3.local.toml
-python examples/run_model.py --config qwen3.local.toml --check-config
+cat >> qwen3.local.toml <<'TOML'
+
+[logging]
+level = "INFO"
+TOML
+python examples/run.py --config qwen3.local.toml --check-config
 ```
 
 已有同一 checkpoint 的完整副本时，可直接放入该目录。模型许可和访问条款与
 RhinoForge 源码许可分别适用。所有示例配置均在
 [`examples/configs`](../examples/README.md) 下按模型归档。
 
-## 3. 在空闲 RPU 上运行
+## 3. 在空闲设备上运行
 
-运行前先检查本机 RPU 是否空闲，并取得平台设备锁。共享机器需与其他使用者协调。
+运行前先检查本机设备是否空闲，并取得平台设备锁。共享机器需与其他使用者协调。
 然后执行：
 
 ```bash
-python examples/run_model.py --config qwen3.local.toml
+python examples/run.py --config qwen3.local.toml
 ```
 
-runner 输出生成结果和计时。需要诊断基础设备配置时，可用
-`python examples/verify_install.py` 做一次小规模 host/device 拷贝；模型已运行成功时
+上面的 `INFO` 设置用于显示生成文本。默认 `ERROR` 会隐藏普通输出，模型和计时摘要
+由 `[logging].summary` 单独控制，见[日志输出](../examples/README.zh.md#logging-and-performance-output)。
+需要诊断基础设备配置时，可用
+`python examples/verify_install.py` 做一次小规模 host/设备拷贝；模型已运行成功时
 无需额外执行。复用本次成功结果，不展开模型矩阵。
 
 若导入了其他 checkout，激活目标环境并查看
@@ -75,4 +82,4 @@ runner 输出生成结果和计时。需要诊断基础设备配置时，可用
 [运行时资产](runtime_assets.zh.md)。
 
 后续参考[模型资产](model_assets.zh.md)、[运行时配置](runtime_config.zh.md)和
-[模型运行与性能分析](model_testing.zh.md)。
+[模型运行与调试](model_testing.zh.md)。

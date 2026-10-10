@@ -87,7 +87,7 @@ def _load_extension(path: str, package_name: str) -> types.ModuleType:
 
     spec = importlib.util.spec_from_file_location(package_name, path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"cannot create an import spec for RPU backend: {path}")
+        raise ImportError(f"cannot create an import spec for device backend: {path}")
     extension = importlib.util.module_from_spec(spec)
     try:
         spec.loader.exec_module(extension)

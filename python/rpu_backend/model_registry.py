@@ -22,9 +22,22 @@ MODELS: Dict[str, str] = {
     "qwen3-14b-w8a16-lmhead-int8": "qwen3_lmhead_int8_ckpts/qwen3-14b-w8a16-lmhead-int8",
     # Qwen3.5 hybrid-attention text profiles.
     "qwen3_5-0.8b": "qwen3_5-0.8b",
+    "qwen3_5-27b": "Qwen3.5-27B",
+    "qwen3_5-27b-w8a16": "qwen3_5-27b-w8a16",
+    "qwen3_5-27b-w4a16": "qwen3_5-27b-w4a16",
     "qwen3_5-2b": "Qwen3.5-2B",      # symmetric GDN 16/16
     "qwen3_5-4b": "Qwen3.5-4B",      # GQA-GDN 16/32 (key-replicated)
     "qwen3_5-9b": "Qwen3.5-9B",      # GQA-GDN 16/32 + untied lm_head
+    # Exact 35B-A3B TP8 controlled bundle. The adapter additionally validates
+    # the complete mixed-E4M3 inventory before materializing model weights.
+    "qwen3_5-35b-a3b-mixed": "Qwen3.5-35B-A3B-rpu-fp8-mixed",
+    # Routed-only RTN G128; public examples may override the checkpoint with
+    # --model PATH. The alias does not certify the current main runtime.
+    "qwen3_5-35b-a3b-rtn-w4a16": "Qwen3.5-35B-A3B-RTN-W4A16-G128",
+    # Official routed-only GPTQ G128, with the same explicit-path override.
+    "qwen3_5-35b-a3b-gptq-w4a16": "Qwen3.5-35B-A3B-GPTQ-Int4",
+    # Exact legacy W8 checkpoint using the Qwen3.5 text adapter; controlled only.
+    "qwen3_8-27b-w8a16": "Qwen3.8-27B-w8a16",
     # Galaxea G0.5 VLA (Qwen3.5-2B VLM + action expert).
     "g05-base": "G05/g05-base",
     # Pi0.5 VLA (LeRobot)
@@ -55,7 +68,7 @@ MODELS: Dict[str, str] = {
     # complete policy is not admitted by this alias.
     "internvla-n1-navdp": "InternVLA-N1-w-NavDP",
     # Hy-Embodied-0.5-VLA (HunYuanVL dual-tower: HYViT2-400M AnyRes ViT + MoT VLM
-    # + flow-matching action expert). RPU runtime = adapters/hy_vla (build_hy_vla).
+    # + flow-matching action expert). device runtime = adapters/hy_vla (build_hy_vla).
     # obs supplies pre-tokenized lang_tokens + the prefill/denoise masks, so no
     # tokenizer is needed at inference; the ckpt is a single model.safetensors.
     "hy-embodied-0.5-vla-umi": "Hy-Embodied-0.5-VLA-UMI",
@@ -105,6 +118,8 @@ MODELS: Dict[str, str] = {
     # Gemma 4 E4B source-only adapter. Registry resolution is not a support
     # claim; the first release does not provide a compatible runnable profile.
     "gemma4-e4b": "gemma-4-e4b-it",
+    'gr00t-n1d7-3b': 'gr00t-n1d7-3b',
+    'internvla-n1-controlled': 'internvla-n1-controlled',
 }
 
 

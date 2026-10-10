@@ -6,7 +6,7 @@
 // HALO act 模式的行结构固定 (chunk_size=18, text 行 {0,17}); 掩码在 set_moe_weights
 // 时按宽度展开为 DDR 常量并经 Persistent SPM 槽 preload, REPLAY 期零开销。
 //
-// 验证边界: 编译成功不构成 RPU 硬件执行或数值正确性证据。
+// 验证边界: 编译成功不构成 device 硬件执行或数值正确性证据。
 #include "rpu_halo_action_expert_model.h"
 #include "model_handle_registry.h"
 #include "rpu_kernel_decls.h"
@@ -407,7 +407,7 @@ void HaloActionExpertModel::set_moe_weights(
                         && list[i].device().type() == at::kPrivateUse1
                         && list[i].is_contiguous(),
                         "halo set_moe_weights: ", name, "[", i,
-                        "] must be fp16 contiguous RPU tensor, got dtype=",
+                        "] must be fp16 contiguous device tensor, got dtype=",
                         list[i].scalar_type(), " device=", list[i].device().type(),
                         " contiguous=", list[i].is_contiguous());
         }
@@ -435,17 +435,17 @@ void HaloActionExpertModel::set_moe_weights(
                 && final_norm_moe_w.device().type() == at::kPrivateUse1
                 && final_norm_moe_w.is_contiguous(),
                 "halo set_moe_weights: final_norm_moe_w must be 1D [hidden=",
-                hidden_size(), "] fp16 contig RPU, got ", final_norm_moe_w.sizes(),
+                hidden_size(), "] fp16 contig device, got ", final_norm_moe_w.sizes(),
                 " dtype=", final_norm_moe_w.scalar_type());
 
-    // 行掩码: [chunk_size] fp16 RPU contig, 取值 {0,1}。
+    // 行掩码: [chunk_size] fp16 device contig, 取值 {0,1}。
     TORCH_CHECK(text_row_mask.defined() && text_row_mask.dim() == 1
                 && text_row_mask.size(0) == chunk_size
                 && text_row_mask.scalar_type() == at::kHalf
                 && text_row_mask.is_contiguous()
                 && text_row_mask.device().type() == at::kPrivateUse1,
                 "halo set_moe_weights: text_row_mask must be [", chunk_size,
-                "] fp16 contig RPU");
+                "] fp16 contig device");
     at::Tensor mask_cpu = text_row_mask.to(at::kCPU).to(at::kFloat);
     TORCH_CHECK(((mask_cpu == 0.0f) | (mask_cpu == 1.0f)).all().item<bool>(),
                 "halo set_moe_weights: text_row_mask values must be exactly 0/1");
@@ -457,8 +457,8 @@ void HaloActionExpertModel::set_moe_weights(
     //   hidden      : input_norm/oproj/down 等全宽广播槽
     //   hidden/8    : h col-partition 槽 (M2 boundary 入模预留)
     //   is/8        : MLP gate/up 槽 (M2 预留; commit-1 在 down 上以全宽 merge)
-    // act 掩码 = 1 - text 掩码。展开在 host (CPU) 完成后整体复制到 RPU DDR —
-    // 不在 RPU device 上做常量填充构造 (Pitfall B-1)。
+    // act 掩码 = 1 - text 掩码。展开在 host (CPU) 完成后整体复制到 device DDR —
+    // 不在 device 上做常量填充构造 (Pitfall B-1)。
     const int tp = attn_tp();
     const int64_t widths[5] = {
         (num_q_heads() / tp) * head_dim(),
@@ -1021,7 +1021,7 @@ at::Tensor HaloActionExpertModel::step_forward(
                 && x_emb.is_contiguous()
                 && x_emb.device().type() == at::kPrivateUse1,
                 "halo step_forward: x_emb must be [1,", cs, ",", h,
-                "] fp16 contig RPU");
+                "] fp16 contig device");
     TORCH_CHECK(attn_mask_4d.defined(),
                 "halo step_forward: explicit attention mask required");
     TORCH_CHECK(prefix_len >= 0, "halo step_forward: prefix_len must be >= 0");
@@ -1034,7 +1034,7 @@ at::Tensor HaloActionExpertModel::step_forward(
                 "halo step_forward: cos/sin must be defined");
     TORCH_CHECK(cos.device().type() == at::kPrivateUse1
                 && sin.device().type() == at::kPrivateUse1,
-                "halo step_forward: cos/sin must be on RPU");
+                "halo step_forward: cos/sin must be on device");
     TORCH_CHECK(cos.scalar_type() == at::kHalf && sin.scalar_type() == at::kHalf,
                 "halo step_forward: cos/sin must be fp16");
     TORCH_CHECK(cos.is_contiguous() && sin.is_contiguous(),

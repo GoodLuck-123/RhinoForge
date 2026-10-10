@@ -1,38 +1,16 @@
-# Examples and execution scope
+# Model entries and execution scope
 
 [简体中文](model_support.zh.md) | English
 
-The [`examples/`](../examples/README.md) directory provides the unified
-`run_model.py` entry point and model-specific scripts. TOML configurations are
-organized by model, component, precision, and workload under
-[`examples/configs/`](../examples/configs/README.md).
+Choose a TOML from [model examples](../examples/README.md), prepare its checkpoint and inputs, then run `python examples/run.py --config PATH --check-config` before execution. This command validates configuration only.
 
-Choose a configuration, supply its checkpoint and input assets, and run
-`python examples/run_model.py --config PATH --check-config` before execution.
-This checks the configuration without loading weights or accessing a board;
-it does not validate the checkpoint or certify model quality. See
-[model execution](model_testing.md), [API reference](api_reference.md), and
-[quantization](quantization.md) for the corresponding runtime contracts.
+Each profile specifies checkpoint, precision, core count, input shape and length. Loaders and runtime admission enforce those limits; controlled entries also require the template's opt-ins. See the [configuration index](../examples/configs/CONFIGURATIONS.md).
 
-## General runtime limits
+Supply model weights and request data separately. Follow [model assets](model_assets.md) and [runtime assets](runtime_assets.md) for dependencies, and [running models](model_testing.md), [API](api_reference.md) and [quantization](quantization.md) for usage.
 
-The dedicated `Qwen3ASRModel` and `Qwen3TTSModel` APIs provide bounded CPU/RPU
-speech inference. Their exact checkpoint revisions, CPU boundaries, input limits
-and latest R1 measurement scope are recorded in the [current speech guide](qwen3_audio_r1.zh.md),
-including the resident ASR path, bounded FP16 TTS codec frontend, explicit
-codec-only native mode, five-arena cold-process requirement and CPU FP32 stages.
-They are separate from `run_model.py` and the CausalLM/VLM registry. These checks
-do not certify multilingual recognition quality, voice similarity or real-time use.
+## Qwen3 speech
 
-Runtime admission checks remain authoritative for each checkpoint and request.
-A configuration file does not imply support for other model sizes, precisions,
-core counts, image counts, or input lengths. Source-only and controlled examples
-retain their exact input restrictions and opt-in gates. Historical validation
-records do not describe the current runtime or establish a new certification.
-
-Model weights, request data, Rhino Launch, and operator assets are supplied
-separately. Follow [model assets](model_assets.md) and
-[runtime assets](runtime_assets.md) for their format, provenance, and licensing
-requirements. The public Wall-OSS base adaptation is retained;
-application-specific models, private data, and deployment customizations are
-excluded from the public package.
+`Qwen3ASRModel` and `Qwen3TTSModel` provide dedicated ASR and TTS entry points
+with CPU and device components. Use the [speech guide](qwen3_audio.md) for pinned
+assets, input limits, source preparation and process ownership. These interfaces
+are separate from the text/vision TOML runner and CausalLM/VLM registry.

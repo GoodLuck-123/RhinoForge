@@ -1,4 +1,4 @@
-"""RhinoVLA RPU weight prep (P1).
+"""RhinoVLA device weight prep (P1).
 
 Self-contained weight-conversion helpers for the RhinoVLA action expert. The
 expert math is identical to QwenPI05's, so these helpers are ported from
@@ -68,13 +68,13 @@ def _gather_expert_scales(expert):
                 or scale.numel() != linear.weight.shape[0]
                 or scale.device != linear.weight.device or not scale.is_contiguous()):
             raise ValueError("RhinoVLA requires uniform W8A16 weights with FP16 [N] scales")
-    # Native admission also checks actual RPU storage, finite positive scales,
+    # Native admission also checks actual device storage, finite positive scales,
     # exact v3 geometry and all retained FP16 weights before committing owners.
     return tuple([linear.weight_scale for linear in group] for group in groups)
 
 
 def convert_expert_for_rpu(expert, *, w8a16=False):
-    """Move a RhinoVLA action expert to RPU in the CORRECT order.
+    """Move a RhinoVLA action expert to device in the CORRECT order.
 
     convert_linear_weights_inplace swizzles by weight.element_size();
     swizzling fp32 then casting to fp16 produces a wrong-dwidth byte layout.
@@ -169,7 +169,7 @@ def _quantize_full_w8_weight(weight):
 
 
 def _prepare_full_w8_cond_weights(expert):
-    """Retain row weights for the owner and col weights for cold RPU tables."""
+    """Retain row weights for the owner and col weights for cold device tables."""
     from rpu_backend.runtime.weights import transform_linear_weight
 
     cached = getattr(expert, "_rpu_full_w8_cond_owners", None)
@@ -203,7 +203,7 @@ def _prepare_full_w8_cond_weights(expert):
 
 
 def _prepare_cond_dense_weights(expert, *, full_w8a16=False):
-    """Swizzle per-layer AdaRMS cond weights for RPU row-partition GEMV.
+    """Swizzle per-layer AdaRMS cond weights for device row-partition GEMV.
 
     For each layer x each of {input_layernorm, post_attention_layernorm}:
       norm.cond.weight [3*width, width] (γ-folded on scale block)
@@ -269,7 +269,7 @@ def _prepare_final_norm_dense_weights(final_norm):
 
     Mirrors ``_prepare_cond_dense_weights`` for the final expert norm, including
     the gamma fold on the scale block. The CPU fallback keeps ``final_norm`` in
-    fp32; these buffers are additive RPU-only copies.
+    fp32; these buffers are additive device-only copies.
     """
     from rpu_backend.runtime.weights import transform_linear_weight, NUM_CORES
 
@@ -356,7 +356,7 @@ def _prepare_denoise_adarms_tables(expert, cond_all_cpu, *, full_w8a16=False,
       * pair_table:  [steps, layers, 6H]  = attn + mlp AdaRMS params
       * final_table: [steps, 3H]          = final norm AdaRMS params
 
-    Both tensors are fp16 RPU tensors consumed by a C++ mutable-DMA fast path.
+    Both tensors are fp16 device tensors consumed by a C++ mutable-DMA fast path.
     """
     if high_precision and not full_w8a16:
         raise ValueError("RhinoVLA high precision requires full W8 AdaRMS tables")
@@ -402,7 +402,7 @@ def _prepare_denoise_adarms_tables(expert, cond_all_cpu, *, full_w8a16=False,
 def _prepare_full_w8_adarms_tables(expert, cond_all_cpu, loop_weights, *,
                                   precompute_gate_tanh=False, high_precision=False,
                                   quantize_final_norm=True, final_norm=None):
-    """Run actual W8A16 RPU Linear once for each fixed-timestep projection."""
+    """Run actual W8A16 device Linear once for each fixed-timestep projection."""
     if type(quantize_final_norm) is not bool:
         raise TypeError("RhinoVLA quantize_final_norm must be bool")
     if not quantize_final_norm and (precompute_gate_tanh or high_precision):
@@ -449,7 +449,7 @@ def _prepare_full_w8_adarms_tables(expert, cond_all_cpu, loop_weights, *,
         if index < 18:
             output[:, 3072:4096] += 1.0
             if precompute_gate_tanh:
-                # Use the owner's actual RPU precision for both fixed gates.
+                # Use the owner's actual device precision for both fixed gates.
                 # Final-norm's gate is never read.
                 gates = torch.cat((output[:, 2048:3072], output[:, 5120:6144]),
                                   dim=1).contiguous().to("rpu")
@@ -549,7 +549,7 @@ def _prepare_denoise_loop_weights(expert, action_io, mask_proj, *, full_w8a16=Fa
 
     def folded_action_time_in():
         # Fold time_in_action(action_in_proj(x)) into one small action-dim GEMM.
-        # Use fp16-rounded weights/biases because the old RPU path consumed fp16
+        # Use fp16-rounded weights/biases because the old device path consumed fp16
         # parameters before the second linear.
         action_w = action_io.action_in_proj.weight.detach().cpu().to(dtype=torch.float16)
         action_b = action_io.action_in_proj.bias.detach().cpu().to(dtype=torch.float16)
@@ -695,7 +695,7 @@ def _precompute_mrope_cos_sin(rotary_emb, prefix_len, suffix_len):
     cos[:, D/2:]; the SPM rope kernel expects the HALF-dim [seq, head_dim/2]
     (slicing the duplicate half is lossless and required for correct addressing).
 
-    Returns (cos, sin): each [suffix_len, head_dim/2] fp16 on RPU.
+    Returns (cos, sin): each [suffix_len, head_dim/2] fp16 on device.
     """
     suffix_positions = torch.arange(
         prefix_len, prefix_len + suffix_len, device="cpu"
@@ -801,7 +801,7 @@ def _plan_rhino_prefix_kv_geometry(*, num_layers, num_kv_heads, logical_rows,
             "RhinoVLA prefix planner returned a non-canonical KV route"
         )
     route_argument_digest = sha256(
-        ("RPU-RHINOVLA-PREFIX-KV-V1\0" + ",".join(
+        ("device-RHINOVLA-PREFIX-KV-V1\0" + ",".join(
             str(value) for value in route_arguments
         )).encode("ascii")
     ).hexdigest()
@@ -839,7 +839,7 @@ def _plan_rhino_prefix_kv_geometry(*, num_layers, num_kv_heads, logical_rows,
 
 
 def _prefill_kv_cache(cache, prefix_pairs, planned_route_arguments):
-    """Pre-fill prefix KV into RPUCache via the RPU insert_kcache/vcache kernels.
+    """Pre-fill prefix KV into RPUCache via the device insert_kcache/vcache kernels.
 
     The insert kernels are the source of truth for the 7D swizzled DDR cache
     layout SDPA reads. We write into a prefix-sized temporary 7D cache then

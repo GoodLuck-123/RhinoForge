@@ -6,6 +6,9 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
 
 ## Canonical public documents
 
+- [v1.2.0 upgrade guide](../docs/upgrading_1_2.md): installation,
+  canonical example paths, compatibility aliases and explicit input migrations.
+
 - [Architecture](../docs/architecture.md): runtime layers, FusedModelBase, SPM,
   Graph/batch execution, and DMA ownership.
 - [API reference](../docs/api_reference.md): supported Python and `torch.rpu`
@@ -22,13 +25,11 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
   without device access, and first inference.
 - [Restricted runtime assets](../docs/runtime_assets.md): matching external
   runtime packages, provider integrity checks, and installation.
-- [Model execution and profiling](../docs/model_testing.md): direct examples,
+- [Run and debug models](../docs/model_testing.md): direct examples,
   TOML runner, and profiling.
-- [Model validation policy](../docs/validation_policy.md): proportionate host and hardware checks, numerical records and stop conditions.
+- [Model validation policy](../docs/validation_policy.md): proportionate host and hardware checks, runtime contracts and stop conditions.
 - [Runtime configuration](../docs/runtime_config.md): supported controls,
   defaults, lifecycle, and risk.
-- [Performance measurement](../docs/performance.md): correctness-first,
-  validation cleanup, BUILD/REPLAY warmup, and reproducible latency and throughput reporting.
 - [Model assets](../docs/model_assets.md) and
   [quantization](../docs/quantization.md): checkpoint records and offline
   conversion.
@@ -102,6 +103,5 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
 
 ## Speech inference
 
-- [Qwen3 ASR/TTS current profile](../docs/qwen3_audio_r1.zh.md): frozen assets,
-  installation, CPU/RPU boundaries, owner-scoped Graphs and codec mode, latest
-  measurement scope, quality limits and reproduction commands.
+- [Qwen3 ASR/TTS](../docs/qwen3_audio.md): pinned assets, source preparation,
+  input limits, CPU/device ownership and dedicated API/CLI commands.

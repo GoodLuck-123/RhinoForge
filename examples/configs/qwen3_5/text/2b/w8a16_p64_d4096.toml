@@ -1,5 +1,4 @@
-# Public configuration; provide your own checkpoint and input assets.
-
+# Fixed-length language benchmark; this TOML does not certify the profile.
 [example]
 profile_id = "qwen3_5-2b.w8a16.text-controlled"
 registry_alias = "qwen3_5-2b-w8a16"
@@ -11,6 +10,7 @@ architecture = "Qwen3_5ForConditionalGeneration"
 QWEN3_5_QUANT_ALLOW_UNCERTIFIED = "1"
 
 [input]
+# Hello from Hugging Face and PyTorch! This is a test for Qwen model.
 prompt_token_ids = [9419, 494, 462, 34098, 18036, 321, 5187, 51, 20923, 0, 1061, 369, 264, 1228, 364, 1167, 16451, 1558, 13]
 prefill_tokens = 64
 prefill_fill_token_id = 248046
@@ -24,12 +24,13 @@ inference_mode = false
 hwperf = false
 profile = false
 seed = 0
-torch_num_threads = 24
-
-[rpu_execution]
+# Fixed for this retest; historical CPU thread counts were not recorded.
 
 [rpu_execution.model]
 num_cores = 8
 
 [rpu_execution.prefill]
 chunk_size = "auto"
+
+[cpu]
+threads = 24

@@ -1,35 +1,4 @@
-"""HALO text_cache_update（mode="und" 文本-prompt KV-prefill）→ RPU（WS-2 组件 A）。
-
-部署口径下 ``Bagel.forward_cache_update_text``（is_causal=True）把文本指令编码进
-past_key_values。assess verdict = **Adapter-only**：复用通用 ``causal_decoder_*`` op
-家族 + HALO und/base 权重，**零新 C++**（干净因果-prefill primitive 已在树且 Wall-OSS
-板上证过 = ``adapters/wall_oss/{llm,action}.py``）。
-
-机制（Codex review 2026-06-16 纠偏后）：
-  * **显式 2D causal-prefix mask 路径**（``is_causal=False`` + ``[seq, P+seq]`` additive
-    mask），**两 regime 统一**：``is_causal=True`` LTM 对 cond 不可用——LTM 要前缀长度
-    ``P`` v16 对齐且是 query 倍数（``rpu_helpers.h:426``），cond ``P=4698`` 被拒。借
-    ``is_causal=False`` op 通道，mask 编码因果语义（Wall-OSS ``action.py:_build_action_mask``
-    同式：query i 看 [0,P+i]）。
-  * **1D RoPE 由 ``position`` arg 驱动**（``mrope_section=[]`` → ``has_mrope_=false``，
-    ``position_ids`` 被 kernel 忽略，``rpu_qwen3_model.h:548``）；用**顺序** cos/sin 表
-    （行 p = position p 的 rotary 基，theta=1e6），``position=P`` 选起点。**不复用**
-    weights.py 的 act 常数-position 表。
-  * **embedding 跟 HALO 路径**（``F.embedding(...).float()→bf16→fp16``，对齐 golden 的
-    bf16-autocast embed），非 Wall-OSS 的 fp32。
-
-两个部署 regime（``halo_inferencer.py:82/83``）：
-  * ``img_uncond``：进入 kv_len=0（空前缀）→ 写 N 文本 token（部署实测 N=8）。
-  * ``cond``：进入 kv_len=image-prefix（部署实测 4698）→ 灌前缀 + 写 N 文本 token。
-
-验收单位 = 新文本段 KV ``[N, num_kv_heads, head_dim]``×28 层，对 CUDA golden
-（``output/halo_text_cache_golden/<regime>/new_kv.pt``）proven-fp16 cos≥0.999 ∧ MSE≤1e-3。
-proof 边界：数值正确性由 @hardware .81 测试对 golden gate，本模块自身不构成硬件证据。
-
-权重复用：``weights.py:load_halo_branches`` 的 text（act=False）分支，已 RC-1
-``.half()→swizzle→rpu``，格式与 ``causal_decoder_set_weights`` 一致。前缀注入复用
-``runtime._swizzle_prefix_7d``（7-D cache 布局，与 kernel DMA 契约一致，禁止重复实现）。
-"""
+"""Model execution and tensor layout contracts."""
 from __future__ import annotations
 
 import dataclasses
@@ -72,11 +41,7 @@ def _to_rpu_half(t: torch.Tensor) -> torch.Tensor:
 
 
 def _dynamic_layer_kv(dc: object, layer: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """跨 transformers 版本取 DynamicCache 第 layer 层 (keys, values)，各 ``[B,nkv,seq,hd]``。
-
-    5.x 用 ``dc.layers[i].keys/.values``（无 ``key_cache``/``to_legacy_cache``，实测 tf 5.9.0）；
-    4.x 回落 ``dc.key_cache[i]/.value_cache[i]``。
-    """
+    """Model execution and tensor layout contracts."""
     layers = getattr(dc, "layers", None)
     if layers is not None:
         return layers[layer].keys, layers[layer].values
@@ -84,7 +49,7 @@ def _dynamic_layer_kv(dc: object, layer: int) -> Tuple[torch.Tensor, torch.Tenso
 
 
 def build_seq_rope_tables(cfg: HaloConfig, max_seq_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """**顺序** position 的 1D RoPE 表 ``[max_seq_len, head_dim/2]`` fp16 RPU（kernel 格式）。
+    """**顺序** position 的 1D RoPE 表 ``[max_seq_len, head_dim/2]`` fp16 device（kernel 格式）。
 
     行 p = position p 的 rotary 基（``inv_freq`` theta=1e6，与 transformers Qwen2
     默认 rope、attention_scaling=1.0 一致）。fp64 构造再降 fp16 匹配 golden。
@@ -123,7 +88,7 @@ def build_causal_prefix_mask(prefix_len: int, seq: int) -> torch.Tensor:
     query i（绝对 position prefix_len+i）看列 ``[0, prefix_len+i]``（全前缀 + 对新
     seq-block 因果），其余 ``-inf``。prefix_len=0 时退化为纯因果 ``[seq,seq]``。
     与 Wall-OSS ``action.py:_build_action_mask`` 同式；op 的 ``sdpa_prepare_mask``
-    把它拷到稳定 RPU DDR 槽（无需手动 flush）。常量（prefix_len/seq 固定）→ BUILD 期烘焙。
+    把它拷到稳定 device DDR 槽（无需手动 flush）。常量（prefix_len/seq 固定）→ BUILD 期烘焙。
     """
     if prefix_len < 0 or seq <= 0:
         raise ValueError(f"prefix_len {prefix_len} >= 0 and seq {seq} > 0 required")
@@ -205,7 +170,7 @@ class HaloTextCacheUpdate:
     """HALO und 文本-prompt KV-prefill runner（经 :func:`build_halo_text_cache` 构造）。
 
     复用通用 ``causal_decoder_*`` op + HALO und/base 权重。``_cos``/``_sin`` 是顺序
-    RoPE 表（与 handle 等寿命，set_weights 已绑同一份）。所有权：RPU 权重/表/cache 在
+    RoPE 表（与 handle 等寿命，set_weights 已绑同一份）。所有权：device 权重/表/cache 在
     runner 存活期有效；``_handle`` 由 finalize 释放。
     """
 
@@ -223,7 +188,7 @@ class HaloTextCacheUpdate:
     )
     _closed: bool = dataclasses.field(init=False, default=False, repr=False)
     # 前缀代数（编进 GraphSignature）：优化 A 后**仅在 _inject_prefix 回落 reassign（换新
-    # RPU 张量 → 新 DMA 地址）时 bump** 强制重 BUILD 防陈旧指针；in-place copy_（稳址）不 bump
+    # device 张量 → 新 DMA 地址）时 bump** 强制重 BUILD 防陈旧指针；in-place copy_（稳址）不 bump
     # → 同 regime 命中 replay；action runner 的 first-insert guard 独立保留。
     _prefix_epoch: int = dataclasses.field(init=False, default=0)
     _prefix_cache_identity: tuple | None = dataclasses.field(init=False, default=None, repr=False)
@@ -234,7 +199,7 @@ class HaloTextCacheUpdate:
                            handles={"_handle": (self._handle, _destroy_causal_decoder)})
 
     def _embed(self, packed_text_ids: torch.Tensor) -> torch.Tensor:
-        """文本 token → ``[1, seq, H]`` fp16 RPU。
+        """文本 token → ``[1, seq, H]`` fp16 device。
 
         跟 HALO runtime 路径（``runtime._assemble_x_emb``）：``F.embedding`` →
         ``.float()`` → ``.to(bf16).to(fp16)``，匹配 golden 的 bf16-autocast embed。
@@ -247,28 +212,11 @@ class HaloTextCacheUpdate:
     def _inject_prefix(
         self, prefix_k: List[torch.Tensor], prefix_v: List[torch.Tensor], prefix_len: int
     ) -> None:
-        """灌入 28 层 cond 前缀 K/V（CUDA NaiveCache ``[P,2,128]`` bf16/fp32）。
-
-        优化 A（2026-06-24，Step 0 实测 + 异前缀扰动探针 CONFIRMED，见
-        连续 prefill 缓冲区的生命周期约束）：
-        ``_swizzle_prefix_7d`` 输出形状 == ``RPUCache.__init__`` 的原始分配形状（attn_tp=2 →
-        ``_KV_SLOTS == nKVHeadChunk == 8``），故**原地 ``copy_`` 进固定地址张量（稳址）**而非换新
-        张量。稳址使同 ``(prefix_len, rope_base)`` regime 的 ``GraphSignature`` 不变 → 第 2+ episode
-        **命中 replay**，省去 reassign 每轮 ~0.45→0.10s 的重分配 H2D。``_prefix_epoch`` 仅在形状/设备
-        不匹配回落 reassign（换 DMA 地址）时 bump，强制重 BUILD 防陈旧指针。``reset_to_position(P)``：
-        K/V ``[P, P+seq)`` 由本次 forward 覆盖。
-        """
+        """Model execution and tensor layout contracts."""
         _inject_text_prefix(self, prefix_k, prefix_v, prefix_len)
 
     def _rope_base(self, packed_text_position_ids: torch.Tensor, seq: int) -> int:
-        """从 golden ``packed_text_position_ids`` 取 1D-RoPE 起点（``cos_sin_offset``）。
-
-        HALO MoT 压缩图像 token 的 RoPE position：cond regime 文本插入 cache 偏移
-        ``prefix_len``（实测 4698），但其 RoPE position 从压缩后的图像 position 续起
-        （实测 3）—— 与插入偏移**解耦**。本函数返回 ``position_ids[0]`` 作 RoPE 基址，
-        并断言这 seq 个 position **连续递增**（否则单 scalar 偏移不成立，须 per-row
-        gather；当前部署文本段恒连续，断言失败=遇到未支持的新口径，须扩 C++）。
-        """
+        """Model execution and tensor layout contracts."""
         pos = packed_text_position_ids.to(torch.long).cpu()
         if tuple(pos.shape) != (seq,):
             raise ValueError(f"packed_text_position_ids shape {tuple(pos.shape)} != ({seq},)")
@@ -316,20 +264,7 @@ class HaloTextCacheUpdate:
         packed_text_position_ids: torch.Tensor,
         prefix_kv: Optional[Tuple[List[torch.Tensor], List[torch.Tensor]]] = None,
     ) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
-        """一次 und 文本 prefill。返回新文本段 KV {layer: (k,v)}，k/v 各 ``[seq,nkv,hd]`` CPU。
-
-        I/O 契约：
-          * ``packed_text_ids`` [seq] int（golden ``text_pack.pt`` 的同名字段）。
-          * ``packed_text_position_ids`` [seq] int（golden 同名字段）——驱动 1D RoPE 的
-            **语义** position（cond regime 与 cache 插入偏移解耦：实测 [3..10] vs 插入
-            [4698..4705]）。img_uncond 时退化为 [0..7]，与插入偏移巧合相等。
-          * ``prefix_kv`` = (28 层 k, 28 层 v) 各 ``[P,2,128]``（cond regime 的 CUDA 前缀，
-            golden ``cond/prefix_kv.pt``）；``None`` = img_uncond（空前缀，P=0）。
-
-        走显式 causal-prefix mask 路径（``is_causal=False``）；KV 插入于 ``position=P``，
-        RoPE 由 ``cos_sin_offset=position_ids[0]`` 驱动（C++ WS-2 解耦，见
-        ``rpu_qwen3_model.h:rope_position_base_``）。
-        """
+        """Model execution and tensor layout contracts."""
         cfg = self.cfg
         seq = int(packed_text_ids.shape[0])
         if prefix_kv is not None:
@@ -343,7 +278,7 @@ class HaloTextCacheUpdate:
             self._inject_prefix(prefix_k, prefix_v, prefix_len)
         else:
             self.cache.reset()                       # 清空（img_uncond 空前缀）
-        ie = self._embed(packed_text_ids)            # [1,seq,H] fp16 RPU
+        ie = self._embed(packed_text_ids)            # [1,seq,H] fp16 device
         mask = build_causal_prefix_mask(prefix_len, seq)   # [seq, P+seq] fp16 CPU
         planned_chunk_size = a6_plan.selected.stage_tuple.compute_chunk
         # sig 含 prefix_len（KV 插入偏移）+ seq + rope_base（RoPE 起点，BUILD 期烘焙进

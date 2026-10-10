@@ -102,7 +102,7 @@ def _round_up(n: int, mult: int) -> int:
 def build_frame_rope_tables(
     cfg: HaloConfig, frame_len: int, max_seq_len: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """逐帧常数 position 的 step 1D-RoPE 表 ``[max_seq_len, head_dim/2]`` fp16 RPU(kernel 格式)。
+    """逐帧常数 position 的 step 1D-RoPE 表 ``[max_seq_len, head_dim/2]`` fp16 device(kernel 格式)。
 
     行 i = position ``floor(i / frame_len)`` 的 rotary 基(theta=cfg.rope_theta,与 text 分支
     一致;fp64 构造再降 fp16 匹配 golden)。**为何是 step 表**:vit 多帧 prefill 里帧 f 的

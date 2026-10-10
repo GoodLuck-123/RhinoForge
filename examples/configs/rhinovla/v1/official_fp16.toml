@@ -1,0 +1,27 @@
+[example]
+profile_id = "rhinovla.fp16.official-nonrtc"
+registry_alias = "rhinovla-controlled"
+target = "rhinovla"
+dtype = "fp16"
+
+[input]
+# Executes only the clean source/checkpoint pinned by official_runtime_factory.
+# The bundle supplies the same open LIBERO images used by the CPU reference.
+trust_model_code = true
+num_steps = 10
+
+[run]
+warmup = 2
+runs = 3
+hwperf = false
+profile = false
+seed = 0
+
+[rpu_execution.components.language_model.prefill]
+chunk_size = "auto"
+
+[rpu_execution.components.vision_encoder.vision]
+chunk_size = "auto"
+
+[rpu_execution.components.action_expert.action]
+chunk_size = "auto"

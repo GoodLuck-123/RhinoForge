@@ -98,7 +98,7 @@ def detect_and_validate_gemma_decoder_w8a16(
         ):
             raise RPUBackendError(
                 f"Pi05 quant validation failed: {fq_name}.weight and "
-                "weight_scale must be on RPU before set_weights"
+                "weight_scale must be on device before set_weights"
             )
         if not module.weight.is_contiguous() or not scale.is_contiguous():
             raise RPUBackendError(
@@ -132,7 +132,7 @@ def replicate_pi05_decoder_kv_heads_for_attention_tp(
 ) -> int:
     """Replicate K/V projection heads so Pi0.5 attention can run on 8 cores.
 
-    Pi0.5 Gemma uses MQA (`num_key_value_heads=1`) with eight Q heads. The RPU
+    Pi0.5 Gemma uses MQA (`num_key_value_heads=1`) with eight Q heads. The device
     attention path partitions Q/K/V/O by attention cores, so using
     `attn_tp=1` serializes all Q heads on core 0. This helper preserves MQA
     semantics by materializing identical effective K/V heads before the normal

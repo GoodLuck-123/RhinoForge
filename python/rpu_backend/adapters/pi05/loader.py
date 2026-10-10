@@ -522,6 +522,7 @@ def load_and_construct_pi05_policy(
     dtype: torch.dtype = torch.float16,
     trust_remote_code: bool = False,
     rpu_execution=None,
+    graph_runtime_policy=None,
     **lerobot_kwargs: Any,
 ) -> "Any":
     """D-01 canonical loader for Pi0.5. Delegated from Pi05Policy.from_pretrained per D-3-03.
@@ -529,10 +530,14 @@ def load_and_construct_pi05_policy(
     D-19 fp16 guard fires here BEFORE any lerobot load. trust_remote_code is an
     EXPLICIT kwarg with default False (D-CR3-SEC1 security).
     """
+    if graph_runtime_policy is not None:
+        from rpu_backend.graph import GraphRuntimePolicy
+        if not isinstance(graph_runtime_policy, GraphRuntimePolicy):
+            raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
     if dtype is not torch.float16:
         raise RPUUnsupportedDtypeError(
             f"Pi05Policy requires dtype=torch.float16; got {dtype}. "
-            "RPU kernels are fp16-primary (CLAUDE.md §Must-Never Rules).")
+            "device kernels are fp16-primary (docs/pitfalls.md).")
     if not isinstance(trust_remote_code, bool):
         raise TypeError(
             "Pi05Policy.from_pretrained: trust_remote_code must be bool, "
@@ -549,8 +554,9 @@ def load_and_construct_pi05_policy(
     # v5-02 D-12: Pi05Policy lives in api/policy.py (was transformers/pi05/policy.py
     # in v4 with a thin shim). Late import keeps loader -> policy circular-free.
     from rpu_backend.api.policy import Pi05Policy
-    if rpu_execution is None:
-        return Pi05Policy.from_lerobot_policy(lerobot_policy)
-    return Pi05Policy.from_lerobot_policy(
-        lerobot_policy, rpu_execution=rpu_execution
-    )
+    options = {}
+    if rpu_execution is not None:
+        options["rpu_execution"] = rpu_execution
+    if graph_runtime_policy is not None:
+        options["graph_runtime_policy"] = graph_runtime_policy
+    return Pi05Policy.from_lerobot_policy(lerobot_policy, **options)

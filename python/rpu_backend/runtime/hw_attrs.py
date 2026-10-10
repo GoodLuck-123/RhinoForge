@@ -196,7 +196,7 @@ PLANNER_SENSITIVE_ATTRS: frozenset[str] = frozenset({
 #   _rpu_action_handle:       Pi05 AdaRMS expert all-layers-once
 #   _rpu_vision_handle:       Pi05 SigLIP vision tower all-layers-once
 #   _rpu_gemma2_handle:       PaliGemma2 inner Gemma2 all-layers-once
-# Phase 2 02-REVIEW.md CR-01/CR-02/CR-03: extended with 8 names that the
+# Includes the names that the
 # Qwen3 / Pi05 / fused-lm-head paths write through the validated tree.
 # A9-SIGLIP-COLLISIONS (debug a9-validator-siglip-collisions, 2026-04-24):
 # extended with 6 names that `_convert_siglip_weights_for_rpu` writes onto
@@ -206,7 +206,7 @@ PLANNER_SENSITIVE_ATTRS: frozenset[str] = frozenset({
 # BEFORE `validate_postinstall(self._lerobot_policy)` runs at line 1178.
 # A9-VALIDATOR-NOISE-SEED (debug a9-validator-noise-seed, 2026-04-24):
 # test_pi05_e2e.py writes `_rpu_noise_seed` onto PI05Pytorch after validator
-# install but before first forward so the RPU path's CPU noise generator can
+# install but before first forward so the device path's CPU noise generator can
 # match the requested seed. It is test/internal harness state, not an A9 public
 # hardware tuning attribute, and remains mutable for reruns on the same object.
 INTERNAL_HW_ATTRS_TRANSITIONAL: frozenset[str] = frozenset({
@@ -343,7 +343,7 @@ INTERNAL_HW_ATTRS_TRANSITIONAL: frozenset[str] = frozenset({
     "_rpu_fused_denoise_retirement_state",
     "_rpu_fuse_validated",
     "_rpu_fused_denoise_graph_cache",
-    # Pi05 warm-inference host caches. The RPU device is fixed by the one-live-
+    # Pi05 warm-inference host caches. The device device is fixed by the one-live-
     # model policy; AdaRMS conditioning is deterministic per num_steps; and the
     # denoise mask is LRU-1 keyed by prefix-mask content + shape/device metadata.
     "_rpu_runtime_device",
@@ -354,7 +354,7 @@ INTERNAL_HW_ATTRS_TRANSITIONAL: frozenset[str] = frozenset({
     "_rpu_adarms_cond_cache",
     "_rpu_denoise_mask_cache",
     # SigLIP-batch (pi05-num-steps-fuse, 2026-05-31): number of camera images
-    # the RPU SigLIP forward packs into one seq=N*256 fused encoder forward.
+    # the device SigLIP forward packs into one seq=N*256 fused encoder forward.
     # Set on PI05Pytorch by Pi05Adapter; read by `_patched_embed_prefix`
     # (patches.py) to choose stack-batch vs per-image loop. Re-set on idempotent
     # re-patching → NOT monotonic.
@@ -372,6 +372,13 @@ INTERNAL_HW_ATTRS_TRANSITIONAL: frozenset[str] = frozenset({
     # maintainer-only and are not part of PUBLIC_HW_ATTRS.
     "_rpu_qwen3_5_vision_conversion_started",
     "_rpu_qwen3_5_vision_weights_converted",
+    "_rpu_vision_w8a16",
+    "_rpu_vision_math_precision",
+    "_rpu_vision_k1_b3_available",
+    "_rpu_vision_k1_camera_group_available",
+    "_rpu_g05_quant_inventory",
+    "_rpu_q_ws", "_rpu_k_ws", "_rpu_v_ws",
+    "_rpu_o_ws", "_rpu_fc1_ws", "_rpu_fc2_ws",
     "_rpu_qwen3_5_had_instance_forward",
     "_rpu_qwen3_5_original_forward",
     "_rpu_q_w", "_rpu_k_w", "_rpu_v_w",
@@ -395,6 +402,9 @@ INTERNAL_HW_ATTRS_TRANSITIONAL: frozenset[str] = frozenset({
     "_rpu_vision_graph_disable", "_rpu_vision_rope_disable",
     "_rpu_vision_linear_acc32",
     "_rpu_vision_gelu_erf_mode",
+    "_rpu_vision_w8a16", "_rpu_vision_math_precision",
+    "_rpu_vision_k1_b3_available", "_rpu_vision_k1_camera_group_available",
+    "_rpu_g05_quant_inventory",
     "_rpu_vision_graph_cache",
     "_rpu_vision_graph_key", "_rpu_vision_graph_sig",
     "_rpu_vision_debug_graph",
@@ -458,7 +468,7 @@ _ROOTS: "weakref.WeakSet[Any]" = weakref.WeakSet()
 
 # --- D-18: mixin + D-28 + H5 policy ---
 class HwAttrValidatorMixin:
-    """Mixin stamped into every module in the RPU model tree via __class__.
+    """Mixin stamped into every module in the device model tree via __class__.
 
     __setattr__ intercepts writes to `_rpu_*` names; delegates to
     _validate_hw_attr_write for D-26/D-27/D-28/H5-COLD_ONLY policy, then

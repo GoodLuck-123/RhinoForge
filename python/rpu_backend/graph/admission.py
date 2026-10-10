@@ -466,7 +466,7 @@ class _PoolEntry:
 class EntryRegistry:
     """Single-LRU frontend cache routing in front of backend GraphCache.
 
-    The registry owns no RPU memory. It chooses which backend GraphCache entry
+    The registry owns no device memory. It chooses which backend GraphCache entry
     should receive a call, enforces a soft LRU budget, and records frontend
     replay/recapture/evict diagnostics.
     """

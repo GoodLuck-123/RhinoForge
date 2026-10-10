@@ -41,7 +41,6 @@ expert_w8a16 = true
 full_w8a16 = true
 
 [run]
-torch_num_threads = 12
 inference_mode = false
 warmup = 2
 runs = 3
@@ -78,3 +77,6 @@ denoise_unroll = true
 shared_cache = true
 prefix_alias = true
 fast_replay = true
+
+[cpu]
+threads = 12

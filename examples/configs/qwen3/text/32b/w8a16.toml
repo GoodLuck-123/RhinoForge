@@ -1,5 +1,7 @@
-# Public configuration; provide your own checkpoint and input assets.
-
+# Existing W8A16 checkpoint with INT8 decoder and lm_head; other weights FP16.
+# TP8/B1, default ACC16; bounded P128/D7 ACC16/ACC32 checks archived.
+# Public runner uses one-step device loading; API also permits a quantized mmap CPU stage.
+# Unmeasured lengths and task quality are not certified; ACC32 need not reduce error.
 [example]
 profile_id = "qwen3-32b-w8a16-lmhead-int8.w8a16.text"
 registry_alias = "qwen3-32b-w8a16-lmhead-int8"
@@ -21,8 +23,6 @@ runs = 5
 hwperf = false
 profile = false
 seed = 0
-
-[rpu_execution]
 
 [rpu_execution.model]
 num_cores = 8

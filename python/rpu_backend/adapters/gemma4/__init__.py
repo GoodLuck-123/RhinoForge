@@ -1,7 +1,7 @@
-"""Gemma4 (E4B text decoder) RPU adapter.
+"""Gemma4 (E4B text decoder) device adapter.
 
 IMPORT SAFETY: the runtime registry imports this package only when Gemma4 is
-selected. This module still MUST NOT touch RPU hardware at import time. The
+selected. This module still MUST NOT touch device hardware at import time. The
 pure-Python ``.geometry`` helpers are import-safe; all heavy work
 (weight swizzle / cache / fused forward + ``graph_cache.capture``) is deferred
 into ``to_rpu`` and ``Gemma4ForRPU.forward`` (call-time imports).
@@ -14,6 +14,7 @@ bucketed by ceil(total_kv/16) beyond the 512-token window.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import threading
 from numbers import Integral
 
@@ -93,12 +94,12 @@ def _check_profile(config) -> None:
         layer_types = tuple(tc.layer_types)
     except (AttributeError, TypeError, ValueError) as exc:
         raise UnsupportedModelError(
-            "Gemma4 RPU adapter requires the complete E4B text config."
+            "Gemma4 device adapter requires the complete E4B text config."
         ) from exc
 
     if profile != _SUPPORTED_TEXT_PROFILE or layer_types != _SUPPORTED_LAYER_TYPES:
         raise UnsupportedModelError(
-            "Gemma4 RPU supports only the certified E4B text profile: "
+            "Gemma4 device supports only the certified E4B text profile: "
             f"profile={_SUPPORTED_TEXT_PROFILE}, got {profile}."
         )
 
@@ -143,14 +144,14 @@ def _validate_max_seq(
 
 
 class Gemma4Adapter:
-    """RPU adapter for Gemma4 E4B (text decoder MVP).
+    """device adapter for Gemma4 E4B (text decoder MVP).
 
     Builds the mixed-geometry fused decoder (``torch.ops.rpu.gemma4_*``) from a
     loaded HF ``Gemma4ForConditionalGeneration`` and installs a patched
     ``forward`` that routes through it: input embed (xsqrt H) -> PLE side-input ->
     fused decoder (graph-captured) -> tied lm_head + final softcap. The HF model
     stays on CPU (embed / PLE tables / tied lm_head live there); only the decoder
-    weights are swizzled onto the RPU.
+    weights are swizzled onto the device.
     """
 
     arch = HF_ARCH
@@ -202,7 +203,7 @@ class Gemma4Adapter:
             if getattr(self.model, "_rpu_gemma4_ready", False):
                 raise RuntimeError(
                     f"model.to({target!r}) rejected: the decoder is swizzled "
-                    "onto the RPU (irreversible). Reload via "
+                    "onto the device (irreversible). Reload via "
                     "RPUModelForConditionalGeneration.from_pretrained(...).")
             return original_to(*args, **kwargs)
 
@@ -282,6 +283,18 @@ class Gemma4Adapter:
         return self.model._execution_session.reconfigure(value)
 
 
+def _gemma4_graph_runtime_policy():
+    from rpu_backend.graph import GraphRuntimePolicy
+
+    policy = GraphRuntimePolicy.from_environment()
+    # Gemma4 still refreshes position-dependent RoPE/KV kernel parameters in
+    # the layer body. Keep normal Graph REPLAY (and its skip-sync policy), but
+    # do not let a process-wide FMB fast flag bypass those mutable updates.
+    return replace(
+        policy, fmb_fast_replay=False, fmb_deep_fast_replay=False,
+        provenance=policy.provenance + ("owner:gemma4-replay-position-updates",),
+    )
+
 def _execution_plan(model, handle, seq_len, position, horizon, graph_cache=None):
     """Shared cold/forward planner for the actual installed Gemma4 owner."""
     import torch
@@ -331,7 +344,7 @@ def _execution_plan(model, handle, seq_len, position, horizon, graph_cache=None)
 
 
 def _build_rpu_model(model, *, max_seq=None, _install_state=None):
-    """Swizzle the decoder onto the RPU + patch ``forward`` (call-time heavy imports)."""
+    """Swizzle the decoder onto the device + patch ``forward`` (call-time heavy imports)."""
     import types
 
     import torch
@@ -369,7 +382,7 @@ def _build_rpu_model(model, *, max_seq=None, _install_state=None):
     sd = model.state_dict()
     raw = lambda nm: sd[nm].float()
 
-    # Decoder + PLE weights -> swizzled fp16 on RPU.
+    # Decoder + PLE weights -> swizzled fp16 on device.
     lists, ple = rt.swizzle_decoder_and_ple(raw, geom)
     rope_tables = make_rope_tables(tc, max_seq, device="rpu", dtype=torch.float16)
     final_norm_w = raw(rt.PFX + "norm.weight").to(torch.float16).to("rpu")
@@ -380,7 +393,7 @@ def _build_rpu_model(model, *, max_seq=None, _install_state=None):
     plmp_w = sd[rt.PFX + "per_layer_model_projection.weight"]
     pln_w = sd[rt.PFX + "per_layer_projection_norm.weight"]
 
-    gc = rpu_backend.graph.GraphCache()
+    gc = rpu_backend.graph.GraphCache(runtime_policy=_gemma4_graph_runtime_policy())
     dyn = geometry_dyn_dims(geom)
     GraphSignature = rpu_backend.graph.GraphSignature
 
@@ -402,55 +415,55 @@ def _build_rpu_model(model, *, max_seq=None, _install_state=None):
                 return_dict=None, cache_position=None, logits_to_keep=0,
                 labels=None, **kwargs):
         if input_ids is None:
-            raise NotImplementedError("Gemma4 RPU forward requires input_ids "
+            raise NotImplementedError("Gemma4 device forward requires input_ids "
                                       "(inputs_embeds path not supported in the MVP).")
         if inputs_embeds is not None:
             raise ValueError(
-                "Gemma4 RPU forward accepts input_ids only; inputs_embeds must be None."
+                "Gemma4 device forward accepts input_ids only; inputs_embeds must be None."
             )
         if not isinstance(input_ids, torch.Tensor):
-            raise TypeError("Gemma4 RPU forward: input_ids must be a torch.Tensor.")
+            raise TypeError("Gemma4 device forward: input_ids must be a torch.Tensor.")
         if input_ids.ndim != 2 or input_ids.shape[1] < 1:
             raise ValueError(
-                "Gemma4 RPU forward: input_ids must have shape [1, seq] with seq >= 1."
+                "Gemma4 device forward: input_ids must have shape [1, seq] with seq >= 1."
             )
         integer_dtypes = {
             torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64
         }
         if input_ids.dtype not in integer_dtypes:
             raise TypeError(
-                f"Gemma4 RPU forward: input_ids must use an integer dtype, got "
+                f"Gemma4 device forward: input_ids must use an integer dtype, got "
                 f"{input_ids.dtype}."
             )
         if labels is not None:
             raise NotImplementedError(
-                "Gemma4 RPU is inference-only and does not support labels/loss."
+                "Gemma4 device is inference-only and does not support labels/loss."
             )
         if use_cache is False:
             raise NotImplementedError(
-                "Gemma4 RPU forward requires use_cache=True."
+                "Gemma4 device forward requires use_cache=True."
             )
         if return_dict is False:
             raise NotImplementedError(
-                "Gemma4 RPU forward requires return_dict=True."
+                "Gemma4 device forward requires return_dict=True."
             )
         if output_attentions or output_hidden_states:
-            raise NotImplementedError("Gemma4 RPU forward: output_attentions / "
+            raise NotImplementedError("Gemma4 device forward: output_attentions / "
                                       "output_hidden_states not supported.")
         if (isinstance(logits_to_keep, bool)
                 or not isinstance(logits_to_keep, Integral)
                 or logits_to_keep < 0):
             raise ValueError(
-                "Gemma4 RPU forward: logits_to_keep must be a non-negative integer."
+                "Gemma4 device forward: logits_to_keep must be a non-negative integer."
             )
         ids = input_ids.to("cpu", dtype=torch.long)
         B, S = ids.shape
         if B != 1:
-            raise NotImplementedError(f"Gemma4 RPU forward batch_size={B} (only 1).")
+            raise NotImplementedError(f"Gemma4 device forward batch_size={B} (only 1).")
         cache = past_key_values if past_key_values is not None else make_cache()
         if not isinstance(cache, Gemma4KVCache):
             raise TypeError(
-                "Gemma4 RPU forward requires Gemma4KVCache from build_rpu_cache()."
+                "Gemma4 device forward requires Gemma4KVCache from build_rpu_cache()."
             )
         position = int(cache.position)
 
@@ -460,7 +473,7 @@ def _build_rpu_model(model, *, max_seq=None, _install_state=None):
         horizon = min(int(cache.max_seq_len), max_seq)
         if position + S > horizon:
             raise ValueError(
-                f"Gemma4 RPU forward: position+seq ({position}+{S}) exceeds the "
+                f"Gemma4 device forward: position+seq ({position}+{S}) exceeds the "
                 f"RoPE/KV horizon {horizon} (RoPE max_seq={max_seq}, "
                 f"cache.max_seq_len={cache.max_seq_len}); rebuild with a larger "
                 "`model._rpu_max_seq` before `.to('rpu')`.")
@@ -474,7 +487,7 @@ def _build_rpu_model(model, *, max_seq=None, _install_state=None):
                     else (attention_mask == 1).all())
             if not bool(ones):
                 raise NotImplementedError(
-                    "Gemma4 RPU forward: only an all-ones attention_mask (no "
+                    "Gemma4 device forward: only an all-ones attention_mask (no "
                     "padding) is supported; got masked positions.")
         want = torch.arange(position, position + S, dtype=torch.long)
         for _nm, _t in (("position_ids", position_ids),
@@ -483,17 +496,17 @@ def _build_rpu_model(model, *, max_seq=None, _install_state=None):
                 if (not isinstance(_t, torch.Tensor)
                         or _t.dtype not in integer_dtypes):
                     raise TypeError(
-                        f"Gemma4 RPU forward: {_nm} must be an integer tensor."
+                        f"Gemma4 device forward: {_nm} must be an integer tensor."
                     )
                 got = _t.reshape(-1).to("cpu", dtype=torch.long)
                 if got.numel() != S or not torch.equal(got, want):
                     raise NotImplementedError(
-                        f"Gemma4 RPU forward: {_nm}={got.tolist()} disagrees with "
+                        f"Gemma4 device forward: {_nm}={got.tolist()} disagrees with "
                         f"the cache position (expected {want.tolist()}); explicit "
                         "or non-contiguous positions are not supported.")
 
         hidden = (torch.nn.functional.embedding(ids, embed_w).float() * (H ** 0.5)
-                  ).to(dtype=torch.float16, device="rpu")
+                  ).to(dtype=torch.float16, device="cpu")
         side = rt.compute_side_input(
             ids, embed_weight=embed_w, embed_per_layer_weight=eptl_w,
             model_projection_weight=plmp_w, projection_norm_weight=pln_w,
@@ -539,7 +552,7 @@ def _build_rpu_model(model, *, max_seq=None, _install_state=None):
         cache._seen_tokens = cache.position
         return CausalLMOutputWithPast(logits=logits, past_key_values=cache)
 
-    # Configure a pending native handle only after every Python/RPU owner and
+    # Configure a pending native handle only after every Python/device owner and
     # replacement callable is ready. Until `_rpu_gemma4_ready` is published,
     # this block owns rollback.
     tracked_attrs = (*_INSTALL_ATTRS, "forward", "build_rpu_cache")

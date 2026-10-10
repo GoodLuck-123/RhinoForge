@@ -1,5 +1,5 @@
 """
-RPU TorchDynamo backend — torch.compile 入口包装。
+device TorchDynamo backend — torch.compile 入口包装。
 
 用法 (FROZEN,见下;2026-08-08 起不再从 rpu_backend 顶层导出,只能直接 import 本模块):
     from rpu_backend.graph.dynamo_backend import RpuDynamoBackend, dynamo_backend
@@ -45,7 +45,7 @@ LRU eviction (max_entries):
 
     不要把 max_entries 关成无穷(default 之前的形态);Python-int guard
     根治在 B 路径(patch RPUCache.get_seq_length 让它返回 0-d tensor 让
-    Dynamo 当 SymInt 处理),目前 backlog,见 docs/d3_backlog.md。
+    Dynamo 当 SymInt 处理),目前 backlog,见 docs/api_reference.md。
 
 
 This frontend is frozen and is not exported from the top-level package.
@@ -153,7 +153,7 @@ class RpuDynamoBackend:
         # Dynamo 把 aten.clone / aten._to_copy (cross-device) / aten.copy_
         # trace 进 FX gm,RECORDING 期 deferred 执行让这些 host-read 节点
         # 读到 empty buffer → silent wrong output。Partition gm 把这些节点
-        # 切成 single-node eager partitions,周围 RPU 段各自 g.begin/end。
+        # 切成 single-node eager partitions,周围 device 段各自 g.begin/end。
         from .dynamo_partitioner import (
             partition_gm, materialization_breaks_enabled,
         )
@@ -163,7 +163,7 @@ class RpuDynamoBackend:
             partitioned_gm, partition_info = partition_gm(gm)
             if self._debug and len(partition_info) > 1:
                 breakdown = ",".join(
-                    f"{name}({'RPU' if rpu else 'eager'})"
+                    f"{name}({'device' if rpu else 'eager'})"
                     for name, rpu in partition_info
                 )
                 print(f"[rpu_dynamo_backend] partition: {breakdown}",
@@ -196,8 +196,8 @@ class RpuDynamoBackend:
             return compiled_call_single
 
         # Partitioned path:partitioned_gm 顶层 forward 按拓扑序调子模块。
-        # 我们替换每个 RPU 子模块的 forward 走 backend g.begin/end RAII;
-        # eager 子模块(单 materialization 节点)保持原样。每个 RPU 子模块
+        # 我们替换每个 device 子模块的 forward 走 backend g.begin/end RAII;
+        # eager 子模块(单 materialization 节点)保持原样。每个 device 子模块
         # 用独立的 gm_id (复合自父 gm_id + 子模块名) 进 planner,这样
         # admission cache 每段独立 LRU entry。
         for sub_name, is_rpu in partition_info:
@@ -217,14 +217,14 @@ class RpuDynamoBackend:
 
         def compiled_call_partitioned(*args):
             # partitioned_gm 顶层 forward 内部依次调 submod_X (.forward);
-            # 已经 in-place 替换 RPU 子模块的 forward 为 backend-wrapped 版本。
+            # 已经 in-place 替换 device 子模块的 forward 为 backend-wrapped 版本。
             return partitioned_gm(*args)
 
         return compiled_call_partitioned
 
     def _install_rpu_wrap(self, parent_gm, sub_name, sub_mod, sub_id,
                           planner, registry, branch_key_fn):
-        """In-place wrap 给定 RPU 子模块的 forward 为 backend g.begin/end RAII。
+        """In-place wrap 给定 device 子模块的 forward 为 backend g.begin/end RAII。
         通过 setattr 替换 sub_mod.forward,parent_gm 顶层 forward 调
         sub_mod(*args) 时实际走 wrapped 版本。"""
         original_forward = sub_mod.forward
@@ -300,7 +300,7 @@ dynamo_backend = RpuDynamoBackend()
 # =============================================================================
 # rpu_backend.compile() — 用户面 API,封掉 cache_position 实现细节
 # =============================================================================
-# 见 428_plan.md §11.5.3:decode 每步进入 forward 时 transformers Qwen3:379
+# decode 每步进入 forward 时，Transformers Qwen3
 # 调 past_key_values.get_seq_length() 拿 Python int,Dynamo 把这个 int 烘进
 # frame guard。compile wrapper 在 traced region 外把它转成 cache_position
 # tensor 显式传入,upstream forward 看到 cache_position 非 None 跳过自己
@@ -380,8 +380,9 @@ class _RpuCompiledModule:
           - size 接近 1 (decode 单 sig)
           - replay_total 随 step 递增
           - recapture_total / evict_count 保持 0 (Python int guard 已修)
-          - prepared_segment_miss_total 在稳定 decode 上保持 0
-            (>0 说明某步 prepared_wq 被丢失)
+          - prepared_segment_hit/miss_total 记录 queue packet 复用/重建；
+            多段 Graph 使用同一 private queue 时，正常 REPLAY 也可累计 miss。
+            这不是 recapture 计数，不要求累计 miss 为 0。
           - non_replayable_reasons 列出每个 entry 的 reason(空字符串过滤掉)
 
         1.2 P0 起 entries 字段给出每个 cache entry 的 graph 计数明细

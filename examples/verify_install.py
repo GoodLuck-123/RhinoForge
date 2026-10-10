@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify that RhinoForge can import and access the configured RPU."""
+"""Verify that RhinoForge can import and access the configured device."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ def main() -> int:
     parser.add_argument(
         "--check-config",
         action="store_true",
-        help="check package metadata and module locations without accessing the RPU",
+        help="check package metadata and module locations without accessing the device",
     )
     args = parser.parse_args()
 
@@ -65,16 +65,16 @@ def main() -> int:
         raise SystemExit(f"RPU_KERNEL_LIB_PATH does not name a file: {ref_path}")
     if not torch.rpu.is_available():
         raise SystemExit(
-            "RPU is unavailable. Check board device permissions and the Rhino "
+            "device is unavailable. Check board device permissions and the Rhino "
             "Launch installation."
         )
 
     expected = torch.arange(4, dtype=torch.float16)
     actual = expected.to("rpu").cpu()
     if not torch.equal(actual, expected):
-        raise SystemExit("RPU host/device copy check failed")
+        raise SystemExit("device host/device copy check failed")
     print(
-        f"RhinoForge {rpu_backend.__version__} (API {API_VERSION}): RPU ready"
+        f"RhinoForge {rpu_backend.__version__} (API {API_VERSION}): device ready"
     )
     return 0
 

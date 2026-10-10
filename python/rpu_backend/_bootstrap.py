@@ -19,7 +19,7 @@ import types as _types
 import atexit as _atexit
 import warnings as _warnings
 
-# The rhino-launch-kernel DMA allocator opens one mem-object fd per RPU
+# The rhino-launch-kernel DMA allocator opens one mem-object fd per device
 # tensor allocation; Pi0.5 (~3.3 GB across hundreds of weight tensors) drives
 # the count past the default soft limit (1024), surfacing as `std::bad_alloc`
 # when the underlying open() returns EMFILE. Lift soft to min(target, hard)

@@ -33,8 +33,8 @@ checkpoint formats, conversion options and input constraints for their examples.
 The public Wall-OSS base checkpoint is
 [`x-square-robot/wall-oss-0.5`](https://huggingface.co/x-square-robot/wall-oss-0.5).
 Use its processor, normalizer and action definitions as described in the
-[Wall-OSS example](../examples/README.md#公开-wall-oss-与-rhinovla). For G0.5, the
-[configuration](../examples/configs/g05/base/fp16.toml) records the source,
+[Wall-OSS example](../examples/configs/README.md). For G0.5, the
+[configuration](../examples/configs/g05/2cam/fp16.toml) records the source,
 revision, subfolder and implementation. Consult the model owner's access and
 license terms and [third-party notices](../THIRD_PARTY_NOTICES.md); RhinoForge's
 source license does not grant rights to these weights.
@@ -43,6 +43,10 @@ Keep the complete checkpoint, including its configuration, tokenizer and
 processor files. Pi0.5's SigLIP weights belong to the policy checkpoint.
 Locally converted weights must match the selected configuration's format and
 do not inherit the original checkpoint's task-quality conclusions.
+
+Qwen3 speech uses separate checkpoint guards and TTS source hashes. Follow the
+[speech guide](qwen3_audio.md) for pinned ASR/TTS downloads and the prepared source
+layout, including the TTS `speech_tokenizer/` directory.
 
 ## Download pattern
 
@@ -105,7 +109,7 @@ model and converter versions for reproducibility.
 Model assets do not replace the external runtime prerequisites:
 
 - A matching sanitized Release Rhino Launch package with headers and libraries.
-- The matching combined operator asset selected through `RPU_KERNEL_LIB_PATH`,
+- The matching main and expansion operator assets selected through `RPU_KERNEL_LIB_PATH`,
   plus its adjacent `.kernels` manifest.
 - The matching board SDK/runtime configured according to the platform's
   installation instructions.

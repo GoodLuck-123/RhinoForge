@@ -3,7 +3,7 @@
 R-Phase 4. Mirrors `RPUModelForCausalLM.from_pretrained` (api/causal_lm.py)
 but routes to multimodal HF classes via `AutoModelForImageTextToText`. Shares
 the same single-handle gate (`_LIVE_REF` in causal_lm.py) so a CausalLM and a
-ConditionalGeneration model cannot be live on RPU simultaneously.
+ConditionalGeneration model cannot be live on device simultaneously.
 
 Supported: `Qwen3VLForConditionalGeneration` and
 `Qwen3_5ForConditionalGeneration`, routed through their registered adapters.
@@ -94,7 +94,7 @@ class RPUModelForConditionalGeneration:
             )
         if dtype is not torch.float16:
             raise RPUUnsupportedDtypeError(
-                f"RPU kernels require torch.float16, got {dtype}. "
+                f"device kernels require torch.float16, got {dtype}. "
                 "Load the CPU reference separately for fp32 comparison."
             )
 

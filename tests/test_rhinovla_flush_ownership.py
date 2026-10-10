@@ -68,6 +68,9 @@ template<class Key> struct Slots {
     at::Tensor* find(Key key) { auto it=values.find(key); return it==values.end()?nullptr:&it->second; }
 };
 struct Model {
+    struct {int stage_plan=0;} context;
+    auto& ctx(){return context;}
+    bool tap_merger_for_plan(int)const{return false;}
     std::vector<int64_t> deepstack_visual_indexes_{2, 5, 8};
     int64_t current_num_patches_=768;
     Slots<std::pair<int64_t,int64_t>> deepstack_ddr_slots_, deepstack_merged_ddr_slots_;

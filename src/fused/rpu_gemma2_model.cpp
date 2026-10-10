@@ -51,7 +51,7 @@
 //   - cfg.cross_layer_batch_size = num_layers() (force single group).
 //
 // Framework contract: src/core/fused_model_base.h
-// Pitfall 2 structural fix reference: CLAUDE.md §"P2 Out-of-band SPM"
+// Pitfall 2 structural fix reference: docs/pitfalls.md
 
 #include "fused_model_base.h"
 #include "model_handle_registry.h"
@@ -375,7 +375,7 @@ public:
 
         // run_all_layers does full k/v cache validation (size / device / dtype / contiguous).
         TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1,
-                    "Gemma2Model::forward: hidden_states must be on RPU device");
+                    "Gemma2Model::forward: hidden_states must be on device");
         TORCH_CHECK(position >= 0,
                     "Gemma2Model::forward: position must be non-negative, got ", position);
 

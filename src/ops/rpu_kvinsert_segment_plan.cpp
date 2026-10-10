@@ -36,6 +36,7 @@ int64_t current_dependency_identity() {
     hash = dependency_hash_append(hash, kKvInsertCostRuntimeRelease);
     hash = dependency_hash_append(hash, kKvInsertCostLaunchSha256);
     hash = dependency_hash_append(hash, kKvInsertCostOperatorSha256);
+    hash = dependency_hash_append(hash, kKvInsertCostExpansionSha256);
     return static_cast<int64_t>(hash &
         static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
 }

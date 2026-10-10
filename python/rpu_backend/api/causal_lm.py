@@ -82,7 +82,7 @@ def _release_live_instance(model=None) -> None:
 
 
 def _claim_live_instance(model) -> int:
-    """Atomically claim the process-wide RPU slot for a model or policy.
+    """Atomically claim the process-wide device slot for a model or policy.
 
     Idempotent for the same owner instance.
 
@@ -113,9 +113,9 @@ def _claim_live_instance(model) -> int:
             if live is model:
                 return id(model)
             raise RPUSingleHandleError(
-                "This process cannot create another RPU model/policy after a "
+                "This process cannot create another device model/policy after a "
                 f"process-terminal owner: {_LIVE_TERMINAL_REASON}. Restart "
-                "the Python process before loading another RPU model/policy."
+                "the Python process before loading another device model/policy."
             )
         if _LIVE_REF is not None:
             live = _LIVE_REF()
@@ -126,10 +126,10 @@ def _claim_live_instance(model) -> int:
                 return id(model)  # idempotent re-entry — adapter's to_rpu() detects via _rpu_is_ready
             else:
                 raise RPUSingleHandleError(
-                    "An RPU model/policy is already live in this process "
+                    "An device model/policy is already live in this process "
                     f"(type={type(live).__name__}, id={id(live)}). "
                     "Call `del model; import gc; gc.collect()` to release it "
-                    "before loading a new RPU model/policy. (If gc.collect() "
+                    "before loading a new device model/policy. (If gc.collect() "
                     "does not release the handle, the previous owner is held "
                     "by another reference or cycle; release it or restart the "
                     "Python process.)"
@@ -211,7 +211,7 @@ class RPUModelForCausalLM:
         # D-19: dtype enforcement BEFORE HF load
         if dtype is not torch.float16:
             raise RPUUnsupportedDtypeError(
-                f"RPU kernels require torch.float16, got {dtype}. "
+                f"device kernels require torch.float16, got {dtype}. "
                 "Load the CPU reference separately if you need an fp32 baseline for comparison."
             )
 

@@ -9,6 +9,7 @@ so Hugging Face never casts the byte codes.
 from __future__ import annotations
 
 import json
+import copy
 import re
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from transformers import AutoConfig, AutoModelForImageTextToText, GenerationConf
 
 from rpu_backend.adapters.qwen3_5_moe.quant_scope import (
     EXACT_PROFILE_ID,
+    GPTQ_METHOD,
+    RTN_METHOD,
     expected_fp8_weight_names,
     scale_name,
     validate_exact_profile,
@@ -53,7 +56,7 @@ def _layer_types(config) -> tuple[str, ...]:
 
 
 def parse_quant_config(config):
-    """Return the exact controlled mixed-E4M3 declaration."""
+    """Return the controlled mixed-E4M3 or routed INT4 source declaration."""
     try:
         profile = validate_exact_profile(config, require_quant=True)
         return profile["quant_config"]
@@ -220,6 +223,96 @@ def _assert_expected_unexpected(unexpected, model) -> None:
         )
 
 
+def _load_int4_checkpoint_model(ckpt_dir, config, quant):
+    """Load ordinary FP16 weights and retain indexed, lazy INT4 expert sources."""
+    from .rtn_checkpoint import RtnCheckpoint
+    from .gptq_checkpoint import GptqCheckpoint
+
+    tc = getattr(config, "text_config", config)
+    checkpoint_type = {RTN_METHOD: RtnCheckpoint, GPTQ_METHOD: GptqCheckpoint}[quant["method"]]
+    try:
+        checkpoint = checkpoint_type(
+            ckpt_dir, num_layers=int(tc.num_hidden_layers),
+            num_experts=int(tc.num_experts), hidden_size=int(tc.hidden_size),
+            intermediate_size=int(tc.moe_intermediate_size))
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise RPUBackendError(f"Invalid Qwen3.5-MoE {quant['profile']} checkpoint: {exc}") from exc
+    if checkpoint.profile_id != quant["profile"]:
+        raise RPUBackendError("INT4 checkpoint source does not match the admitted profile")
+    # from_config needs only the architecture, never a Transformers GPTQ
+    # quantizer. Preserve the original metadata on the returned model.
+    skeleton_config = copy.deepcopy(config)
+    if hasattr(skeleton_config, "quantization_config"):
+        delattr(skeleton_config, "quantization_config")
+    with torch.device("meta"):
+        model = AutoModelForImageTextToText.from_config(skeleton_config)
+    model.config = config
+    model.requires_grad_(False)
+    model.generation_config = GenerationConfig.from_pretrained(
+        ckpt_dir, local_files_only=True)
+    for layer in range(checkpoint.num_layers):
+        prefix = f"model.language_model.layers.{layer}.mlp.experts"
+        experts = model.get_submodule(prefix)
+        for name, shape in (
+            ("gate_up_proj", (checkpoint.num_experts, 2 * checkpoint.intermediate_size,
+                              checkpoint.hidden_size)),
+            ("down_proj", (checkpoint.num_experts, checkpoint.hidden_size,
+                           checkpoint.intermediate_size)),
+        ):
+            parameter = experts._parameters.get(name)
+            if parameter is None or tuple(parameter.shape) != shape:
+                raise RPUBackendError(f"INT4 skeleton requires {prefix}.{name} {shape}")
+            # Do not leave meta Parameters in the CPU-stage preflight. Empty
+            # byte sentinels cannot allocate or accidentally expose FP16 experts.
+            experts._parameters[name] = nn.Parameter(
+                torch.empty(0, dtype=torch.uint8, device="cpu"), requires_grad=False)
+        experts._qwen3_5_moe_int4_source = checkpoint.layer_source(layer)
+        experts.rpu_weight_mode = 6
+        experts.rpu_quant_profile = checkpoint.profile_id
+
+    # HF intentionally ignores the checkpoint's unquantized MTP subtree.
+    # Check all unexpected keys before payload reads, then omit only those
+    # accepted by the model's existing ignore policy. Never materialize/cast
+    # the unused MTP experts merely to discard them after load_state_dict.
+    model_keys = set(model.state_dict())
+    regular_keys = {key for keys in checkpoint.regular_keys.values() for key in keys}
+    _assert_expected_unexpected(regular_keys - model_keys, model)
+    unexpected = []
+    for filename, keys in sorted(checkpoint.regular_keys.items()):
+        keys = [key for key in keys if key in model_keys]
+        if not keys:
+            continue
+        with checkpoint.open_shards([filename]) as opened:
+            state_dict = {}
+            for key in keys:
+                tensor = opened[filename].get_tensor(key)
+                if not bool(torch.isfinite(tensor).all()):
+                    raise RPUBackendError(f"INT4 non-quantized tensor is nonfinite: {key}")
+                tensor = tensor.to(torch.float16)
+                if not bool(torch.isfinite(tensor).all()):
+                    raise RPUBackendError(f"INT4 non-quantized tensor overflows FP16: {key}")
+                state_dict[key] = tensor
+            result = model.load_state_dict(state_dict, assign=True, strict=False)
+            unexpected.extend(result.unexpected_keys)
+            del state_dict
+    _assert_expected_unexpected(unexpected, model)
+    model.tie_weights()
+    _materialize_meta_buffers(model)
+    model.half()
+    missing = [name for name, tensor in (*model.named_parameters(), *model.named_buffers())
+               if tensor.device.type == "meta"]
+    if missing:
+        raise RPUBackendError(f"INT4 loader left missing model tensors: {missing[:8]}")
+    model._qwen3_5_moe_quant_config = dict(quant)
+    model._qwen3_5_moe_profile = checkpoint.profile_id
+    model._qwen3_5_moe_checkpoint_identity = checkpoint.identity
+    descriptor = getattr(checkpoint, "identity_descriptor", None)
+    if descriptor is not None:
+        model._qwen3_5_moe_checkpoint_descriptor = copy.deepcopy(descriptor)
+    _LOG.info("Qwen3.5-MoE %s loaded with lazy UINT4 experts", checkpoint.profile_id)
+    return model.eval()
+
+
 def load_qwen3_5_moe_model(
     pretrained_name_or_path,
     *,
@@ -227,7 +320,7 @@ def load_qwen3_5_moe_model(
     dtype: torch.dtype = torch.float16,
     **hf_kwargs,
 ):
-    """Stream the exact 35B-A3B mixed-E4M3 checkpoint onto a CPU skeleton."""
+    """Load an admitted 35B-A3B checkpoint onto a CPU skeleton."""
     if hf_kwargs.get("trust_remote_code", False) is not False:
         raise ValueError("RhinoForge requires trust_remote_code=False")
     if dtype is not torch.float16:
@@ -260,6 +353,9 @@ def load_qwen3_5_moe_model(
             "Qwen3.5-MoE quantized checkpoints must be a local directory, got "
             f"{str(ckpt_dir)!r}. Download it first."
         )
+
+    if quant.get("method") in (RTN_METHOD, GPTQ_METHOD):
+        return _load_int4_checkpoint_model(ckpt_dir, config, quant)
 
     layer_types = _layer_types(config)
     expected = set(expected_fp8_weight_names(layer_types))

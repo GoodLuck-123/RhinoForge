@@ -5,12 +5,12 @@
 This guide installs the current RhinoForge source in a separate Python
 environment and runs the public Qwen3-0.6B example. Models and runtime assets are
 provided separately. The [examples directory](../examples/README.md) describes
-configuration and usage; its templates do not certify model quality.
+configuration and usage.
 
 ## 1. Prepare the runtime and environment
 
 Use Python 3.12, a C++17 compiler and a configured board SDK/runtime. Obtain the
-matching external assets and set `RHINO_LAUNCH_ROOT`, `RPU_KERNEL_LIB_PATH` and
+matching external assets and set `RHINO_LAUNCH_ROOT`, `RPU_KERNEL_LIB_PATH`, `RPU_KERNEL_LIB_PATH_EXPANSION` and
 library paths as described in [Runtime assets](runtime_assets.md).
 
 Create a new environment for this checkout, separate from other RhinoForge or
@@ -33,11 +33,12 @@ python examples/verify_install.py --check-config
 ```
 
 `--check-config` checks installed package metadata and module locations without
-importing Torch or RhinoForge, loading the native runtime, or accessing the RPU.
+importing Torch or RhinoForge, loading the native runtime, or accessing the device.
 It does not validate native-library compatibility or device availability.
 
 Project dependencies come from [pyproject.toml](../pyproject.toml). Use
-`'.[vision]'` for vision models or `'.[vla]'` for policies in the install command.
+`'.[vision]'` for vision, `'.[vla]'` for policies, or `'.[audio]'` for
+[speech models](qwen3_audio.md) in the install command.
 For editable installs and building wheels, see [Development build](development_build.md).
 
 ## 2. Prepare the public model
@@ -51,7 +52,12 @@ hf download Qwen/Qwen3-0.6B \
   --revision c1899de289a04d12100db370d81485cdf75e47ca \
   --local-dir "$RPU_MODEL_CACHE/Qwen3-0.6B"
 cp examples/configs/qwen3/text/0_6b/fp16.toml qwen3.local.toml
-python examples/run_model.py --config qwen3.local.toml --check-config
+cat >> qwen3.local.toml <<'TOML'
+
+[logging]
+level = "INFO"
+TOML
+python examples/run.py --config qwen3.local.toml --check-config
 ```
 
 An existing complete copy of that checkpoint can be placed at the same location.
@@ -59,17 +65,19 @@ Model licenses and access terms are separate from RhinoForge's source license.
 All example configurations are organized by model under
 [`examples/configs`](../examples/README.md).
 
-## 3. Run inference on an idle RPU
+## 3. Run inference on an idle device
 
-Check that the local RPU is idle and acquire the platform's device lock before
+Check that the local device is idle and acquire the platform's device lock before
 running. On a shared host, coordinate with the board's other users. Then run:
 
 ```bash
-python examples/run_model.py --config qwen3.local.toml
+python examples/run.py --config qwen3.local.toml
 ```
 
-The runner prints generated output and timing information. For a basic device
-setup diagnosis, `python examples/verify_install.py` performs a small host/device
+The `INFO` setting above displays generated text. Without it, the default
+`ERROR` level hides ordinary output; `[logging].summary` controls the separate
+model and timing summaries. See [example logging](../examples/README.md#logging-and-performance-output).
+For a basic device setup diagnosis, `python examples/verify_install.py` performs a small host/device
 copy; it is optional when model inference already succeeds. Reuse the successful
 run instead of launching a model matrix.
 
@@ -80,4 +88,4 @@ covered in [Runtime assets](runtime_assets.md).
 
 Continue with [Model assets](model_assets.md),
 [Runtime configuration](runtime_config.md), and
-[Model execution and profiling](model_testing.md).
+[Run and debug models](model_testing.md).

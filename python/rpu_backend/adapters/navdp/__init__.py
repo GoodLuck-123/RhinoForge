@@ -1,4 +1,4 @@
-"""Controlled InternVLA-N1 NavDP RPU evaluator (standalone builder).
+"""Controlled InternVLA-N1 NavDP device evaluator (standalone builder).
 
 NavDP is a standalone diffusion-policy checkpoint (not an HF AutoModel), so it
 follows the GR00T standalone-build pattern, NOT the `register_adapter` HF path.

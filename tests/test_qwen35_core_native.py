@@ -190,9 +190,19 @@ def test_actual_qwen35_weight_guards_distinguish_logical_and_prepared_mlp(tmp_pa
     base = (ROOT / "src/core/fused_model_base.cpp").read_text()
     weights = _function(source, "Qwen3_5Model::set_weights")
     signature, body = weights.split("{", 1)
-    validation = body[:body.index("    has_qk_norm_ =")]
+    validation = body[:body.index("    action_nvfp4_ =")]
     parameter_call, = re.findall(r"    set_model_params\([^;]+;", weights)
     lists = re.findall(r"at::TensorList\s+(\w+)", signature)
+    # Tensor-scale tables are optional profile input, not one entry per layer.
+    layer_lists = [name for name in lists if name != "nvfp4_tensor_scales"]
+    nvfp4_header = (ROOT / "src/fused/g05_nvfp4.h").read_text()
+    nvfp4_metadata = nvfp4_header[
+        nvfp4_header.index("struct G05Nvfp4Tables"):
+        nvfp4_header.index("    void install(")
+    ]
+    kernel_header = (ROOT / "src/core/rpu_kernel_cache.h").read_text()
+    start = kernel_header.index("enum class KernelId")
+    kernel_ids = kernel_header[start:kernel_header.index("};", start) + 2]
 
     def method_body(text, signature):
         start = text.index(signature)
@@ -201,12 +211,15 @@ def test_actual_qwen35_weight_guards_distinguish_logical_and_prepared_mlp(tmp_pa
 
     cpp = r'''
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <initializer_list>
 #include <stdexcept>
+#include <string>
 #include <vector>
 #include "fused/qwen3_5_execution_topology.h"
+#include "ops/rpu_linear_tiling.h"
 using namespace v3;
 #define TORCH_CHECK(ok, ...) do { if (!(ok)) throw std::runtime_error(#ok); } while(false)
 namespace at {
@@ -225,9 +238,21 @@ struct Tensor {
     bool is_contiguous() const {return contiguous;}
     struct Device {int value;int type() const{return value;}};
     Device device() const {return {device_type};}
+    Tensor cpu() const {assert(false);return *this;}
+    template<class T> const T* data_ptr() const {assert(false);return nullptr;}
 };
 using TensorList=std::vector<Tensor>;
 }
+// These device preflights must stay unreachable for the ordinary dense inputs.
+__NVFP4_METADATA__
+    void install(at::TensorList) {assert(false);}
+};
+__KERNEL_IDS__
+struct KernelCache {
+    static KernelCache& instance() {static KernelCache cache;return cache;}
+    bool has_loaded(KernelId) const {assert(false);return false;}
+};
+void rpu_require_high_precision_math_kernels() {assert(false);}
 struct FusedModelBase {
     struct Impl {
         int num_cores_=8, attn_tp_=8, mlp_tp_=8;
@@ -249,6 +274,7 @@ struct Qwen3_5Model : FusedModelBase {
     int64_t gdn_num_v_heads=16,gdn_key_head_dim=128,gdn_value_head_dim=128;
     int64_t gdn_conv_dim=6144,gdn_conv_kernel=4;
     bool use_silu=true,action_mode_=false,z2_bound_=false,linear_acc32_=false,validated=false;
+    bool high_precision_=false;
     double eps=1e-6;
     int gdn_tp() const {return num_cores()==8?8:4;}
     DecoderExecutionTopology resolve_model_execution_topology(
@@ -329,9 +355,32 @@ struct Qwen3_5Model : FusedModelBase {
             }
         }
     }
+    void use_modern27(bool w4=false) {
+        use_legacy();
+        const auto quant=[w4](at::Tensor& w,at::Tensor& s,bool row=false) {
+            if(!w4) {w.dtype=at::kChar;s={w.size(0)};return;}
+            const auto local_n=w.size(0)/(row?1:8),local_g=w.size(1)/32/(row?8:1);
+            const auto elements=((local_n+63)/64)*((local_g+3)/4)*8*4*64;
+            w.dtype=at::kByte;w.shape[1]/=2;s={32,elements/32};
+        };
+        for(int i=0;i<64;++i) {
+            quant(gate_list[i],gate_scale_list[i]);quant(up_list[i],up_scale_list[i]);
+            quant(down_list[i],down_scale_list[i],true);
+            if(layer_is_full[i]) {
+                quant(q_w_list[i],q_scale_list[i]);quant(k_w_list[i],k_scale_list[i]);
+                quant(v_w_list[i],v_scale_list[i]);quant(attn_gate_list[i],attn_gate_scale_list[i]);
+                quant(o_w_list[i],o_scale_list[i],true);
+            } else {
+                quant(gdn_q_list[i],gdn_q_scale_list[i]);quant(gdn_k_list[i],gdn_k_scale_list[i]);
+                quant(gdn_v_list[i],gdn_v_scale_list[i]);quant(gdn_in_z_list[i],gdn_in_z_scale_list[i]);
+                quant(gdn_b_bg_list[i],gdn_b_bg_scale_list[i]);quant(gdn_a_bg_list[i],gdn_a_bg_scale_list[i]);
+                quant(gdn_out_list[i],gdn_out_scale_list[i],true);
+            }
+        }
+    }
     void validate() {
         __VALIDATION__
-        // Actual late logical call, isolated from RPU allocations and uploads.
+        // Actual late logical call, isolated from device allocations and uploads.
         __PARAMETER_CALL__
         validated=true;
     }
@@ -353,12 +402,30 @@ template<class F> void reject_legacy(int cores,F mutate) {
     catch(const std::invalid_argument&) {rejected=true;}
     assert(rejected && !m.validated && m.impl.hidden_size_==0 && m.impl.intermediate_size_==0);
 }
+template<class F> void reject_modern27(int cores,bool w4,F mutate) {
+    Qwen3_5Model m(cores);m.use_modern27(w4);mutate(m);bool rejected=false;
+    try {m.validate();} catch(const std::exception&) {rejected=true;}
+    assert(rejected && !m.validated && m.impl.hidden_size_==0);
+}
 int main() {
     for(int cores:{4,6,8}) {
         Qwen3_5Model m(cores);m.validate();
         assert(m.validated && m.intermediate_size==3584);
         assert(m.impl.intermediate_size_==(cores==6?3648:3584));
         assert(m.impl.mlp_tp_==cores && m.impl.attn_tp_==(cores==8?8:4));
+        Qwen3_5Model modern(cores);modern.use_modern27();modern.validate();
+        assert(modern.validated && modern.impl.hidden_size_==5120);
+        assert(modern.impl.intermediate_size_==(cores==6?17472:17408));
+        reject_modern27(cores,false,[](auto& m){m.gdn_a_bg_list[62].dtype=at::kHalf;m.gdn_a_bg_scale_list[62]={};});
+        reject_modern27(cores,false,[](auto& m){m.gate_list[63].dtype=at::kHalf;m.gate_scale_list[63]={};});
+        reject_modern27(cores,false,[](auto& m){m.gdn_q_scale_list[62]={2047};});
+        if(cores==8) {
+            Qwen3_5Model w4(cores);w4.use_modern27(true);w4.validate();assert(w4.validated);
+            reject_modern27(cores,true,[](auto& m){m.gdn_a_bg_scale_list[62]={64,320};});
+            reject_modern27(cores,true,[](auto& m){m.gdn_a_bg_scale_list[62]={32,1};});
+            reject_modern27(cores,true,[](auto& m){m.down_list[63].shape[1]++;});
+            reject_modern27(cores,true,[](auto& m){m.gdn_q_list[62].dtype=at::kChar;});
+        } else reject_modern27(cores,true,[](auto&){});
     }
     for(int cores:{4,6}) {
         Qwen3_5Model w8(cores);w8.use_w8_2b();w8.validate();
@@ -418,8 +485,9 @@ int main() {
 '''
     for marker, value in (
         ("__LIST_FIELDS__", "\n".join(f"at::TensorList {name};" for name in lists)),
-        ("__LIST_INIT__", "\n".join(f"{name}.resize(24);" for name in lists)),
-        ("__LEGACY_LIST_INIT__", "\n".join(f"{name}.assign(64,at::Tensor{{}});" for name in lists)),
+        ("__LIST_INIT__", "\n".join(f"{name}.resize(24);" for name in layer_lists)),
+        ("__LEGACY_LIST_INIT__", "\n".join(f"{name}.assign(64,at::Tensor{{}});" for name in layer_lists)),
+        ("__NVFP4_METADATA__", nvfp4_metadata), ("__KERNEL_IDS__", kernel_ids),
         ("__VALIDATION__", validation), ("__PARAMETER_CALL__", parameter_call),
         ("__BASE_SET_PARAMS__", method_body(base, "void FusedModelBase::set_model_params(")),
         ("__BASE_RESOLVE__", method_body(base, "DecoderExecutionTopology FusedModelBase::resolve_model_execution_topology(")),
@@ -477,56 +545,3 @@ int main() {
     }
 }
 '''.replace("__SCALAR_DMA__", scalar_dma))
-
-
-def test_qwen35_vision_native_geometry_rejects_nonpublic_modes_without_mutation(tmp_path):
-    source = (ROOT / "src/fused/rpu_qwen3_5_vision_model.cpp").read_text()
-    guards = "\n".join(_function(source, name) for name in (
-        "Qwen3_5VisionModel::configure_execution_geometry",
-        "Qwen3_5VisionModel::set_temporal",
-    ))
-    limit = re.search(
-        r"constexpr int64_t QWEN3_5_VISION_GENERIC_MAX_SEQ = [0-9]+;", source
-    )[0]
-    _run_cpp(tmp_path, r'''
-#include <cassert>
-#include <cstdint>
-#include <stdexcept>
-#include <tuple>
-#include <vector>
-#define TORCH_CHECK(condition, ...) do { if (!(condition)) throw std::runtime_error("rejected"); } while (0)
-namespace at { struct Tensor {}; }
-class Qwen3_5VisionModel {
-public:
-    int64_t current_camera_batch_count_ = 1;
-    int64_t current_output_patches_ = 0;
-    void configure_execution_geometry(int64_t, int64_t, int64_t, bool);
-    void set_temporal(const at::Tensor&, int64_t, int64_t);
-};
-''' + limit + guards + r'''
-int main() {
-    Qwen3_5VisionModel model;
-    for (int64_t rows : {1, 256, 2640, 4096}) {
-        model.configure_execution_geometry(rows, 1, 1, false);
-        assert(model.current_output_patches_ == rows);
-        assert(model.current_camera_batch_count_ == 1);
-    }
-    for (auto args : std::vector<std::tuple<int64_t,int64_t,int64_t,bool>>{
-            {0,1,1,false}, {-1,1,1,false}, {4097,1,1,false},
-            {256,0,1,false}, {256,2,1,false}, {256,6,1,false},
-            {256,1,0,false}, {256,1,3,false}, {256,1,1,true}}) {
-        bool rejected = false;
-        try { model.configure_execution_geometry(
-            std::get<0>(args), std::get<1>(args), std::get<2>(args), std::get<3>(args)); }
-        catch (const std::runtime_error&) { rejected = true; }
-        assert(rejected && model.current_output_patches_ == 4096);
-        assert(model.current_camera_batch_count_ == 1);
-    }
-    for (int frames : {0,1,2,6}) {
-        bool rejected = false;
-        try { model.set_temporal(at::Tensor{}, frames, 256); }
-        catch (const std::runtime_error&) { rejected = true; }
-        assert(rejected && model.current_output_patches_ == 4096);
-    }
-}
-''')

@@ -52,7 +52,7 @@ public:
 
     // =========================================================================
     // 初始化：预分配每个 core 的 8MB GlobalSPM_t
-    // 必须在 RPU 硬件初始化后、首次使用前调用
+    // 必须在 device 硬件初始化后、首次使用前调用
     // =========================================================================
     void init();
     bool is_initialized() const { return initialized_; }
@@ -87,7 +87,7 @@ public:
         size_t peak_bytes = 0;
     };
 
-    // Pure first-fit planner: no RPU/SPM initialization or allocation required.
+    // Pure first-fit planner: no device/SPM initialization or allocation required.
     static AliasedPlan plan_temporary_aliased(
         const std::vector<AllocRequest>& requests);
 

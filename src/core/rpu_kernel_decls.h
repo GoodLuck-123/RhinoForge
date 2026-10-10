@@ -12,9 +12,10 @@
 #include <ATen/ATen.h>
 #include <c10/util/Half.h>
 #include "rpu_helpers.h"  // SdpaKernelType
-#include "rpu_math_precision.h"
 #include "rpu_eltwise.h"  // ValuOpType
 #include "rpu_kvinsert_segment_plan.h"
+#include "rpu_wall_sorting_config.h"
+#include "rpu_math_precision.h"
 
 class GraphDmaSemanticEndpoint;
 struct GraphStats;
@@ -81,7 +82,7 @@ void rpu_launch_rhinovla_silu_high_mul_spm_kernel(
 
 // HIGH stages through SPM with synchronous DMA (cold/PASSTHROUGH only), since
 // the high-precision payloads use byte addresses and cannot address DDR >4GiB.
-// It requires contiguous RPU FP16 operands and a 16-byte-aligned byte count.
+// It requires contiguous device FP16 operands and a 16-byte-aligned byte count.
 void rpu_launch_eltwise_unary_kernel(const at::Tensor &input,
                                      at::Tensor &output, ValuOpType op_type,
                                      RpuUnaryPrecision precision = RpuUnaryPrecision::BASE);
@@ -112,6 +113,7 @@ inline void rpu_launch_eltwise_unary_spm_kernel(
 }
 // Sum over rows (axis 0) of an [rows, cols<256] fp16 SPM tensor → [cols] in ONE
 // launch (replaces the 7-step tree-reduce). Kernel reduce_sum_non_last_dim_out_seg;
+// reg layout mirrors rhino-runtime kernel_wrapper/r1/reduce.cc (Sum, axis=0).
 void rpu_launch_reduce_sum_rows_spm_kernel(
     uint32_t in_spm_addr, uint32_t out_spm_addr,
     int64_t rows, int64_t cols, int num_cores = 1);
@@ -211,7 +213,6 @@ void rpu_launch_linear_ddr_kernel(const at::Tensor &input, const at::Tensor &wei
 // SDPA (Scaled Dot Product Attention) Kernels
 // =============================================================================
 
-// Eager unified-layout SDPA computes on CPU; fused decoders use the SPM launcher.
 at::Tensor rpu_scaled_dot_product_attention_unified(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const c10::optional<at::Tensor> &attn_mask, double dropout_p, bool is_causal,
@@ -318,17 +319,6 @@ void rpu_launch_rhinovla_rope_spm_kernel(
     int64_t rows, int64_t local_heads, int64_t head_dim, int64_t position,
     bool partial, int num_cores);
 
-// M-RoPE (Qwen3-VL R-Phase 1)
-// =============================================================================
-//
-// cos/sin tables live in DDR with shape [max_seq, head_dim/2]; position_ids
-// is a per-forward DDR tensor in absolute-indexing contract (caller writes
-// 3D positions [seq_len, 3] int32 starting at row `pos_offset`).
-//
-// Strobe masks are 3 × WARP_SIZE uint16 values encoding which dims of the
-// rotary half-dim belong to the T / H / W axis. Caller computes them once
-// (rpu_compute_mrope_strobe_masks) and passes them in; the launcher writes
-// them to SCM at register offsets [SCM_REG_OFFSET, SCM_REG_OFFSET + 3 × WARP_SIZE).
 
 void rpu_launch_mrope_spm_kernel(
     uint32_t x_spm_addr,                  // input SPM address (core 0 base)
@@ -362,6 +352,7 @@ void rpu_launch_mrope_spm_kernel(
 // Compute the 3 × WARP_SIZE uint16 strobe masks (T / H / W axis selector)
 // from an mrope_section [T_dim_half, H_dim_half, W_dim_half] vector. Called
 // once per set_weights — masks depend only on mrope_section + head_dim.
+// Mirrors rhino-runtime llama_common.cc:614-654.
 std::array<std::array<uint16_t, 16>, 3> rpu_compute_mrope_strobe_masks(
     const std::vector<int32_t> &mrope_section,
     int32_t head_dim);
@@ -411,35 +402,6 @@ void rpu_launch_partial_rope_1d_spm_kernel(
     int64_t rotary_dim,
     int num_cores);
 
-// =============================================================================
-// 2D RoPE (Qwen3-VL R-Phase 3 vision encoder)
-// =============================================================================
-//
-// Tables (FreqCos / FreqSin) shape:  [max_hw, head_dim/4] FP16
-//   Built from `Qwen3VLVisionRotaryEmbedding(head_dim/2).forward(max_hw)` →
-//   freqs (max_hw, head_dim/4) → cos/sin element-wise. SAME freq table is
-//   indexed by both row_idx and col_idx (see HF rot_pos_emb).
-//
-// position_idx shape:  [num_tokens, 2] int16 DDR aligned to 256B
-//   Per-patch (row_idx, col_idx). Built on CPU by adapter.py per forward.
-//
-// pos_offset is always 0 for vision encoder (the position table covers every
-// token in this forward — Qwen3-VL vision is single-image bidirectional).
-//
-// Register layout:
-//   reg[0]/[1]   position_idx DDR addr (>> 8)
-//   reg[2]/[3]   FreqCos addr (DDR >>8 or SPM raw, by variant)
-//   reg[4]/[5]   FreqSin addr (DDR >>8 or SPM raw, by variant)
-//   reg[6]/[7]   input_hidden SPM addr (32-bit raw)
-//   reg[8]/[9]   output_hidden SPM addr (32-bit raw)
-//   reg[10]/[11] pos_offset (uint32)
-//   reg[12]      head_dim                  (u16)
-//   reg[13]      head_num                  (u16)
-//   reg[14]      num_tokens                (u16)
-//   reg[15]      head_dim_pad              (u16)
-//   reg[64]      grid_dim_x = CeilDiv(head_dim/4, 32)   (u16)
-//   reg[65]      grid_dim_y = CeilDiv(num_tokens, 128)  (u16)
-//   reg[66]      grid_dim_z = 1                          (u16)
 
 // DDR cos/sin variant — vision encoder default.
 void rpu_launch_rope_2d_ddr_kernel(
@@ -461,7 +423,8 @@ void rpu_launch_rope_2d_ddr_kernel(
 // re-reading the DDR tables every block. Register layout is identical to the DDR
 // variant EXCEPT reg[2..5] hold the RAW per-core SPM byte offset of cos/sin (no
 // >>8) — the same encoding already used for the x/y SPM addr regs. position_idx
-// stays in DDR (reg[0]/[1] >>8).
+// stays in DDR (reg[0]/[1] >>8). Mirrors Rope2dGenerator get_config's
+// `part_in_ddr=False` branch (cos_base_param = cos_base, not config_cos_base//256).
 void rpu_launch_rope_2d_spm_kernel(
     uint32_t x_spm_addr,                  // input_hidden SPM addr (core 0 base)
     uint32_t y_spm_addr,                  // output_hidden SPM addr (may alias x)
@@ -491,67 +454,33 @@ void rpu_launch_rope_2d_spm_kernel(
     int64_t head_dim_pad,
     int num_cores = 8);
 
+// Exact Wall base M672/M324 Q/K pair; fixed local heads2/D80, tables128x20.
+void rpu_launch_wall_base_vision_qk_rope_2d_spm_kernel(
+    uint32_t q, uint32_t k, uint32_t cos_spm, uint32_t sin_spm,
+    const at::Tensor& position_idx, int64_t pos_offset,
+    int64_t rows, int num_cores = 8);
+
 // Test-only wrapper: alloc SPM, DMA input in, run rope_2d, DMA out. Single-core.
 // Used by tests/ops/test_rope_2d_isolated.py to compare kernel output against
 // HF apply_rotary_pos_emb_vision reference per-lane.
 at::Tensor rpu_rope_2d_test_ddr(
-    const at::Tensor& input,          // [N, num_heads, head_dim] fp16 RPU
-    const at::Tensor& cos,            // [max_hw, head_dim/4] fp16 RPU
-    const at::Tensor& sin,            // [max_hw, head_dim/4] fp16 RPU
-    const at::Tensor& position_idx);  // [N, 2] int16 RPU
+    const at::Tensor& input,          // [N, num_heads, head_dim] fp16 device
+    const at::Tensor& cos,            // [max_hw, head_dim/4] fp16 device
+    const at::Tensor& sin,            // [max_hw, head_dim/4] fp16 device
+    const at::Tensor& position_idx);  // [N, 2] int16 device
 
 // Test-only wrapper (SPM variant): alloc SPM for input/cos/sin/output, DMA all
 // three inputs in, run rope_2d_spm, DMA out. Single-core. Used by
 // tests/ops/test_rope_2d_isolated.py --variant spm.
 at::Tensor rpu_rope_2d_test_spm(
-    const at::Tensor& input,          // [N, num_heads, head_dim] fp16 RPU
-    const at::Tensor& cos,            // [max_hw, head_dim/4] fp16 RPU
-    const at::Tensor& sin,            // [max_hw, head_dim/4] fp16 RPU
-    const at::Tensor& position_idx);  // [N, 2] int16 RPU
+    const at::Tensor& input,          // [N, num_heads, head_dim] fp16 device
+    const at::Tensor& cos,            // [max_hw, head_dim/4] fp16 device
+    const at::Tensor& sin,            // [max_hw, head_dim/4] fp16 device
+    const at::Tensor& position_idx);  // [N, 2] int16 device
 
-// =============================================================================
-// fast_pos_embed_interpolate — bilinear positional-embedding interpolation.
-//
-// Computes, per token t, a bilinear sample of a [num_grid_H_side *
-// num_grid_W_side, hidden_size] embedding table at the FRACTIONAL grid
-// coordinate (h, w) = grid_mapping[pos_offset + t]:
-//
-//   h0 = floor(h), w0 = floor(w)
-//   h1 = min(h0+1, num_grid_H_side-1), w1 = min(w0+1, num_grid_W_side-1)
-//   dh = h - h0, dw = w - w0
-//   idx(i, j) = i * num_grid_W_side + j          <-- row stride is W_side
-//   out[t] = (1-dh)(1-dw)*E[idx(h0,w0)] + (1-dh)*dw*E[idx(h0,w1)]
-//          +    dh *(1-dw)*E[idx(h1,w0)] +    dh *dw*E[idx(h1,w1)]
-//
-// The kernel does the whole bilinear itself: grid_mapping holds raw fractional
-// coordinates, NOT precomputed indices or weights.
-//
-// Two semantics that are easy to get wrong:
-//   1. pos_offset indexes grid_mapping ONLY. The output is written densely from
-//      the output base — it is NOT shifted by pos_offset.
-//   2. grid_mapping must ALREADY be permuted into spatial-merge block order by
-//      the caller. The kernel does no reordering (cf. HF's `reorder` gather in
-//      transformers/vision_utils.py get_vision_bilinear_indices_and_weights).
-//
-// Register layout:
-//   reg[0]/[1]   grid_mapping base       (u32; DDR: addr/256, SPM: raw bytes)
-//   reg[2]/[3]   pos_embed_weight base   (u32; DDR: addr/256, SPM: raw bytes)
-//   reg[4]/[5]   patch_pos_embeds output SPM base (u32, raw bytes)
-//   reg[6]/[7]   pos_offset              (u32, token offset into grid_mapping)
-//   reg[8]       hidden_size             (i16)
-//   reg[9]       num_grid_H_side         (i16; used ONLY for the ceil clamp)
-//   reg[10]      num_grid_W_side         (i16; row stride AND ceil clamp)
-//   reg[11]      num_tokens              (i16)
-//   reg[64]      grid_dim_x = CeilDiv(hidden_size, 2048)  (u16)
-//   reg[65]      grid_dim_y = CeilDiv(num_tokens, 8)      (u16)
-//   reg[66]      grid_dim_z = 1                           (u16)
-//
-// The kernel needs no workspace/scratch.
-//
-// Both inputs must live in the SAME space — all DDR or all SPM. The output is
-// always SPM, and every core computes the same full-width result redundantly.
 
-// DDR-input variant.
+// DDR-input variant — what the vision graph uses (rhino sisc STEP 0 declares
+// both fast_grid_mapping and vit_fast_pos_embed_weight as DDR tensors).
 void rpu_launch_fast_pos_embed_interp_ddr_kernel(
     void *grid_mapping_ptr,        // [total_tokens, 2] fp16 DDR, 256B-aligned
     void *pos_embed_weight_ptr,    // [H_side*W_side, hidden] fp16 DDR, 256B-aligned
@@ -563,44 +492,6 @@ void rpu_launch_fast_pos_embed_interp_ddr_kernel(
     int64_t num_tokens,
     int num_cores = 8);
 
-// =============================================================================
-// all_gather_multi_core — axis=1 (column) concat across cores.
-//
-// Each core holds a packed [n, chunk_elems] shard; afterwards EVERY core holds
-// the full [n, chunk_elems*num_cores], core j's shard occupying columns
-// [j*chunk_elems, (j+1)*chunk_elems) of every row.
-//
-// Pairs with COLUMN-parallel matmul (partition=1): per-core outputs are
-// different columns of one answer, so they are concatenated. Contrast
-// rpu_launch_all_reduce_sum_residual_kernel, which pairs with ROW-parallel
-// (partition=0): per-core outputs are full-width PARTIAL SUMS, so they are
-// added. Picking the wrong one is silently wrong, not a crash.
-//
-// For `out = concat(shards) + residual`, follow this with
-// rpu_launch_eltwise_binary_spm_kernel(out, residual, out, n*chunk*tp,
-//                                      ValuOpType::ADD, 1.0, num_cores).
-//
-// Register layout:
-//   reg[0]      core_num                                   (u16)   both
-//   reg[1]      n = row count                              (u16)   both
-//   reg[2]/[3]  dst row stride bytes                       (u32)   both
-//   reg[4]      line_byte_size  = 4096                     multi_core only
-//   reg[5]      block_byte_size = 28672                    multi_core only
-//   reg[6]      max_chunk_size_v16 = ceil(chunk/32)        little_chunk only
-//   reg[7]      n_per_thd = 64/reg[6]  (must be >= 1)      little_chunk only
-//   reg[64..66] grid = (warp_num=8, 1, 1)                  both
-//   scm[0+j]/[8+j]   chunk bytes                           (u32)   both
-//   scm[16+j]        block count = ceil(chunk / 28672)     multi_core only
-//   scm[24+j]/[32+j] src row stride bytes                  (u32)   both
-//   scm[40+j]/[48+j] core j's shard base                   (u32)   both
-//   scm[56+j*16+k]/[64+j*16+k] dst table: core j's column base on core k
-//
-// reg[4]/[5] are VLM staging granularity, NOT layout, and are NOT dtype-scaled:
-// they are always 4096/28672
-// whatever the tensor dtype. The striding lives in reg[1] + reg[2]/[3] +
-// scm[24+j].
-//
-// Not exposed: non-uniform per-core chunks and strided sources.
 enum class RpuAllGatherSchedule : int64_t {
     LITTLE_CHUNK = 1,
     MULTI_CORE = 2,
@@ -632,20 +523,20 @@ void rpu_launch_spm_local_shard_copy_kernel(
     uint32_t spm_dst_unified,
     int num_cores);
 
-// Qwen3.5 GDN: row-wise L2 norm (kernel "l2norm", in the matching runtime asset).
+// Qwen3.5 GDN: row-wise L2 norm (kernel "l2norm", in default ref (be627ce5+)).
 void rpu_launch_l2norm_spm_kernel(uint32_t in_spm_addr, uint32_t out_spm_addr,
                                   int64_t M, int64_t D, double eps,
                                   int num_cores = 1);
 
 // Qwen3.5 GDN prefill chunk: cumulative sum along last dim (kernel
-// "cumsum_reduceC_tileN", in the matching runtime asset). Caller supplies a
+// "cumsum_reduceC_tileN", in default ref (be627ce5+)). Caller supplies a
 // workspace SPM buffer of min(64,C)*17*16 halfs (kernel spec, N-independent).
 void rpu_launch_cumsum_spm_kernel(uint32_t in_spm_addr, uint32_t out_spm_addr,
                                   uint32_t ws_spm_addr, int64_t N, int64_t C,
                                   int num_cores = 1);
 
 // Qwen3.5 GDN prefill chunk: (I - M)^-1 for strict lower-tri 64x64 blocks of M
-// (kernel "unit_tril_inv", in the matching runtime asset). C = 64 fixed, no
+// (kernel "unit_tril_inv", in default ref (be627ce5+)). C = 64 fixed, no
 // workspace; num_blocks = numel/(64*64).
 void rpu_launch_unit_tril_inv_spm_kernel(uint32_t in_spm_addr, uint32_t out_spm_addr,
                                          int64_t num_blocks, int num_cores = 1);
@@ -679,11 +570,13 @@ void rpu_launch_bmm_spm_kernel(uint32_t a_spm_addr, uint32_t b_spm_addr,
 
 // Slice SPM (fused-graph): out[output_shape] = in[input_shape] sliced at begins
 // (step 1). Reuses slice_single_axis / slice_last_dim_axis (same as insert_slice).
+// per_core_local validates core-zero operands and preserves the same slice on
+// each selected core; false retains the original global-address semantics.
 void rpu_launch_slice_spm_kernel(uint32_t input_spm_addr, uint32_t output_spm_addr,
                                  const std::vector<int64_t>& input_shape,
                                  const std::vector<int64_t>& output_shape,
                                  const std::vector<int64_t>& begins,
-                                 int num_cores = 1);
+                                 int num_cores = 1, bool per_core_local = false);
 
 // Permute3d SPM (fused-graph): out = in.permute(perm) for a 3D tensor [b,n,c].
 // Reuses the transpose_{nbc,cbn,bcn,cnb,ncb}_c16 family (perm{1,0,2} = transpose_nbc).
@@ -697,7 +590,7 @@ void rpu_launch_permute4d_0213_spm_kernel(
     uint32_t input_spm_addr, uint32_t output_spm_addr,
     int64_t q, int64_t b, int64_t n, int64_t c, int num_cores = 1);
 
-// Qwen3.5 GDN: causal depthwise conv1d decode-update (kernel in the matching runtime asset).
+// Qwen3.5 GDN: causal depthwise conv1d decode-update (kernel in default ref (be627ce5+)).
 void rpu_launch_fla_conv1d_spm_kernel(uint32_t cs_spm_addr, uint32_t x_spm_addr,
                                       c10::Half* weight_ddr, int64_t B,
                                       int64_t local_d, int64_t Kc, int num_cores);
@@ -738,6 +631,10 @@ at::Tensor rpu_partial_mrope_test(
 at::Tensor rpu_gather_embedding(const at::Tensor& vocab, const at::Tensor& ids);
 at::Tensor rpu_assemble_inputs_embeds(const at::Tensor& vocab, const at::Tensor& ids,
                                       const at::Tensor& merged, int64_t img_start);
+at::Tensor rpu_assemble_inputs_embeds_parts(
+    const at::Tensor& vocab, const at::Tensor& ids,
+    at::TensorList merged_parts, const at::Tensor& runs,
+    bool prefix_is_embeddings = false);
 at::Tensor rpu_assemble_inputs_embeds_rev(const at::Tensor& vocab, const at::Tensor& ids,
                                           const at::Tensor& merged_window,
                                           const at::Tensor& rev_idx, const at::Tensor& runs);
@@ -827,7 +724,7 @@ inline constexpr uint32_t RPU_RMSNORM_CAP_ALL =
     RPU_RMSNORM_CAP_BASE | RPU_RMSNORM_CAP_V16 | RPU_RMSNORM_CAP_V32;
 
 // Operator-level conformance ceiling for ordinary FP16 direct-SPM RMSNorm.
-// The fixed-grid contract covers V16 and V32; actual payload
+// The fixed-grid generator contract covers V16 and V32; actual payload
 // availability is intersected while installing each handle. Shape eligibility
 // stays in the resolver below.
 inline constexpr uint32_t RPU_RMSNORM_CAP_GENERIC_DIRECT_SPM =
@@ -854,6 +751,8 @@ enum class RpuRmsNormSpmRoute : int64_t {
     NEWTON = 7,
     NEWTON_V16_GRID8 = 8,
     NEWTON_V32_GRID8 = 9,
+    // HyVLA's corrected BF16 partial-copy arithmetic, owned by expansion.
+    HYVLA_V16_BITCOPY_GRID8 = 10,
 };
 
 enum class RpuMixedRmsNormSpmRoute : int64_t {
@@ -895,7 +794,8 @@ inline RpuRmsNormSpmRoute rpu_resolve_rmsnorm_spm_route(
     return RpuRmsNormSpmRoute::BASE;
 }
 
-// Cold installation separately requires all payloads.
+// Matches LlamaGenerator's Newton scheduling without changing the ordinary
+// capability resolver. Cold installation separately requires all payloads.
 inline RpuRmsNormSpmRoute rpu_resolve_high_precision_rmsnorm_spm_route(
     int64_t rows, int64_t cols) {
     TORCH_CHECK(rows > 0, "Newton RMSNorm rows must be positive, got ", rows);
@@ -917,14 +817,19 @@ inline RpuRmsNormSpmRoute rpu_resolve_high_precision_rmsnorm_spm_route(
 // physical-manifest producer and consumer.
 struct RpuRmsNormSpmContract {
     uint32_t capability = RPU_RMSNORM_CAP_BASE;
+    bool v16_bitcopy = false;
 
     RpuRmsNormSpmRoute resolve(int64_t rows, int64_t cols) const {
-        return rpu_resolve_rmsnorm_spm_route(capability, rows, cols);
+        const auto route = rpu_resolve_rmsnorm_spm_route(capability, rows, cols);
+        return v16_bitcopy && route == RpuRmsNormSpmRoute::V16_GRID8
+            ? RpuRmsNormSpmRoute::HYVLA_V16_BITCOPY_GRID8 : route;
     }
 
     std::vector<int64_t> manifest_arguments(
         int64_t rows, int64_t cols) const {
-        return {rows, cols, static_cast<int64_t>(capability)};
+        std::vector<int64_t> arguments{rows, cols, static_cast<int64_t>(capability)};
+        if (v16_bitcopy) arguments.push_back(1);
+        return arguments;
     }
 
     bool has_vector_payload() const {
@@ -935,6 +840,17 @@ struct RpuRmsNormSpmContract {
 RpuRmsNormSpmContract rpu_snapshot_rmsnorm_spm_contract(
     uint32_t certified_capability =
         RPU_RMSNORM_CAP_GENERIC_DIRECT_SPM);
+
+inline RpuMixedRmsNormSpmRoute rpu_resolve_mixed_rmsnorm_spm_route(
+    int64_t rows, int64_t cols) {
+    TORCH_CHECK(
+        (rows == 576 && cols == 1280) ||
+            ((rows == 320 || rows == 336) && cols == 2048),
+        "Wall-OSS mixed RMSNorm supports only Vision (576,1280) or "
+        "RTC prefill (320/336,2048); got rows=", rows, " cols=", cols);
+    return rows == 336 ? RpuMixedRmsNormSpmRoute::V16
+                       : RpuMixedRmsNormSpmRoute::V32;
+}
 
 void rpu_launch_rmsnorm_kernel(const at::Tensor &input, at::Tensor &output,
                                const at::Tensor &weight, double eps);
@@ -986,6 +902,8 @@ enum class GroupedParallelLinearWeightMode : int64_t {
     FP16 = 2,
     FP8_E2M5 = 4,
     FP8_E4M3 = 5,
+    // Backend profile tag only; UINT4 has its own register ABI/launcher.
+    UINT4_PGRP = 6,
 };
 
 void rpu_launch_grouped_parallel_linear_spm_kernel(
@@ -1001,7 +919,66 @@ void rpu_launch_grouped_parallel_linear_spm_kernel(
     bool is_col_parallel,
     int num_cores,
     int64_t weight_dtype_mode = -1,
-    bool linear_acc32 = false);
+    bool linear_acc32 = false,
+    bool expert_parallel_y4 = false);
+
+// Fixed sparse T51/R204/E32/H768/N128/TP8, no bias. All SPM operands are
+// 32-byte-aligned disjoint absolute core0 addresses with complete spans:
+// input78336B, tokens512B, padded counts256B, output52224B. Canonical rawU16
+// token IDs and dynamic counts are supplied by the admitted compact producer.
+void rpu_launch_lingbot2_grouped_gateup_routed_spm_kernel(
+    uint32_t input_spm_addr, uint32_t tokens_spm_addr,
+    const at::Tensor& packed_weight, uint32_t m_sizes_spm_addr,
+    const c10::optional<at::Tensor>& scale, uint32_t output_spm_addr,
+    int64_t weight_dtype_mode);
+
+// Same fixed profile and typed weight/scale banks, with FP16 [64,32] route
+// weights and compact [204,64] output. Preserve GU -> SwiGLU -> routed multiply
+// FP16 boundaries. Five disjoint absolute core0 SPM spans: input78336B,
+// tokens512B, routes4096B, padded counts256B, output26112B. Selected zero
+// weights remain tasks. The caller supplies the canonical compact IDs/counts.
+void rpu_launch_lingbot2_grouped_gateup_routed_swiglu_route_spm_kernel(
+    uint32_t input_spm_addr, uint32_t tokens_spm_addr, uint32_t routes_spm_addr,
+    const at::Tensor& packed_weight, uint32_t m_sizes_spm_addr,
+    const c10::optional<at::Tensor>& scale, uint32_t output_spm_addr,
+    int64_t weight_dtype_mode);
+
+// Fixed sparse R204/E32/N768/K64/TP8 W8 ACC16 row-parallel Down, no bias.
+// Input [204,64], padded raw-U16 counts [128] and output [204,768] are
+// disjoint 32-byte-aligned absolute core0 SPM spans of 26112/256/313344B.
+// The admitted producer supplies counts in [0,51], summing to204. Packed
+// INT8 weight [32,768*64*8] and FP16 scale [32,768] keep the generic DDR ABI.
+void rpu_launch_lingbot2_grouped_down_w8_scale_shuffle_spm_kernel(
+    uint32_t input_spm_addr, const at::Tensor& packed_weight,
+    uint32_t m_sizes_spm_addr, const at::Tensor& scale, uint32_t output_spm_addr);
+
+// Exact T51/R204/E32/Top4/N768/K64/TP8 ACC16 Down plus ascending-expert FP16
+// combine and final shared ADD. Six disjoint absolute core0 SPM spans:
+// input26112B/counts256B/taskout313344B/inverse4096B/shared78336B/acc78336B.
+// The compact producer supplies canonical counts and padded [64,32] task+1
+// inverse rows; taskout remains materialized. FP16 mode2 or signed INT8 mode1.
+void rpu_launch_lingbot2_grouped_down_ordered_combine_spm_kernel(
+    uint32_t input_spm_addr, const at::Tensor& packed_weight,
+    uint32_t m_sizes_spm_addr, const c10::optional<at::Tensor>& scale_opt,
+    uint32_t taskout_spm_addr, uint32_t inverse_spm_addr,
+    uint32_t shared_spm_addr, uint32_t acc_spm_addr,
+    int64_t weight_dtype_mode);
+
+// Cold capability for exact T51/E32/Ic64/H768/TP8 ACC16 Gate/Up. Older MAIN
+// refs or a different standard tile retain the caller's dense Linear route.
+bool rpu_lingbot2_routed_col_available(bool w8);
+
+// Counts-gated dense column Linear for that fixed profile, without bias.
+// Input [51,768] and raw U16 counts [32] must already be on all eight cores.
+// Original dense packed weight [16384,768]; W8 scale [16384] is flattened
+// [core,E,Ic], not the sparse grouped [E,core,Ic] layout. The three absolute
+// SPM intervals must be disjoint and 32-byte aligned. This wrapper clears the
+// complete per-core FP16 output [51,32,64] before the kernel skips empty
+// experts. Active experts project all 51 tokens; Down ACC32 is unchanged.
+void rpu_launch_lingbot2_routed_col_spm_kernel(
+    uint32_t input_spm_addr, const at::Tensor& dense_packed_weight,
+    uint32_t counts_spm_addr, uint32_t output_spm_addr,
+    const at::Tensor& scale = at::Tensor());
 
 // Conformance-only immediate wrapper; not a retained Graph entry point.
 at::Tensor rpu_grouped_parallel_linear_test(
@@ -1010,6 +987,50 @@ at::Tensor rpu_grouped_parallel_linear_test(
     const c10::optional<at::Tensor>& bias_per_core, int64_t local_n,
     int64_t local_k, bool is_col_parallel, int64_t num_cores,
     int64_t weight_dtype_mode, bool linear_acc32);
+
+// Returns {N_TILE, M_TILE}, using total routed rows for generated selection.
+std::array<int64_t, 2> rpu_select_grouped_parallel_linear_uint4_tile(
+    int64_t m_total, int64_t num_experts, int64_t local_n, int64_t local_k);
+
+void rpu_launch_grouped_parallel_linear_uint4_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& packed_weight,
+    uint32_t m_sizes_spm_addr,
+    const at::Tensor& scale,
+    const at::Tensor& negative_zero,
+    uint32_t output_spm_addr,
+    int64_t local_n,
+    int64_t local_k,
+    int64_t num_experts,
+    bool is_col_parallel,
+    int num_cores,
+    int64_t group_size,
+    int64_t m_total);
+
+// Exact E32/T51/Tp64/K4 selector mask [E,Tp] -> raw U16 expert/token
+// IDs [204] and counts [32]. Absolute core-0 SPM byte addresses, disjoint
+// 32-byte-aligned operands; output padding is untouched.
+void rpu_launch_lingbot2_route_compact_e32_t51_tp64_spm_kernel(
+    uint32_t mask_spm_addr, uint32_t expert_ids_spm_addr,
+    uint32_t token_ids_spm_addr, uint32_t counts_spm_addr);
+
+// Fixed TP8 FP16 sparse combine: +0 followed by four expert-ordered FP16
+// additions per token. Inputs [204,768], raw U16 tokens [256] (204 logical),
+// output [51,768]; disjoint 32-byte-aligned core-0 absolute SPM addresses.
+void rpu_launch_lingbot2_combine_t51_r204_h768_scan_spm_kernel(
+    uint32_t updates_spm_addr, uint32_t token_ids_spm_addr,
+    uint32_t output_spm_addr);
+
+// Paired fixed-profile inverse route ABI: zero-filled U16 [64,32], task+1.
+void rpu_launch_lingbot2_combine_t51_r204_h768_inverse_spm_kernel(
+    uint32_t updates_spm_addr, uint32_t inverse_spm_addr, uint32_t output_spm_addr);
+// Four disjoint absolute core-0 SPM ranges; +0, four ordered FP16 adds, shared ADD.
+void rpu_launch_lingbot2_combine_shared_t51_r204_h768_inverse_spm_kernel(
+    uint32_t updates_spm_addr, uint32_t inverse_spm_addr,
+    uint32_t shared_spm_addr, uint32_t output_spm_addr);
+void rpu_launch_lingbot2_route_compact_inverse_e32_t51_tp64_spm_kernel(
+    uint32_t mask_spm_addr, uint32_t expert_ids_spm_addr,
+    uint32_t token_ids_spm_addr, uint32_t counts_spm_addr, uint32_t inverse_spm_addr);
 
 void rpu_launch_moe_topk_scalar_fp16_spm_kernel(
     uint32_t input_key_spm_addr,
@@ -1097,14 +1118,71 @@ void rpu_launch_pi05_adarms_norm_shift_spm_kernel(
     uint32_t input_spm, uint32_t output_spm, uint32_t scale_spm,
     uint32_t shift_spm, int64_t rows, double eps, int cores = 8);
 
+// Exact LingBot2 H768/M51/TP8/eps1e-6 norm-shift. The cold owner may select
+// the optional bit-diagonal shuffle; the default retains the original payload.
+// Absolute core-0 SPM addresses; permits exact input/output in-place alias.
+void rpu_launch_lingbot2_adarms_norm_shift_h768_spm_kernel(
+    uint32_t input_spm, uint32_t output_spm, uint32_t scale_spm,
+    uint32_t shift_spm, int64_t rows, double eps, int cores = 8,
+    bool diagonal = false);
+
 // FP16 broadcast gate*x, rounded before residual ADD; absolute local SPM.
 void rpu_launch_pi05_gated_residual_spm_kernel(
     uint32_t input_spm, uint32_t residual_spm, uint32_t gate_spm,
     uint32_t output_spm, int64_t rows, int cores = 8);
 
+// Exact G05 Action composition: original M32/H1024 TP8 nopace ring, then
+// separately rounded FP16 SUB/MUL/ADD on owners before the unchanged gather.
+// The model COMPLETE route proves residual/gates replicated across all cores.
+// Exact RTC Action tail. Norm overwrites dead full residual; raw remains full.
+void rpu_launch_g05_action_tail_spm_kernel(
+    uint32_t input, uint32_t residual, uint32_t raw,
+    uint32_t clean_gate, uint32_t noisy_gate,
+    uint32_t clean_scale, uint32_t clean_shift,
+    uint32_t noisy_scale, uint32_t noisy_shift, int64_t clean_rows, double eps);
+
+void rpu_launch_g05_ring_rtc_residual_spm_kernel(
+    uint32_t input_spm, uint32_t residual_spm, uint32_t clean_gate_spm,
+    uint32_t noisy_gate_spm, uint32_t output_spm, int64_t clean_rows, int cores=8);
+
+// Optional G05: FP16 SUB, separately-rounded MUL, then original residual ADD.
+// Absolute local SPM, M1..64/H1024, cores1/8; no additional SPM scratch.
+void rpu_launch_g05_rtc_sub_gated_residual_spm_kernel(
+    uint32_t input_spm, uint32_t residual_spm, uint32_t clean_gate_spm,
+    uint32_t noisy_gate_spm, uint32_t output_spm, int64_t clean_rows, int cores=8);
+void rpu_launch_g05_sub_gated_residual_spm_kernel(
+    uint32_t input_spm, uint32_t residual_spm, uint32_t gate_spm,
+    uint32_t output_spm, int64_t rows, int cores = 8);
+// Optional G05 RTC M32/H1024, cores8, clean_rows in [0,32]. BASE norm math.
+void rpu_launch_g05_rtc_adarms_norm_shift_spm_kernel(
+    uint32_t input_spm, uint32_t output_spm, uint32_t clean_scale_spm,
+    uint32_t clean_shift_spm, uint32_t noisy_scale_spm, uint32_t noisy_shift_spm,
+    int64_t clean_rows, double eps, int cores = 8);
+
+// Wall-OSS RTC Vision/prefill: BF16 residual input, FP16 gamma/output.
+// The COMPLETE descriptor supplies V32 for M576/M320 and V16 for M336.
+void rpu_launch_rmsnorm_bf16in_fp16out_spm_kernel(
+    uint32_t input_spm_addr,
+    uint32_t output_spm_addr,
+    uint32_t weight_spm_addr,
+    int64_t M,
+    int64_t C,
+    double eps,
+    RpuMixedRmsNormSpmRoute route);
 
 // SwiGLU activation fusion: out = silu(x) * y, flat per-core elementwise.
-// SPM addresses are absolute core-0 bases.
+// Wraps the rhino-ops `llama_silu_mul` kernel (already in the oplib, previously
+// unwired). SPM addresses are absolute core-0 bases.
+// Exact G05 M32/localN512: rounded BASE SiLU then MUL, in-place Gate output.
+// Exact G05 NVFP4/ACC16 Action M32/D256: BASE Sigmoid writes gate,
+// then FP16-rounded MUL writes output. Both full16KiB roots must be disjoint.
+void rpu_launch_g05_attn_sigmoid_round_mul_spm_kernel(uint32_t gate, uint32_t output);
+
+void rpu_launch_g05_silu_round_mul_spm_kernel(uint32_t gate, uint32_t up);
+// Exact Text M256/localN768; product is the prefix of a full1MiB R root.
+void rpu_launch_g05_text_silu_round_mul_spm_kernel(
+    uint32_t gate,uint32_t up,uint32_t product);
+
 void rpu_launch_silu_mul_spm_kernel(
     uint32_t x_spm_addr,
     uint32_t y_spm_addr,
@@ -1166,7 +1244,8 @@ void rpu_launch_pi05_prefill_gate_up_geglu_weight_outer_w8a16_c400x2_kernel(
 
 // Experimental P800 full-K INT8 GateUp; FP32 scales are exact promotions of
 // the installed FP16 W8 scales. Two independent C400 outputs feed original Down.
-// P544/C272 online quantization. The residual lives in a separate owner.
+// P544/C272 online quantization: x becomes the weight stage after its local
+// eight-warp publication barrier. The residual lives in a separate owner.
 void rpu_launch_pi05_prefill_gate_up_geglu_online_w8a8_c272_kernel(
     uint32_t x_stage, uint32_t a8, uint32_t output,
     const at::Tensor& gate_weight, const at::Tensor& up_weight,
@@ -1194,14 +1273,6 @@ void rpu_launch_layernorm_spm_kernel(
     uint32_t skip_spm_addr = 0,
     int num_cores = 8);
 
-// LayerNorm bf16 SPM kernel — same launcher signature as the fp16 SPM
-// LayerNorm, with input/output/gamma/beta SPM data still treated as fp16
-// (so it's a drop-in replacement at the call site).
-//
-// Data-type contract:
-//   - All SPM addresses point at fp16 data (NOT bf16).
-//   - `eps` is encoded as fp16 inside this launcher.
-//   - `1/lc` stays fp32.
 void rpu_launch_layernorm_bf16_spm_kernel(
     uint32_t input_spm_addr,
     uint32_t output_spm_addr,
@@ -1397,7 +1468,7 @@ PreparedMask sdpa_prepare_mask(
     SdpaStableMaskCache& stable_cache,
     int64_t ordinal = 0);
 
-// RPU side: DMA prepared mask to SPM (batch compatible).
+// device side: DMA prepared mask to SPM (batch compatible).
 void sdpa_dma_mask_to_spm(
     const PreparedMask &mask,
     uint32_t sdpa_mask_off,
@@ -1447,6 +1518,18 @@ void rpu_launch_sdpa_spm_unified_kernel_v2(
     bool use_16b = false,
     bool qwen3vl_tm160 = false);
 
+// Bounded T51 Action tail SDPA; optional payload and typed allocator offsets.
+bool rpu_lingbot2_sdpa_tail_t51_key_rows_supported(int64_t key_rows);
+void rpu_launch_lingbot2_sdpa_tail_t51_spm_kernel(
+    const at::Tensor& key, const at::Tensor& value,
+    uint32_t q_off, uint32_t output_off, uint32_t tmp_off, uint32_t mask_off,
+    int64_t kv_seq_len);
+
+// Legacy six-argument K275 ABI.
+void rpu_launch_lingbot2_sdpa_t51_k275_tail_spm_kernel(
+    const at::Tensor& key, const at::Tensor& value,
+    uint32_t q_off, uint32_t output_off, uint32_t tmp_off, uint32_t mask_off);
+
 // Independent ordinary Vision route; its COMPLETE descriptor owns selection.
 void rpu_launch_sdpa_qwen3vl_n1200_tm160(
     const at::Tensor& key, const at::Tensor& value,
@@ -1467,6 +1550,13 @@ void rpu_launch_sdpa_spm_vctxlen_kernel(
     int64_t kv_seq_len,
     int num_cores = 8,
     int virtual_num_cores = -1);
+
+// Exact LingBot Vision B3/S256/QKV16/D64/TP8. Five disjoint absolute core-0
+// SPM addresses; Vt is already [3,2,64,256]. Original 32b M128/N64/K256 math,
+// unmasked scale 0.125; Q/K/Vt/out each 196608 bytes, tmp 393216 bytes/core.
+void rpu_launch_lingbot2_vision_sdpa_spm_kernel(
+    uint32_t q_addr, uint32_t k_addr, uint32_t vt_addr,
+    uint32_t output_addr, uint32_t tmp_addr);
 
 // Generic raw-SPM path. Per-core layouts:
 //   V input [batch,seq_k,nkv/core,head_dim]
@@ -1501,13 +1591,42 @@ void rpu_launch_sdpa_by_mha_spm(
     int64_t head_dim,
     int num_cores);
 
+// Exact Wall RTC W8 Vision window attention. Geometry, mask layout, and grid
+// are fixed by the dedicated B3/S576/H16/D80 expansion payload.
+void rpu_launch_wall_base_vision_ragged_sdpa_spm(
+    uint32_t q_spm, uint32_t k_spm, uint32_t v_transposed_spm,
+    uint32_t output_spm, uint32_t mask_spm, double scale,
+    int64_t rows, int num_cores = 8);
+
+void rpu_launch_wall_window_sdpa_by_mha_spm(
+    uint32_t q_spm,
+    uint32_t k_spm,
+    uint32_t v_transposed_spm,
+    uint32_t output_spm,
+    double scale);
+
+// Backward-compatible exact Wall RTC Vision entry points.
+void rpu_launch_v_transpose_spm_batch3_576(
+    uint32_t input_spm,
+    uint32_t output_spm);
+
+void rpu_launch_sdpa_by_mha_spm_batch3_576(
+    uint32_t q_spm,
+    uint32_t k_spm,
+    uint32_t v_transposed_spm,
+    uint32_t output_spm,
+    uint32_t mask_spm,
+    int attn_mask_type,
+    double scale);
+
 // =============================================================================
 // SDPA SPM vctxlen MINIBATCH Kernel (per-image K/V slicing)
 // =============================================================================
 // kernel: llm_fp16_32b_prefill_flash_attn_univ_vctxlen_minibatch
 // Splits gridDim.x into `image_batch_count` image groups; image i's queries
 // attend ONLY its own per_image_ctx_len K/V (cache rows [i*ctx, (i+1)*ctx)).
-// No mask. HARD CONSTRAINT: num_kv_heads == num_heads (MHA).
+// No mask. HARD CONSTRAINT: num_kv_heads == num_heads (MHA) — see rhino-ops
+// LlmPrefillFlashAttnGenerator.py:207.
 //   seq_q       = total packed query length (= per_image_ctx_len * image_batch_count)
 //   kv_seq_len  = per_image_ctx_len (each image's KV length; reg[0,1])
 //   image_batch_count -> reg[34]
@@ -1558,6 +1677,25 @@ void rpu_launch_all_reduce_sum_residual_kernel(
     int input_num_cores = 8,
     int output_num_cores = 8);
 
+// Exact GR00T M41/H1536/TP8: original paced reduce-scatter/residual math,
+// XOR3 all-gather, full FP16 [41,1536] output. Three disjoint, 256-byte-aligned
+// absolute core-0 SPM operands. No DDR operand or temporary allocation.
+void rpu_launch_gr00t_all_reduce_residual_xor3_kernel(
+    uint32_t input_spm, uint32_t residual_spm, uint32_t output_spm);
+
+// Exact LingBot2 T51/H768/TP8 post-attention ring and adopted AdaRMS norm/shift.
+// Complete raw residual2 is retained; normalized output must exactly replace
+// the ring residual input. All five distinct owners are absolute core-0 SPM.
+void rpu_launch_lingbot2_attn_all_reduce_adarms_norm_shift_spm_kernel(
+    uint32_t partial_spm, uint32_t residual_spm, uint32_t raw_output_spm,
+    uint32_t norm_output_spm, uint32_t scale_spm, uint32_t shift_spm,
+    int64_t rows, int64_t hidden, double eps, int cores = 8);
+
+// Exact Wall Vision M576N1280. CModel proves the paced payload can overwrite
+// its full FP16 partial in place while adding a disjoint full FP16 residual.
+void rpu_launch_wall_vision_all_reduce_sum_residual_m576_inplace_kernel(
+    uint32_t partial_output_spm,
+    uint32_t residual_spm);
 
 // Existing all-reduce kernel with an opaque FMB-authorized terminal target.
 // The overload adds Graph provenance only; it does not introduce a new
@@ -1582,6 +1720,11 @@ void rpu_launch_all_reduce_sum_residual_ddr_kernel(
     int input_num_cores = 8,
     int output_num_cores = 8);
 
+// Exact Wall Vision M576N1280, Text M320N2048, or Qwen3-VL Vision M1200N1024:
+// `residual_local_spm`
+// is one reduce-scatter shard at the same local SPM offset on each core, not
+// a replicated [M,N] tensor. The dedicated expansion symbol interprets
+// residual mode 2.
 void rpu_launch_all_reduce_sum_residual_local_spm_kernel(
     uint32_t input_spm,
     uint32_t residual_local_spm,
@@ -1593,19 +1736,140 @@ void rpu_launch_all_reduce_sum_residual_local_spm_kernel(
 
 // Fused ring reduce-scatter + all-gather. Both variants produce BF16 raw
 // 16-bit output on every core; the names describe the two input encodings.
+void rpu_launch_all_reduce_bf16_partial_fp16_residual_spm_kernel(
+    uint32_t input_spm,
+    uint32_t residual_spm,
+    uint32_t output_spm,
+    int64_t M,
+    int64_t N);
 
+// Exact Wall Vision M576N1280 mixed counterparts. The single
+// `partial_output_spm` argument makes the validated input/output alias explicit.
+void rpu_launch_wall_vision_all_reduce_bf16_partial_fp16_residual_m576_inplace_kernel(
+    uint32_t partial_output_spm,
+    uint32_t residual_spm);
 
+void rpu_launch_all_reduce_fp16_partial_bf16_residual_spm_kernel(
+    uint32_t input_spm,
+    uint32_t residual_spm,
+    uint32_t output_spm,
+    int64_t M,
+    int64_t N);
 
+void rpu_launch_wall_vision_all_reduce_fp16_partial_bf16_residual_m576_inplace_kernel(
+    uint32_t partial_output_spm,
+    uint32_t residual_spm);
 
+// Exact Wall Vision M576 down-projection continuations. Each kernel adds the
+// disjoint full residual, stores this core's compact raw shard, and overwrites
+// the partial with FP16 RMSNorm output for the next encoder layer.
+void rpu_launch_wall_down_postnorm_m576_fp16_partial_fp16_residual_kernel(
+    uint32_t partial_normalized_spm,
+    uint32_t residual_spm,
+    uint32_t raw_residual_local_spm,
+    uint32_t gamma_spm,
+    double eps);
 
+void rpu_launch_wall_down_postnorm_m576_bf16_partial_fp16_residual_kernel(
+    uint32_t partial_normalized_spm,
+    uint32_t residual_spm,
+    uint32_t raw_residual_local_spm,
+    uint32_t gamma_spm,
+    double eps);
 
+void rpu_launch_wall_down_postnorm_m576_fp16_partial_bf16_residual_kernel(
+    uint32_t partial_normalized_spm,
+    uint32_t residual_spm,
+    uint32_t raw_residual_local_spm,
+    uint32_t gamma_spm,
+    double eps);
 
+// Exact Wall Vision M576 steady-state carry. The compact residual is updated
+// in place and the aliased partial/output slab receives FP16 post-RMSNorm.
+void rpu_launch_wall_ring_postnorm_m576_fp16_partial_fp16_residual_local_inout_kernel(
+    uint32_t partial_normalized_spm,
+    uint32_t residual_local_spm,
+    uint32_t gamma_spm,
+    double eps);
 
+void rpu_launch_wall_ring_postnorm_m576_bf16_partial_fp16_residual_local_inout_kernel(
+    uint32_t partial_normalized_spm,
+    uint32_t residual_local_spm,
+    uint32_t gamma_spm,
+    double eps);
 
+void rpu_launch_wall_ring_postnorm_m576_fp16_partial_bf16_residual_local_inout_kernel(
+    uint32_t partial_normalized_spm,
+    uint32_t residual_local_spm,
+    uint32_t gamma_spm,
+    double eps);
 
+// Mixed FP16-partial/BF16-residual counterpart for the same exact Wall
+// Vision/Text local-shard shapes.
+void rpu_launch_all_reduce_fp16_partial_bf16_residual_local_spm_kernel(
+    uint32_t input_spm,
+    uint32_t residual_local_spm,
+    uint32_t output_spm,
+    int64_t M,
+    int64_t N);
 
+// Exact Wall Text M320N2048. The full BF16 residual is overwritten in place
+// by the replicated FP16 post-RMSNorm output; raw_residual_local_spm receives
+// this core's compact BF16 [40,2048] reduce-scatter shard.
+void rpu_launch_wall_ring_postnorm_fp16_partial_bf16_residual_spm_kernel(
+    uint32_t partial_spm,
+    uint32_t residual_norm_spm,
+    uint32_t raw_residual_local_spm,
+    uint32_t gamma_spm,
+    double eps);
 
+// Exact Wall Text M320N2048 steady-state carry. The compact BF16 residual is
+// updated in place after reduce-scatter. The exact carrier form may also alias
+// partial_spm and normalized_spm when the compact residual remains disjoint.
+void rpu_launch_wall_ring_postnorm_fp16_partial_bf16_residual_local_spm_kernel(
+    uint32_t partial_spm,
+    uint32_t residual_local_spm,
+    uint32_t normalized_spm,
+    uint32_t gamma_spm,
+    double eps);
 
+// Exact Wall Text P640 pair. The two FP16 partial/output C320 carriers are
+// contiguous; each BF16 compact residual shard is passed independently.
+void rpu_launch_wall_ring_postnorm_pair_fp16_partial_bf16_residual_local_spm_kernel(
+    uint32_t partial_normalized_pair_spm,
+    uint32_t residual0_local_spm,
+    uint32_t residual1_local_spm,
+    uint32_t gamma_spm,
+    double eps, bool tile40 = false);
+
+// Exact Wall base M672H1280 FP16 paced ring + R19 owner RMSNorm.
+// partial_norm holds full normalized output. raw retains only this core's
+// 84-row owner range at its original full-slab offset; its sole raw consumer
+// must be the next residual ring. Three full matrix slabs and the replicated
+// [1280] FP16 gamma use disjoint, aligned core-0 absolute SPM intervals.
+void rpu_launch_wall_base_vision_owner_ring_norm_m672_kernel(
+    uint32_t partial_norm_spm,
+    uint32_t residual_spm,
+    uint32_t raw_spm,
+    uint32_t gamma_spm,
+    double eps);
+
+// Nonfinal Down plus next norm1 uses the same owner-row raw contract, but
+// normalizes into the retired residual input. partial remains unchanged;
+// the next O residual ring is the sole consumer of the owner-only raw slab.
+void rpu_launch_wall_base_vision_down_owner_ring_norm_m672_kernel(
+    uint32_t partial_spm,
+    uint32_t residual_norm_spm,
+    uint32_t raw_spm,
+    uint32_t gamma_spm,
+    double eps);
+
+// Exact Wall base C224/H2048 O ring + owner postnorm. Normalized output
+// replaces residual_norm; raw contains only each core's 28-row owner shard.
+// The actual subsequent Down residual ring is the sole raw consumer.
+void rpu_launch_wall_base_prefill_o_owner_ring_norm_m224_kernel(
+    uint32_t partial_spm, uint32_t residual_norm_spm,
+    uint32_t raw_spm, uint32_t gamma_spm, double eps);
 
 // =============================================================================
 // SPM-to-SPM Linear Kernels
@@ -1617,6 +1881,14 @@ at::Tensor rpu_retain_linear_quant_scale(
     const at::Tensor& weight,
     const at::Tensor& scale);
 
+// Exact LingBot2 core-0 Router: FP16 packed [32,768], ACC32 -> FP16 logits,
+// BASE SIGMOID19 and thirteen FP16-one padding rows. Absolute disjoint SPM:
+// input [51,768], logits [64,32] (only first51rows written), scores [64,32].
+// Optional expansion payload; missing symbols fail before typed staging.
+void rpu_launch_lingbot2_router_sigmoid_pad_spm_kernel(
+    uint32_t input_spm_addr, const at::Tensor& weight,
+    uint32_t logits_spm_addr, uint32_t scores_spm_addr);
+
 void rpu_launch_linear_spm_to_spm_kernel(
     uint32_t input_spm_addr,
     const at::Tensor &weight,
@@ -1626,12 +1898,101 @@ void rpu_launch_linear_spm_to_spm_kernel(
     int num_cores = 8,
     uint32_t bias_spm_addr = 0);
 
+// Fixed Wall-OSS Vision block-17 / RTC expert-0 layer-2 down projection: FP16
+// input/weight, FP32 accumulation and BF16 raw 16-bit output. Bias is FP16 and
+// row-partitioned exactly like the corresponding existing down projection.
+void rpu_launch_linear_spm_to_spm_acc32_out_bf16_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor &weight,
+    uint32_t output_spm_addr,
+    int64_t M, int64_t N, int64_t K,
+    int partition,
+    int num_cores = 8,
+    uint32_t bias_spm_addr = 0);
+
+// Exact Wall H32 row NVFP4 ACC16 O + full FP16 ring + BASE RMSNorm.
+void rpu_launch_wall_base_nvfp4_o_ring_norm_spm_kernel(
+    uint32_t input, const at::Tensor& weight, uint32_t partial,
+    uint32_t residual, uint32_t raw_output, uint32_t normalized_output,
+    uint32_t gamma, const at::Tensor& scale, uint32_t tensor_scale,
+    int64_t tensor_scale_elems, uint16_t layer, double eps);
+
+// Same full-residual ABI for Down layers 0..34; next input norm is out-of-place from raw.
+void rpu_launch_wall_base_nvfp4_down_ring_norm_spm_kernel(
+    uint32_t input, const at::Tensor& weight, uint32_t partial,
+    uint32_t residual, uint32_t raw_output, uint32_t normalized_output,
+    uint32_t gamma, const at::Tensor& scale, uint32_t tensor_scale,
+    int64_t tensor_scale_elems, uint16_t layer, double eps);
+
+// Wall base Q/K/V only: exact M32/K1024/TP8 ACC16 with grid4 bias barrier.
+void rpu_launch_wall_base_nvfp4_qkv_bias_spm_kernel(
+    uint32_t input, const at::Tensor& weight, uint32_t output,
+    uint32_t bias, const at::Tensor& scale, uint32_t tensor_scale,
+    int64_t tensor_scale_elems, uint16_t layer, int64_t n);
+
+// Wall base Q/K/V plus in-place partial-MRoPE: exact H32/P336-or-P384.
+void rpu_launch_wall_base_nvfp4_qkv_bias_rope_spm_kernel(
+    uint32_t input, const at::Tensor& q_weight, const at::Tensor& k_weight,
+    const at::Tensor& v_weight, uint32_t q, uint32_t k, uint32_t v,
+    const at::Tensor& q_scale, const at::Tensor& k_scale, const at::Tensor& v_scale,
+    uint32_t q_bias, uint32_t k_bias, uint32_t v_bias,
+    uint32_t q_ts, uint32_t k_ts, uint32_t v_ts,
+    int64_t scale_count, uint16_t layer,
+    const at::Tensor& cos, const at::Tensor& sin, int64_t position);
+
+// Wall base full Q/K/V: fixed H32, Q4/K2/V2 N64 tiles and eight-block bias barrier.
+void rpu_launch_wall_base_nvfp4_qkv_parallel_bias_spm_kernel(
+    uint32_t input, const at::Tensor& q_weight, const at::Tensor& k_weight,
+    const at::Tensor& v_weight, uint32_t q, uint32_t k, uint32_t v,
+    const at::Tensor& q_scale, const at::Tensor& k_scale, const at::Tensor& v_scale,
+    uint32_t q_bias, uint32_t k_bias, uint32_t v_bias,
+    uint32_t q_ts, uint32_t k_ts, uint32_t v_ts,
+    int64_t scale_count, uint16_t layer);
+
+// Wall base K/V pair: fixed H32, two N128 shards, eight-block bias barrier.
+void rpu_launch_wall_base_nvfp4_kv_parallel_bias_spm_kernel(
+    uint32_t input, const at::Tensor& k_weight, const at::Tensor& v_weight,
+    uint32_t k, uint32_t v, const at::Tensor& k_scale, const at::Tensor& v_scale,
+    uint32_t k_bias, uint32_t v_bias, uint32_t k_ts, uint32_t v_ts,
+    int64_t scale_count, uint16_t layer);
+
 // Pi0.5 Action NVFP4 striped-v2 ABI, per-handle ACC16/ACC32 accumulation.
 void rpu_launch_pi05_nvfp4_v2_kernel(
     uint32_t input, const at::Tensor& weight, uint32_t output,
     int64_t rows, int64_t n, int64_t k, int partition, int cores,
     const at::Tensor& scale, uint32_t tensor_scale, uint16_t layer,
     bool linear_acc32);
+
+// Exact G0.5 K1 Action, 24-layer striped-v2 NVFP4, per-handle ACC16/ACC32.
+void rpu_launch_g05_nvfp4_v2_kernel(
+    uint32_t input, const at::Tensor& weight, uint32_t output,
+    int64_t rows, int64_t n, int64_t k, int partition, int cores,
+    const at::Tensor& scale, uint32_t tensor_scale, uint16_t layer,
+    bool linear_acc32);
+
+// Same exact Action scope; independent FP16 Gate/Up retirement before BASE SiLU.
+void rpu_launch_g05_gate_up_paired_nvfp4_acc16_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate_output, uint32_t up_output,
+    const at::Tensor& gate_scale, const at::Tensor& up_scale,
+    uint32_t gate_tensor_scale, uint32_t up_tensor_scale, uint16_t layer);
+void rpu_launch_g05_gate_up_paired_nvfp4_acc32_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate_output, uint32_t up_output,
+    const at::Tensor& gate_scale, const at::Tensor& up_scale,
+    uint32_t gate_tensor_scale, uint32_t up_tensor_scale, uint16_t layer);
+
+// Same owners/SPM roots; original FP16-rounded BASE SiLU/Mul retires in Gate.
+void rpu_launch_g05_gate_up_swiglu_nvfp4_acc16_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate_output, uint32_t up_output,
+    const at::Tensor& gate_scale, const at::Tensor& up_scale,
+    uint32_t gate_tensor_scale, uint32_t up_tensor_scale, uint16_t layer);
+void rpu_launch_g05_gate_up_swiglu_nvfp4_acc32_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate_output, uint32_t up_output,
+    const at::Tensor& gate_scale, const at::Tensor& up_scale,
+    uint32_t gate_tensor_scale, uint32_t up_tensor_scale, uint16_t layer);
 
 void rpu_launch_linear_spm_to_spm_acc16_kernel(
     uint32_t input_spm_addr,
@@ -1664,13 +2025,199 @@ void rpu_launch_pi05_gateup_resident_w8_preload(
     uint64_t& live_src_base, const at::Tensor& packed_weight,
     uint32_t weight_spm_addr);
 // All three SPM addresses are core-0 absolute bytes; scale keeps its ordinary
-// per-channel RPU FP16 [4096] DDR ABI (registers 20/21, device address >> 8).
+// per-channel device FP16 [4096] DDR ABI (registers 20/21, device address >> 8).
 void rpu_launch_pi05_gateup_resident_w8_kernel(
     uint32_t input_spm_addr, uint32_t weight_spm_addr,
     uint32_t output_spm_addr, const at::Tensor& scale);
 
+// Exact GR00T layer-0 FF1, COL TP8 M41/N6144/K1536 with original bias/scale.
+// Packed int8 bytes are [8,1179648]; all SPM addresses are absolute core-0 bytes.
+at::Tensor rpu_pack_gr00t_ff1_resident_w8(const at::Tensor& weight);
+void rpu_launch_gr00t_ff1_resident_w8_preload(
+    uint64_t& live_src_base, const at::Tensor& packed_weight,
+    uint32_t weight_spm_addr);
+void rpu_launch_gr00t_ff1_resident_w8_kernel(
+    uint32_t input_spm_addr, uint32_t weight_spm_addr,
+    uint32_t output_spm_addr, uint32_t bias_spm_addr, const at::Tensor& scale);
+
+// Exact GR00T self-attention COL TP8 M41/N1536/K1536, W8A16 ACC16 with bias.
+// All SPM operands are disjoint absolute core-0 byte intervals. The six DDR
+// owners retain their installed TP8 layout and per-channel scale ABI.
+void rpu_launch_gr00t_qkv_multibase_w8_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& q_weight,
+    const at::Tensor& k_weight,
+    const at::Tensor& v_weight,
+    uint32_t q_output_spm_addr,
+    uint32_t k_output_spm_addr,
+    uint32_t v_output_spm_addr,
+    uint32_t q_bias_spm_addr,
+    uint32_t k_bias_spm_addr,
+    uint32_t v_bias_spm_addr,
+    const at::Tensor& q_scale,
+    const at::Tensor& k_scale,
+    const at::Tensor& v_scale);
+// Exact G05 M32/H1024/I4096/TP8 ACC32 Gate/Up. Cold packing deinterleaves
+// installed col-swizzled FP16 bytes into [8,1048576] halfs: Gate then Up per
+// core. Each projection occupies 1 MiB/core. The caller owns typed preload
+// and the COMPLETE route; all addresses below are absolute local SPM bytes.
+at::Tensor rpu_pack_g05_gateup_resident_fp16(
+    const at::Tensor& gate, const at::Tensor& up);
+// Cold, byte-exact proof that installed TP8 stripes repeat each KV head four times.
+bool rpu_g05_kv_weight_is_replicated_fp16(const at::Tensor& weight);
+void rpu_launch_g05_kv_owner_linear_fp16_acc32_kernel(
+    uint32_t input, const at::Tensor& key_weight, const at::Tensor& value_weight,
+    uint32_t key_output, uint32_t value_output);
+// Exact M32/N256-per-core/K1024 Q + attention-gate: two independent weight
+// owners and outputs, original ACC32 arithmetic, one six-block TP8 launch.
+void rpu_launch_g05_q_gate_linear_fp16_acc32_kernel(
+    uint32_t input, const at::Tensor& query_weight, const at::Tensor& gate_weight,
+    uint32_t query_output, uint32_t gate_output);
+// Exact K1 Vision M256/localN128/K1024 Q/K/V with independent TP8 FP16 weight
+// owners and SPM biases. Original ACC32 arithmetic; one six-block launch.
+void rpu_launch_g05_vision_qkv_linear_fp16_acc32_kernel(
+    uint32_t input, const at::Tensor& query_weight, const at::Tensor& key_weight,
+    const at::Tensor& value_weight, uint32_t query_output, uint32_t key_output,
+    uint32_t value_output, uint32_t query_bias, uint32_t key_bias,
+    uint32_t value_bias);
+
+void rpu_launch_g05_vision_qkv_linear_w8a16_acc32_kernel(
+    uint32_t input, const at::Tensor& query_weight, const at::Tensor& key_weight,
+    const at::Tensor& value_weight, uint32_t query_output, uint32_t key_output,
+    uint32_t value_output, uint32_t query_bias, uint32_t key_bias,
+    uint32_t value_bias, const at::Tensor& query_scale,
+    const at::Tensor& key_scale, const at::Tensor& value_scale, bool linear_acc32 = true);
+// Exact M32/N512-per-core/K1024 DDR Gate/Up pair. Preserves separate FP16
+// outputs for the existing SiLU/MUL sequence; independent typed weight owners.
+void rpu_launch_g05_gate_up_linear_fp16_acc32_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate_output, uint32_t up_output);
+// Exact G05 Text M256/localN768/K2048: independent FP16 outputs before the
+// original SiLU/MUL, ACC32, two typed DDR owners and one grid24 TP8 launch.
+void rpu_launch_g05_text_gate_up_linear_fp16_acc32_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate_output, uint32_t up_output);
+
+// Genuine generated FP16 ACC16 m432n80k128 pairs. Action uses grid14,
+// Text uses grid20; retain separate Gate/Up outputs and typed DDR owners.
+void rpu_launch_g05_gate_up_linear_fp16_acc16_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate_output, uint32_t up_output);
+void rpu_launch_g05_text_gate_up_linear_fp16_acc16_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate_output, uint32_t up_output);
+
+void rpu_launch_g05_text_gate_up_linear_w8a16_acc32_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate_output, uint32_t up_output,
+    const at::Tensor& gate_scale, const at::Tensor& up_scale, bool linear_acc32 = true);
+void rpu_launch_g05_gateup_resident_fp16_kernel(
+    uint32_t input_spm_addr, uint32_t weight_spm_addr,
+    uint32_t output_spm_addr);
+
+// Exact Action W8A16 variants. Historical ACC32 names keep ACC32 by default;
+// explicit false selects genuine ACC16 payloads. Scales are FP16 DDR owners;
+// activation/output and KV fanout layouts remain FP16.
+bool rpu_g05_kv_weight_is_replicated_w8a16(const at::Tensor& weight, const at::Tensor& scale);
+void rpu_launch_g05_gate_kv_owner_only_w8a16_acc16_kernel(
+    uint32_t input, const at::Tensor& gate_weight,
+    const at::Tensor& key_weight, const at::Tensor& value_weight,
+    const at::Tensor& gate_scale, const at::Tensor& key_scale,
+    const at::Tensor& value_scale, uint32_t gate_output,
+    uint32_t key_output, uint32_t value_output);
+
+void rpu_launch_g05_kv_owner_linear_w8a16_acc32_kernel(
+    uint32_t input, const at::Tensor& key_weight, const at::Tensor& value_weight,
+    const at::Tensor& key_scale, const at::Tensor& value_scale,
+    uint32_t key_output, uint32_t value_output, bool linear_acc32 = true);
+void rpu_launch_g05_qkv_gate_owner_linear_w8a16_acc32_kernel(
+    uint32_t input, const at::Tensor& query_weight, const at::Tensor& gate_weight,
+    const at::Tensor& key_weight, const at::Tensor& value_weight,
+    const at::Tensor& query_scale, const at::Tensor& gate_scale,
+    const at::Tensor& key_scale, const at::Tensor& value_scale,
+    uint32_t query_output, uint32_t gate_output,
+    uint32_t key_output, uint32_t value_output, bool linear_acc32 = true);
+void rpu_launch_g05_qkv_gate_owner_only_linear_w8a16_acc32_kernel(
+    uint32_t input, const at::Tensor& query_weight, const at::Tensor& gate_weight,
+    const at::Tensor& key_weight, const at::Tensor& value_weight,
+    const at::Tensor& query_scale, const at::Tensor& gate_scale,
+    const at::Tensor& key_scale, const at::Tensor& value_scale,
+    uint32_t query_output, uint32_t gate_output,
+    uint32_t key_output, uint32_t value_output, bool linear_acc32 = true);
+// Exact W8 Action owner continuation: BASE norm/RoPE on K owners0/4,
+// then source-owner reads into the existing complete physical KV8 cache.
+void rpu_launch_g05_qk_norm_rope_group4_spm_kernel(
+    uint32_t query_spm_addr, uint32_t key_spm_addr,
+    uint32_t query_norm_spm_addr, uint32_t key_norm_spm_addr,
+    const at::Tensor& query_cos, const at::Tensor& query_sin, int64_t query_position,
+    const at::Tensor& key_cos, const at::Tensor& key_sin, int64_t key_position);
+
+void rpu_launch_g05_k_owner_norm_rope_spm_kernel(
+    uint32_t key_spm_addr, uint32_t norm_spm_addr,
+    const at::Tensor& cos, const at::Tensor& sin, int64_t rope_position);
+void rpu_launch_g05_owner_insert_kvcache_spm_with_plan(
+    at::Tensor& key_cache, at::Tensor& value_cache,
+    uint32_t key_spm_offset, uint32_t value_spm_offset,
+    const KvInsertSegmentPlan& plan);
+
+// Optional exact G05 NVFP4 owner continuation, preserving standard KV22.
+void rpu_launch_g05_owner_insert_kvcache_joint_spm_with_plan(
+    at::Tensor& key_cache, at::Tensor& value_cache,
+    uint32_t key_spm_offset, uint32_t value_spm_offset,
+    const KvInsertSegmentPlan& plan);
+void rpu_launch_g05_q_gate_linear_w8a16_acc32_kernel(
+    uint32_t input, const at::Tensor& query_weight, const at::Tensor& gate_weight,
+    const at::Tensor& query_scale, const at::Tensor& gate_scale,
+    uint32_t query_output, uint32_t gate_output, bool linear_acc32 = true);
+void rpu_launch_g05_gate_up_linear_w8a16_acc32_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    const at::Tensor& gate_scale, const at::Tensor& up_scale,
+    uint32_t gate_output, uint32_t up_output, bool linear_acc32 = true);
+// Four cold row-TP8 O weights become one signed-int8 [8,1MiB] preload owner.
+// The existing G05 W8 preload accepts the same physical owner shape.
+at::Tensor rpu_pack_g05_o_resident_w8a16(at::TensorList weights);
+// Cold striped-v2 O: preserve every installed FP4/FP8 byte, core then layer.
+std::pair<at::Tensor, at::Tensor> rpu_pack_g05_o_resident_nvfp4(
+    at::TensorList weights, at::TensorList scales);
+void rpu_launch_g05_o_resident_nvfp4_preload(
+    const at::Tensor& packed, uint32_t destination, int64_t family);
+void rpu_launch_g05_o_resident_nvfp4_acc16_kernel(
+    uint32_t input, uint32_t weight, uint32_t output,
+    uint32_t scale, uint32_t tensor_scale, uint16_t layer);
+void rpu_launch_g05_o_resident_nvfp4_acc32_kernel(
+    uint32_t input, uint32_t weight, uint32_t output,
+    uint32_t scale, uint32_t tensor_scale, uint16_t layer);
+// Cold striped-v2 first10 Down: preserve every installed FP4/FP8 byte, core then layer.
+std::pair<at::Tensor, at::Tensor> rpu_pack_g05_down_resident_nvfp4(
+    at::TensorList weights, at::TensorList scales);
+void rpu_launch_g05_down_resident_nvfp4_preload(
+    const at::Tensor& packed, uint32_t destination, int64_t family);
+void rpu_launch_g05_down_resident_nvfp4_acc16_kernel(
+    uint32_t input, uint32_t weight, uint32_t output,
+    uint32_t scale, uint32_t tensor_scale, uint16_t layer);
+void rpu_launch_g05_down_resident_nvfp4_acc32_kernel(
+    uint32_t input, uint32_t weight, uint32_t output,
+    uint32_t scale, uint32_t tensor_scale, uint16_t layer);
+// Exact ACC16 layer0 Down: first672 channels in SPM, remaining352 in original DDR.
+at::Tensor rpu_pack_g05_down_partial_w8a16(const at::Tensor& weight);
+void rpu_launch_g05_down_partial_w8a16_preload(
+    const at::Tensor& packed, uint32_t weight_spm_addr);
+void rpu_launch_g05_down_partial_w8a16_acc16_kernel(
+    uint32_t input_spm_addr, const at::Tensor& weight,
+    uint32_t weight_spm_addr, uint32_t output_spm_addr, const at::Tensor& scale);
+void rpu_launch_g05_o_resident_w8a16_acc16_kernel(
+    uint32_t input_spm_addr, uint32_t weight_spm_addr,
+    uint32_t output_spm_addr, const at::Tensor& scale, bool n128 = false);
+at::Tensor rpu_pack_g05_gateup_resident_w8a16(
+    const at::Tensor& gate, const at::Tensor& up);
+void rpu_launch_g05_gateup_resident_w8a16_kernel(
+    uint32_t input_spm_addr, uint32_t weight_spm_addr,
+    uint32_t output_spm_addr, const at::Tensor& scale, bool linear_acc32 = true);
+void rpu_launch_g05_gateup_resident_w8a16_preload(
+    const at::Tensor& packed, uint32_t weight_spm_addr);
+
 // Cold-install only: invert the installed TP8 col swizzle, prove all eight
-// logical KV replicas byte-identical, then return independent compact RPU
+// logical KV replicas byte-identical, then return independent compact device
 // owners. The compact weight remains TP8-col-swizzled for local N=32.
 std::pair<at::Tensor, at::Tensor>
 rpu_pack_pi05_kv1_stripe_w8a16(
@@ -1687,7 +2234,7 @@ rpu_pack_pi05_kv1_direct_pair_w8a16(
 // Cold-install validation for the pair-owner route. This proves the installed
 // K/V full owners contain eight byte-identical logical replicas and that all
 // four DDR intervals satisfy the independent aligned shift8 ABI. It creates no
-// persistent tensor and performs no RPU allocation.
+// persistent tensor and performs no device allocation.
 void rpu_validate_pi05_kv1_pair_owner_w8a16(
     const at::Tensor& k_replicated_weight,
     const at::Tensor& k_replicated_scale,
@@ -1696,7 +2243,7 @@ void rpu_validate_pi05_kv1_pair_owner_w8a16(
 
 // Cold-install validation for the exact Pi0.5 prefill K2048 pair-owner route.
 // It inverts the installed TP8 column swizzle and proves all eight logical
-// D256 replicas byte-identical for both K and V without allocating RPU owners.
+// D256 replicas byte-identical for both K and V without allocating device owners.
 void rpu_validate_pi05_prefill_kv1_pair_owner_w8a16(
     const at::Tensor& k_replicated_weight,
     const at::Tensor& k_replicated_scale,
@@ -1771,7 +2318,56 @@ void rpu_launch_gemv_spm_to_spm_kernel(
     int num_cores = 8,
     const at::Tensor &scale = {});
 
+// Experimental exact Vision M1728/N1280 row Linear, TP8 ACC16 only.
+// Reuses a full local-K weight slab across internal M tiles; no extra SPM.
+void rpu_launch_wall_vision_row_weight_outer_w8a16_spm_kernel(
+    uint32_t input_spm_addr, const at::Tensor& weight,
+    uint32_t output_spm_addr, int64_t M, int64_t N, int64_t K,
+    uint32_t bias_spm_addr, const at::Tensor& scale,
+    const WallSortingConfig& sorting = {});
 
+void rpu_launch_hyvla_vlm_gateup_swiglu_fp16_spm_kernel(
+    uint32_t input_spm, const at::Tensor& gate_weight,
+    const at::Tensor& up_weight, uint32_t output_spm, int64_t rows);
+// Exact M51/H1024/I2048 expert DDR route; retains the R6 SPM-weight layers.
+void rpu_launch_hyvla_expert_gateup_swiglu_fp16_spm_kernel(
+    uint32_t input_spm, const at::Tensor& gate_weight,
+    const at::Tensor& up_weight, uint32_t output_spm, int64_t rows);
+
+void rpu_launch_hyvla_gateup_resident_spm_kernel(
+    uint32_t input_spm, uint32_t gate_output_spm, uint32_t up_output_spm,
+    uint32_t gate_weight_spm, uint32_t up_weight_spm, int64_t rows);
+
+// Exact Wall Action M20 or opted-in M32 FP16/W8A16 gate+up. M32 uses DDR
+// weights; the resident-weight variants retain their original M20 contract.
+void rpu_launch_wall_action_gate_up_w8a16_multibase_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& gate_weight,
+    const at::Tensor& up_weight,
+    uint32_t gate_output_spm_addr,
+    uint32_t up_output_spm_addr,
+    const at::Tensor& gate_scale,
+    const at::Tensor& up_scale,
+    uint32_t gate_weight_spm_addr = 0,
+    uint32_t up_weight_spm_addr = 0,
+    const WallSortingConfig& sorting = {}, int64_t rows = 20);
+
+// Exact Wall Action M20 or opted-in M32 row-parallel producer followed by the row-aligned
+// 8-core ring, residual add, raw compact carry, and RMSNorm. A full residual
+// seeds layer-0 Down; later O/Down calls consume the compact per-core carry.
+void rpu_launch_wall_action_linear_ring_postnorm_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& weight,
+    uint32_t partial_spm_addr,
+    uint32_t residual_spm_addr,
+    uint32_t raw_residual_local_spm_addr,
+    uint32_t normalized_spm_addr,
+    uint32_t gamma_spm_addr,
+    const at::Tensor& scale,
+    bool residual_local_shard,
+    double eps,
+    uint32_t weight_spm_addr = 0,
+    const WallSortingConfig& sorting = {}, int64_t rows = 20);
 
 // Ordinary Qwen3-VL-4B prefill TP8 W8A16 Gate/Up/SwiGLU: fixed K2560/N9728,
 // no bias, 16-aligned rows in [16,256], and existing COL-swizzled weights.
@@ -1786,6 +2382,34 @@ void rpu_launch_qwen3vl_4b_prefill_gate_up_swiglu_w8a16_spm_kernel(
     int64_t rows,
     const at::Tensor& gate_scale,
     const at::Tensor& up_scale);
+
+// Exact LingBot2 M224/K2560/N9728 COL-TP8 W8 Prefill. The optional N96
+// shared-A payload retains the original fused SwiGLU and both scale owners.
+// Input/output are disjoint absolute SPM intervals; no extra scratch.
+void rpu_launch_lingbot2_prefill_gate_up_shared_a_w8_m224_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& gate_weight,
+    const at::Tensor& up_weight,
+    uint32_t gate_output_spm_addr,
+    const at::Tensor& gate_scale,
+    const at::Tensor& up_scale);
+
+// Exact LingBot2 T51/H768/localI96 COL-TP8 W8 shared Gate/Up + original
+// SiLU. Reads one joint [1536,768] INT8 bank and [1536] FP16 scale owner;
+// writes compact [51,96] into disjoint absolute SPM with no raw GU scratch.
+void rpu_launch_lingbot2_shared_gateup_resident_silu_w8_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& packed_weight,
+    const at::Tensor& scale,
+    uint32_t output_spm_addr);
+
+// Exact LingBot2 T51/H768/localI96 COL-TP8 FP16 shared Gate/Up + original
+// SiLU. Reads one complete joint [1536,768] FP16 bank and writes compact
+// [51,96] into disjoint absolute SPM with no raw GU scratch or scale owner.
+void rpu_launch_lingbot2_shared_gateup_resident_silu_fp16_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& packed_weight,
+    uint32_t output_spm_addr);
 
 // Exact M1/K2560/N9728 COL-TP8 decode. Both [9728] scale views require
 // backing for the original GEMV loader's 160-half final-block overfetch.
@@ -1812,12 +2436,160 @@ void rpu_launch_qwen3vl_4b_decode_o_ring_norm_spm_kernel(
     uint32_t gamma_spm_addr,
     double eps);
 
+// Exact optional base Prefill M336/M384, W8 H2048/I11008, TP8. Shared K128
+// input tile; raw FP16 Gate/Up outputs, no bias or extra SPM scratch.
+void rpu_launch_wall_base_prefill_gate_up_shared_input_spm_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate, uint32_t up, int64_t rows,
+    const at::Tensor& gate_scale, const at::Tensor& up_scale);
 
+// Same exact ABI; canonical SiLU/Mul consumes the live FP16 results in VLM.
+// Gate holds SwiGLU and Up remains raw FP16.
+void rpu_launch_wall_base_prefill_gate_up_shared_silu_spm_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate, uint32_t up, int64_t rows,
+    const at::Tensor& gate_scale, const at::Tensor& up_scale);
 
+// Same checked layout/ABI, but Up SPM is untouched; only activated Gate is stored.
+void rpu_launch_wall_base_prefill_gate_up_shared_silu_no_up_spm_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate, uint32_t up, int64_t rows,
+    const at::Tensor& gate_scale, const at::Tensor& up_scale);
 
+// Exact Wall Prefill M320/M640 W8A16 gate+up+SwiGLU. P640 reuses each N96
+// weight tile across five M128 rows; M320 keeps the N112 direct-store path.
+// The complete result is written in-place to gate_output; the legacy scratch
+// argument remains ABI-compatible with the existing staged graph.
+// Exact pure FP16 long-prefill shared-A Gate/Up + SiLU; no raw Up or scratch.
+void rpu_launch_wall_base_prefill_gate_up_shared_fp16_spm_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate, int64_t rows);
 
+void rpu_launch_wall_prefill_gate_up_swiglu_w8a16_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& gate_weight,
+    const at::Tensor& up_weight,
+    uint32_t gate_output_spm_addr,
+    uint32_t scratch_spm_addr,
+    int64_t rows,
+    const at::Tensor& gate_scale,
+    const at::Tensor& up_scale,
+    const WallSortingConfig& sorting = {});
 
+// Exact Wall Prefill P640 Down. Reads one TP8 row-swizzled W8 weight/scale
+// stream and writes the two C320 FP16 partial outputs to independent SPM slabs.
+void rpu_launch_wall_prefill_down_w8a16_c320x2_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& weight,
+    uint32_t output0_spm_addr,
+    uint32_t output1_spm_addr,
+    const at::Tensor& scale,
+    const WallSortingConfig& sorting = {});
 
+// Exact Wall Prefill P640 O-proj. Reads two contiguous C320 local-K inputs,
+// reuses one TP8 row-swizzled W8 weight/scale stream, and writes two independent
+// C320 FP16 partial outputs.
+void rpu_launch_wall_prefill_oproj_w8a16_c320x2_spm_kernel(
+    uint32_t input0_spm_addr,
+    const at::Tensor& weight,
+    uint32_t output0_spm_addr,
+    uint32_t output1_spm_addr,
+    const at::Tensor& scale,
+    const WallSortingConfig& sorting = {});
+
+// Exact Wall Vision M576 W8A16 gate+up+SwiGLU. Four non-zero extra bases select
+// the three-image weight-outer kernel; all-zero extras retain the single-image
+// fallback. The cold small-image W8 route also admits single-base M324.
+// Gate and Up each apply their own SPM bias after scaling.
+void rpu_launch_wall_vision_gate_up_swiglu_w8a16_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& gate_weight,
+    const at::Tensor& up_weight,
+    uint32_t gate_output_spm_addr,
+    uint32_t gate_bias_spm_addr,
+    uint32_t up_bias_spm_addr,
+    const at::Tensor& gate_scale,
+    const at::Tensor& up_scale,
+    uint32_t input1_spm_addr = 0,
+    uint32_t input2_spm_addr = 0,
+    uint32_t output1_spm_addr = 0,
+    uint32_t output2_spm_addr = 0,
+    const WallSortingConfig& sorting = {}, int64_t rows = 576);
+
+// Exact Wall P640 W8A16 QKV for one C320 half or both packed C320 halves.
+// Reads the independent Q/K/V weights and scales from DDR and writes the
+// unified-head SPM buffers.
+void rpu_launch_wall_qkv_w8a16_multibase_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& q_weight,
+    const at::Tensor& k_weight,
+    const at::Tensor& v_weight,
+    uint32_t q_output_spm_addr,
+    uint32_t k_output_spm_addr,
+    uint32_t v_output_spm_addr,
+    uint32_t q_bias_spm_addr,
+    uint32_t k_bias_spm_addr,
+    uint32_t v_bias_spm_addr,
+    const at::Tensor& q_scale,
+    const at::Tensor& k_scale,
+    const at::Tensor& v_scale,
+    int64_t rows,
+    bool kv_tile_owner = false,
+    const WallSortingConfig& sorting = {});
+
+// Exact Wall Prefill P640 owner K/V path. K owners remote-read their peer
+// D64 half, apply partial M-RoPE and write the replicated K cache; V owners
+// transpose their local D64 half and write the replicated V cache.
+void rpu_launch_wall_prefill_owner_direct_kv_spm_kernel(
+    at::Tensor& k_cache,
+    at::Tensor& v_cache,
+    uint32_t k_spm_addr,
+    uint32_t v_spm_addr,
+    const at::Tensor& cos,
+    const at::Tensor& sin);
+
+// Exact Wall Action M20 or opted-in M32 FP16/W8A16 QKV. M32 uses the
+// parameterized partial-MRoPE payload with DDR weights and replicated K/V.
+void rpu_launch_wall_action_qkv_w8a16_multibase_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& q_weight,
+    const at::Tensor& k_weight,
+    const at::Tensor& v_weight,
+    uint32_t q_output_spm_addr,
+    uint32_t k_output_spm_addr,
+    uint32_t v_output_spm_addr,
+    uint32_t q_bias_spm_addr,
+    uint32_t k_bias_spm_addr,
+    uint32_t v_bias_spm_addr,
+    const at::Tensor& q_scale,
+    const at::Tensor& k_scale,
+    const at::Tensor& v_scale,
+    const at::Tensor* cos = nullptr,
+    const at::Tensor* sin = nullptr,
+    int64_t position = 0,
+    uint32_t q_weight_spm_addr = 0,
+    uint32_t k_weight_spm_addr = 0,
+    uint32_t v_weight_spm_addr = 0,
+    bool kv_owner_fanout = false,
+    const WallSortingConfig& sorting = {}, int64_t rows = 20);
+
+// Exact Wall Vision 3x576 W8A16 QKV. Reads the existing independent
+// M1728/K1280/N1280 projections and writes three packed row-major SPM buffers.
+void rpu_launch_wall_vision_qkv_w8a16_multibase_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& q_weight,
+    const at::Tensor& k_weight,
+    const at::Tensor& v_weight,
+    uint32_t q_output_spm_addr,
+    uint32_t k_output_spm_addr,
+    uint32_t v_output_spm_addr,
+    uint32_t q_bias_spm_addr,
+    uint32_t k_bias_spm_addr,
+    uint32_t v_bias_spm_addr,
+    const at::Tensor& q_scale,
+    const at::Tensor& k_scale,
+    const at::Tensor& v_scale,
+    const WallSortingConfig& sorting = {});
 
 // =============================================================================
 // SPM Binary Kernels
@@ -1922,10 +2694,16 @@ int64_t rpu_causal_decoder_create(
 void rpu_causal_decoder_destroy(int64_t handle);
 void rpu_causal_decoder_set_tts_codec_mode(int64_t handle);
 std::vector<int64_t> rpu_causal_decoder_topology(int64_t handle);
+void rpu_causal_decoder_set_wall_prefill_routes(
+    int64_t handle, bool mixed_precision, bool staged_mlp,
+    int64_t rmsnorm_capability, bool owner_direct_kv = false);
 
 // Set model weights on the given instance (marks C++ preload/allocation state dirty;
 // the owning adapter is responsible for invalidating/re-warming captured graphs).
 // Phase 1: final_norm_w is required (fused into last layer's build_layer_subgraph)
+void rpu_causal_decoder_set_wall_sorting_routes(
+    int64_t handle, int64_t mask, bool m224, bool silu, bool action_reuse,
+    bool prefill_row, bool prefill_mlp, bool paired);
 
 void rpu_causal_decoder_set_weights(
     int64_t handle,
@@ -2025,7 +2803,7 @@ at::Tensor rpu_causal_decoder_forward(
     const std::optional<at::Tensor>& position_ids = std::nullopt,
     const std::optional<std::vector<at::Tensor>>& deepstack_dense_visual_embeds = std::nullopt,
     // partial_mrope path (wall-oss perf): per-forward interleaved cos/sin
-    // [seq_len, head_dim/2] fp16 RPU. None preserves llama_mrope_interleave.
+    // [seq_len, head_dim/2] fp16 device. None preserves llama_mrope_interleave.
     const std::optional<at::Tensor>& rope_cos_il = std::nullopt,
     const std::optional<at::Tensor>& rope_sin_il = std::nullopt,
     // HALO WS-2: 1D-RoPE position-base override (-1 = legacy ctx().position;
@@ -2307,7 +3085,8 @@ void rpu_qwen3_5_set_weights(
     at::TensorList gdn_in_z_scale_list, at::TensorList gdn_out_scale_list,
     at::TensorList gdn_q_scale_list, at::TensorList gdn_k_scale_list,
     at::TensorList gdn_v_scale_list, at::TensorList gdn_b_bg_scale_list,
-    at::TensorList gdn_a_bg_scale_list);
+    at::TensorList gdn_a_bg_scale_list,
+    const std::optional<std::vector<at::Tensor>>& nvfp4_tensor_scales = std::nullopt);
 void rpu_qwen3_5_set_prefill_rope(int64_t handle, const at::Tensor& cos, const at::Tensor& sin);
 void rpu_qwen3_5_set_valid_prefill_len(int64_t handle, int64_t n);
 void rpu_qwen3_5_set_mrope_position_delta(int64_t handle, int64_t d);
@@ -2321,6 +3100,7 @@ void rpu_qwen3_5_stage_prefill_execution_controls(
 void rpu_qwen3_5_set_chunk_envelope(int64_t handle, int64_t max_kv_len,
                                     int64_t chunk);
 void rpu_qwen3_5_set_linear_acc32(int64_t handle, bool enabled);
+void rpu_qwen3_5_set_high_precision(int64_t handle, bool enabled);
 void rpu_qwen3_5_set_fast_replay(int64_t handle, bool enabled);
 void rpu_qwen3_5_set_retained_prefill_graph(
     int64_t handle, bool enabled);
@@ -2493,7 +3273,7 @@ at::Tensor rpu_qwen3_5_action_rtc_trace_forward(
     at::IntArrayRef planned_stage_descriptor);
 
 // Phase 2.5: per-instance fused lm_head 入口
-//   set_lm_head:   注入 [vocab, hidden] fp16 or int8 RPU-resident weight.
+//   set_lm_head:   注入 [vocab, hidden] fp16 or int8 device-resident weight.
 //                  int8 requires [vocab] fp16 lm_head_scale. 启用 fuse_lm_head_,
 //                  调 invalidate_model_state() → main + post graph cache 自动失效
 //   clear_lm_head: 清空 lm_head_w_, 关闭 fuse_lm_head_, 同样 invalidate_model_state()
@@ -2509,6 +3289,33 @@ void rpu_causal_decoder_set_rhinovla_high_precision_fusions(int64_t handle, bool
 void rpu_causal_decoder_set_rhinovla_high_precision(int64_t handle, bool enabled);
 void rpu_causal_decoder_set_linear_acc32(int64_t handle, bool enabled);
 // RhinoVLA text-prefill fast-replay opt-ins (per-model).
+void rpu_causal_decoder_set_lingbot_prefill_mode(int64_t handle, bool folded_rmsnorm, bool kv_only);
+void rpu_causal_decoder_set_lingbot_prefill_kv_pair(int64_t handle, bool enabled);
+void rpu_causal_decoder_set_lingbot_prefill_qk_norm_rope(int64_t handle, bool enabled);
+void rpu_causal_decoder_enable_resident_preloads(int64_t handle);
+void rpu_causal_decoder_prime_resident_preloads(int64_t handle, at::IntArrayRef descriptor);
+void rpu_causal_decoder_prefill_kv_only(
+    int64_t handle,
+    const at::Tensor& hidden_states,
+    at::TensorList k_caches_list,
+    at::TensorList v_caches_list,
+    const std::optional<at::Tensor>& attention_mask,
+    int64_t position,
+    bool is_causal,
+    const std::optional<at::Tensor>& position_ids = std::nullopt,
+    const std::optional<std::vector<at::Tensor>>& deepstack_dense_visual_embeds = std::nullopt,
+    const std::optional<at::Tensor>& rope_cos_il = std::nullopt,
+    const std::optional<at::Tensor>& rope_sin_il = std::nullopt,
+    int64_t cos_sin_offset = -1,
+    int64_t batch_slot = 0,
+    bool allow_batch_decode = false,
+    int64_t planned_chunk_size = 0,
+    at::IntArrayRef planned_stage_descriptor = {});
+RpuRmsNormSpmContract rpu_snapshot_rmsnorm_nogamma_spm_contract();
+void rpu_launch_rmsnorm_nogamma_spm_kernel(
+    uint32_t input_spm_addr, uint32_t output_spm_addr,
+    int64_t M, int64_t C, double eps, RpuRmsNormSpmRoute route, int num_cores = 8);
+
 void rpu_causal_decoder_set_fast_replay(int64_t handle, bool enabled);
 void rpu_causal_decoder_set_preload_replay_skip(int64_t handle, bool enabled);
 void rpu_causal_decoder_set_chunk_size_cap(int64_t handle, int64_t chunk_size_cap);
@@ -2781,7 +3588,7 @@ void rpu_causal_decoder_stage_chunk_size_override(
 // replayed under the wrong SPM layout. O(1) on purpose: it must be affordable on
 // the decode path, where the override also reaches alloc_ctx.chunk_size.
 int64_t rpu_causal_decoder_get_chunk_size_override(int64_t handle);
-// MR-A certified chunk envelope (docs/roadmap/chunk_certified_envelope.md).
+// MR-A certified chunk envelope (docs/runtime_config.md).
 void rpu_causal_decoder_set_chunk_envelope(int64_t handle, int64_t max_kv_len,
                                            int64_t chunk);
 void rpu_causal_decoder_set_equal_two_prefill(int64_t handle, bool enabled);
@@ -2794,7 +3601,7 @@ void rpu_causal_decoder_set_adarms_step(
     at::TensorList input_scales, at::TensorList input_shifts,
     at::TensorList post_scales,  at::TensorList post_shifts);
 
-// Replay-safe AdaRMS step-update: each arg is one [num_layers, hidden] fp16 RPU tensor.
+// Replay-safe AdaRMS step-update: each arg is one [num_layers, hidden] fp16 device tensor.
 // Enables build-once/replay-per-step for the denoise loop. See rpu_qwen3_model.h.
 void rpu_causal_decoder_set_adarms_step_mutable(
     int64_t handle,
@@ -2965,9 +3772,6 @@ at::Tensor rpu_gemma2_forward(
     int64_t chunk_size = 0,
     at::IntArrayRef planned_stage_descriptor = {});
 
-// Gemma4Model -- Gemma4 E4B text decoder, mixed geometry (sliding 256 / global
-// 512), 4-norm + QK-RMSNorm, direct-weight norms, qk_scale=1.0.
-// Implementation: src/fused/rpu_gemma4_model.cpp.
 
 int64_t rpu_gemma4_create();
 void rpu_gemma4_destroy(int64_t handle);
@@ -3048,7 +3852,7 @@ void rpu_adarms_set_weights(
     at::TensorList down_scale_list, const std::optional<std::vector<at::Tensor>>& nvfp4_tensor_scales);
 
 // All-layers-once forward. SEQUENTIAL mode only. cond is [hidden_size] fp16 on
-// RPU device, DMA'd once per forward at layer 0 / chunk 0 (D-401).
+// device, DMA'd once per forward at layer 0 / chunk 0 (D-401).
 // Logical RoPE start for the action suffix (-1 = use the physical cache row).
 void rpu_adarms_set_rope_position(int64_t handle, int64_t position);
 
@@ -3068,10 +3872,17 @@ std::vector<int64_t> rpu_adarms_resolve_action_stage_domain(
     bool is_causal, int64_t requested_chunk_size);
 int64_t rpu_adarms_get_resolved_chunk_size(int64_t handle);
 
-// GR00T-N1.7 flow-matching DiT action head (src/fused/rpu_gr00t_dit_model.cpp).
-// 32-layer AlternateVLDiT: self-attention and cross-attention use external
-// vl_embeds K/V with MASK_2D image/text subsets; norm1 is AdaLayerNorm.
 int64_t rpu_gr00t_dit_create();
+void rpu_gr00t_dit_prepare_persistent_spm(int64_t handle, int64_t execution_len);
+void rpu_gr00t_dit_prepare_adaln_table(int64_t handle);
+void rpu_gr00t_dit_prepare_time_tables(int64_t handle);
+std::tuple<at::Tensor, at::Tensor> rpu_gr00t_precompute_time_glue(
+    const at::Tensor& tau, const at::Tensor& cond,
+    const at::Tensor& tau_weight, const at::Tensor& tau_scale,
+    const at::Tensor& po1_weight, const at::Tensor& po1_bias, const at::Tensor& po1_scale);
+at::Tensor rpu_gr00t_precompute_adaln(
+    const at::Tensor& cond, at::TensorList weights,
+    at::TensorList biases, at::TensorList scales);
 void rpu_gr00t_dit_set_chunk_envelope(int64_t handle, int64_t max_kv_len, int64_t chunk);
 void    rpu_gr00t_dit_destroy(int64_t handle);
 void    rpu_gr00t_dit_set_weights(
@@ -3173,9 +3984,6 @@ std::vector<int64_t> rpu_internvla_nextdit_resolve_stage_domain(
     bool prepare_modulation_on_rpu);
 int64_t rpu_internvla_nextdit_get_resolved_chunk_size(int64_t handle);
 
-// InternVLA-N1 NavDP action head (src/fused/rpu_navdp_model.cpp).
-// 16-layer nn.TransformerDecoder diffusion policy: pre-LN causal self-attention,
-// cross-attention over memory and GELU-FFN; DDPM 20-step.
 int64_t rpu_navdp_create(bool allow_numeric_blocked, bool spm_kv_by_mha);
 void rpu_navdp_set_chunk_envelope(int64_t handle, int64_t max_kv_len, int64_t chunk);
 void    rpu_navdp_destroy(int64_t handle);
@@ -3199,7 +4007,9 @@ at::Tensor rpu_navdp_forward(
     at::TensorList k_caches_list,
     at::TensorList v_caches_list,
     const std::optional<at::Tensor>& tgt_mask,
-    at::IntArrayRef planned_stage_descriptor = {});
+    at::IntArrayRef planned_stage_descriptor = {},
+    const std::optional<at::Tensor>& output = std::nullopt,
+    bool output_published = false);
 std::vector<int64_t> rpu_navdp_resolve_stage_domain(
     int64_t handle, int64_t packed_rows, int64_t denoise_steps = 0);
 int64_t rpu_navdp_get_resolved_chunk_size(int64_t handle);
@@ -3215,7 +4025,7 @@ at::Tensor rpu_navdp_denoise_loop_forward(
     at::IntArrayRef planned_stage_descriptor = {});
 
 // =============================================================================
-// GR00T-N1.7 "全程 RPU" Component A — vlln + 4-layer vl_self_attention encoder
+// GR00T-N1.7 "全程 device" Component A — vlln + 4-layer vl_self_attention encoder
 // (src/fused/rpu_gr00t_vl_encoder_model.cpp). SigLIP-twin bidirectional self-attn:
 // u = raw⊙inv_w_rms -> LN(vlln) -> 4×[LN1 -> qkv+bias -> KV@0 -> SDPA(MASK_NONE) ->
 // o+bias -> resid -> LN3 -> GELU-FFN -> resid]. See FUSED_GLUE_{SPEC,PLAN}.md (Phase A).
@@ -3306,6 +4116,7 @@ at::Tensor rpu_gr00t_spm_z2_pipeline_forward(
     int64_t plan_hash);
 
 int64_t rpu_gr00t_vl_encoder_create();
+void rpu_gr00t_vl_encoder_prepare_persistent_spm(int64_t handle, int64_t execution_len);
 void rpu_gr00t_vl_encoder_set_chunk_envelope(int64_t handle, int64_t max_kv_len, int64_t chunk);
 void    rpu_gr00t_vl_encoder_destroy(int64_t handle);
 void    rpu_gr00t_vl_encoder_set_weights(
@@ -3390,7 +4201,7 @@ at::Tensor rpu_pi05_forward(
 // =============================================================================
 // Pi0.5 num_steps fused denoise step model.
 // Implementation: src/fused/rpu_pi05_denoise_step_model.cpp
-// The denoise loop retains its state across the requested action steps.
+// Spec: docs/architecture.md
 // =============================================================================
 
 int64_t rpu_pi05_denoise_step_create(bool linear_acc32);
@@ -3466,11 +4277,20 @@ void rpu_pi05_denoise_loop_forward(
 // =============================================================================
 // Wall-OSS-0.5 fused action-denoise step model.
 // Implementation: src/fused/rpu_wall_oss_action_step_model.cpp
-// Fused Wall-OSS denoise-step interface.
+// Spec: docs/architecture.md
 // =============================================================================
 
 int64_t rpu_wall_oss_action_step_create();
+void rpu_wall_oss_action_step_set_linear_acc32(int64_t handle, bool enabled);
 void    rpu_wall_oss_action_step_destroy(int64_t handle);
+void rpu_wall_oss_action_step_set_weight_residency(
+    int64_t handle, const at::Tensor& core_major_bundle);
+void rpu_wall_oss_action_step_set_kv_owner_fanout(
+    int64_t handle, bool enabled);
+
+void rpu_wall_oss_action_step_set_wall_sorting_routes(
+    int64_t handle, int64_t mask, bool m224, bool silu, bool action_reuse,
+    bool prefill_row, bool prefill_mlp, bool paired);
 
 void rpu_wall_oss_action_step_set_weights(
     int64_t handle,
@@ -3511,7 +4331,7 @@ std::vector<int64_t> rpu_wall_oss_action_resolve_stage_domain(
     int64_t handle, int64_t horizon, int64_t prefix_len,
     int64_t mask_kv_len, int64_t requested_chunk_size,
     bool loop_mode, int64_t num_steps, bool b_step_is_bias,
-    bool have_te);
+    bool have_te, int64_t rtc_delay, bool velocity_blend);
 int64_t rpu_wall_oss_action_get_resolved_chunk_size(int64_t handle);
 void rpu_wall_oss_action_enable_execution_reconfigure(int64_t handle);
 void rpu_wall_oss_action_stage_chunk_size(
@@ -3526,10 +4346,12 @@ void rpu_wall_oss_action_denoise_loop_forward(
     at::Tensor x_traj, at::Tensor v_traj, double dt, int64_t prefix_len, int64_t num_steps,
     const std::optional<at::Tensor>& rope_cos_il,
     const std::optional<at::Tensor>& rope_sin_il,
+    const std::optional<at::Tensor>& rtc_prefix = std::nullopt,
+    int64_t rtc_delay = 0,
+    const std::optional<at::Tensor>& velocity_mask = std::nullopt,
+    const std::optional<at::Tensor>& velocity_override = std::nullopt,
     at::IntArrayRef planned_stage_descriptor = {});
 
-// LingBot-VLA fused action-expert denoise unroll model.
-// Implementation: src/fused/rpu_lingbot_denoise_model.cpp.
 
 int64_t rpu_lingbot_denoise_create();
 void    rpu_lingbot_denoise_destroy(int64_t handle);
@@ -3592,6 +4414,11 @@ void rpu_lingbot_v2_moe_set_weights(
 
 // Cold, optional selection-only centered FP16 router weights; original score
 // weights and normalisation remain unchanged. Requires installed zero bias.
+void rpu_lingbot_v2_moe_configure_runtime_graph(int64_t handle, bool fused_router, bool routed_gemm);
+void rpu_lingbot_v2_moe_enable_resident_preloads(int64_t handle);
+void rpu_lingbot_v2_moe_prepare_resident_spm(int64_t handle, int64_t execution_len,
+    int64_t position, bool is_causal, int64_t mask_kv_len);
+void rpu_lingbot_v2_moe_prime_resident_preloads(int64_t handle, at::IntArrayRef descriptor);
 void rpu_lingbot_v2_moe_set_router_rank_weights(
     int64_t handle, at::TensorList rank_weights);
 
@@ -3612,13 +4439,14 @@ void rpu_lingbot_v2_moe_set_denoise_unroll(
     const at::Tensor& adarms_is, const at::Tensor& adarms_ish,
     const at::Tensor& adarms_ps, const at::Tensor& adarms_psh,
     int64_t state_dim, int64_t action_dim, int64_t state_dim_pad,
-    int64_t action_dim_pad, int64_t num_steps);
+    int64_t action_dim_pad, int64_t num_steps, bool tp8_encoder = false);
 void rpu_lingbot_v2_moe_denoise_unroll_forward(
     int64_t handle, const at::Tensor& x0_rpu, const at::Tensor& state_rpu,
     std::vector<at::Tensor> k_caches, std::vector<at::Tensor> v_caches,
     const std::optional<at::Tensor>& attention_mask, at::Tensor x_final,
     double dt, int64_t prefix_len, int64_t cos_sin_offset,
-    int64_t num_steps, at::IntArrayRef planned_stage_descriptor = {});
+    int64_t num_steps, at::IntArrayRef planned_stage_descriptor = {},
+    bool inputs_published = false);
 std::vector<int64_t> rpu_lingbot_v2_moe_resolve_action_stage_domain(
     int64_t handle, int64_t execution_len, int64_t prefix_len,
     int64_t mask_kv_len, int64_t cos_sin_offset);
@@ -3636,7 +4464,14 @@ at::Tensor rpu_lingbot_v2_moe_debug_ccap(int64_t handle);
 // device path (which: 0=gate, 1=up, 2=down). Gated on RPU_L2_DBG_PACKED=1 -- throws
 // when the flag is absent, so no default-path caller can reach it.
 at::Tensor rpu_lingbot_v2_moe_debug_packed(int64_t handle, int64_t which, int64_t layer);
+// Cold per-layer shared Gate/Up joint banks, preserving installed TP8 packing.
+void rpu_lingbot_v2_moe_set_shared_gate_up_weights(
+    int64_t handle, at::TensorList joint_weights, at::TensorList joint_scales);
+
 // GROUPED-EXPERTS opt-in: bind per-layer core-slice-interleaved packed expert weights.
+void rpu_lingbot_v2_moe_set_sparse_weights(
+    int64_t handle, at::TensorList gate_up, at::TensorList down,
+    at::TensorList gate_up_scales, at::TensorList down_scales);
 void rpu_lingbot_v2_moe_set_packed_weights(
     int64_t handle, at::TensorList gate_packed, at::TensorList up_packed,
     at::TensorList down_packed);
@@ -3649,6 +4484,7 @@ void rpu_lingbot_v2_moe_set_base_scales(
     int64_t handle, at::TensorList q_ws, at::TensorList k_ws, at::TensorList v_ws,
     at::TensorList o_ws, at::TensorList gate_ws, at::TensorList up_ws, at::TensorList down_ws);
 at::Tensor rpu_lingbot_v2_moe_debug_router_h(int64_t handle);
+at::Tensor rpu_lingbot_v2_moe_debug_sparse_route_stage(int64_t handle);
 at::Tensor rpu_lingbot_v2_moe_debug_layer_in(int64_t handle);
 at::Tensor rpu_lingbot_v2_moe_debug_attn_resid(int64_t handle);
 
@@ -3666,7 +4502,7 @@ at::Tensor rpu_lingbot_v2_moe_forward(
     at::IntArrayRef planned_stage_descriptor = {});
 
 // =============================================================================
-// HALO action expert (mode="act") fused MoT step model.
+// HALO action expert (mode="act") fused MoT step model — HALO MR-2 commit 1.
 // Implementation: src/fused/rpu_halo_action_expert_model.cpp
 // 双权重 (text/act) 解码器, 行掩码合并; M1 boundary 在 host。
 // =============================================================================
@@ -3719,6 +4555,7 @@ at::Tensor rpu_halo_action_expert_step_forward(
 // 实现见 src/fused/rpu_hyvla_vlm_model.cpp。
 // =============================================================================
 int64_t rpu_hyvla_vlm_create();
+int64_t rpu_hyvla_vlm_create_kv_only();
 void    rpu_hyvla_vlm_destroy(int64_t handle);
 void rpu_hyvla_vlm_set_runtime_config(
     int64_t handle,
@@ -3784,12 +4621,18 @@ void rpu_hyvla_vlm_set_moe_weights_w8a16(
 // 一次 act step: x_emb [1,cs,hidden] -> 返回末隐藏 [1,cs,hidden] (prefix-KV 非
 // 因果 forward, 显式 4D additive mask)。返回的是基类 output_tensor_ (graph 写
 // 目标), 调用方须在 capture 作用域退出后读 (已证模式 wall_oss/pi05)。
+void rpu_hyvla_vlm_prefill_kv_only(
+    int64_t handle, const at::Tensor& x_emb,
+    std::vector<at::Tensor> k_caches, std::vector<at::Tensor> v_caches,
+    const at::Tensor& cos, const at::Tensor& sin,
+    const at::Tensor& attn_mask_4d, int64_t prefix_len,
+    at::IntArrayRef planned_stage_descriptor, bool inputs_published = false);
 at::Tensor rpu_hyvla_vlm_step_forward(
     int64_t handle, const at::Tensor& x_emb,
     std::vector<at::Tensor> k_caches, std::vector<at::Tensor> v_caches,
     const at::Tensor& cos, const at::Tensor& sin,
     const at::Tensor& attn_mask_4d, int64_t prefix_len,
-    at::IntArrayRef planned_stage_descriptor = {});
+    at::IntArrayRef planned_stage_descriptor = {}, bool inputs_published = false);
 std::vector<int64_t> rpu_hyvla_vlm_resolve_stage_domain(
     int64_t handle, int64_t seq_len, int64_t prefix_len,
     int64_t mask_kv_len);
@@ -3843,6 +4686,24 @@ void rpu_hyvla_expert_set_weights_w8a16(
     at::TensorList o_ws, at::TensorList gate_ws, at::TensorList up_ws,
     at::TensorList down_ws);
 
+// Exact Action-only NVFP4: FP4 codes, FP8 block scales and FP32 tensor scales.
+void rpu_hyvla_expert_set_weights_nvfp4(
+    int64_t handle,
+    at::TensorList q_w, at::TensorList k_w, at::TensorList v_w, at::TensorList o_w,
+    at::TensorList q_norm, at::TensorList k_norm,
+    at::TensorList input_norm, at::TensorList post_norm,
+    at::TensorList gate_w, at::TensorList up_w, at::TensorList down_w,
+    const at::Tensor& cos, const at::Tensor& sin, const at::Tensor& final_norm_w,
+    int64_t num_q_heads, int64_t num_kv_heads, int64_t head_dim,
+    int64_t hidden_size, int64_t intermediate_size, double eps,
+    int64_t chunk_size, int64_t action_mlp_cores,
+    at::TensorList q_ws, at::TensorList k_ws, at::TensorList v_ws,
+    at::TensorList o_ws, at::TensorList gate_ws, at::TensorList up_ws,
+    at::TensorList down_ws,
+    const at::Tensor& q_ts, const at::Tensor& k_ts, const at::Tensor& v_ts,
+    const at::Tensor& o_ts, const at::Tensor& gate_ts, const at::Tensor& up_ts,
+    const at::Tensor& down_ts);
+
 at::Tensor rpu_hyvla_expert_step_forward(
     int64_t handle, const at::Tensor& x_emb,
     std::vector<at::Tensor> k_caches, std::vector<at::Tensor> v_caches,
@@ -3853,6 +4714,8 @@ at::Tensor rpu_hyvla_expert_step_forward(
 // in-graph N 步 Euler unroll (opt-in)。set_action_weights 打开 unroll 模式,
 // unroll_forward 一次 forward 跑完 num_steps 步 —— encoder / out_proj / Euler
 // 全在图内, x 不离开 SPM。不调用这两个入口时, 上面的单步路径逐位不变。
+void rpu_hyvla_expert_set_gateup_resident_weights(
+    int64_t handle, const at::Tensor& bundle, int64_t o_layers = 0);
 void rpu_hyvla_expert_set_action_weights(
     int64_t handle,
     const at::Tensor& wc, const at::Tensor& mo, const at::Tensor& mo_bias,
@@ -3865,7 +4728,8 @@ void rpu_hyvla_expert_unroll_forward(
     const at::Tensor& state_emb, const at::Tensor& cos, const at::Tensor& sin,
     const at::Tensor& attn_mask_4d, at::Tensor x_traj,
     double dt, int64_t prefix_len, int64_t num_steps,
-    at::IntArrayRef planned_stage_descriptor = {});
+    at::IntArrayRef planned_stage_descriptor = {}, bool inputs_published = false,
+    const std::optional<at::Tensor>& noise_cpu = std::nullopt);
 std::vector<int64_t> rpu_hyvla_expert_resolve_stage_domain(
     int64_t handle, int64_t seq_len, int64_t prefix_len,
     int64_t mask_kv_len);
@@ -3913,7 +4777,7 @@ void rpu_halo_image_flow_set_weights(
     at::TensorList q_bias, at::TensorList k_bias, at::TensorList v_bias);
 
 // gen(*_moe_gen) 孪生 + 行掩码 (= action expert set_moe_weights 角色, 减去
-// chunk_size SDPA override)。row_mask [query_len] fp16 RPU {0,1} (1=und/text 行
+// chunk_size SDPA override)。row_mask [query_len] fp16 device {0,1} (1=und/text 行
 // {0,1377}); query_len=1378。须在 set_weights 之后调用。
 void rpu_halo_image_flow_set_gen_weights(
     int64_t handle,
@@ -3962,7 +4826,7 @@ void rpu_qwenpi05_set_weights(
     int64_t hidden_size, int64_t intermediate_size,
     double eps);
 
-// W8A16 weights: expert, conditional projections, and action IO.
+// Full v3 W8A16: expert, conditional projections, and action IO.
 void rpu_rhino_vla_set_weights_full_w8a16(
     int64_t handle,
     at::TensorList q_w_list, at::TensorList k_w_list,
@@ -4015,7 +4879,7 @@ void rpu_rhino_vla_set_denoise_loop_adarms_tables_w8a16(
     bool gates_tanh_precomputed, bool high_precision);
 
 // All-layers-once forward. cos/sin are per-forward M-RoPE tensors
-// pre-computed on CPU and DMA'd to RPU. cond is [hidden_size] fp16 on RPU.
+// pre-computed on CPU and DMA'd to device. cond is [hidden_size] fp16 on device.
 at::Tensor rpu_qwenpi05_forward(
     int64_t handle,
     const at::Tensor& hidden_states,
@@ -4125,7 +4989,7 @@ void rpu_rhino_vla_set_weights(
     int64_t hidden_size, int64_t intermediate_size,
     double eps);
 
-// Expert W8A16 weights. Seven INT8 projections use natural FP16 [N]
+// Exact v3 expert-only W8A16. Seven INT8 projections use natural FP16 [N]
 // output-channel scales; all AdaRMS, QK norm and action IO weights stay FP16.
 void rpu_rhino_vla_set_weights_w8a16(
     int64_t handle,
@@ -4145,7 +5009,7 @@ void rpu_rhino_vla_set_weights_w8a16(
     at::TensorList down_scale_list);
 
 // All-layers-once forward. cos/sin are per-forward M-RoPE tensors
-// pre-computed on CPU and DMA'd to RPU. cond is [hidden_size] fp16 on RPU.
+// pre-computed on CPU and DMA'd to device. cond is [hidden_size] fp16 on device.
 at::Tensor rpu_rhino_vla_forward(
     int64_t handle,
     const at::Tensor& hidden_states,
@@ -4297,7 +5161,7 @@ at::Tensor rpu_siglip_forward_packed(
     at::TensorList v_caches_list,
     at::IntArrayRef planned_stage_descriptor);
 
-// SigLIP-batch all-RPU path: takes the N camera images as a LIST (each
+// SigLIP-batch all-device path: takes the N camera images as a LIST (each
 // [1,3,H,W]) instead of a torch.cat'd [N,3,H,W] tensor — the C++ packs them
 // directly, so the Python caller no longer needs torch.cat (a CPU fallback
 // that does NOT flush its result to DDR) nor the C++ a per-image slice.
@@ -4314,6 +5178,7 @@ at::Tensor rpu_siglip_forward_multi(
 // 实现见 src/fused/rpu_hyvit2_vision_model.cpp。
 // =============================================================================
 int64_t rpu_hyvit2_create();
+int64_t rpu_hyvit2_create_kv_spm_only();
 void rpu_hyvit2_destroy(int64_t handle);
 void rpu_hyvit2_set_runtime_config(
     int64_t handle,
@@ -4366,11 +5231,11 @@ void rpu_hyvit2_model_set_patch_emb(
 
 at::Tensor rpu_hyvit2_patch_embed(
     int64_t handle,
-    const at::Tensor& input);
+    const at::Tensor& input, bool inputs_published = false);
 
 at::Tensor rpu_hyvit2_patch_embed_multi(
     int64_t handle,
-    at::TensorList images);
+    at::TensorList images, bool inputs_published = false);
 
 // Hy-VLA merger 的组轴（DwPooler）两个 op —— 输入必须是 member-major [4, G, D]
 // （由 ViT 尾部的两次 permute3d 产出）。实现与理由见 src/ops/rpu_hyvla_merger.cpp。
@@ -4409,16 +5274,16 @@ at::Tensor rpu_hyvit2_forward_packed(
     at::TensorList v_caches_list,
     at::IntArrayRef planned_stage_descriptor = {});
 
-// SigLIP-batch all-RPU path: takes the N camera images as a LIST (each
+// SigLIP-batch all-device path: takes the N camera images as a LIST (each
 // [1,3,H,W]) instead of a torch.cat'd [N,3,H,W] tensor — the C++ packs them
-// directly, so the Python caller no longer needs torch.cat (a CPU fallback
-// that does NOT flush its result to DDR) nor the C++ a per-image slice.
+// directly. inputs_published is a per-call promise for adapter-owned uploads;
+// ordinary callers retain the conservative host-alias publication boundary.
 at::Tensor rpu_hyvit2_forward_multi(
     int64_t handle,
     at::TensorList images,
     at::TensorList k_caches_list,
     at::TensorList v_caches_list,
-    at::IntArrayRef planned_stage_descriptor = {});
+    at::IntArrayRef planned_stage_descriptor = {}, bool inputs_published = false);
 std::vector<int64_t> rpu_hyvit2_resolve_stage_domain(
     int64_t handle, int64_t seq_len, int64_t image_batch_count,
     bool external_patch_prologue);
@@ -4457,6 +5322,7 @@ at::Tensor rpu_siglip_fused_encoder_layer(
 // See src/fused/rpu_qwen3vl_vision_model.cpp for full design notes.
 
 int64_t rpu_qwen3vl_vision_create(int64_t num_cores = 8);
+void rpu_qwen3vl_vision_prepare_persistent_spm(int64_t handle, int64_t execution_len);
 std::vector<int64_t> rpu_qwen3vl_vision_topology(int64_t handle);
 void rpu_qwen3vl_vision_destroy(int64_t handle);
 
@@ -4508,6 +5374,11 @@ void rpu_qwen3vl_vision_set_rope_route(
 void rpu_qwen3vl_vision_set_fast_replay(int64_t handle, bool enabled);
 void rpu_qwen3vl_vision_set_preload_replay_skip(int64_t handle, bool enabled);
 void rpu_qwen3vl_vision_set_bake_merger(int64_t handle, bool enabled);
+void rpu_qwen3vl_vision_set_lingbot_tap_merger(int64_t handle, bool enabled);
+void rpu_qwen3vl_vision_enable_resident_preloads(int64_t handle);
+void rpu_qwen3vl_vision_prepare_resident_spm(int64_t handle, int64_t num_patches,
+    int64_t image_batch_count);
+void rpu_qwen3vl_vision_prime_resident_preloads(int64_t handle, at::IntArrayRef descriptor);
 void rpu_qwen3vl_vision_set_chunk_size(int64_t handle, int64_t chunk_size);
 void rpu_qwen3vl_vision_set_chunk_envelope(int64_t handle, int64_t max_kv_len, int64_t chunk);
 void rpu_qwen3vl_vision_enable_execution_reconfigure(int64_t handle);
@@ -4570,8 +5441,13 @@ std::vector<at::Tensor> rpu_qwen3vl_vision_pop_merged(int64_t handle);
 int64_t rpu_qwen3_5_vision_create();
 void rpu_qwen3_5_vision_set_execution_cores(int64_t handle, int64_t num_cores);
 std::vector<int64_t> rpu_qwen3_5_vision_get_execution_topology(int64_t handle);
+bool rpu_qwen3_5_vision_k1_b3_available(int64_t handle);
+bool rpu_qwen3_5_vision_k1_camera_group_available(int64_t handle,int64_t cameras);
+void rpu_launch_g05_vision_fc2_weight_outer_linear_w8a16_acc16_kernel(
+    uint32_t input,const at::Tensor& weight,uint32_t output,uint32_t bias,const at::Tensor& scale);
 void rpu_qwen3_5_vision_destroy(int64_t handle);
 void rpu_qwen3_5_vision_set_linear_acc32(int64_t handle, bool enabled);
+void rpu_qwen3_5_vision_set_high_precision(int64_t handle, bool enabled);
 void rpu_qwen3_5_vision_set_moe_precision(
     int64_t handle, bool linear_acc32, bool gelu_erf_ultra);
 void rpu_qwen3_5_vision_set_gelu_erf_ultra(int64_t handle, bool enabled);
@@ -4589,6 +5465,10 @@ void rpu_qwen3_5_vision_set_weights(
     int64_t num_heads, int64_t head_dim,
     int64_t hidden_size, int64_t intermediate_size,
     double eps);
+
+void rpu_qwen3_5_vision_set_weight_scales(
+    int64_t handle, at::TensorList q, at::TensorList k, at::TensorList v,
+    at::TensorList o, at::TensorList fc1, at::TensorList fc2);
 
 void rpu_qwen3_5_vision_set_rope(
     int64_t handle,
@@ -4675,10 +5555,15 @@ at::Tensor rpu_qwen3_5_vision_get_dbg_q(int64_t handle);
 // =============================================================================
 
 int64_t rpu_qwen25vl_vision_create();
+void rpu_qwen25vl_vision_set_linear_acc32(int64_t handle, bool enabled);
 void rpu_qwen25vl_vision_destroy(int64_t handle);
 void rpu_qwen25vl_vision_set_per_window_sdpa(int64_t handle, bool enabled);
+void rpu_qwen25vl_vision_set_wall_sorting_routes(
+    int64_t handle, int64_t mask, bool row, bool silu);
+
 void rpu_qwen25vl_vision_set_execution_routes(
-    int64_t handle, bool rope_spm, bool fused_merger);
+    int64_t handle, bool rope_spm, bool fused_merger, bool mixed_precision,
+    bool layer_group, bool exact_mimc, int64_t rmsnorm_capability);
 
 void rpu_qwen25vl_vision_set_weights(
     int64_t handle,
@@ -4728,7 +5613,8 @@ std::vector<int64_t> rpu_qwen25vl_vision_resolve_stage_domain(
     int64_t handle, int64_t num_patches, int64_t image_batch_count,
     bool window_mask_present,
     const std::optional<at::Tensor>& cu_window_seqlens,
-    int64_t requested_chunk_size);
+    int64_t requested_chunk_size, int64_t valid_patches_per_image = 0,
+    const std::optional<at::Tensor>& planning_window_mask = std::nullopt);
 int64_t rpu_qwen25vl_vision_get_resolved_chunk_size(int64_t handle);
 void rpu_qwen25vl_vision_enable_execution_reconfigure(int64_t handle);
 void rpu_qwen25vl_vision_stage_chunk_size(
@@ -4745,7 +5631,10 @@ at::Tensor rpu_qwen25vl_vision_forward(
     std::optional<at::Tensor> window_mask,
     int64_t image_batch_count = 1,
     std::optional<at::Tensor> cu_window_seqlens = std::nullopt,
-    at::IntArrayRef planned_stage_descriptor = {});
+    at::IntArrayRef planned_stage_descriptor = {},
+    int64_t valid_patches_per_image = 0,
+    std::optional<at::Tensor> full_mask = std::nullopt,
+    bool position_published = false);
 
 
 // =============================================================================
@@ -4859,7 +5748,7 @@ bool get_cross_layer_batch_prefill();
 // recovers the local offset via `spm_addr_unified - SPM_ALLOC.addr(0, 0)`
 // and then composes the per-core DMA destinations as `SPM_ALLOC.addr(c, off)`.
 //
-// Captured DMA nodes retain the ownership and address contracts above.
+// See spec knowledge/concepts/ddr-dma-wrappers.md.
 
 // DDR → per-core SPM. One DMA per core on channels 0..num_cores-1, with
 // 2·(num_cores-1) barriers framing the burst.
@@ -4881,12 +5770,12 @@ void rpu_launch_ddr_broadcast_spm_dma(
 
 // DDR → per-core SPM, mutable variant. Same kd_buf layout as the immutable
 // version, but src is rewritten per replay via Queue_t::update_dma_kernel
-// when the caller-side DDR buffer changes
+// (rhino-launch-kernel eaf9897). Use when the caller-side DDR buffer changes
 // per forward (e.g. fresh `hidden_states` tensors) — eliminates the prior
 // at::copy_-to-staging workaround needed for graph-mode src baking.
 //
 // `live_src_base` points to caller-owned uint64_t storage holding the live
-// RPU dev addr (RpuGetDevAddr of the per-forward tensor's data_ptr). The
+// device dev addr (RpuGetDevAddr of the per-forward tensor's data_ptr). The
 // caller updates `*live_src_base` BEFORE each REPLAY of any GraphSlot that
 // references it. `src_offset_bytes` is added at update time so a single
 // live-base can feed multiple per-chunk DMAs at fixed offsets.
@@ -5085,7 +5974,7 @@ void rpu_launch_spm_gather_spm_dma(
 
 // Mutable variant — for callers whose DDR source tensor is reassigned per
 // forward (e.g. AdaRMS `cond_ref_`). `live_src_base` points to caller-owned
-// uint64_t storage holding the live RPU dev addr; caller updates it BEFORE
+// uint64_t storage holding the live device dev addr; caller updates it BEFORE
 // each REPLAY. Per-core src = `*live_src_base + src_offset_bytes + c * core_stride_bytes`
 // (the BUILD-time base offset is summed with the per-core scatter stride).
 // Caller is responsible for `rpu_ddr_flush_force` of the live buffer per
@@ -5154,11 +6043,52 @@ void rpu_launch_memset_spm_multicore(
 
 // Fill `num_elements` halfs with `value` at the per-core SPM addr (multi-core
 // broadcast), via the oplib `fill` kernel. Replaces memset_spm_multicore where that
-// kernel (memset_spm_multi_core_v2) is absent from the loaded operator library.
+// kernel (memset_spm_multi_core_v2) is absent from the oplib (e.g. be627ce5).
 // `core_begin` fills cores [core_begin, core_begin+num_cores) instead of [0,n).
 void rpu_launch_fill_spm_kernel(uint32_t spm_addr, int64_t num_elements,
                                 c10::Half value, int num_cores,
                                 int core_begin = 0);
+
+// Existing fused payload for E32/K4 and 1..128 token rows. All four operands
+// are disjoint token-major [n,32] SPM regions, aligned to 32 bytes. Expert IDs
+// and output mask are RAW U16 (arange(32) and integer 0/1); scores and weights
+// are FP16. The SAFE payload adds FP16 minimum subnormal (0x0001) to the
+// selected sum before division. It normalizes the selection keys themselves;
+// callers must cold-admit zero bias/no separate ranking scores. Its reduction
+// order may round differently from the backend E-axis FP16 tree.
+void rpu_launch_moe_exact_topk_dense_route_fp16_spm_kernel(
+    uint32_t scores_spm_addr, uint32_t expert_ids_u16_spm_addr,
+    uint32_t weights_spm_addr, uint32_t mask_u16_spm_addr,
+    int64_t n, int64_t c, int64_t k, c10::Half routed_scale,
+    int num_cores = 1);
+
+// Fixed E32/K4 lane-pair selector for n=51 or 64, with the same SAFE ABI and
+// FP16 selected-sum/epsilon/scale arithmetic as the launcher above. The caller
+// must provide finite FP16 sigmoid scores in [0,1] (signed zero is valid), zero
+// correction bias/no separate ranking scores, and canonical RAW U16 arange(32)
+// IDs in every row. All four absolute core-0 SPM operands are disjoint [n,32]
+// regions aligned to 32 bytes. N64 processes all padding rows as ordinary data;
+// those scores must satisfy the same contract. Missing optional payload rejects
+// before enqueue; caller-owned cold selection retains the generic SAFE route.
+void rpu_launch_lingbot2_topk_e32_k4_lane2_safe_spm_kernel(
+    uint32_t scores_spm_addr, uint32_t expert_ids_u16_spm_addr,
+    uint32_t weights_spm_addr, uint32_t mask_u16_spm_addr,
+    int64_t n, int64_t c, int64_t k, c10::Half routed_scale,
+    int num_cores = 1);
+
+// Optional exact T51/Tp64/E32/K4 lane2 Top4 + two raw-bit transposes + inverse
+// route compact, core 0 only. Same finite sigmoid/canonical ID/zero bias
+// contract as lane2 above. Six disjoint, 32-byte-aligned absolute SPM owners:
+// scores/IDs/mask/weightsT/membershipT each 4096 B; route exactly 9472 B.
+// Route offsets: weights 0, expert IDs 4096, token IDs 4608, counts 5120,
+// inverse 5376. Caller retains full route fill and relay; no extra scratch.
+// Missing optional payload rejects before recording. Cold owner fallback keeps
+// the original four kernels. Both barrier counters are reset on every launch.
+void rpu_launch_lingbot2_topk_compact_inverse_spm_kernel(
+    uint32_t scores_spm_addr, uint32_t expert_ids_u16_spm_addr,
+    uint32_t route_spm_addr, uint32_t mask_u16_spm_addr,
+    uint32_t weights_transposed_spm_addr, uint32_t membership_transposed_spm_addr,
+    c10::Half routed_scale);
 
 // Strict exactly-k FP16 MoE selector. `correction_bias` affects selection only;
 // `dense_weights` are gathered from the unbiased scores and normalised over k.
@@ -5196,10 +6126,6 @@ at::Tensor rpu_argmax(const at::Tensor &self, c10::optional<int64_t> dim,
                       bool keepdim = false);
 at::Tensor rpu_argmin(const at::Tensor &self, c10::optional<int64_t> dim,
                       bool keepdim = false);
-// Host-side argmax over the last dim of a contiguous 2-D tensor: CPU FP16/FP32,
-// or RPU FP16 read in place via rpu_to_cpu_zerocopy (no D2H copy). Exists
-// because `logits.cpu().float().argmax(-1)` costs ~1.25 ms/step on a
-// [1, 151936] greedy-decode row. Ties → lowest index (matches torch.argmax).
 at::Tensor rpu_argmax_lastdim_host(const at::Tensor &self);
 
 // =============================================================================
@@ -5315,7 +6241,29 @@ void rpu_shutdown();
 // (v5-12 D-09: SmokeModelV3 op dispatcher forward decls removed; private to
 //  librpu_conformance.so via tests/conformance/_cpp/forward_decls.h. Ledger §6 T1.)
 
-// Controlled fused routes, consumed through COMPLETE physical descriptors.
+// Optional exact Wall Base nonfinal-layer parallel Gate/Up projections.
+void rpu_launch_wall_base_nvfp4_gate_up_parallel_spm_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate, uint32_t up, const at::Tensor& gate_scale, const at::Tensor& up_scale,
+    uint32_t gate_ts, uint32_t up_ts, int64_t scale_count, uint16_t layer);
+
+// Same bounded operands, with the canonical SiLU/Mul tail fused in place.
+void rpu_launch_wall_base_nvfp4_gate_up_parallel_silu_spm_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate, uint32_t up, const at::Tensor& gate_scale, const at::Tensor& up_scale,
+    uint32_t gate_ts, uint32_t up_ts, int64_t scale_count, uint16_t layer);
+
+void rpu_launch_wall_base_nvfp4_gate_up_shared_silu_spm_kernel(
+    uint32_t input, const at::Tensor& gate_weight, const at::Tensor& up_weight,
+    uint32_t gate, uint32_t up, const at::Tensor& gate_scale, const at::Tensor& up_scale,
+    uint32_t gate_ts, uint32_t up_ts, int64_t scale_count, uint16_t layer);
+
+// Optional exact Wall Base H32 in-place Q/K route.
+void rpu_launch_wall_base_partial_mrope_qk_spm_kernel(
+    uint32_t q, uint32_t k, const at::Tensor& cos, const at::Tensor& sin,
+    int64_t position);
+
+// Controlled MR59 routes, consumed through COMPLETE physical descriptors.
 void rpu_launch_partial_mrope_qk_spm_kernel(
     uint32_t q_x_spm_addr,
     uint32_t q_y_spm_addr,
@@ -5331,16 +6279,103 @@ void rpu_launch_partial_mrope_qk_spm_kernel(
     int64_t rotary_dim,
     int num_cores);
 
+// Exact T51/Q4/K1/HD128/TP8 RoPE using absolute in-place Q/K SPM addresses.
+// position indexes the retained cos/sin tables independently of the KV row.
+void rpu_launch_lingbot2_qk_rope_t51_spm_kernel(
+    uint32_t q_abs, uint32_t k_abs, const at::Tensor& cos,
+    const at::Tensor& sin, int64_t position);
+
+// Exact B1/M224/Q4/K1/HD128/TP8 learned-gamma V32 norm and partial RoPE.
+// Full FP16 normalized scratch is preserved; every operand is absolute SPM.
+void rpu_launch_lingbot2_prefill_qk_norm_rope_m224_spm_kernel(
+    uint32_t q_abs, uint32_t k_abs,
+    uint32_t q_norm_abs, uint32_t k_norm_abs,
+    uint32_t q_gamma_abs, uint32_t k_gamma_abs,
+    const at::Tensor& cos, const at::Tensor& sin,
+    int64_t position, double eps);
+
+// Exact T51/Q4/K1/HD128/TP8 paired RoPE plus paired cache insertion.
+// Q is absolute SPM; K/V offsets are converted once at this boundary.
+void rpu_launch_lingbot2_qk_rope_kv_t51_spm_kernel(
+    uint32_t q_abs, uint32_t k_off, uint32_t v_off,
+    const at::Tensor& cos, const at::Tensor& sin, int64_t rope_position,
+    at::Tensor& k_cache, at::Tensor& v_cache,
+    int64_t cache_position, int64_t spm_rows);
+
 void rpu_qwen3vl_scatter_row_parts_unflushed_(
     const at::Tensor& destination,
     const at::Tensor& row_indices,
     at::TensorList sources);
+
+void rpu_qwen3vl_publish_inputs(at::TensorList tensors);
+
+at::Tensor rpu_qwen3_5_decode_embedding_cpu(
+    const at::Tensor& weight, const at::Tensor& token_ids,
+    int64_t padding_idx, bool scale_grad_by_freq, bool sparse);
 
 void rpu_qwen3vl_gather_embedding_from_rpu_unflushed_(
     const at::Tensor& destination,
     const at::Tensor& vocabulary,
     const at::Tensor& token_ids,
     int64_t skip_token_id);
+
+// Fixed T51/E32/K4/R204/local-D64 FP16 sparse activation, eight cores.
+void rpu_launch_lingbot2_swiglu_route_r204_d64_spm_kernel(
+    uint32_t packed_spm_addr, uint32_t routes_spm_addr,
+    uint32_t token_ids_spm_addr, uint32_t expert_ids_spm_addr,
+    uint32_t output_spm_addr);
+
+// Fixed shared M51/D96/TP8, packed [51,192] -> separate compact [51,96].
+void rpu_launch_lingbot2_shared_silu_d96_spm_kernel(
+    uint32_t packed_spm_addr, uint32_t output_spm_addr,
+    int64_t rows, int num_cores);
+
+// Optional compact-vector schedule; same exact profile and absolute SPM ABI.
+void rpu_launch_lingbot2_shared_silu_t51_d96_vector_spm_kernel(
+    uint32_t packed_spm_addr, uint32_t output_spm_addr,
+    int64_t rows, int num_cores);
+
+// Exact T51/H768/Q4096/KV1024/TP8 ACC16 dispatch over separate tensor owners.
+void rpu_launch_lingbot2_qkv_multibase_t51_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& q_weight, const at::Tensor& k_weight,
+    const at::Tensor& v_weight,
+    uint32_t q_output_spm_addr, uint32_t k_output_spm_addr,
+    uint32_t v_output_spm_addr,
+    uint32_t q_bias_spm_addr, uint32_t k_bias_spm_addr,
+    uint32_t v_bias_spm_addr,
+    const at::Tensor& q_scale, const at::Tensor& k_scale,
+    const at::Tensor& v_scale);
+
+// Exact no-bias M224/H2560/Q4096/KV1024/TP8 ACC16 prefill dispatch.
+void rpu_launch_lingbot2_prefill_qkv_m224_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& q_weight, const at::Tensor& k_weight,
+    const at::Tensor& v_weight,
+    uint32_t q_output_spm_addr, uint32_t k_output_spm_addr,
+    uint32_t v_output_spm_addr,
+    const at::Tensor& q_scale, const at::Tensor& k_scale,
+    const at::Tensor& v_scale);
+
+// Exact Vision M768/N1024/K1024/TP8 ACC16 QKV; three independent biases.
+void rpu_launch_lingbot2_vision_qkv_joint_spm_kernel(
+    uint32_t input_spm_addr,
+    const at::Tensor& q_weight, const at::Tensor& k_weight,
+    const at::Tensor& v_weight,
+    uint32_t q_output_spm_addr, uint32_t k_output_spm_addr,
+    uint32_t v_output_spm_addr,
+    uint32_t q_bias_spm_addr, uint32_t k_bias_spm_addr,
+    uint32_t v_bias_spm_addr,
+    const at::Tensor& q_scale = at::Tensor(),
+    const at::Tensor& k_scale = at::Tensor(),
+    const at::Tensor& v_scale = at::Tensor());
+
+// Exact Vision M768/N4096/K1024/TP8 ACC16 FC1+bias then original BASE tanh-GELU.
+// Scale is undefined for FP16 and a complete FP16 [4096] owner for W8.
+void rpu_launch_lingbot2_vision_fc1_gelu_spm_kernel(
+    uint32_t input_spm_addr, const at::Tensor& weight,
+    uint32_t output_spm_addr, uint32_t bias_spm_addr,
+    const at::Tensor& scale);
 
 void rpu_launch_silu_mul_exact_strided_spm_kernel(
     uint32_t packed_spm_addr,
@@ -5355,11 +6390,37 @@ void rpu_launch_insert_kv_cache_spm_unified_v16(
     int64_t seq_len, int64_t num_kv_heads, int64_t head_dim,
     int num_cores = 8);
 
+// Exact HyVLA suffix: owned FP16 caches, S51/S64/P240/TP8/KV8/D128.
+void rpu_launch_hyvla_expert_paired_kv_spm_kernel(
+    at::Tensor& k_cache, at::Tensor& v_cache,
+    uint32_t k_off, uint32_t v_off, int64_t spm_rows,
+    const KvInsertSegmentPlan& plan);
+
+// Exact Wall base H32/P336-or-P384. Consumes the real ALIGNED_V16 plan;
+// K/V inputs are per-core byte offsets, as for the ordinary KV-insert ABI.
+void rpu_launch_wall_base_paired_kv_spm_kernel(
+    at::Tensor& k_cache, at::Tensor& v_cache,
+    uint32_t k_off, uint32_t v_off, int64_t spm_rows,
+    const KvInsertSegmentPlan& plan);
+
 void rpu_launch_insert_kv_cache_spm_unified_decode(
     at::Tensor &k_cache, at::Tensor &v_cache, int64_t position,
     uint32_t k_off, uint32_t v_off,
     int64_t seq_len, int64_t num_kv_heads, int64_t head_dim,
     int num_cores = 8);
+
+// Exact B1 M224 KV8/HD128/TP8 paired writer. Consumes the validated immutable
+// ALIGNED_V16 plan; SPM offsets are converted once and only224 rows are used.
+void rpu_launch_lingbot2_insert_kv_m224_spm_with_plan(
+    at::Tensor& k_cache, at::Tensor& v_cache,
+    uint32_t k_off, uint32_t v_off, int64_t spm_rows,
+    const KvInsertSegmentPlan& plan);
+
+// Exact51 paired FP16 KV8/HD128/TP8 writer. Input offsets are converted once;
+// spm_rows describes available rows, while only51 rows are read and written.
+void rpu_launch_lingbot2_insert_kv_t51_spm_kernel(
+    at::Tensor& k_cache, at::Tensor& v_cache, int64_t position,
+    uint32_t k_off, uint32_t v_off, int64_t spm_rows);
 
 void rpu_qwen3vl_vision_set_delivery_compatibility(int64_t handle, bool enabled);
 

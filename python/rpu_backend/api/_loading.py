@@ -23,7 +23,7 @@ _BUILTIN_ROUTES = {
 
 
 def resolve_loader_device(device, *, entry_point: str) -> bool:
-    """Validate a loader target and return whether the RPU shortcut is requested."""
+    """Validate a loader target and return whether the device shortcut is requested."""
     if device is None:
         return False
     if not isinstance(device, (str, torch.device)):

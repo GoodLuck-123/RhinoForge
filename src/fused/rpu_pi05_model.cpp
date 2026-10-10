@@ -60,7 +60,7 @@
 // Why the prefix K/V is .clone()-ed per step (CR-R5 BLOCKER 3):
 //   AdaRMS's kv-cache-insert kernel WRITES to the K/V buffer entries at the
 //   suffix offset (position..position+suffix_len). Shallow-copy of at::Tensor
-//   handles (iteration 3/4 plan) aliases the same RPU DDR storage — step N's
+//   handles (iteration 3/4 plan) aliases the same device DDR storage — step N's
 //   writes corrupt step N+1's prefix read. Lerobot's
 //   `past_key_values = copy.deepcopy(past_key_values)` (modeling_pi05.py:889)
 //   is the contract: fresh scratch per step.
@@ -129,8 +129,8 @@ public:
 
     // Internal entry; no current public select_action caller.
     //
-    // Shapes (all RPU fp16 unless noted):
-    //   initial_noise:      [B=1, chunk_size, max_action_dim]      — x_t seed (RPU fp16)
+    // Shapes (all device fp16 unless noted):
+    //   initial_noise:      [B=1, chunk_size, max_action_dim]      — x_t seed (device fp16)
     //   adarms_cond_list:   [N_steps, B, width]                    — Python precomputed
     //   attention_mask:     [B, 1, S, S] fp16                      — 4-D causal+pad (optional)
     //   k_caches_list:      TensorList of prefix KV (one per Expert layer)   — read-only
@@ -158,7 +158,7 @@ public:
         TORCH_CHECK(prefix_len >= 0,
                     "Pi05Model::forward: prefix_len must be >= 0, got ", prefix_len);
         TORCH_CHECK(initial_noise.device().type() == at::kPrivateUse1,
-                    "Pi05Model::forward: initial_noise must be on RPU device");
+                    "Pi05Model::forward: initial_noise must be on device");
         TORCH_CHECK(initial_noise.dim() == 3,
                     "Pi05Model::forward: initial_noise must be 3-D [B, chunk_size, max_action_dim]");
         // Finding 5: batch=1 invariant for Phase 3 (matches D-17 + v2.15).
@@ -174,7 +174,7 @@ public:
                     "Pi05Model::forward: k_caches_list.size (", k_caches_list.size(),
                     ") != v_caches_list.size (", v_caches_list.size(), ")");
 
-        // x_t evolves across steps. Start as the input noise (RPU).
+        // x_t evolves across steps. Start as the input noise (device).
         // P4 mitigation — caller's tensor stays untouched.
         at::Tensor x_t = initial_noise.clone();
 
@@ -201,7 +201,7 @@ public:
             //   `past_key_values = copy.deepcopy(past_key_values)`
             // before each denoise_step call. AdaRMS writes suffix K/V slots at
             // position >= prefix_len; without .clone(), those writes corrupt
-            // step N+1's prefix read (shared at::Tensor RPU storage).
+            // step N+1's prefix read (shared at::Tensor device storage).
             //
             // NO "probe" conditional — AdaRMS MUST write K/V entries (that's
             // how kv-cache-insert kernels work). We commit to .clone() always.
@@ -260,7 +260,7 @@ public:
             // k_caches_step / v_caches_step drop here; allocator recycles.
         }
 
-        return x_t;   // RPU tensor (D-701 internal surface)
+        return x_t;   // device tensor (D-701 internal surface)
     }
 
     int64_t adarms_handle() const { return adarms_handle_; }

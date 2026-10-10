@@ -1,6 +1,6 @@
 """Public lifecycle contract for externally assembled RhinoVLA runtimes.
 
-The backend owns the RPU components, but the separate RhinoVLA model repository
+The backend owns the device components, but the separate RhinoVLA model repository
 owns checkpoint composition, preprocessing, and the live-input contract. This
 wrapper gives delivery executors one stable API without pretending the backend
 can infer those model-repository choices.
@@ -74,7 +74,7 @@ class RhinoVLAPolicy:
         *,
         rpu_execution=None,
     ) -> "RhinoVLAPolicy":
-        """Wrap an already assembled, RPU-ready runtime with ``predict``."""
+        """Wrap an already assembled, device-ready runtime with ``predict``."""
         if isinstance(runtime, cls):
             if rpu_execution is None:
                 return runtime
@@ -200,7 +200,7 @@ class RhinoVLAPolicy:
 
         The factory receives ``pretrained_name_or_path`` as its first argument.
         When supplied, ``config`` is forwarded as a keyword argument. Loading,
-        irreversible RPU conversion, and input-envelope validation remain the
+        irreversible device conversion, and input-envelope validation remain the
         factory's responsibility. It always receives canonical
         ``rpu_execution`` and must bind the explicit text, vision, and action
         children before returning.

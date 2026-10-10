@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "rhino_launch_buffer.h"
 
@@ -24,6 +25,7 @@ struct RpuDmaEndpoint {
 struct RpuDeviceDmaEndpointRequest;
 struct RpuCpuDmaEndpointRequest;
 struct RpuDmaAllocationWitness;
+class RpuResolvedDeviceDmaBatch;
 
 // A synchronous Queue submission may outlive the registry lookup that resolved
 // its raw Launch Buffer_t endpoints.  This move-only lease keeps every live DDR
@@ -48,6 +50,9 @@ private:
 
     bool active_ = false;
 
+    // Internal shared resolver constructs the lease while its registry lock
+    // is still held; publication thereafter consists only of noexcept moves.
+    friend struct RpuDeviceDmaEndpointResolver;
     friend RpuDmaSubmissionLease rpu_resolve_device_dma_endpoints(
         const RpuDeviceDmaEndpointRequest*, size_t, RpuDmaEndpoint*);
     friend RpuDmaSubmissionLease rpu_resolve_cpu_dma_endpoints(
@@ -71,6 +76,32 @@ RpuDmaSubmissionLease rpu_resolve_device_dma_endpoints(
     const RpuDeviceDmaEndpointRequest* requests,
     size_t count,
     RpuDmaEndpoint* endpoints);
+
+// Own the one private publication vector together with its fresh submission
+// lease. Endpoints remain read-only to callers, and the whole result must live
+// through the matching synchronous Queue submission (including fallback).
+class RpuResolvedDeviceDmaBatch final {
+public:
+    RpuResolvedDeviceDmaBatch() noexcept = default;
+    RpuResolvedDeviceDmaBatch(const RpuResolvedDeviceDmaBatch&) = delete;
+    RpuResolvedDeviceDmaBatch& operator=(const RpuResolvedDeviceDmaBatch&) = delete;
+    RpuResolvedDeviceDmaBatch(RpuResolvedDeviceDmaBatch&&) noexcept = default;
+    RpuResolvedDeviceDmaBatch& operator=(RpuResolvedDeviceDmaBatch&&) noexcept = default;
+
+    const std::vector<RpuDmaEndpoint>& endpoints() const noexcept { return endpoints_; }
+    const RpuDmaSubmissionLease& lease() const noexcept { return lease_; }
+
+private:
+    std::vector<RpuDmaEndpoint> endpoints_;
+    RpuDmaSubmissionLease lease_;
+
+    friend RpuResolvedDeviceDmaBatch rpu_resolve_device_dma_endpoints_owned(
+        const RpuDeviceDmaEndpointRequest*, size_t);
+};
+
+RpuResolvedDeviceDmaBatch rpu_resolve_device_dma_endpoints_owned(
+    const RpuDeviceDmaEndpointRequest* requests,
+    size_t count);
 
 // Resolve CPU pointers as one registry transaction and retain their Launch
 // owners across a synchronous standalone CopyMemory call.

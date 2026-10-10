@@ -21,6 +21,7 @@
 
 #include "model_handle_registry.h"
 #include "rpu_ops.h"
+#include "rpu_grouped_linear_tiling.h"
 #include "rpu_spm_buffers.h"
 #include "rpu_spm_residency.h"
 #include "rpu_helpers.h"
@@ -29,6 +30,7 @@
 #include <c10/util/Half.h>
 #include <algorithm>
 #include <cmath>     // std::sqrt (GDN qk_scale)
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <tuple>
@@ -42,6 +44,11 @@ using namespace ::rhino_lkn;
 namespace {
 
 constexpr int kNumCores = NUM_CORES;
+// Backend profile tag; the UINT4 generator has its own register ABI and is
+// never dispatched through the byte-oriented FP8 weight-mode register.
+constexpr int64_t kRoutedUint4Mode = 6;
+constexpr int64_t kRoutedUint4GroupSize = 128;
+constexpr int64_t kRoutedUint4DownGroupSize = 64;
 // Only the post-mixer MLP is sliced; Attention/GDN keep the outer chunk.
 constexpr int64_t kMoeChunkSize = 128;
 
@@ -63,6 +70,7 @@ constexpr int64_t QWEN35_MOE_GDN_MASK_RESIDENCY_SITE = 4606644302213524820LL;
 constexpr int64_t QWEN35_MOE_ATTENTION_SITE = 4947544041507852223LL;
 constexpr int64_t QWEN35_MOE_LINEAR_SITE = 2506358524225803894LL;
 constexpr int64_t QWEN35_MOE_GROUPED_FP8_SITE = 1444084512072972229LL;
+constexpr int64_t QWEN35_MOE_GROUPED_UINT4_SITE = 1370207785648096751LL;
 constexpr int64_t QWEN35_MOE_FULL_PREPARE_ALL_REDUCE_SITE =
     548848499648069557LL;
 constexpr int64_t QWEN35_MOE_FULL_ALL_REDUCE_SITE =
@@ -168,32 +176,40 @@ int64_t aligned_bytes(int64_t elements, int64_t element_bytes = 2) {
 // PARTIAL_MROPE encodes DDR bases in 256-byte units (addr >> 8). The caching
 // allocator guarantees only 32-byte alignment, so retain an aligned view when
 // needed instead of silently truncating address bits in the launcher.
-at::Tensor keep_256b_aligned_rpu_copy(const at::Tensor& src,
-                                      const char* name) {
-    TORCH_CHECK(src.defined() && src.device().type() == at::kPrivateUse1
+at::Tensor keep_aligned_rpu_copy(const at::Tensor& src,
+                               const char* name, int64_t alignment_bytes = 256,
+                               bool allow_cpu = false) {
+    TORCH_CHECK(src.defined() &&
+                (src.device().type() == at::kPrivateUse1 ||
+                 (allow_cpu && src.device().is_cpu()))
                 && src.scalar_type() == at::kHalf && src.is_contiguous(),
-                name, " must be a contiguous FP16 RPU tensor");
-    const uint64_t src_addr = RpuGetDevAddr(src.data_ptr<c10::Half>());
-    if ((src_addr & 0xFF) == 0)
-        return src;
+                name, " must be a contiguous FP16 ", allow_cpu ? "CPU or device" : "device", " tensor");
+    TORCH_CHECK(alignment_bytes > 0 && alignment_bytes % 256 == 0,
+                name, " requires a valid device address and 256-byte-multiple alignment");
+    if (src.device().type() == at::kPrivateUse1) {
+        const uint64_t src_addr = RpuGetDevAddr(src.data_ptr<c10::Half>());
+        TORCH_CHECK(src_addr != 0, name, " requires a valid device address");
+        if (src_addr % alignment_bytes == 0)
+            return src;
+    }
 
-    constexpr int64_t kAlignmentBytes = 256;
-    constexpr int64_t kAlignmentElems =
-        kAlignmentBytes / static_cast<int64_t>(sizeof(c10::Half));
-    auto storage = at::empty({src.numel() + kAlignmentElems}, src.options());
+    const int64_t kAlignmentElems =
+        alignment_bytes / static_cast<int64_t>(sizeof(c10::Half));
+    auto storage = at::empty({src.numel() + kAlignmentElems},
+                            src.options().device(at::kPrivateUse1));
     const uint64_t storage_addr =
         RpuGetDevAddr(storage.data_ptr<c10::Half>());
     const int64_t byte_offset = static_cast<int64_t>(
-        (kAlignmentBytes - (storage_addr & (kAlignmentBytes - 1)))
-        & (kAlignmentBytes - 1));
+        (alignment_bytes - storage_addr % alignment_bytes) % alignment_bytes);
     TORCH_CHECK(byte_offset % static_cast<int64_t>(sizeof(c10::Half)) == 0,
                 name, " allocator returned an address incompatible with FP16 alignment");
     auto aligned = storage.narrow(
         0, byte_offset / static_cast<int64_t>(sizeof(c10::Half)), src.numel()
     ).view(src.sizes());
     aligned.copy_(src);
-    TORCH_CHECK((RpuGetDevAddr(aligned.data_ptr<c10::Half>()) & 0xFF) == 0,
-                name, " failed to create a 256-byte aligned RPU copy");
+    const uint64_t aligned_addr = RpuGetDevAddr(aligned.data_ptr<c10::Half>());
+    TORCH_CHECK(aligned_addr != 0 && aligned_addr % alignment_bytes == 0,
+                name, " failed to create an aligned device copy");
     return aligned;
 }
 
@@ -330,6 +346,9 @@ void Qwen3_5MoeModel::set_prefill_chunk_size(int64_t chunk_size) {
 void Qwen3_5MoeModel::set_linear_acc32(bool enabled) {
     TORCH_CHECK(get_last_resolved_chunk_size() == 0,
                 "Qwen3.5 linear accumulation mode must be set before the first forward");
+    TORCH_CHECK(!enabled || moe_layer_weights_.empty() ||
+                    moe_layer_weights_.front().routed_weight_mode != kRoutedUint4Mode,
+                "Qwen3.5-MoE routed UINT4 W4A16 currently requires ACC16");
     linear_acc32_ = enabled;
     invalidate_model_state();
 }
@@ -391,6 +410,50 @@ std::vector<int64_t> Qwen3_5MoeModel::resolve_decode_stage_descriptor() {
     return encode_fmb_prefill_stage_candidate(candidates.front());
 }
 
+at::Tensor Qwen3_5MoeModel::prepare_decode_cpu_input(const at::Tensor& hidden_states) {
+    // Used by one complete public serialized decode/capture at a time.
+    // This receipt lock does not make raw native forward reentrant.
+    // Read the entire current CPU value, even on an eventual hit. The receipt
+    // describes private copied bytes, never a public Tensor version/address.
+    std::vector<uint8_t> current_bytes(hidden_states.nbytes());
+    std::memcpy(current_bytes.data(), hidden_states.data_ptr(), current_bytes.size());
+    std::lock_guard<std::mutex> lock(decode_cpu_input_mutex_);
+    const uint64_t generation = installed_model_state_generation();
+    const bool force = rpu_get_ddr_flush_force();
+    if (force && decode_cpu_input_published_ &&
+        decode_cpu_input_generation_ == generation &&
+        decode_cpu_input_owner_.defined() &&
+        decode_cpu_input_owner_.sizes() == hidden_states.sizes() &&
+        decode_cpu_input_bytes_.size() == current_bytes.size() &&
+        std::memcmp(decode_cpu_input_bytes_.data(), current_bytes.data(),
+                    current_bytes.size()) == 0) {
+        return decode_cpu_input_owner_;
+    }
+    // Invalidate before allocation/copy/publication, so an exception cannot
+    // certify an unpublished owner. Never overwrite the previous DDR owner.
+    decode_cpu_input_published_ = false;
+    auto next_owner = at::empty(
+        hidden_states.sizes(), hidden_states.options().device(at::kPrivateUse1));
+    std::memcpy(next_owner.data_ptr(), current_bytes.data(), current_bytes.size());
+    rpu_ddr_flush_force_sized(next_owner.data_ptr(), current_bytes.size());
+    if (force) {
+#if defined(__aarch64__)
+        // Complete CPU publication before certifying this private DDR owner.
+        __asm__ volatile("dsb sy" ::: "memory");
+#endif
+        decode_cpu_input_owner_ = next_owner;
+        decode_cpu_input_bytes_ = std::move(current_bytes);
+        decode_cpu_input_generation_ = generation;
+        decode_cpu_input_published_ = true;
+    } else {
+        decode_cpu_input_owner_ = at::Tensor{};
+        decode_cpu_input_bytes_.clear();
+    }
+    // FMB's original mutable layer-0 DMA binds this local owner and keep_alive
+    // retains it through deferred execution. This helper never exposes it.
+    return next_owner;
+}
+
 // ── forward: stash GDN state for the seam, then all-layers-once ──────────────
 at::Tensor Qwen3_5MoeModel::forward(
     const at::Tensor& hidden_states,
@@ -406,6 +469,21 @@ at::Tensor Qwen3_5MoeModel::forward(
         planned_chunk_size == 0 && !planned_stage_descriptor.empty(),
         "RPU_PLANNER_REJECT:CAPABILITY: Qwen3.5 MoE text forward requires "
         "one complete planner stage descriptor");
+    if (hidden_states.device().is_cpu()) {
+        TORCH_CHECK(hidden_states.defined() && hidden_states.dim() == 3 &&
+                        hidden_states.size(0) == 1 && hidden_states.size(1) == 1 &&
+                        hidden_states.size(2) == hidden_size() &&
+                        hidden_states.scalar_type() == at::kHalf &&
+                        hidden_states.is_contiguous() && !hidden_states.requires_grad() &&
+                        position > 0 && is_causal && mrope_pos_delta_ == 0 &&
+                        !attention_mask.has_value(),
+                    "Qwen3.5 MoE CPU ingress requires ordinary causal text decode "
+                    "with contiguous CPU FP16 [1,1,H], position > 0, no mask/grad");
+        auto private_hidden = prepare_decode_cpu_input(hidden_states);
+        return forward_impl(private_hidden, k_caches, v_caches, gdn_states,
+                            conv_states, attention_mask, position, is_causal,
+                            planned_chunk_size, planned_stage_descriptor);
+    }
     return forward_impl(hidden_states, k_caches, v_caches, gdn_states,
                         conv_states, attention_mask, position, is_causal,
                         planned_chunk_size, planned_stage_descriptor);
@@ -428,7 +506,7 @@ at::Tensor Qwen3_5MoeModel::forward_impl(
                     hidden_states.device().type() == at::kPrivateUse1 &&
                     hidden_states.is_contiguous() && is_causal,
                 "Qwen3.5 MoE execution requires causal B1 contiguous FP16 "
-                "hidden states on RPU");
+                "hidden states on device");
     const int64_t seq_len = hidden_states.size(1);
     if (num_cores() != 8) {
         TORCH_CHECK(
@@ -446,6 +524,32 @@ at::Tensor Qwen3_5MoeModel::forward_impl(
     // Fast replay skips build_gdn(), so refresh every mutable cache base before
     // entering run_all_layers. Decode still walks the layer loop, but shares the
     // same safe prologue.
+    std::vector<void*> cache_flush_ptrs;
+    std::vector<size_t> cache_flush_sizes;
+    if (fast_replay_active_ && g_rpu_ddr_flush_force_enabled) {
+        cache_flush_ptrs.reserve(2 * num_layers());
+        cache_flush_sizes.reserve(2 * num_layers());
+    }
+    const auto collect_cache_flush = [&](const at::Tensor& tensor) {
+        void* ptr = tensor.data_ptr<c10::Half>();
+        auto* owner = ::rhino_lkn::RpuGetHostddr(ptr);
+        if (owner) {
+            const uintptr_t base = reinterpret_cast<uintptr_t>(owner->get_cpu_ptr());
+            const uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
+            const size_t size = owner->get_memory_size();
+            const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
+            if (size > 0 && base <= address && size <= limit - base &&
+                address - base < size && base + size <= limit - 63) {
+                // Match unsized SDK flush, including the allocation tail
+                // beyond this Tensor's logical view.
+                cache_flush_ptrs.push_back(ptr);
+                cache_flush_sizes.push_back(size - (address - base));
+                return;
+            }
+        }
+        // Preserve the original SDK lookup/fallback for an unresolved range.
+        rpu_ddr_flush_force(ptr);
+    };
     for (int64_t layer_idx = 0; layer_idx < num_layers(); ++layer_idx) {
         if (layer_is_full_[layer_idx])
             continue;
@@ -474,12 +578,22 @@ at::Tensor Qwen3_5MoeModel::forward_impl(
         conv_state_live_addr_[layer_idx] =
             ::rhino_lkn::RpuGetDevAddr(cv->data_ptr<c10::Half>());
         if (fast_replay_active_) {
-            rpu_ddr_flush_force(st->data_ptr<c10::Half>());
-            rpu_ddr_flush_force(cv->data_ptr<c10::Half>());
+            if (g_rpu_ddr_flush_force_enabled) {
+                collect_cache_flush(*st);
+                collect_cache_flush(*cv);
+            }
         } else {
             rpu_ddr_flush(st->data_ptr<c10::Half>());
             rpu_ddr_flush(cv->data_ptr<c10::Half>());
         }
+    }
+    if (g_rpu_ddr_flush_force_enabled && !cache_flush_ptrs.empty()) {
+        ::rhino_lkn::RpuDdrFlushBatch(cache_flush_ptrs.data(),
+                                    cache_flush_sizes.data(), cache_flush_ptrs.size());
+#if defined(__aarch64__)
+        // Retain the scalar large-tail system-wide completion boundary.
+        __asm__ volatile("dsb sy" ::: "memory");
+#endif
     }
 
     at::Tensor out = run_all_layers(hidden_states, k_caches, v_caches,
@@ -574,15 +688,36 @@ void Qwen3_5MoeModel::launch_grouped_linear(
     uint32_t m_sizes, const at::Tensor& scale,
     uint32_t output, int64_t n, int64_t k,
     int64_t num_experts, bool is_col_parallel,
-    int num_cores, int64_t weight_mode) {
+    int num_cores, int64_t weight_mode,
+    const at::Tensor& negative_zero, int64_t group_size, int64_t m_total) {
     const int64_t invocation = chunk_idx * 2 + (is_col_parallel ? 0 : 1);
+    std::vector<int64_t> arguments{
+        n, k, num_experts, is_col_parallel ? 1 : 0, num_cores,
+        linear_acc32_ ? 1 : 0};
+    if (weight_mode == kRoutedUint4Mode) {
+        const auto tile = rpu_select_grouped_parallel_linear_uint4_tile(
+            m_total, num_experts, n, k);
+        arguments.insert(arguments.end(), {group_size, tile[0], tile[1], m_total});
+        const auto metadata = rpu_grouped_tiling::uint4_metadata_layout(
+            n, k, group_size, num_cores);
+        arguments.insert(arguments.end(), {metadata.version,
+            metadata.group_block_bytes, metadata.expert_bytes});
+    }
+    if (weight_mode == kRoutedUint4Mode) {
+        if (ctx().has_complete_physical_manifest()) {
+            ctx().consume_physical_route(
+                FmbRouteFamily::LINEAR, QWEN35_MOE_GROUPED_UINT4_SITE,
+                weight_mode, /*resolved_flags=*/0, arguments, invocation);
+        }
+        rpu_launch_grouped_parallel_linear_uint4_spm_kernel(
+            input, weight, m_sizes, scale, negative_zero, output,
+            n, k, num_experts, is_col_parallel, num_cores, group_size, m_total);
+        return;
+    }
     if (ctx().has_complete_physical_manifest()) {
         ctx().consume_physical_route(
             FmbRouteFamily::LINEAR, QWEN35_MOE_GROUPED_FP8_SITE,
-            weight_mode, /*resolved_flags=*/0,
-            {n, k, num_experts, is_col_parallel ? 1 : 0, num_cores,
-             linear_acc32_ ? 1 : 0},
-            invocation);
+            weight_mode, /*resolved_flags=*/0, arguments, invocation);
     }
     rpu_launch_grouped_parallel_linear_spm_kernel(
         input, weight, m_sizes, optional_scale(scale), output, /*bias=*/0,
@@ -1203,7 +1338,7 @@ void Qwen3_5MoeModel::build_gdn(int layer_idx, const ChunkInfo& chunk, bool deco
             c10::Half(1.0f), nc);
     }
     // out_proj (row-parallel): gated [L,value_dim] @ gdn_out_w → per-core partial m [L,hidden].
-    // FULL K = value_dim (launcher splits local_k = value_dim/tp). See [[emitter-local-vs-graphop-full-dims]].
+    // FULL K = value_dim (launcher splits local_k = value_dim/tp).
     if (nc != num_cores()) {
         consume_manifest_route(
             FmbRouteFamily::ALL_REDUCE,
@@ -1781,6 +1916,13 @@ int64_t Qwen3_5MoeModel::subclass_layout_hash() const {
     }
     for (const uint8_t full : layer_is_full_)
         hash = detail::layout_mix(hash, full);
+    if (!moe_layer_weights_.empty() &&
+            moe_layer_weights_.front().routed_weight_mode == kRoutedUint4Mode) {
+        const auto& mw = moe_layer_weights_.front();
+        hash = detail::layout_mix(hash, mw.routed_weight_mode);
+        hash = detail::layout_mix(hash, mw.routed_group_size);
+        hash = detail::layout_mix(hash, mw.routed_down_group_size);
+    }
     return hash;
 }
 
@@ -1819,6 +1961,13 @@ std::vector<int64_t> Qwen3_5MoeModel::kvinsert_cost_weight_identity() const {
         }
         const auto& mw = moe_layer_weights_[i];
         identity.push_back(mw.routed_weight_mode);
+        if (mw.routed_weight_mode == kRoutedUint4Mode) {
+            identity.push_back(rpu_grouped_tiling::Uint4MetadataLayout::version);
+            identity.push_back(mw.routed_group_size);
+            identity.push_back(mw.routed_down_group_size);
+            append_kvinsert_cost_tensor_identity(identity, mw.routed_gate_negative_zero);
+            append_kvinsert_cost_tensor_identity(identity, mw.routed_down_negative_zero);
+        }
         for (const auto* tensor : {
                  &mw.router_w, &mw.routed_gate_w, &mw.routed_up_w,
                  &mw.routed_down_w, &mw.routed_gate_scale,
@@ -2198,15 +2347,42 @@ void Qwen3_5MoeModel::append_mlp_manifest_routes(
                     linear_invocation(invocation, selector, /*mlp_slice=*/true));
             }
         }
+        std::vector<int64_t> gate_arguments{
+            local_i, hidden_size(), moe_.num_experts, 1, nc,
+            linear_acc32_ ? 1 : 0};
+        std::vector<int64_t> down_arguments{
+            hidden_size(), local_i, moe_.num_experts, 0, nc,
+            linear_acc32_ ? 1 : 0};
+        if (grouped_mode == kRoutedUint4Mode) {
+            const int64_t m_total = t * moe_.top_k;
+            const auto gate_tile = rpu_select_grouped_parallel_linear_uint4_tile(
+                m_total, moe_.num_experts, local_i, hidden_size());
+            const auto down_tile = rpu_select_grouped_parallel_linear_uint4_tile(
+                m_total, moe_.num_experts, hidden_size(), local_i);
+            gate_arguments.insert(gate_arguments.end(),
+                {kRoutedUint4GroupSize, gate_tile[0], gate_tile[1], m_total});
+            down_arguments.insert(down_arguments.end(),
+                {kRoutedUint4DownGroupSize, down_tile[0], down_tile[1], m_total});
+            const auto gate_metadata = rpu_grouped_tiling::uint4_metadata_layout(
+                local_i, hidden_size(), kRoutedUint4GroupSize, nc);
+            const auto down_metadata = rpu_grouped_tiling::uint4_metadata_layout(
+                hidden_size(), local_i, kRoutedUint4DownGroupSize, nc);
+            gate_arguments.insert(gate_arguments.end(), {gate_metadata.version,
+                gate_metadata.group_block_bytes, gate_metadata.expert_bytes});
+            down_arguments.insert(down_arguments.end(), {down_metadata.version,
+                down_metadata.group_block_bytes, down_metadata.expert_bytes});
+        }
+        const int64_t grouped_site = grouped_mode == kRoutedUint4Mode
+            ? QWEN35_MOE_GROUPED_UINT4_SITE : QWEN35_MOE_GROUPED_FP8_SITE;
         manifest.routes.push_back({
-            QWEN35_MOE_GROUPED_FP8_SITE, FmbRouteFamily::LINEAR,
+            grouped_site, FmbRouteFamily::LINEAR,
             grouped_mode, /*flags=*/0,
-            {local_i, hidden_size(), moe_.num_experts, 1, nc, linear_acc32_ ? 1 : 0},
+            std::move(gate_arguments),
             invocation * 2});
         manifest.routes.push_back({
-            QWEN35_MOE_GROUPED_FP8_SITE, FmbRouteFamily::LINEAR,
+            grouped_site, FmbRouteFamily::LINEAR,
             grouped_mode, /*flags=*/0,
-            {hidden_size(), local_i, moe_.num_experts, 0, nc, linear_acc32_ ? 1 : 0},
+            std::move(down_arguments),
             invocation * 2 + 1});
 
         const RpuAllGatherSchedule gather_schedule =
@@ -2273,22 +2449,166 @@ void Qwen3_5MoeModel::set_prefill_rope(const at::Tensor& cos, const at::Tensor& 
                 "set_prefill_rope: cos/sin must be 2D [N, rotary_dim/2]");
     TORCH_CHECK(cos.scalar_type() == at::kHalf && sin.scalar_type() == at::kHalf,
                 "set_prefill_rope: cos/sin must be FP16");
-    TORCH_CHECK(cos.device().type() == at::kPrivateUse1
-                && sin.device().type() == at::kPrivateUse1,
-                "set_prefill_rope: cos/sin must be on RPU device");
+    TORCH_CHECK((cos.device().is_cpu() || cos.device().type() == at::kPrivateUse1)
+                && (sin.device().is_cpu() || sin.device().type() == at::kPrivateUse1),
+                "set_prefill_rope: cos/sin must be on CPU or device device");
     TORCH_CHECK(cos.sizes() == sin.sizes(),
                 "set_prefill_rope: cos/sin shapes must match");
     TORCH_CHECK(cos.is_contiguous() && sin.is_contiguous(),
                 "set_prefill_rope: cos/sin must be contiguous");
-    if (prefill_cos_.defined() && prefill_cos_.sizes() == cos.sizes()) {
+    const bool cpu_pair = cos.device().is_cpu() && sin.device().is_cpu()
+        && !cos.is_conj() && !sin.is_conj() && !cos.is_neg() && !sin.is_neg();
+    const uint64_t generation = installed_model_state_generation();
+    if (prefill_rope_cpu_generation_ != generation)
+        prefill_rope_cpu_published_ = false;
+    const auto snapshot = [](const at::Tensor& tensor, PrefillRopeCpuSpan& span) {
+        if (!tensor.defined() || !tensor.is_contiguous() || tensor.nbytes() == 0)
+            return false;
+        const auto storage = tensor.storage();
+        span = {storage.unsafeGetStorageImpl(),
+                reinterpret_cast<uintptr_t>(storage.data_ptr().get()),
+                reinterpret_cast<uintptr_t>(tensor.data_ptr()),
+                storage.nbytes(), tensor.nbytes()};
+        const auto max = std::numeric_limits<uintptr_t>::max();
+        return span.base != 0 && span.data >= span.base &&
+            span.storage_bytes <= max - span.base &&
+            span.bytes <= max - span.data &&
+            span.data + span.bytes <= span.base + span.storage_bytes;
+    };
+    const auto disjoint = [](const PrefillRopeCpuSpan& a,
+                             const PrefillRopeCpuSpan& b) {
+        return a.base + a.storage_bytes <= b.base ||
+            b.base + b.storage_bytes <= a.base;
+    };
+    const auto cpu_pair_spans = [&](std::array<PrefillRopeCpuSpan, 2>& owners) {
+        if (!cpu_pair || !prefill_rope_cpu_owned_ ||
+            !prefill_cos_.defined() || !prefill_sin_.defined() ||
+            prefill_cos_.sizes() != cos.sizes() ||
+            prefill_sin_.sizes() != sin.sizes())
+            return false;
+        std::array<PrefillRopeCpuSpan, 2> sources;
+        if (!snapshot(cos, sources[0]) || !snapshot(sin, sources[1]) ||
+            !snapshot(prefill_cos_, owners[0]) ||
+            !snapshot(prefill_sin_, owners[1]) || !disjoint(owners[0], owners[1]))
+            return false;
+        // A CPU view can share even the unused alignment tail of either device
+        // backing. Reject the entire backing, not just the logical copy range.
+        for (const auto& source : sources)
+            for (const auto& owner : owners)
+                if (!disjoint(source, owner)) return false;
+        return true;
+    };
+    std::array<PrefillRopeCpuSpan, 2> owners;
+    if (g_rpu_ddr_flush_force_enabled && prefill_rope_cpu_published_ &&
+        cpu_pair_spans(owners) && owners == prefill_rope_cpu_owners_ &&
+        std::memcmp(cos.data_ptr(), prefill_cos_.data_ptr(), cos.nbytes()) == 0 &&
+        std::memcmp(sin.data_ptr(), prefill_sin_.data_ptr(), sin.nbytes()) == 0)
+        return;
+
+    // Invalidate before either copy: a failed second publication or force-off
+    // write must never leave a receipt for the pair's previous DDR contents.
+    prefill_rope_cpu_published_ = false;
+    bool cpu_pair_batched = false;
+    if (cpu_pair && g_rpu_ddr_flush_force_enabled && cos.nbytes() != 0) {
+        const bool same_shape = prefill_cos_.defined()
+            && prefill_cos_.sizes() == cos.sizes();
+        // An aligned public device table can be retained as a caller alias. Only
+        // fresh CPU-owned backings or the existing private pair may batch.
+        if (!same_shape || prefill_rope_cpu_owned_) {
+            const auto empty_owner = [](const at::Tensor& src) {
+                constexpr int64_t alignment_elements = 128;
+                TORCH_CHECK(src.numel() <= std::numeric_limits<int64_t>::max()
+                                - alignment_elements,
+                            "set_prefill_rope: aligned owner size overflow");
+                auto storage = at::empty({src.numel() + alignment_elements},
+                                         src.options().device(at::kPrivateUse1));
+                const uint64_t base = RpuGetDevAddr(storage.data_ptr<c10::Half>());
+                TORCH_CHECK(base != 0, "set_prefill_rope: invalid private owner address");
+                const int64_t offset = static_cast<int64_t>((256 - base % 256) % 256);
+                TORCH_CHECK(offset % sizeof(c10::Half) == 0,
+                            "set_prefill_rope: incompatible private owner alignment");
+                auto aligned = storage.narrow(0, offset / sizeof(c10::Half),
+                                              src.numel()).view(src.sizes());
+                const uint64_t address = RpuGetDevAddr(aligned.data_ptr<c10::Half>());
+                TORCH_CHECK(address != 0 && address % 256 == 0,
+                            "set_prefill_rope: failed to align private owner");
+                return aligned;
+            };
+            std::array<at::Tensor, 2> targets = same_shape
+                ? std::array<at::Tensor, 2>{prefill_cos_, prefill_sin_}
+                : std::array<at::Tensor, 2>{empty_owner(cos), empty_owner(sin)};
+            std::array<PrefillRopeCpuSpan, 2> sources, destinations;
+            bool bounded = snapshot(cos, sources[0]) && snapshot(sin, sources[1])
+                && snapshot(targets[0], destinations[0])
+                && snapshot(targets[1], destinations[1])
+                && disjoint(destinations[0], destinations[1]);
+            for (const auto& source : sources)
+                for (const auto& destination : destinations)
+                    if (bounded && !disjoint(source, destination)) bounded = false;
+            const auto rounded_in_owner = [](uintptr_t base, size_t owner_bytes,
+                                             uintptr_t address, size_t bytes) {
+                const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
+                if (base == 0 || owner_bytes == 0 || bytes == 0 || address < base
+                        || owner_bytes > limit - base || bytes > limit - address
+                        || address + bytes > limit - 63) return false;
+                const uintptr_t offset = address - base;
+                return offset <= owner_bytes && bytes <= owner_bytes - offset
+                    && (address & ~uintptr_t(63)) >= base
+                    && ((address + bytes + 63) & ~uintptr_t(63)) <= base + owner_bytes;
+            };
+            void* ranges[2] = {};
+            size_t sizes[2] = {cos.nbytes(), sin.nbytes()};
+            for (int i = 0; i < 2 && bounded; ++i) {
+                const auto& destination = destinations[i];
+                ranges[i] = targets[i].data_ptr();
+                bounded = destination.bytes == sizes[i]
+                    && rounded_in_owner(destination.base, destination.storage_bytes,
+                                        destination.data, sizes[i]);
+                auto* owner = bounded ? ::rhino_lkn::RpuGetHostddr(ranges[i]) : nullptr;
+                const uintptr_t base = owner
+                    ? reinterpret_cast<uintptr_t>(owner->get_cpu_ptr()) : 0;
+                const size_t bytes = owner ? owner->get_memory_size() : 0;
+                bounded = bounded && rounded_in_owner(base, bytes,
+                                                       destination.data, sizes[i]);
+                if (bounded) {
+                    // Reject CPU aliases anywhere in the SDK backing, including
+                    // unused alignment tails, before either destination write.
+                    const PrefillRopeCpuSpan sdk_owner{nullptr, base, base, bytes, bytes};
+                    for (const auto& source : sources)
+                        if (!disjoint(source, sdk_owner)) bounded = false;
+                }
+            }
+            if (bounded) {
+                std::memcpy(targets[0].data_ptr(), cos.const_data_ptr(), cos.nbytes());
+                std::memcpy(targets[1].data_ptr(), sin.const_data_ptr(), sin.nbytes());
+                ::rhino_lkn::RpuDdrFlushBatch(ranges, sizes, 2);
+#if defined(__aarch64__)
+                asm volatile("dsb sy" ::: "memory");
+#endif
+                prefill_cos_ = targets[0];
+                prefill_sin_ = targets[1];
+                prefill_rope_cpu_owned_ = true;
+                cpu_pair_batched = true;
+            }
+        }
+    }
+    if (!cpu_pair_batched && prefill_cos_.defined()
+            && prefill_cos_.sizes() == cos.sizes()) {
         // Retain the DDR addresses baked into an existing action GraphCache
         // entry. Text prefill also benefits from reusing the aligned backing.
         prefill_cos_.copy_(cos);
         prefill_sin_.copy_(sin);
-        return;
+    } else if (!cpu_pair_batched) {
+        prefill_rope_cpu_owned_ = false;
+        prefill_cos_ = keep_aligned_rpu_copy(cos, "set_prefill_rope: cos", 256, true);
+        prefill_sin_ = keep_aligned_rpu_copy(sin, "set_prefill_rope: sin", 256, true);
+        prefill_rope_cpu_owned_ = cpu_pair;
     }
-    prefill_cos_ = keep_256b_aligned_rpu_copy(cos, "set_prefill_rope: cos");
-    prefill_sin_ = keep_256b_aligned_rpu_copy(sin, "set_prefill_rope: sin");
+    if (g_rpu_ddr_flush_force_enabled && cpu_pair_spans(owners)) {
+        prefill_rope_cpu_owners_ = owners;
+        prefill_rope_cpu_generation_ = generation;
+        prefill_rope_cpu_published_ = true;
+    }
 }
 
 // ═══════════════════════════ SETUP (weights) ═══════════════════════════════
@@ -2335,8 +2655,9 @@ void Qwen3_5MoeModel::set_weights(
     at::TensorList gdn_v_scale_list,
     at::TensorList gdn_cq_list, at::TensorList gdn_ck_list, at::TensorList gdn_cv_list,
     at::TensorList gdn_b_bg_list, at::TensorList gdn_a_bg_list) {
-
+    prefill_rope_cpu_published_ = false;
     const int64_t N = static_cast<int64_t>(layer_is_full.size());
+    const bool routed_uint4 = routed_weight_mode == kRoutedUint4Mode;
     const int64_t effective_kv_heads = num_cores() == 8 ? 8 : 4;
     const int64_t physical_routed_intermediate =
         num_cores() == 6 ? 576 : routed_intermediate;
@@ -2349,15 +2670,18 @@ void Qwen3_5MoeModel::set_weights(
             head_dim == 256 && hidden_size == 2048 &&
             num_experts == 256 && top_k == 8 &&
             routed_intermediate == 512 && shared_intermediate == 512 &&
-            tensor_parallel == num_cores() && routed_weight_mode == 5 &&
+            tensor_parallel == num_cores() &&
+            (routed_weight_mode == 5 || (routed_uint4 && num_cores() == 8)) &&
             gdn_num_v_heads == 32 && gdn_key_head_dim == 128 &&
             gdn_value_head_dim == 128 && gdn_conv_dim == 8192 &&
             gdn_conv_kernel == 4,
         "RPU_MODEL_REJECT:EXACT_PROFILE: qwen3_5_moe supports only the "
-        "Qwen3.5-35B-A3B TP4/mixed-TP6/TP8 mixed-E4M3 profiles "
+        "Qwen3.5-35B-A3B TP4/mixed-TP6/TP8 mixed-E4M3 or TP8 routed-UINT4 profiles "
         "(L40/H2048/Q16/effective-KV=4 for reduced profiles/HD256/"
         "E256/top8/logical-I512/logical-shared512, "
         "GDN V32/Dk128/Dv128/conv8192/K4)");
+    TORCH_CHECK(!routed_uint4 || !linear_acc32_,
+                "Qwen3.5-MoE routed UINT4 W4A16 currently requires ACC16");
     TORCH_CHECK(
         mrope_section.size() == 3 && mrope_section[0] == 11 &&
             mrope_section[1] == 11 && mrope_section[2] == 10,
@@ -2436,7 +2760,7 @@ void Qwen3_5MoeModel::set_weights(
                     && tensor.scalar_type() == at::kHalf
                     && tensor.is_contiguous(),
                     "qwen3_5_moe set_weights: ", name, "[", layer,
-                    "] must be a contiguous FP16 RPU tensor");
+                    "] must be a contiguous FP16 device tensor");
         TORCH_CHECK(tensor.dim() == dim,
                     "qwen3_5_moe set_weights: ", name, "[", layer,
                     "] must be ", dim, "D, got ", tensor.dim(), "D");
@@ -2472,12 +2796,20 @@ void Qwen3_5MoeModel::set_weights(
                         weight.size(0) == out_features &&
                         weight.size(1) == in_features,
                     "qwen3_5_moe set_weights: ", name, "[", layer,
-                    "] must be contiguous RPU [", out_features, ",",
+                    "] must be contiguous device [", out_features, ",",
                     in_features, "], got ", weight.sizes());
-        TORCH_CHECK(weight.scalar_type() == at::kByte,
+        TORCH_CHECK(weight.scalar_type() == (routed_uint4 ? at::kHalf : at::kByte),
                     "qwen3_5_moe set_weights: ", name, "[", layer,
-                    "] must use full-byte uint8 E4M3 storage");
+                    "] must use the profile's ",
+                    routed_uint4 ? "FP16 mixer storage" : "full-byte uint8 E4M3 storage");
         check_weight_alignment(weight, name, layer);
+        if (routed_uint4) {
+            TORCH_CHECK(!scale.defined() || scale.numel() == 0,
+                        "qwen3_5_moe set_weights: routed UINT4 profile FP16 mixers "
+                        "must carry an empty quantization scale");
+            check_bytes(weight, name, layer, out_features * in_features * 2);
+            return;
+        }
         check_tensor(scale, name, layer, 1);
         TORCH_CHECK(scale.numel() == out_features,
                     "qwen3_5_moe set_weights: FP8 ", name, "[", layer,
@@ -2488,14 +2820,13 @@ void Qwen3_5MoeModel::set_weights(
     };
 
     const int64_t resolved_weight_mode = routed_weight_mode;
-    TORCH_CHECK(resolved_weight_mode == 5,
+    TORCH_CHECK(resolved_weight_mode == 5 || routed_uint4,
                 "qwen3_5_moe set_weights: routed_weight_mode must be "
-                "5 (full-byte FP8 E4M3)");
+                "5 (full-byte FP8 E4M3) or 6 (grouped UINT4 RTN)");
     const auto routed_dtype = at::kByte;
-    const int64_t routed_dwidth = 1;
     const int64_t routed_weight_bytes =
-        num_experts * hidden_size * physical_routed_intermediate *
-        routed_dwidth;
+        num_experts * hidden_size * physical_routed_intermediate /
+        (routed_uint4 ? 2 : 1);
 
     for (int64_t i = 0; i < N; ++i) {
         TORCH_CHECK(layer_is_full[i] == 0 || layer_is_full[i] == 1,
@@ -2560,7 +2891,8 @@ void Qwen3_5MoeModel::set_weights(
             check_bytes(tensor, item.second, i, routed_weight_bytes);
             check_shape(
                 tensor,
-                {num_experts, hidden_size * physical_routed_intermediate},
+                {num_experts, hidden_size * physical_routed_intermediate /
+                    (routed_uint4 ? 2 : 1)},
                 item.second, i);
             check_weight_alignment(tensor, item.second, i);
         }
@@ -2576,14 +2908,30 @@ void Qwen3_5MoeModel::set_weights(
             num_experts * hidden_size * 2}};
         for (size_t j = 0; j < routed_scales.size(); ++j) {
             const auto& tensor = *routed_scales[j].first;
-            check_tensor(tensor, routed_scales[j].second, i, 2);
-            check_bytes(tensor, routed_scales[j].second, i, scale_bytes[j]);
-            check_shape(
-                tensor,
-                {num_experts,
-                 j == 2 ? hidden_size : physical_routed_intermediate},
-                routed_scales[j].second, i);
-            check_weight_alignment(tensor, routed_scales[j].second, i);
+            check_tensor(tensor, routed_scales[j].second, i, routed_uint4 ? 6 : 2);
+            if (routed_uint4) {
+                const auto metadata = rpu_grouped_tiling::uint4_metadata_layout(
+                    j == 2 ? hidden_size : physical_routed_intermediate / num_cores(),
+                    j == 2 ? physical_routed_intermediate / num_cores() : hidden_size,
+                    j == 2 ? kRoutedUint4DownGroupSize : kRoutedUint4GroupSize,
+                    num_cores());
+                check_shape(tensor, {num_experts, metadata.q_blocks,
+                            metadata.n_blocks, num_cores(), 4, 64},
+                            routed_scales[j].second, i);
+                check_bytes(tensor, routed_scales[j].second, i,
+                            num_experts * metadata.expert_bytes);
+            } else {
+                check_bytes(tensor, routed_scales[j].second, i, scale_bytes[j]);
+                check_shape(
+                    tensor,
+                    {num_experts,
+                     j == 2 ? hidden_size : physical_routed_intermediate},
+                    routed_scales[j].second, i);
+            }
+            // UINT4 metadata receives its stronger controller alignment in
+            // cold installation below; never infer DDR alignment from the host pointer.
+            if (!routed_uint4)
+                check_weight_alignment(tensor, routed_scales[j].second, i);
         }
         if (layer_is_full[i]) {
             check_projection(q_w_list[i], q_scale_list[i], "q_w_list", i,
@@ -2655,7 +3003,7 @@ void Qwen3_5MoeModel::set_weights(
                     expert_ids.scalar_type() == at::kHalf &&
                     expert_ids.is_contiguous() && expert_ids.dim() == 2 &&
                     expert_ids.size(0) > 0 && expert_ids.size(1) == num_experts,
-                "qwen3_5_moe set_weights: expert_ids must be contiguous FP16 RPU "
+                "qwen3_5_moe set_weights: expert_ids must be contiguous FP16 device "
                 "[max_chunk,num_experts]");
     TORCH_CHECK(token_ids.defined() && token_ids.device().type() == at::kPrivateUse1 &&
                     token_ids.scalar_type() == at::kShort &&
@@ -2663,7 +3011,40 @@ void Qwen3_5MoeModel::set_weights(
                     token_ids.size(0) == expert_ids.size(0) &&
                     token_ids.size(1) == top_k,
                 "qwen3_5_moe set_weights: token_ids must be contiguous raw-U16 "
-                "RPU [max_chunk,top_k] with the same max_chunk as expert_ids");
+                "device [max_chunk,top_k] with the same max_chunk as expert_ids");
+
+    at::Tensor next_gate_negative_zero, next_down_negative_zero;
+    std::vector<std::array<at::Tensor, 3>> next_uint4_scales;
+    if (routed_uint4) {
+        const int64_t metadata_alignment = num_cores() * 512;
+        // The exact symmetric profile uses zero=8. Share immutable physical
+        // Q4/N64 tables across L40; padded slots match the generator's zero fill.
+        const auto make_negative_zero = [&](const at::Tensor& scale,
+                                            int64_t local_q, int64_t local_n) {
+            auto zero = at::full(scale.sizes(), -8.0,
+                                 scale.options().device(at::kCPU));
+            if (local_q % 4)
+                zero.select(1, zero.size(1) - 1).slice(3, local_q % 4, 4).zero_();
+            if (local_n % 64)
+                zero.select(2, zero.size(2) - 1).slice(4, local_n % 64, 64).zero_();
+            return keep_aligned_rpu_copy(zero.to(scale.device()),
+                "qwen3_5_moe negative_zero Q4/N64", metadata_alignment);
+        };
+        next_gate_negative_zero = make_negative_zero(routed_gate_scale_list[0],
+            hidden_size / kRoutedUint4GroupSize,
+            physical_routed_intermediate / num_cores());
+        next_down_negative_zero = make_negative_zero(routed_down_scale_list[0],
+            physical_routed_intermediate / num_cores() / kRoutedUint4DownGroupSize,
+            hidden_size);
+        next_uint4_scales.resize(N);
+        for (int64_t i = 0; i < N; ++i) {
+            const std::array<at::Tensor, 3> scales{{routed_gate_scale_list[i],
+                routed_up_scale_list[i], routed_down_scale_list[i]}};
+            for (size_t j = 0; j < scales.size(); ++j)
+                next_uint4_scales[i][j] = keep_aligned_rpu_copy(scales[j],
+                    "qwen3_5_moe scale Q4/N64", metadata_alignment);
+        }
+    }
 
     at::Tensor next_router_bridge;
     if (num_cores() == 6) {
@@ -2717,10 +3098,16 @@ void Qwen3_5MoeModel::set_weights(
         mw.routed_gate_w = routed_gate_list[i];
         mw.routed_up_w = routed_up_list[i];
         mw.routed_down_w = routed_down_list[i];
-        mw.routed_gate_scale = routed_gate_scale_list[i];
-        mw.routed_up_scale = routed_up_scale_list[i];
-        mw.routed_down_scale = routed_down_scale_list[i];
+        mw.routed_gate_scale = routed_uint4 ? next_uint4_scales[i][0] : routed_gate_scale_list[i];
+        mw.routed_up_scale = routed_uint4 ? next_uint4_scales[i][1] : routed_up_scale_list[i];
+        mw.routed_down_scale = routed_uint4 ? next_uint4_scales[i][2] : routed_down_scale_list[i];
         mw.routed_weight_mode = resolved_weight_mode;
+        if (routed_uint4) {
+            mw.routed_group_size = kRoutedUint4GroupSize;
+            mw.routed_down_group_size = kRoutedUint4DownGroupSize;
+            mw.routed_gate_negative_zero = next_gate_negative_zero;
+            mw.routed_down_negative_zero = next_down_negative_zero;
+        }
         mw.shared_gate_w = shared_gate_list[i];
         mw.shared_up_w = shared_up_list[i];
         mw.shared_down_w = shared_down_list[i];
@@ -2754,8 +3141,8 @@ void Qwen3_5MoeModel::set_weights(
         lw.attn_gate_w = attn_gate_list[i];
         lw.attn_gate_scale = attn_gate_scale_list[i];
     }
-    cos_ = keep_256b_aligned_rpu_copy(cos, "qwen3_5_moe set_weights: cos");
-    sin_ = keep_256b_aligned_rpu_copy(sin, "qwen3_5_moe set_weights: sin");
+    cos_ = keep_aligned_rpu_copy(cos, "qwen3_5_moe set_weights: cos");
+    sin_ = keep_aligned_rpu_copy(sin, "qwen3_5_moe set_weights: sin");
     final_norm_w_ = final_norm_w;
 
     // GDN mixer dims + persistent DDR scratch (residual bridge + zeros).
@@ -2766,12 +3153,12 @@ void Qwen3_5MoeModel::set_weights(
     gdn_kc_       = gdn_conv_kernel;
     gdn_value_dim_ = gdn_nvh_ * gdn_dv_;
     if (has_gdn_) {
-        auto opt = final_norm_w.options();   // fp16 on RPU
+        auto opt = final_norm_w.options();   // fp16 on device
         gdn_zero_ = at::zeros({gdn_dk_ * gdn_dv_}, opt);
         // prefill-chunk constant masks (C=64 fixed). tril keeps the diagonal (decay
         // self-score exp(0)=1); strict is the strict-lower (i>j). Both match rhino's
         // host-prepared constant masks (the -1 is a separate binary_scalar, not folded
-        // here). Built on CPU then moved to RPU (host-side fill; values exact).
+        // here). Built on CPU then moved to device (host-side fill; values exact).
         {
             const int64_t C = 64;
             auto cpuf = at::TensorOptions().dtype(at::kFloat).device(at::kCPU);
@@ -3019,14 +3406,16 @@ void Qwen3_5MoeModel::emit_routed_experts(
         addr(0, "moe_m_sizes"), lw.routed_gate_scale,
         addr(0, "moe_routed_gate"),
         local_i, h, e, /*is_col_parallel=*/true, nc,
-        lw.routed_weight_mode);
+        lw.routed_weight_mode, lw.routed_gate_negative_zero,
+        lw.routed_group_size, r);
     launch_grouped_linear(
         invocation,
         addr(0, "moe_shuffled_input"), lw.routed_up_w,
         addr(0, "moe_m_sizes"), lw.routed_up_scale,
         addr(0, "moe_routed_up"),
         local_i, h, e, /*is_col_parallel=*/true, nc,
-        lw.routed_weight_mode);
+        lw.routed_weight_mode, lw.routed_gate_negative_zero,
+        lw.routed_group_size, r);
     consume_manifest_route(
         FmbRouteFamily::ACTIVATION, QWEN35_MOE_ROUTED_SILU_SITE,
         static_cast<int64_t>(Qwen35MoeActivationRoute::SILU_MUL),
@@ -3040,7 +3429,8 @@ void Qwen3_5MoeModel::emit_routed_experts(
         addr(0, "moe_m_sizes"), lw.routed_down_scale,
         addr(0, "moe_routed_output"),
         h, local_i, e, /*is_col_parallel=*/false, nc,
-        lw.routed_weight_mode);
+        lw.routed_weight_mode, lw.routed_down_negative_zero,
+        lw.routed_down_group_size, r);
     rpu_launch_moe_gather_mul_v2_fp16_spm_kernel(
         addr(0, "moe_routed_output"), addr(0, "moe_router_probs"),
         addr(0, "moe_route_token_ids"), addr(0, "moe_route_expert_ids"),

@@ -1,4 +1,4 @@
-"""Lazy-init guard — verify an RPU-patched module finished its install.
+"""Lazy-init guard — verify an device-patched module finished its install.
 
 NOT a torch.compile / Dynamo component, despite the names this module
 shipped under until 2026-08-08 (`dynamo_freeze`, `freeze_for_dynamo`,
@@ -19,7 +19,7 @@ L2 防线 (事前 hard raise):
 - `_verify_lazy_init_best_effort(gm, example_inputs)` — RpuDynamoBackend 入口
   hook,扫 gm._modules best-effort
 
-详细机制见 `docs/graph_rules.md` 中的状态冻结规则。
+详细机制见 `docs/architecture.md` 中的状态冻结规则。
 
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ import torch.nn as nn
 
 
 class DynamoUnsafeLazyStateError(RuntimeError):
-    """Raised when an RPU-patched module has lazy state not initialized
+    """Raised when an device-patched module has lazy state not initialized
     before Dynamo trace.
 
     Root cause: forward-time `if not hasattr(self, '_rpu_xxx'): ...` lazy init
@@ -72,7 +72,7 @@ def _verify_lazy_init(model: nn.Module) -> None:
             f"  {name}: missing {miss}" for name, miss in failures
         )
         raise DynamoUnsafeLazyStateError(
-            "RPU module(s) have lazy state not initialized before Dynamo trace.\n"
+            "device module(s) have lazy state not initialized before Dynamo trace.\n"
             "Initialize in patch_*_for_rpu() / to_rpu(), not in forward.\n"
             "Forward-time lazy init causes Dynamo `hasattr` guard hazards →\n"
             "Call 2 recompile → backend cache miss → replay never hits.\n"

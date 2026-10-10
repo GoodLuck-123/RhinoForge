@@ -7,13 +7,13 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "rhinoforge"
-version = "1.1.0"
+version = "1.2.0"
 authors = [{name = "HUIXI-AI"}]
-description = "PyTorch inference backend and model deployment toolkit for the Rhino Processing Unit"
+description = "PyTorch inference backend and model deployment toolkit for Rhino devices"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.12,<3.13"
-keywords = ["pytorch", "rpu", "inference", "transformers", "vla"]
+keywords = ["pytorch", "rhinoforge", "inference", "transformers", "vla"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
@@ -75,7 +75,7 @@ wheel.exclude = [
     "**/*.bak*",
     "**/*.log",
 ]
-wheel.license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
+wheel.license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "LICENSES/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

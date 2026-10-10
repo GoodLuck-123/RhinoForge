@@ -1,0 +1,39 @@
+# G05 K1: 3 real cameras, one frame each, ten FM steps.
+# Edit linear_accumulation (acc16/acc32), math_precision (base/high) and text_lengths.
+# For one length use text_tokens instead; the two fields are exclusive.
+# Actual prefix = T + 193; no fake token/image padding.
+[g05]
+precision = "w8a16"
+linear_accumulation = "acc16"
+# HIGH borrows the BASE schedule; its performance must be measured separately.
+math_precision = "base"
+# W8 Vision ACC16/ACC32: B1 or B3; requires cold runtime/REF capability.
+vision_camera_batch = "auto"
+
+[input]
+checkpoint = "/path/to/vla_rtc_release/checkpoint"
+release_root = "/path/to/vla_rtc_release"
+source = "synthetic"
+source_golden = "/path/to/g05_k1_rtc_cpu_golden.pt"
+source_step = 1
+text_lengths = [32, 52, 64, 128, 192, 256]
+cameras = 3
+camera_names = ["head_rgb", "left_wrist_rgb", "right_wrist_rgb"]
+num_steps = 10
+
+[rpu_execution.components.language_model.prefill]
+chunk_size = "auto"
+
+[cpu]
+threads = 8
+
+[run]
+warmup = 2
+runs = 6
+seed = 7
+output_dir = "./g05_results/3cam/w8a16"
+
+[libraries]
+native = "/path/to/selected/rpu_backend.so"
+main = "/path/to/selected/rhinoOpLib.ref"
+expansion = "/path/to/selected/rhinoExpansionOpLib.ref"

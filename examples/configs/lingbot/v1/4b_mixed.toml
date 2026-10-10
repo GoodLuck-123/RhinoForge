@@ -1,0 +1,21 @@
+[example]
+profile_id = "lingbot-vla-4b.mixed.vla"
+registry_alias = "lingbot-vla-4b"
+target = "lingbot"
+dtype = "cpu-fp32+rpu-fp16"
+
+[example.opt_in]
+
+[input]
+observation = "/path/to/lingbot_observation.pt"
+num_steps = 10
+max_seq = 256
+
+[run]
+warmup = 2
+runs = 3
+hwperf = false
+profile = false
+seed = 0
+
+[rpu_execution]

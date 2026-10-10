@@ -22,10 +22,10 @@ Hugging Face model or policy API
               |
        Rhino Launch 1.0.0
               |
-             RPU
+             device
 ```
 
-The combined operator asset is loaded through the host launch interface. The
+The main and expansion operator assets is loaded through the host launch interface. The
 asset is opaque to RhinoForge: the backend selects named operators and supplies
 the documented host ABI parameters, but does not parse the asset format or
 interpret device instructions. Kernel availability comes from the adjacent
@@ -42,7 +42,7 @@ architecture, and asks the adapter registry for an implementation. The adapter
 then:
 
 1. rejects unsupported profiles before loading or modifying weights;
-2. transforms supported weights into the layout consumed by RPU operators;
+2. transforms supported weights into the layout consumed by device operators;
 3. moves tensors to `rpu`;
 4. creates native model handles and caches;
 5. installs the model-specific forward path; and
@@ -50,7 +50,7 @@ then:
 
 Weight transformation is irreversible in place. Do not transform one model
 instance twice or move a transformed instance back to CPU. The main fused
-CausalLM path also permits only one live RPU-resident model or policy per
+CausalLM path also permits only one live device-resident model or policy per
 process.
 
 Built-in Hugging Face adapters are registered from a static manifest and
@@ -61,8 +61,8 @@ overriding built-in architecture names. See [API reference](api_reference.md).
 
 Native operators register implementations for the PyTorch `PrivateUse1`
 dispatch key and model-specific schemas under `torch.ops.rpu`. Supported tensor
-operations launch an RPU operator directly or contribute nodes to an active
-graph. An operation without an RPU implementation may use the checked CPU
+operations launch a device operator directly or contribute nodes to an active
+graph. An operation without a device implementation may use the checked CPU
 fallback path; a model profile is not considered supported merely because all
 of its calls return.
 

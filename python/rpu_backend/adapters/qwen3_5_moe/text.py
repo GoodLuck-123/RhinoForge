@@ -3,7 +3,7 @@
 Sibling module of ``__init__.py`` (the orchestration entry) in the
 ``adapters/qwen3_5_moe/`` package. This module owns the text-decoder half of the
 adapter: config-driven layer dispatch, weight swizzle + GDN mixer prep, the C++
-``qwen3_5_moe_*`` handle install, and the per-forward RPU decoder run (route-B pad +
+``qwen3_5_moe_*`` handle install, and the per-forward device decoder run (route-B pad +
 partial M-RoPE + capture). Attention/GDN and forward lifecycle follow the dense
 Qwen3.5 implementation, while weight collection and the entire runtime state are
 independent and sparse-MoE specific.
@@ -15,7 +15,7 @@ Public surface:
     weights, create the C++ model, ``set_weights``; stashes per-model forward state
     on ``text_model._rpu_qwen3_5_moe`` (a non-``*_handle`` namespace) and returns the
     C++ handle (the ADAPTER keeps it as ``self._handle``).
-  - ``run_qwen3_5_moe_text(text_model, hidden, cache, ...) -> raw`` — drive the RPU
+  - ``run_qwen3_5_moe_text(text_model, hidden, cache, ...) -> raw`` — drive the device
     decoder for one forward and return the raw output ([B, real_len, hidden]).
 
 The profile guard (``_SUPPORTED_PROFILES`` / ``_check_profile``) intentionally
@@ -315,6 +315,21 @@ def _text_config(config):
     return getattr(config, "text_config", config)
 
 
+def _validate_qwen3_5_moe_linear_accumulation(profile_id, execution_config):
+    """Bind Text accumulation before weight loading or native installation."""
+    from .quant_scope import GPTQ_PROFILE_ID, RTN_PROFILE_ID
+
+    linear_acc32 = execution_config.get("prefill", {}).get("linear_acc32", False)
+    if type(linear_acc32) is not bool:
+        raise TypeError("Qwen3.5-MoE prefill.linear_acc32 must be bool")
+    if profile_id in (RTN_PROFILE_ID, GPTQ_PROFILE_ID) and linear_acc32:
+        raise UnsupportedModelError(
+            "Qwen3.5-MoE routed UINT4 currently supports Text ACC16 only; "
+            "prefill.linear_acc32 must be false. Vision linear_acc32 is independent."
+        )
+    return linear_acc32
+
+
 def _plan_prefill_execution(
     real_len,
     physical_limit,
@@ -501,7 +516,7 @@ def _get_prefill_mrope_tables(state, position_ids, rotary_dim, rope_theta,
     if cached is not None and torch.equal(cached[0], position_ids):
         return cached[1], cached[2]
     cos, sin = _build_interleaved_mrope_cos_sin(
-        position_ids, rotary_dim, rope_theta, mrope_section)
+        position_ids, rotary_dim, rope_theta, mrope_section, device="cpu")
     if hasattr(state, "prefill_rope_cache"):
         state.prefill_rope_cache = (position_ids.clone(), cos, sin)
     return cos, sin
@@ -519,7 +534,7 @@ def _normalize_prefill_position_ids(position_ids, *, real_len, padded_len):
     if pid.dim() == 3:
         if pid.size(1) != 1:
             raise ValueError(
-                "Qwen3.5 RPU fused prefill supports batch_size == 1 for "
+                "Qwen3.5 device fused prefill supports batch_size == 1 for "
                 "position_ids.")
         pid = pid[:, 0, :]
     if pid.dim() != 2 or pid.size(0) not in (1, 3, 4):
@@ -618,7 +633,7 @@ def install_qwen3_5_moe_text_for_rpu(
     _cpu_stage_weights: bool = True,
     _graph_runtime_policy=None,
 ):
-    """Install the exact 35B-A3B mixed-E4M3 text owner transactionally."""
+    """Install an admitted exact 35B-A3B text owner transactionally."""
     if type(max_seq_len) is not int or not 0 < max_seq_len <= 8192:
         raise ValueError(
             "Qwen3.5-35B-A3B max_seq_len must be an integer in [1, 8192]"
@@ -627,14 +642,19 @@ def install_qwen3_5_moe_text_for_rpu(
     import torch
 
     from .cores import core_topology
-    from .quant_scope import validate_exact_profile
+    from .quant_scope import runtime_capabilities, validate_exact_profile
 
     try:
-        validate_exact_profile(config, require_quant=True)
+        profile = validate_exact_profile(config, require_quant=True)
     except (TypeError, ValueError) as exc:
         raise UnsupportedModelError(str(exc)) from exc
     execution_config = {} if execution_config is None else execution_config
+    linear_acc32 = _validate_qwen3_5_moe_linear_accumulation(
+        profile["profile"], execution_config
+    )
     topology = core_topology(execution_config)
+    if topology.num_cores not in runtime_capabilities(profile["profile"]).allowed_cores:
+        raise UnsupportedModelError("Qwen3.5-MoE routed W4A16 requires TP8")
     for name in ("qwen3_5_moe_set_execution_cores", "qwen3_5_moe_get_execution_topology",
                  "qwen3_5_moe_get_execution_topology_v2"):
         if not callable(getattr(torch.ops.rpu, name, None)):
@@ -673,9 +693,6 @@ def install_qwen3_5_moe_text_for_rpu(
         resolved_options=_resolved_options,
     )
     prefill_config = execution_config.get("prefill", {})
-    linear_acc32 = prefill_config.get("linear_acc32", False)
-    if type(linear_acc32) is not bool:
-        raise TypeError("Qwen3.5-MoE prefill.linear_acc32 must be bool")
     requested_chunk = prefill_config.get("chunk_size", "auto")
     exact_chunk_size = 0 if requested_chunk == "auto" else int(requested_chunk)
     if exact_chunk_size and exact_chunk_size % 64:
@@ -764,9 +781,12 @@ def _install_qwen3_5_moe_text_for_rpu_impl(
         convert_linear_weights_inplace, transform_linear_weight,
     )
     from .weights import build_route_tables, prepare_moe_layer_weights
+    from .quant_scope import runtime_capabilities, validate_exact_profile
 
     inner = text_model
-    # RPU kernels are fp16-only. Like every rpu_backend adapter, the swizzle
+    profile = validate_exact_profile(config, require_quant=True)
+    capabilities = runtime_capabilities(profile["profile"])
+    # device kernels are fp16-only. Like every rpu_backend adapter, the swizzle
     # (convert_linear_weights_inplace / transform_linear_weight) PRESERVES weight
     # dtype (so int8/w8a16 quant paths stay intact) and relies on the CALLER having
     # loaded the model as fp16. Fail fast with a clear message here instead of a
@@ -783,7 +803,7 @@ def _install_qwen3_5_moe_text_for_rpu_impl(
     _wdt = inner.norm.weight.dtype
     if _wdt != torch.float16:
         raise UnsupportedModelError(
-            f"Qwen3.5 RPU adapter needs fp16 weights (RPU kernels are fp16-only), "
+            f"Qwen3.5 device adapter needs fp16 weights (device kernels are fp16-only), "
             f"but the model loaded as {_wdt}. Call .half() before to_rpu(), e.g. "
             f"AutoModelForCausalLM.from_pretrained(..., dtype=torch.float16).half(). "
             f"(Some Qwen3.5 ckpts set text_config.dtype=bfloat16, which overrides "
@@ -849,6 +869,14 @@ def _install_qwen3_5_moe_text_for_rpu_impl(
         """
         weight = projection.weight
         scale = getattr(projection, "weight_scale", None)
+        if capabilities.mixer_precision == "float16":
+            if weight.dtype != torch.float16 or (
+                scale is not None and scale.numel() != 0
+            ):
+                raise UnsupportedModelError(
+                    f"{fq_name}: routed-only INT4 requires FP16 mixers with empty scales"
+                )
+            return empty
         if weight.dtype != torch.uint8:
             raise UnsupportedModelError(
                 f"{fq_name}: exact mixer projection must be raw E4M3 uint8, "
@@ -1048,7 +1076,7 @@ def _install_qwen3_5_moe_text_for_rpu_impl(
 
     if cpu_stage_weights:
         # G0.5 installs Vision before text. Performing swizzle or scalar norm
-        # arithmetic after moving the text modules to RPU can enqueue hundreds
+        # arithmetic after moving the text modules to device can enqueue hundreds
         # of eager kernels behind that live runtime and stall installation.
         # Keep every transformation above on CPU and upload only the finalized
         # contiguous FP16 tensors used by set_weights().
@@ -1076,9 +1104,11 @@ def _install_qwen3_5_moe_text_for_rpu_impl(
     gdn_conv_dim = 2 * (gdn_nkh * gdn_dk) + gdn_nvh * gdn_dv   # 8192 for 4B
     gdn_conv_kernel = int(tc.linear_conv_kernel_dim)
     final_norm = inner.norm.weight.data + 1.0
-    if routed_weight_mode != 5:
+    expected_routed_mode = capabilities.routed_weight_mode
+    if routed_weight_mode != expected_routed_mode:
         raise UnsupportedModelError(
-            f"Qwen3.5-35B-A3B routed experts require E4M3 mode 5, got {routed_weight_mode}"
+            f"Qwen3.5-35B-A3B profile requires routed mode {expected_routed_mode}, "
+            f"got {routed_weight_mode}"
         )
     if free_raw_hf_weights:
         _drop_tensor_data(inner.norm, "weight")
@@ -1197,7 +1227,7 @@ def _install_qwen3_5_moe_text_for_rpu_impl(
 def _preflight_qwen3_5_moe_text(
     text_model, cache, real_len, *, multimodal_prefill=False
 ):
-    """Resolve one complete native stage domain before mutating RPU state."""
+    """Resolve one complete native stage domain before mutating device state."""
     import torch
 
     from rpu_backend.adapters.qwen3_5.cores import topology_tuple
@@ -1307,6 +1337,7 @@ def run_qwen3_5_moe_text(
     position_ids=None,
     multimodal_prefill=False,
     preflight_plan=None,
+    _private_cpu_prefill=False,
 ):
     """Drive exact-profile prefill/decode using planner-selected descriptors."""
     import torch
@@ -1345,11 +1376,16 @@ def run_qwen3_5_moe_text(
         if pad_len > seq_len:
             hidden = torch.cat(
                 [hidden, hidden.new_zeros(
-                    hidden.shape[0], pad_len - seq_len, hidden.shape[2]
+                    hidden.shape[0], pad_len - seq_len, hidden.shape[2], device="cpu"
                 )],
                 dim=1,
             )
             seq_len = int(pad_len)
+        # The private pure-text gather stays on CPU through complete padding.
+        # Publish one fresh full input before native setters or one-shot capture.
+        if (_private_cpu_prefill and not multimodal_prefill
+                and cache.position == 0 and hidden.device.type == "cpu"):
+            hidden = hidden.to("rpu")
         torch.ops.rpu.qwen3_5_moe_set_valid_prefill_len(handle, real_len)
 
     if seq_len > 1 and st.mrope_section:

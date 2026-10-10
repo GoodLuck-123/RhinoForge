@@ -2,19 +2,25 @@
 
 [简体中文](runtime_assets.zh.md) | English
 
-RhinoForge source and wheels do not contain Rhino Launch binaries, the combined
-opaque operator asset, the board SDK, or model weights. Obtain a runtime package
+RhinoForge source and wheels do not contain Rhino Launch binaries, the external
+main and expansion operator assets, the board SDK, or model weights. Obtain a runtime package
 compatible with the source revision you are installing from the runtime provider.
-Follow that package's distribution terms and integrity instructions. Historical
-runtime receipts do not establish compatibility with the current source.
+Follow that package's distribution terms and integrity instructions.
 
-For the RhinoForge v1.1.0 internal prerelease, request
-`RhinoForge-runtime-v1.1.0.tar.gz` and its `.tar.gz.sha256` file from the provider.
-The archive extracts to `RhinoForge-runtime-v1.1.0/` and contains
-`rhinoOpLib_rhinoforge_v1.1.0.ref` with its adjacent `.ref.kernels` manifest.
+For RhinoForge v1.2.0, request
+`RhinoForge-runtime-v1.2.0.tar.gz` and its `.tar.gz.sha256` file from the provider.
+The archive extracts to `RhinoForge-runtime-v1.2.0/` and contains
+`rhinoOpLib_current.ref` and `rhinoExpansionOpLib_current.ref`, each with an adjacent `.ref.kernels` manifest.
 Rhino Launch's own version remains **1.0.0**; the bundle version does not rename
 or change that API version. Use the exact nested Launch package named by
-`RELEASE.txt`. This prerelease does not imply a published GitHub release/tag.
+`RELEASE.txt`.
+
+## Request runtime assets
+
+Submit an [asset request](https://github.com/HUIXI-AI/RhinoForge/issues/new)
+with the source version or commit, board platform, and required Launch, main and
+DDR-expansion components. Keep restricted files, credentials and machine details
+out of the public issue. Asset access follows the provider's distribution terms.
 
 ## Required components
 
@@ -22,14 +28,13 @@ or change that API version. Use the exact nested Launch package named by
   shared libraries and `lib/cmake/rhino_launch/rhino_launchConfig.cmake`.
   Current CMake checks `graph-arena-pool-v2`, `register-state-token`, Chrome
   hwperf support and the absence of the development Program API.
-- **One combined operator asset** matching this source, plus its adjacent
+- **Two operator assets**, built from the main and DDR-expansion branches respectively, matching this source, each with an adjacent
   `<asset>.kernels` manifest. It must contain the kernels required by the public
   models and precision profiles being used.
 - **The matching board SDK/runtime**, configured according to the platform's
   installation instructions.
 
-A package version or shared-library filename alone does not establish the
-required capabilities. Keep build-time and run-time Launch paths consistent.
+Keep build-time and run-time Launch paths consistent.
 Do not mix an old operator payload with a new sidecar or merge payloads locally.
 
 ## Configure paths
@@ -40,13 +45,16 @@ to the installed Launch prefix and the unchanged operator asset:
 
 ```bash
 export RHINO_LAUNCH_ROOT="/absolute/path/to/matching/launch-install"
-export RPU_KERNEL_LIB_PATH="/absolute/path/to/RhinoForge-runtime-v1.1.0/rhinoOpLib_rhinoforge_v1.1.0.ref"
+export RPU_KERNEL_LIB_PATH="/absolute/path/to/RhinoForge-runtime-v1.2.0/rhinoOpLib_current.ref"
+export RPU_KERNEL_LIB_PATH_EXPANSION="/absolute/path/to/RhinoForge-runtime-v1.2.0/rhinoExpansionOpLib_current.ref"
 export CMAKE_PREFIX_PATH="$RHINO_LAUNCH_ROOT${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export LD_LIBRARY_PATH="$RHINO_LAUNCH_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 test -r "$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch/rhino_launchConfig.cmake"
 test -r "$RPU_KERNEL_LIB_PATH"
 test -r "$RPU_KERNEL_LIB_PATH.kernels"
+test -r "$RPU_KERNEL_LIB_PATH_EXPANSION"
+test -r "$RPU_KERNEL_LIB_PATH_EXPANSION.kernels"
 ```
 
 Replace the sample paths with the provider's actual filenames. Remove conflicting
@@ -54,6 +62,12 @@ Launch paths from the inherited environment while preserving required SDK paths.
 Credentials and machine paths belong in the shell environment, outside model
 TOMLs. Continue with [Getting started](getting_started.md) or the
 [source build guide](development_build.md).
+
+## Operator roles and replacement
+
+The main and DDR-expansion roles are fixed. [runtime-dependencies.json](../release/runtime-dependencies.json) records their source commits and SHA256 identities. Source and installed-package entries use the same roles across models.
+
+`RPU_KERNEL_LIB_PATH` and `RPU_KERNEL_LIB_PATH_EXPANSION` may point to identical installed copies. Entries reject hash mismatches, swapped roles and conflicting inherited paths. GR00T configurations reject `example.expansion_ref`. Start a new process after replacing either asset.
 
 ## Operator manifest
 
@@ -76,4 +90,4 @@ payload. Operator source and payload contents remain outside this repository.
 | CMake rejects a required capability | Obtain a matching sanitized Release Launch package |
 | Launch cannot be loaded | Check its `lib` path and the board SDK library paths |
 | Asset or sidecar is missing, or a kernel is absent | Obtain the matching asset and unchanged sidecar together |
-| RPU is unavailable | Check device permissions and the platform runtime setup |
+| device is unavailable | Check device permissions and the platform runtime setup |

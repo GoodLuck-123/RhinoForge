@@ -15,7 +15,7 @@ TEXT_PROJECTIONS = (
 def quantize_text_prefix(model):
     """Stage all seven projections before committing natural INT8 weights.
 
-    The caller owns half -> quantize -> byte-width swizzle -> RPU migration.
+    The caller owns half -> quantize -> byte-width swizzle -> device migration.
     Embedding, norms and rotary buffers retain their floating point precision.
     """
     cfg = model.config

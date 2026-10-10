@@ -102,8 +102,12 @@ class GraphRuntimePolicy:
     qwen35_legacy_27b_sdk_budget: bool = False
     execution_core_count: int = 8
     graph_arena_count: int = 0
+    batch_snapshot_mode: str = "auto"
+    qwen35_dense_27b_sdk_budget: bool = False
 
     def __post_init__(self) -> None:
+        if self.batch_snapshot_mode not in ("auto", "off"):
+            raise ValueError("batch_snapshot_mode must be 'auto' or 'off'")
         for name in (
             "fast_replay_skip_sync",
             "force_oneshot_on_replay",
@@ -112,6 +116,7 @@ class GraphRuntimePolicy:
             "fmb_fast_replay",
             "fmb_deep_fast_replay",
             "qwen35_legacy_27b_sdk_budget",
+            "qwen35_dense_27b_sdk_budget",
         ):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be bool")
@@ -137,6 +142,9 @@ class GraphRuntimePolicy:
             raise ValueError("graph_arena_count must be an integer in [0, 4096]")
         if self.qwen35_legacy_27b_sdk_budget and self.graph_arena_count:
             raise ValueError("graph_arena_count cannot override the legacy 27B arena plan")
+        if self.qwen35_dense_27b_sdk_budget and (
+                self.qwen35_legacy_27b_sdk_budget or self.graph_arena_count != 4):
+            raise ValueError("dense 27B requires its four-arena plan and no legacy owner")
 
     @classmethod
     def from_environment(
@@ -144,6 +152,8 @@ class GraphRuntimePolicy:
         qwen35_legacy_27b_sdk_budget: bool = False,
         execution_core_count: int = 8,
         graph_arena_count: int = 0,
+        batch_snapshot_mode: str = "auto",
+        qwen35_dense_27b_sdk_budget: bool = False,
     ) -> "GraphRuntimePolicy":
         if type(qwen35_legacy_27b_sdk_budget) is not bool:
             raise TypeError("qwen35_legacy_27b_sdk_budget override must be bool")
@@ -187,6 +197,8 @@ class GraphRuntimePolicy:
             qwen35_legacy_27b_sdk_budget=qwen35_legacy_27b_sdk_budget,
             execution_core_count=execution_core_count,
             graph_arena_count=graph_arena_count,
+            batch_snapshot_mode=batch_snapshot_mode,
+            qwen35_dense_27b_sdk_budget=qwen35_dense_27b_sdk_budget,
             provenance=(
                 skip_sync_src,
                 force_oneshot_src,
@@ -198,7 +210,8 @@ class GraphRuntimePolicy:
                 "LKN=extension-load-snapshot",
                 f"owner:qwen35_legacy_27b_sdk_budget={int(qwen35_legacy_27b_sdk_budget)}",
             ) + (("owner:execution_core_count",) if execution_core_count != 8 else ())
-            + ((f"owner:graph_arena_count={graph_arena_count}",) if graph_arena_count else ()),
+            + ((f"owner:graph_arena_count={graph_arena_count}",) if graph_arena_count else ())
+            + (("owner:qwen35_dense_27b_sdk_budget=1",) if qwen35_dense_27b_sdk_budget else ()),
         )
 
     def prepare_arenas(self) -> bool:
@@ -220,6 +233,15 @@ class GraphRuntimePolicy:
         native_mode = (modes.Auto, modes.ForceOff, modes.ForceOn)[
             self.host_op_defer_mode
         ]
+        # An older native extension has no new policy enum/argument. Its
+        # ordinary prepared-Queue fallback remains usable without new symbols.
+        snapshot_modes = getattr(_cpp_ext, "GraphBatchSnapshotMode", None)
+        snapshot_args = {} if snapshot_modes is None else {
+            "batch_snapshot_mode": snapshot_modes.Auto
+            if self.batch_snapshot_mode == "auto" else snapshot_modes.Off
+        }
+        if self.qwen35_dense_27b_sdk_budget:
+            snapshot_args["qwen35_dense_27b_sdk_budget"] = True
         return _cpp_ext.GraphRuntimePolicy(
             self.fast_replay_skip_sync,
             self.force_oneshot_on_replay,
@@ -234,6 +256,7 @@ class GraphRuntimePolicy:
             self.qwen35_legacy_27b_sdk_budget,
             *((self.execution_core_count, self.graph_arena_count) if self.graph_arena_count
               else (self.execution_core_count,) if self.execution_core_count != 8 else ()),
+            **snapshot_args,
         )
 
 

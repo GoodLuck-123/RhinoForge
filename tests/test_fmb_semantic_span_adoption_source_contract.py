@@ -79,7 +79,7 @@ def test_qwen35_public_vision_publishes_one_checked_image_span():
         "int64_t Qwen3_5VisionModel::input_chunk_size_for_geometry(",
     )
     assert "temporal_num_frames == 1 && camera_batch_count == 1 && !compact_input" in admission
-    assert "current_camera_batch_count_ = 1;" in admission
+    assert "current_camera_batch_count_ = camera_batch_count;" in admission
     assert "current_output_patches_ = execution_len;" in admission
     assert "QWEN3_5_VISION_STEP0_CHUNK" in geometry
     assert "input_chunk_size_for_geometry(execution_len)" in planner

@@ -1,3 +1,4 @@
+# Compatibility path; canonical template: rhinovla/v3/expert_w8a16.toml
 # V3 caller-factory template: W8A16 seven action-expert projections.
 # This does not select W8 for the vision/language models or action IO.
 [example]

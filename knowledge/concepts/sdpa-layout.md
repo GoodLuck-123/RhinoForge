@@ -16,19 +16,14 @@ each token and head.
   accepted implicitly.
 - Keep query, key, value, and returned attention output in one declared layout
   throughout a wrapper. Convert once at the boundary instead of adding
-  compensating transposes at individual call sites.
-  [Public attention schema](../../src/core/rpu_dispatch_registrations.inc)
+  compensating transposes at individual call sites. [Public attention schema](../../src/core/rpu_dispatch_registrations.inc)
 - Treat `RPUCache` as the owner of cached K/V storage. Callers size it and
   update its logical position through the public cache API; they do not
-  reinterpret its storage as a regular PyTorch attention tensor.
-  [RPUCache](../../docs/api_reference.md#rpucache)
+  reinterpret its storage as a regular PyTorch attention tensor. [RPUCache](../../docs/api_reference.md#rpucache)
 - Mask shape, causal mode, cache position, and head geometry are semantic
   inputs. They belong in profile validation and, where applicable, the Graph
-  signature.
-  [Model porting](../../docs/model_porting.md#7-graph-and-cache-invariants)
-- A leading batch dimension does not imply that every model path supports
-  general batching. Use only the envelope named for the exact release profile.
-  [Examples](../../docs/model_support.md#general-runtime-limits)
+  signature. [Model porting](../../docs/model_porting.md#7-graph-and-cache-invariants)
+- Batch support follows the envelope named for the exact release profile. [Examples](../../docs/model_support.md)
 
 If attention output is numerically wrong while projection norms look
 reasonable, verify the layout at every public boundary before changing model

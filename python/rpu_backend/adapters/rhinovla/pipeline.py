@@ -3,7 +3,7 @@
 
 Qwen3-VL vision and text prefill produce the prefix KV. Text layers [10:28]
 feed the RhinoVLA action expert and its denoise loop before action decoding.
-RPU setup runs once in __init__; predict() reuses the installed pipeline."""
+device setup runs once in __init__; predict() reuses the installed pipeline."""
 import math, os, sys, time
 import torch
 from .prefix import prepare_prefix_inputs_from_vision_outputs, get_cache_layer
@@ -295,7 +295,7 @@ def _preflight_rhinovla_cold_install(
         if not (native_cold.precompute_adarms and not native_cold.skip_adarms_gemv
                 and vision_cold["rpu_patch_embed"] and vision_cold["rpu_mergers"]
                 and vision_cold["fused_merger"] and not vision_cold["rpu_mergers_streaming"]):
-            raise ValueError("RhinoVLA FULL_W8A16 requires precomputed AdaRMS and RPU patch/fused resident mergers")
+            raise ValueError("RhinoVLA FULL_W8A16 requires precomputed AdaRMS and device patch/fused resident mergers")
         if tuple(getattr(text_cfg, name, None) for name in (
             "num_hidden_layers", "hidden_size", "intermediate_size",
             "num_attention_heads", "num_key_value_heads", "head_dim",
@@ -501,7 +501,7 @@ class RhinoVLAOnRPU:
         import rpu_backend  # noqa: F401
         from rpu_backend.api.cache import RPUCache
         from rpu_backend.runtime.weights import convert_linear_weights_inplace
-        # RhinoVLA-only vision fork: the RhinoVLA vision-on-RPU + perf hooks live
+        # RhinoVLA-only vision fork: the RhinoVLA vision-on-device + perf hooks live
         # in adapters/rhinovla/vision.py (a self-contained fork), NOT the shared
         # adapters/qwen3_vl/vision.py — so gr00t/other qwen3_vl consumers on main
         # are untouched. Text prefill uses the shared M-RoPE decoder mechanism.
@@ -536,7 +536,7 @@ class RhinoVLAOnRPU:
         action_cold = cold["action_cold"]
         m = cold["model"]
         iface = cold["iface"]
-        # Everything below may mutate model weights or materialize RPU state.
+        # Everything below may mutate model weights or materialize device state.
         # A failed owner therefore keeps the process slot until that owner dies,
         # even when graph-first native cleanup succeeds.
         self._rpu_swizzle_started = True
@@ -567,10 +567,10 @@ class RhinoVLAOnRPU:
         )
         own_rhinovla_child(self, self.vision_model, RHINOVLA_VISION_COMPONENT)
         if rpu_patch_embed:
-            _trace("vision RPU patch_embed enabled")
+            _trace("vision device patch_embed enabled")
         if rpu_mergers:
             merger_mode = "streaming" if rpu_mergers_streaming else "resident"
-            _trace(f"vision RPU mergers enabled ({merger_mode})")
+            _trace(f"vision device mergers enabled ({merger_mode})")
         if vision_cold["fast_replay"]:
             torch.ops.rpu.qwen3vl_vision_set_fast_replay(
                 self.vision_model._rpu_vision_handle, True)
@@ -600,7 +600,7 @@ class RhinoVLAOnRPU:
                 self.vision_model._rpu_vision_handle, True)
         # Clone elimination (RPU_RHINOVLA_PREFIX_NO_CLONE): the vision merger output
         # (pop_merged stable slots) + the prefix base buffers don't need a per-predict
-        # clone in the RhinoVLA flow — vision runs once per predict and prefix assembly
+        # clone in the RhinoVLA flow — vision runs once per predict and prefix composition
         # copies the slots out immediately, and the prefix buffers' text/zero positions
         # are static (same prompt).
         self._prefix_no_clone = prefill_cold["prefix_no_clone"]
@@ -835,7 +835,7 @@ class RhinoVLAOnRPU:
         # forward), at the visual run positions — killing the eager Python scatter copy_.
         # Build the persistent buffers + register them + the runs with the C++ merger NOW
         # (before the first vision forward, so the captured graph bakes their addresses).
-        # Requires the fused merger + RPU prefix prep. Bit-identical (on/off action A/B).
+        # Requires the fused merger + device prefix prep. Bit-identical (on/off action A/B).
         self._prefix_merger_scatter = (
             self._prefix_prep_rpu_enabled
             and getattr(self.vision_model, "_rpu_vision_fused_merger", False)
@@ -965,8 +965,8 @@ class RhinoVLAOnRPU:
                 }
             )
             # Contiguous runs of visual-token positions (one per camera view, 64
-            # tokens each). index_put has no RPU kernel -> CPU fallback + RPU<->CPU
-            # round-trips; these runs let prefix assembly write the merger output
+            # tokens each). index_put has no device kernel -> CPU fallback + device<->CPU
+            # round-trips; these runs let prefix composition write the merger output
             # with on-device slice copy_ instead. Computed once (mask is static).
             vp_idx = visual_pos_mask.nonzero(as_tuple=True)[0].tolist()
             runs = []
@@ -1038,7 +1038,7 @@ class RhinoVLAOnRPU:
                 device="rpu", dtype=torch.float16
             )
             # On-device slice copy_ per contiguous visual run (replaces index_put,
-            # which has no RPU kernel and falls back to CPU). pooler rows are in
+            # which has no device kernel and falls back to CPU). pooler rows are in
             # view order = sequence order of the runs.
             off = 0
             for start, length in runs:
@@ -1192,7 +1192,7 @@ class RhinoVLAOnRPU:
             prep["prefix_mask"] = prep["prefix_mask"][:, :logical_len]
         if pad and ie.shape[1] != execution_len:
             # The shared Qwen3-VL helper handles both [3,B,P] and the cached
-            # RPU-preparation layout [P,3]; only the token axis is padded.
+            # device-preparation layout [P,3]; only the token axis is padded.
             ie, attn, pos = _pad_causal_prefill_inputs(ie, attn, pos, execution_len)
             ds = [
                 torch.cat([item, item.new_zeros(pad, item.shape[-1])], dim=0)
@@ -1275,15 +1275,17 @@ class RhinoVLAOnRPU:
         # Diagnostic exports belong to the caller. Retaining one here would
         # defer its release until the next predict() overwrites _last_prefix_kv,
         # moving validation cleanup into the next inference's timing window.
-        dyn = self._text_cache.to_dynamic_cache("cpu")
-        physical_prefix_len = int(self._text_cache.position)
-        kv = []
-        for i in range(self.prefix_layer_offset, self.prefix_layer_offset + int(self.cfg.depth)):
-            k, v = get_cache_layer(dyn, i)
-            kv.append((
-                k[:, :, :physical_prefix_len, :].float().contiguous(),
-                v[:, :, :physical_prefix_len, :].float().contiguous(),
-            ))
+        # Stepwise denoise reuses these copied tensors through their mutation
+        # versions; exports made under inference_mode need normal owned storage.
+        with torch.inference_mode(False), torch.no_grad():
+            dyn = self._text_cache.to_dynamic_cache("cpu")
+            physical_prefix_len = int(self._text_cache.position)
+            kv = []
+            for i in range(self.prefix_layer_offset, self.prefix_layer_offset + int(self.cfg.depth)):
+                k, v = get_cache_layer(dyn, i)
+                kv.append(tuple(t[:, :, :physical_prefix_len, :].to(
+                    dtype=torch.float32, copy=True,
+                    memory_format=torch.contiguous_format) for t in (k, v)))
         return kv
 
     def export_last_prefix_kv_cpu(self):

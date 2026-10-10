@@ -68,7 +68,7 @@ class _GraphScope:
 
 
 class Graph:
-    """RPU KernelGraph — capture/replay execution graph.
+    """device KernelGraph — capture/replay execution graph.
 
     Usage:
         g = torch.rpu.Graph()

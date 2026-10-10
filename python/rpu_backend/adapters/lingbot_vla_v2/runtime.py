@@ -1,22 +1,22 @@
-"""LingBot-VLA V2 (robbyant/lingbot-vla-v2-6b) — RPU runtime (image+text → action, flow-matching).
+"""LingBot-VLA V2 (robbyant/lingbot-vla-v2-6b) — device runtime (image+text → action, flow-matching).
 
 Self-contained standalone runtime, mirroring `adapters/lingbot_vla/runtime.py` (V1) structure. V1 is
 NOT touched and NOT imported; this is an independent, default-OFF, opt-in package.
 
-  image  → Qwen3-VL ViT on RPU (install_qwen3_vl_vision_for_rpu)   → img_emb  [n_vis, 2560]
+  image  → Qwen3-VL ViT on device (install_qwen3_vl_vision_for_rpu)   → img_emb  [n_vis, 2560]
   text   → embed_tokens[lang_tokens]                               → lang_emb [1, L, 2560]
   prefix = image-placeholder tokens + lang tokens, visual embeds masked_scatter'd in
-         → RPU Qwen3-VL text decoder (M-RoPE; vision features from [5,11,17]
+         → device Qwen3-VL text decoder (M-RoPE; vision features from [5,11,17]
            injected into text layers [0,1,2]; CAUSAL — YAML vlm_causal: true)
            fills the SHARED RPUCache [0, S)
   state+noise → host encoders + per-(step,layer,norm) AdaRMS fold
-         → RPU sparse-MoE AdaRMS expert (768-d, 32 experts, top_k 4, joint shared-prefix-KV,
+         → device sparse-MoE AdaRMS expert (768-d, 32 experts, top_k 4, joint shared-prefix-KV,
            explicit 2D mask), 10-step host Euler (default) → action [1, 50, 55]
 
 Deliberately NOT inherited from V1
 ----------------------------------
 * V1's CPU-fp32 ViT. That was a V1-checkpoint-specific fp16-overflow workaround
-  (`vit_fp16_outlier_overflow`); V2 uses the validated Qwen3-VL RPU vision tower.
+  (`vit_fp16_outlier_overflow`); V2 uses the validated Qwen3-VL device vision tower.
 * V1's ROPE_BASE = 10000. The V2 expert does NOT own its RoPE — it is rotated by the VLM's
   rotary_emb (theta 5e6). See convert._build_rope_tables.
 * V1's separate in-graph denoise handle. V2 keeps the HOST Euler loop as its default path and
@@ -30,6 +30,8 @@ unless exact ``RPU_LINGBOT2_ALLOW_UNVALIDATED=1`` is set; the env name is retain
 for compatibility. Nothing here changes V1.
 """
 from __future__ import annotations
+
+from rpu_backend.runtime.masks import versioned_cpu_mask
 
 import dataclasses
 import math
@@ -467,6 +469,10 @@ class _Lingbot2MoeColdConfig:
     fp16_top4: bool
     routed_only: bool
     down_acc16: bool
+    sparse_experts: bool = False
+    sparse_w8a16: bool = False
+    runtime_graph: bool = False
+    routed_gemm: bool = False
 
     @classmethod
     def from_env(cls) -> "_Lingbot2MoeColdConfig":
@@ -476,7 +482,8 @@ class _Lingbot2MoeColdConfig:
         schunk = _lingbot2_nonnegative_int(
             "RPU_L2_SCHUNK", default=256 * 127
         )
-        return cls(
+        sparse_experts = _lingbot2_exact_bool("RPU_LINGBOT2_SPARSE_EXPERTS")
+        config = cls(
             # These two historical controls intentionally use presence
             # semantics: an explicitly present "0" still enables them.
             bufonly="RPU_L2_BUFONLY" in os.environ,
@@ -492,7 +499,47 @@ class _Lingbot2MoeColdConfig:
             ),
             routed_only=_lingbot2_exact_bool("RPU_L2_ROUTED_ONLY"),
             down_acc16=_lingbot2_exact_bool("RPU_L2_DOWN_ACC16"),
+            sparse_experts=sparse_experts,
+            sparse_w8a16=_lingbot2_exact_bool("RPU_LINGBOT2_EXPERT_W8A16")
+            if sparse_experts else False,
+            runtime_graph=_lingbot2_exact_bool("RPU_LINGBOT2_RUNTIME_GRAPH"),
+            routed_gemm=_lingbot2_exact_bool("RPU_LINGBOT2_ROUTED_GEMM"),
         )
+        if config.runtime_graph:
+            conflicts = {
+                "RPU_LINGBOT2_MULTIVIEW_SPM_Z2": _lingbot2_exact_bool("RPU_LINGBOT2_MULTIVIEW_SPM_Z2"),
+                "RPU_LINGBOT2_PREFILL_W4A16": _lingbot2_exact_bool("RPU_LINGBOT2_PREFILL_W4A16"),
+                "RPU_LINGBOT2_EXPERT_W4A16": _lingbot2_exact_bool("RPU_LINGBOT2_EXPERT_W4A16"),
+                "dense-soft/debug routing": config.dense_soft_router or not config.fp16_top4 or config.bufonly or config.addr or config.routed_only or config.down_acc16,
+            }
+            enabled = [name for name, active in conflicts.items() if active]
+            if enabled:
+                raise ValueError("RPU_LINGBOT2_RUNTIME_GRAPH=1 conflicts with " + ", ".join(enabled))
+        if config.routed_gemm and (config.sparse_experts or not _lingbot2_exact_bool("RPU_LINGBOT2_GROUPED_EXPERTS")):
+            raise ValueError("RPU_LINGBOT2_ROUTED_GEMM=1 requires dense grouped experts")
+        if config.sparse_experts:
+            conflicts = {
+                "RPU_LINGBOT2_GROUPED_EXPERTS":
+                    _lingbot2_exact_bool("RPU_LINGBOT2_GROUPED_EXPERTS"),
+                "RPU_LINGBOT2_EXPERT_W4A16":
+                    _lingbot2_exact_bool("RPU_LINGBOT2_EXPERT_W4A16"),
+                "RPU_LINGBOT2_MULTIVIEW_SPM_Z2":
+                    _lingbot2_exact_bool("RPU_LINGBOT2_MULTIVIEW_SPM_Z2"),
+                "RPU_LINGBOT2_DEBUG_DENSE_SOFT_ROUTER": config.dense_soft_router,
+                "RPU_LINGBOT2_FP16_TOP4=0": not config.fp16_top4,
+                "RPU_L2_BUFONLY": config.bufonly,
+                "RPU_L2_ADDR": config.addr,
+                "RPU_L2_ROUTED_ONLY": config.routed_only,
+                "RPU_L2_DOWN_ACC16": config.down_acc16,
+                "RPU_L2_RCHUNK": config.rchunk_requested != 0,
+            }
+            enabled = [name for name, active in conflicts.items() if active]
+            if enabled:
+                raise ValueError(
+                    "RPU_LINGBOT2_SPARSE_EXPERTS=1 conflicts with "
+                    + ", ".join(enabled)
+                )
+        return config
 
 
 def _close_multiview_spm_z2_state(state) -> bool:
@@ -898,7 +945,7 @@ def _validate_multiview_spm_z2() -> bool:
 
 
 def _validate_adarms_direct_schedule() -> bool:
-    """Cold preflight before any LingBot2 RPU materialization; return whether enabled."""
+    """Cold preflight before any LingBot2 device materialization; return whether enabled."""
     enabled = _env_on("RPU_LINGBOT2_ADARMS_DIRECT_SCHEDULE", "0")
     if not enabled:
         return False
@@ -1039,7 +1086,7 @@ def _contiguous_runs(mask_1d):
 
     The prefix layout puts the <image> placeholders in exactly `n_images` contiguous runs
     ([<vision_start> <image>*P <vision_end>] repeated), so scattering the visual embeddings needs
-    no boolean mask at all — `narrow().copy_()` per run is the same write with an RPU kernel
+    no boolean mask at all — `narrow().copy_()` per run is the same write with a device kernel
     behind it, instead of an `index_put_` that has none (it falls back to the CPU, round-tripping
     the whole [S, hidden] tensor twice).
 
@@ -1194,15 +1241,12 @@ def _clear_graph_caches_for_rebind(caches):
 
 
 def _build_suffix_mask(prefix_len, align_cfg, *, real_prefix_len=None):
-    """Additive fp16 [51, prefix_len + 51] on RPU: 0 attend, big_neg masked.
-
-    Built on CPU then moved (pitfall B-1: never torch.zeros(device='rpu')).
-    """
+    """Versioned CPU FP16 mask [51, prefix_len + 51]."""
     full = build_suffix_mask_bool(
         prefix_len, align_cfg, real_prefix_len=real_prefix_len
     )
     add = torch.where(full, torch.tensor(0.0), torch.tensor(-50000.0)).half()
-    return add.to("rpu").contiguous()
+    return versioned_cpu_mask(add)
 
 
 # =============================================================================
@@ -1214,7 +1258,7 @@ class LingbotVlaV2Policy:
     def __init__(self, *, vlm, cfg, head_W, norm_W, align_W, align_cfg, rope_theta,
                  exp_handle, exp_keep, max_seq=DEFAULT_MAX_SEQ, rpu_execution=None,
                  execution_session=None, execution_generation=0,
-                 component_generations=None):
+                 component_generations=None, graph_runtime_policy=None):
         # Establish cleanup state first: the public builder may call
         # _retire_resources() after any later constructor failure.
         self._closed = False
@@ -1222,10 +1266,15 @@ class LingbotVlaV2Policy:
         self._live_slot_released = False
         self._gc_retirement_enabled = True
         self._multiview_spm_z2 = _validate_multiview_spm_z2()
+        if graph_runtime_policy is None:
+            graph_runtime_policy = rpu_backend.graph.GraphRuntimePolicy.from_environment()
+        if not isinstance(graph_runtime_policy, rpu_backend.graph.GraphRuntimePolicy):
+            raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
         self._graph_runtime_policy = (
-            rpu_backend.graph.GraphRuntimePolicy.from_environment(
-                lingbot2_multiview_spm_z2=self._multiview_spm_z2
-            )
+            graph_runtime_policy
+            if graph_runtime_policy.lingbot2_multiview_spm_z2 == self._multiview_spm_z2
+            else dataclasses.replace(
+                graph_runtime_policy, lingbot2_multiview_spm_z2=self._multiview_spm_z2)
         )
         self._z2_state = {
             "prepare_attempted": False,
@@ -1250,7 +1299,7 @@ class LingbotVlaV2Policy:
         self._z2_position_ids = None
         self._z2_rope_cos_il = None
         self._z2_rope_sin_il = None
-        self._vlm = vlm                              # HF Qwen3VLModel (visual + language_model on RPU)
+        self._vlm = vlm                              # HF Qwen3VLModel (visual + language_model on device)
         self._cfg = cfg
         self._text = vlm.language_model
         self._visual = vlm.visual
@@ -1457,7 +1506,7 @@ class LingbotVlaV2Policy:
         # Set the option to "0" to retain the caller's ambient thread configuration.
         self._enc_1thread = _env_on("RPU_LINGBOT2_ENCODER_1THREAD", "1")
         # Prefix constants depend on image count, tokens per image, language tokens
-        # and grid. Cache them in RPU buffers and overwrite only the visual rows;
+        # and grid. Cache them in device buffers and overwrite only the visual rows;
         # disabling this option rebuilds the prefix for each request.
         self._prefix_opt = _env_on("RPU_LINGBOT2_HOST_PREFIX_OPT", "1")
         self._pfx_memo = None          # prompt-keyed prefix buffers (see _build_prefix)
@@ -1623,7 +1672,7 @@ class LingbotVlaV2Policy:
         vars(self._text)["_rpu_execution"] = text
 
     def _drop_device_state(self) -> None:
-        """Drop policy-owned RPU tensors after confirmed native cleanup."""
+        """Drop policy-owned device tensors after confirmed native cleanup."""
         for attr in (
             "_cache",
             "_vgc",
@@ -1635,6 +1684,9 @@ class LingbotVlaV2Policy:
             "_denoise_keep",
             "_denoise_state_host",
             "_denoise_x0_host",
+            "_denoise_upload_rows",
+            "_denoise_x0_host_row",
+            "_denoise_x0_row",
             "_denoise_state",
             "_denoise_x0",
             "_denoise_x_final",
@@ -2026,7 +2078,7 @@ class LingbotVlaV2Policy:
 
         READY admission calls this before Vision, cache reset, prefix DMA or any
         Graph capture.  A request outside the prepared envelope therefore cannot
-        partially execute an RPU subsystem before it is rejected.
+        partially execute a device subsystem before it is rejected.
         """
         if (not isinstance(images, torch.Tensor) or images.device.type != "cpu"
                 or images.dim() != 3):
@@ -2090,8 +2142,64 @@ class LingbotVlaV2Policy:
             "image_shape": tuple(int(value) for value in images.shape),
         }
 
+    def _reserve_runtime_parameters(self, metadata, prefill_plan):
+        """Reserve all three immutable SPM banks before the first hot layout."""
+        cold = getattr(self, "_lingbot2_moe_cold_config", None)
+        if not getattr(cold, "runtime_graph", False):
+            return False
+        grids = torch.tensor(metadata["grid_key"], dtype=torch.long).reshape(-1, 3)
+        count = len(metadata["keep_img"])
+        _validate_direct_prefix_group(
+            grids, patches_per_image=metadata["image_shape"][1],
+            batch_cap=self._visual._rpu_vision_batch_cap,
+            cache_capacity=self._visual._rpu_vision_kv_cache.max_seq_len)
+        key = (metadata["grid_key"], metadata["keep_img"],
+               int(prefill_plan.execution_len))
+        resident = getattr(self, "_runtime_resident_state", None)
+        if resident is not None:
+            if resident["phase"] == "FAILED":
+                raise RuntimeError("LingBot2 resident initialization failed; recreate the policy")
+            if resident["key"] != key:
+                raise ValueError("LingBot2 resident graph geometry changed; recreate the policy")
+            return False
+        resident = {"key": key, "phase": "FAILED"}
+        self._runtime_resident_state = resident
+        vision = int(self._visual._rpu_vision_handle)
+        text = int(self._text._rpu_decoder_handle)
+        action = int(self._exp)
+        torch.ops.rpu.qwen3vl_vision_enable_resident_preloads(vision)
+        torch.ops.rpu.causal_decoder_enable_resident_preloads(text)
+        torch.ops.rpu.lingbot_v2_moe_enable_resident_preloads(action)
+        # No owner may prime before the complete persistent top is reserved.
+        torch.ops.rpu.qwen3vl_vision_prepare_resident_spm(
+            vision, int(metadata["image_shape"][1]) * count, count)
+        prefix = int(prefill_plan.execution_len)
+        torch.ops.rpu.causal_decoder_prepare_persistent_spm(text, prefix, 0, True, 0)
+        torch.ops.rpu.lingbot_v2_moe_prepare_resident_spm(
+            action, N_ACTION + 1, prefix, False, prefix + N_ACTION + 1)
+        resident["phase"] = "RESERVED"
+        return True
+
+    def _prime_runtime_parameters(self, vision_plans, prefill_plan):
+        resident = getattr(self, "_runtime_resident_state", None)
+        if resident is None or resident["phase"] == "PRIMED":
+            return
+        if resident["phase"] != "RESERVED" or len(vision_plans) != 1:
+            raise RuntimeError("LingBot2 resident initialization requires one selected Vision group")
+        action_plan = self._action_execution_plan(prefill_plan.execution_len, 0)
+        resident["phase"] = "FAILED"
+        torch.ops.rpu.qwen3vl_vision_prime_resident_preloads(
+            self._visual._rpu_vision_handle,
+            list(vision_plans[0].selected.stage_tuple.physical_descriptor))
+        torch.ops.rpu.causal_decoder_prime_resident_preloads(
+            self._text._rpu_decoder_handle,
+            list(prefill_plan.a6_plan.selected.stage_tuple.physical_descriptor))
+        torch.ops.rpu.lingbot_v2_moe_prime_resident_preloads(
+            self._exp, list(action_plan.selected.stage_tuple.physical_descriptor))
+        resident["phase"] = "PRIMED"
+
     def _vision_execution_plans(self, metadata):
-        """Plan every Qwen3-VL dispatch group before its first RPU op."""
+        """Plan every Qwen3-VL dispatch group before its first device op."""
         image_count = len(metadata["keep_img"])
         grid_words = metadata["grid_key"]
         grids = tuple(
@@ -2511,7 +2619,12 @@ class LingbotVlaV2Policy:
             not self._multiview_spm_z2
             and LINGBOT2_TEXT_COMPONENT in changed
         ):
-            self._pfx_memo = None
+            if getattr(self, "_vision_direct_prefix", False) and self._pfx_memo is not None:
+                # Native Vision retains these scatter owners. Keep their
+                # addresses and force prompt/plan refresh after retirement.
+                self._pfx_memo["key"] = None
+            else:
+                self._pfx_memo = None
             self._pfx_memos.clear()
             self._pos_ids_src = None
             self._pos_rpu = None
@@ -2525,6 +2638,11 @@ class LingbotVlaV2Policy:
             self._z2_position_ids = None
             self._z2_rope_cos_il = None
             self._z2_rope_sin_il = None
+        resident = getattr(self, "_runtime_resident_state", None)
+        if resident is not None and resident["phase"] != "FAILED":
+            # The reservation is still owned; native generation checks require
+            # a new content receipt before rebuilding any retired stage.
+            resident["phase"] = "RESERVED"
 
     def _poison_z2_execution(self) -> None:
         """Keep the native-composite and public session states consistent."""
@@ -3002,7 +3120,7 @@ class LingbotVlaV2Policy:
             for word in _plan_digest_words(child.plan_digest)
         )
         if len(descriptor) != len(native) + _Z2_CHILD_DIGEST_WORDS:
-            raise RuntimeError("LingBot2 Z2 planner descriptor assembly drifted")
+            raise RuntimeError("LingBot2 Z2 planner descriptor composition drifted")
         parent_metadata = tuple(
             (f"descriptor_{index:02d}", value)
             for index, value in enumerate(descriptor)
@@ -3058,7 +3176,7 @@ class LingbotVlaV2Policy:
                 or metadata["fixed_real_rows"] != profile["fixed_real_rows"]):
             raise RuntimeError(
                 "LingBot2 image/prefix structure differs from the prepared profile; "
-                "no RPU graph was touched.")
+                "no device graph was touched.")
         real_len = metadata["real_len"]
         lo, hi = profile["prefix_length_range"]
         if not lo <= real_len <= hi:
@@ -3121,11 +3239,6 @@ class LingbotVlaV2Policy:
         if int(num_steps) != NUM_STEPS:
             raise ValueError(
                 f"lingbot2 denoise is built for num_steps={NUM_STEPS}; got {num_steps}")
-        if self._vision_direct_prefix:
-            raise RuntimeError(
-                "LingBot2 direct-prefix owns one Vision Graph-baked scatter target "
-                "and is not a multi-prompt READY path. Disable "
-                "RPU_LINGBOT2_VISION_DIRECT_PREFIX or use multiview SPM Z2.")
         if not self._vlm_replay or not self._expert_replay:
             raise RuntimeError(
                 "LingBot2 prepare_graphs requires VLM_REPLAY=1 and EXPERT_REPLAY=1; "
@@ -3140,6 +3253,11 @@ class LingbotVlaV2Policy:
             prefix_length_range)
         lo = profiles[0]["real_min"]
         hi = profiles[-1]["real_max"]
+        if self._vision_direct_prefix and (len(profiles) != 1 or lo != hi):
+            raise ValueError(
+                "LingBot2 direct-prefix READY requires one fixed REAL prefix "
+                "length and one physical execution profile; prompt contents "
+                "and images may change while that REAL length stays fixed.")
         if self._multiview_spm_z2:
             if not (
                 MULTIVIEW_SPM_Z2_MIN_REAL_LEN
@@ -3335,7 +3453,7 @@ class LingbotVlaV2Policy:
 
     def _build_prefix_direct(
         self, images, keep_img, lang_tokens, lang_masks, grid_thw, num_patch,
-        prefill_plan,
+        prefill_plan, *, _run_vision=True,
     ):
         """Build/bind persistent prefix targets before the fused Vision Graph BUILD."""
         batch_cap = self._visual._rpu_vision_batch_cap
@@ -3347,55 +3465,71 @@ class LingbotVlaV2Policy:
             cache_capacity=int(vision_cache.max_seq_len),
         )
 
-        if lang_masks is not None:
-            keep = lang_masks.reshape(-1).bool()
-            lang_ids = lang_tokens.reshape(-1)[keep].reshape(1, -1)
-        else:
-            lang_ids = lang_tokens.reshape(1, -1)
-        lang_ids = lang_ids.to("cpu", dtype=torch.long)
-        lay = build_prefix_layout(
-            len(keep_img), num_patch, lang_ids, self._align_cfg, self._ids
-        )
-        if int(lay.S) != prefill_plan.real_len:
-            raise RuntimeError(
-                "LingBot2 CPU prefix geometry drifted after planner admission: "
-                f"admitted={prefill_plan.real_len}, built={lay.S}"
-            )
         plan = prefill_plan
 
         memo_key = (
-            PREFIX_POLICY_VERSION, tuple(keep_img), int(num_patch),
+            PREFIX_POLICY_VERSION, tuple(keep_img), int(num_patch), int(plan.execution_len),
             tuple(lang_tokens.reshape(-1).tolist()),
             None if lang_masks is None else tuple(
                 lang_masks.reshape(-1).bool().tolist()),
             tuple(grid_thw.reshape(-1).tolist()),
         )
         memo = self._pfx_memo
+        # Admission already validated the current request. The value-based key
+        # covers every prompt input, so a hit can reuse the admitted real length
+        # without rebuilding token/mask tensors twice per frame. Still compare
+        # the current plan before updating any owner or dispatching new pixels.
+        if (memo is not None and memo["key"] == memo_key
+                and memo["real_S"] != plan.real_len):
+            raise RuntimeError(
+                "LingBot2 CPU prefix geometry drifted after planner admission: "
+                f"admitted={plan.real_len}, built={memo['real_S']}"
+            )
         old_memo_keepalive = None
-        if memo is not None and memo["key"] != memo_key:
-            # Both graphs baked addresses owned by the old memo.  Refuse READY
-            # before mutating either cache; otherwise clear both and retain the
-            # old tensors locally until the new binding has executed once.
-            old_memo_keepalive = memo
-            _clear_graph_caches_for_rebind((
-                (self._visual._rpu_vision_graph_cache, "Vision"),
-                (self._vgc, "VLM"),
-            ))
-            self._pos_ids_src = None
-            self._pos_rpu = None
-            memo = None
-
-        if memo is None:
-            if (old_memo_keepalive is None
-                    and getattr(self._visual, "_rpu_vision_has_dispatched", False)):
+        if memo is None or memo["key"] != memo_key:
+            if lang_masks is not None:
+                keep = lang_masks.reshape(-1).bool()
+                lang_ids = lang_tokens.reshape(-1)[keep].reshape(1, -1)
+            else:
+                lang_ids = lang_tokens.reshape(1, -1)
+            lang_ids = lang_ids.to("cpu", dtype=torch.long)
+            lay = build_prefix_layout(
+                len(keep_img), num_patch, lang_ids, self._align_cfg, self._ids
+            )
+            if int(lay.S) != plan.real_len:
                 raise RuntimeError(
-                    "lingbot2 direct-prefix must bind its fixed DMA targets before "
-                    "the first Vision forward.")
-
+                    "LingBot2 CPU prefix geometry drifted after planner admission: "
+                    f"admitted={plan.real_len}, built={lay.S}"
+                )
             execution = pad_prefix_layout_for_execution(
                 lay, plan.execution_len, pad_token_id=self._ids.eos)
             real_S = int(lay.S)
             S = int(execution.execution_len)
+            runs = _contiguous_runs(execution.visual_pos_masks.squeeze(0))
+            _validate_prefix_scatter_runs(
+                runs, prefix_rows=S,
+                expected_rows=len(keep_img) * int(num_patch),
+                expected_runs=len(keep_img))
+            binding_key = (PREFIX_POLICY_VERSION, tuple(keep_img), int(num_patch),
+                           tuple(grid_thw.reshape(-1).tolist()), S, tuple(runs))
+            if memo is not None and memo["binding_key"] != binding_key:
+                # A physical-layout change needs new graph targets. Reject a
+                # frozen cache before allocating or copying any device input.
+                old_memo_keepalive = memo
+                _clear_graph_caches_for_rebind((
+                    (self._visual._rpu_vision_graph_cache, "Vision"),
+                    (self._vgc, "VLM"),
+                ))
+                self._pos_ids_src = None
+                self._pos_rpu = None
+                memo = None
+
+            if (old_memo_keepalive is None
+                    and memo is None
+                    and getattr(self._visual, "_rpu_vision_has_dispatched", False)):
+                raise RuntimeError(
+                    "lingbot2 direct-prefix must bind its fixed DMA targets before "
+                    "the first Vision forward.")
 
             _mm_types = getattr(self, "_rope_index_takes_mm_types", None)
             if _mm_types is None:
@@ -3413,6 +3547,10 @@ class LingbotVlaV2Policy:
                 _rope_kw["mm_token_type_ids"] = execution.mm_token_type_ids
             position_ids, _delta = self._vlm.get_rope_index(**_rope_kw)
             p0 = suffix_position_start(position_ids, execution.pad_masks)
+            position_ids_for_decoder, rope_cos_il_cpu, rope_sin_il_cpu = (
+                _build_prefill_mrope_inputs(
+                    position_ids, head_dim=self._mrope_head_dim,
+                    rope_theta=self._rope_theta, mrope_section=self._mrope_section))
 
             # Build the same prompt base as the legacy path, but leave visual
             # placeholders untouched: the in-graph merger DMA overwrites them.
@@ -3421,50 +3559,51 @@ class LingbotVlaV2Policy:
             for seg, tok in self._align_tokens.items():
                 a, b = lay.spans[seg]
                 embeds[0, a:b] = tok.to(torch.float16)
-            embeds = embeds.to(
-                device="rpu", dtype=torch.float16).contiguous()
-
-            runs = _contiguous_runs(
-                execution.visual_pos_masks.squeeze(0))
-            _validate_prefix_scatter_runs(
-                runs,
-                prefix_rows=S,
-                expected_rows=len(keep_img) * int(num_patch),
-                expected_runs=len(keep_img),
-            )
-            dense_ds = [
-                torch.zeros((S, VLM_HID), dtype=torch.float16)
-                .to("rpu").contiguous()
-                for _ in range(3)
-            ]
-            memo = {
-                "key": memo_key,
-                "embeds": embeds,
-                "dense": dense_ds,
-                "position_ids": position_ids,
-                "position_ids_rpu": position_ids.to("rpu"),
-                "S": S,
-                "real_S": real_S,
-                "p0": p0,
-                "a6_plan": plan.a6_plan,
-                "runs": runs,
-            }
-            # `memo` itself strongly owns every target while the setter runs.
-            # Publish it only after the setter succeeds: otherwise a retry with
-            # the same key could skip binding and feed untouched placeholders.
-            torch.ops.rpu.qwen3vl_vision_set_prefix_scatter(
-                self._visual._rpu_vision_handle,
-                int(embeds.data_ptr()),
-                [int(dense.data_ptr()) for dense in dense_ds],
-                [int(start) for start, _length in runs],
-                [int(length) for _start, length in runs],
-            )
-            self._pfx_memo = memo
-            # Prefix preparation used immediate RPU ops before the Vision
+            if memo is None:
+                with torch.inference_mode(False):
+                    embeds = embeds.to(device="rpu", dtype=torch.float16).contiguous()
+                    dense_ds = [
+                        torch.zeros((S, VLM_HID), dtype=torch.float16)
+                        .to("rpu").contiguous() for _ in range(3)]
+                    stable_position_ids = position_ids.clone()
+                    stable_position_ids_rpu = position_ids_for_decoder.to("rpu").contiguous()
+                    stable_rope_cos_il = rope_cos_il_cpu.to("rpu").contiguous()
+                    stable_rope_sin_il = rope_sin_il_cpu.to("rpu").contiguous()
+                memo = {
+                    "key": memo_key, "binding_key": binding_key,
+                    "embeds": embeds, "dense": dense_ds,
+                    "position_ids": stable_position_ids,
+                    "position_ids_rpu": stable_position_ids_rpu,
+                    "rope_cos_il": stable_rope_cos_il,
+                    "rope_sin_il": stable_rope_sin_il,
+                    "S": S, "real_S": real_S, "p0": p0,
+                    "a6_plan": plan.a6_plan, "runs": runs,
+                }
+                # Publish only after the native setter retains all Tensor owners.
+                torch.ops.rpu.qwen3vl_vision_set_prefix_scatter(
+                    self._visual._rpu_vision_handle, embeds, dense_ds,
+                    [int(start) for start, _length in runs],
+                    [int(length) for _start, length in runs])
+                self._pfx_memo = memo
+            else:
+                # Graph DMA addresses stay fixed. Mark content dirty before the
+                # first copy so a failed refresh cannot be mistaken for a hit.
+                memo["key"] = None
+                memo["embeds"].copy_(embeds)
+                memo["position_ids"].copy_(position_ids)
+                memo["position_ids_rpu"].copy_(position_ids_for_decoder)
+                memo["rope_cos_il"].copy_(rope_cos_il_cpu)
+                memo["rope_sin_il"].copy_(rope_sin_il_cpu)
+                memo.update(key=memo_key, real_S=real_S, p0=p0,
+                            a6_plan=plan.a6_plan)
+            # Prefix preparation used immediate device ops before the Vision
             # subsystem.  Release only temporary SPM allocations; persistent
             # targets above live in DDR and remain strongly owned by the memo.
             torch.ops.rpu.spm_alloc_reset_temporary()
 
+        memo["a6_plan"] = plan.a6_plan
+        if not _run_vision:
+            return
         if len(keep_img) == images.shape[0]:
             pix = images.reshape(-1, images.shape[-1])
             if not pix.is_contiguous():
@@ -3484,7 +3623,8 @@ class LingbotVlaV2Policy:
                     self._vision_direct_prefix_no_output),
             )
         return (memo["embeds"], memo["position_ids"],
-                memo["position_ids_rpu"], memo["dense"], None, None,
+                memo["position_ids_rpu"], memo["dense"],
+                memo["rope_cos_il"], memo["rope_sin_il"],
                 memo["S"], memo["real_S"], memo["p0"], memo["a6_plan"])
 
     def _fill_prefix_multiview_spm_z2(
@@ -3492,9 +3632,9 @@ class LingbotVlaV2Policy:
     ):
         """Run the exact three-camera Vision->Text physical Z2.
 
-        All prompt/layout validation and every RPU input allocation happen before
+        All prompt/layout validation and every device input allocation happen before
         the native prepare.  Once prepare acquires the physical arena, its first
-        forward is the immediately following RPU operation.  Later calls may
+        forward is the immediately following device operation.  Later calls may
         change images and any admitted REAL prompt.  Prompt owners keep their
         addresses; bytes are refreshed in place and position/M-RoPE changes are
         explicitly re-primed outside Graph capture before retained replay.
@@ -3629,7 +3769,7 @@ class LingbotVlaV2Policy:
         prompt_changed = prompt_key != current_prompt_key
         next_prompt_metadata = None
         if prompt_changed:
-            # Finish every fallible CPU copy before mutating stable RPU owners.
+            # Finish every fallible CPU copy before mutating stable device owners.
             next_prompt_metadata = {
                 "lang_ids": lang_ids.clone(),
                 "position_ids_cpu": position_ids_cpu.clone(),
@@ -3721,7 +3861,7 @@ class LingbotVlaV2Policy:
             3 * 256, images.size(2)
         )
         # This is preparation-only packing: one patch Linear/H2D/position add
-        # owns three adjacent RPU inputs, while native Vision remains three
+        # owns three adjacent device inputs, while native Vision remains three
         # sequential N=256 occurrences.  W8 Z2 explicitly selects the staged
         # device Linear; shared helper callers retain their CPU default.  Each
         # narrow view keeps the storage alive through the synchronous forward.
@@ -3750,7 +3890,7 @@ class LingbotVlaV2Policy:
 
         if not z2.get("prepared", False):
             # This reset and all allocations above precede prepare.  After the
-            # physical lease is acquired, forward is intentionally the next RPU
+            # physical lease is acquired, forward is intentionally the next device
             # operation; even stats are deferred until the caller regains control.
             torch.ops.rpu.spm_alloc_reset_temporary()
             z2["prepare_attempt_token"] = next(_Z2_PREPARE_ATTEMPTS)
@@ -3774,7 +3914,7 @@ class LingbotVlaV2Policy:
         if refresh_text_inputs:
             try:
                 # Re-prime last: the retained Text forward is the immediately
-                # following RPU operation, matching the physical-owner contract.
+                # following device operation, matching the physical-owner contract.
                 torch.ops.rpu.lingbot2_multiview_spm_z2_refresh_text_inputs(
                     z2["vision_handle"], z2["text_handle"],
                     z2["expert_handle"], self._z2_position_ids,
@@ -3812,12 +3952,12 @@ class LingbotVlaV2Policy:
         self, images, img_masks, lang_tokens, lang_masks, prefill_plan,
         grid_thw=None,
     ):
-        """Run the RPU ViT and assemble the prefix EXACTLY as the official embed_prefix does.
+        """Run the device ViT and assemble the prefix EXACTLY as the official embed_prefix does.
 
         Layout (authoritative YAML): [<vision_start> <image>*P <vision_end>]*n_img ++ lang
                                      ++ <eos>*8 (current_depth) ++ <eos>*8 (future_depth)
 
-        Returns (inputs_embeds [1,S,2560] RPU fp16, position_ids [3,1,S] CPU, dense_ds, S, p0).
+        Returns (inputs_embeds [1,S,2560] device fp16, position_ids [3,1,S] CPU, dense_ds, S, p0).
         """
         keep_img = [i for i in range(images.shape[0])
                     if img_masks is None or bool(img_masks.reshape(-1)[i])]
@@ -3862,7 +4002,7 @@ class LingbotVlaV2Policy:
                              f"{len(keep_img)} x {num_patch}")
 
         # Prompt constants depend on image count, tokens per image, language tokens
-        # and grid. Build their RPU buffers once, then overwrite only each image's
+        # and grid. Build their device buffers once, then overwrite only each image's
         # contiguous visual rows. Stable addresses support VLM Graph replay.
         # The key also includes which images survive filtering, so dropping different
         # cameras cannot reuse an incompatible prefix layout.
@@ -3942,10 +4082,10 @@ class LingbotVlaV2Policy:
         )
 
         # ---- embeds: token embeds, then overwrite the placeholder spans ----
-        # embed_tokens.weight lives on RPU (text_model.to("rpu") in build_lingbot_vla_v2), so the
+        # embed_tokens.weight lives on device (text_model.to("rpu") in build_lingbot_vla_v2), so the
         # lookup itself must run there — torch.embedding(rpu_weight, cpu_ids) raises
-        # "rpu_to_cpu_zerocopy: input must be on RPU device". Pull the RESULT straight back to
-        # CPU so the placeholder assembly below (masked_scatter / align-token writes) stays
+        # "rpu_to_cpu_zerocopy: input must be on device device". Pull the RESULT straight back to
+        # CPU so the placeholder composition below (masked_scatter / align-token writes) stays
         # exactly as it was; :345 does the single final .to("rpu").
         embeds_cpu = self._vlm.get_input_embeddings()(
             execution.input_ids.to("rpu")
@@ -4088,7 +4228,7 @@ class LingbotVlaV2Policy:
         self._cache.reset_to_position(0)
         if position_ids_rpu is None:
             # Legacy non-memo caller.  Memoized buckets pass their own stable
-            # RPU owner explicitly so A(length-x)->B(length-y)->A(length-x)
+            # device owner explicitly so A(length-x)->B(length-y)->A(length-x)
             # returns to the address originally baked for x.
             if self._pos_rpu is None or position_ids is not self._pos_ids_src:
                 self._pos_ids_src = position_ids
@@ -4103,14 +4243,20 @@ class LingbotVlaV2Policy:
             dtypes=[torch.float16],
         )
         with self._vgc.capture(sig):
-            _run_causal_decoder_forward(
-                self._text, self._text._rpu_decoder_handle,
+            prefill_kwargs = dict(
                 input_ids=None, inputs_embeds=embeds,
                 attention_mask=None, position_ids=position_ids_rpu,
                 past_key_values=self._cache, use_cache=True, return_dict=True,
                 deepstack_dense_visual_embeds=dense_ds,
                 rope_cos_il=rope_cos_il, rope_sin_il=rope_sin_il,
                 prefill_plan=(S, chunk_size, a6_plan))
+            cache_only = getattr(self._text, "_rpu_prefill_kv_only", None)
+            if cache_only is not None:
+                if cache_only(**prefill_kwargs) is not self._cache:
+                    raise RuntimeError("LingBot KV-only prefill replaced its shared cache owner")
+            else:
+                _run_causal_decoder_forward(
+                    self._text, self._text._rpu_decoder_handle, **prefill_kwargs)
         # _run_causal_decoder_forward advances the cache position by seq_len itself.
 
     def _prepare_ready_suffix_rope(self, p0):
@@ -4182,7 +4328,8 @@ class LingbotVlaV2Policy:
 
     def _build_denoise_unroll(self):
         """Bind the FP16-resident action head and full indexed AdaRMS schedule once."""
-        from rpu_backend.runtime.weights import tp_col_swizzle_mc_weight
+        from rpu_backend.runtime.weights import tp_col_swizzle_mc_weight, tp_row_swizzle_mc_weight
+        tp8_encoder = self._lingbot2_moe_cold_config.runtime_graph
 
         state_w_cpu = self._head_W["model.state_proj.weight"]
         state_b_cpu = self._head_W["model.state_proj.bias"]
@@ -4214,10 +4361,16 @@ class LingbotVlaV2Policy:
             weight_h = weight.detach().to(torch.float16).contiguous()
             return tp_col_swizzle_mc_weight(weight_h, 1).to("rpu").contiguous()
 
-        # P1 order is load-bearing: fp16 -> zero-pad -> single-core col-swizzle -> RPU.
+        # P1 order is load-bearing: fp16 -> zero-pad -> single-core col-swizzle -> device.
         state_w = col1(F.pad(state_w_cpu.half(), (0, state_pad - STATE_DIM)))
-        wc = col1(F.pad(self._enc_Wf.half(), (0, action_pad - ACTION_DIM)))
-        mo = col1(mo_w_cpu)
+        if tp8_encoder:
+            wc = tp_col_swizzle_mc_weight(
+                F.pad(self._enc_Wf.half(), (0, action_pad - ACTION_DIM)).contiguous(), 8
+            ).to("rpu").contiguous()
+            mo = tp_row_swizzle_mc_weight(mo_w_cpu.half().contiguous(), 8).to("rpu").contiguous()
+        else:
+            wc = col1(F.pad(self._enc_Wf.half(), (0, action_pad - ACTION_DIM)))
+            mo = col1(mo_w_cpu)
         op = col1(F.pad(op_w_cpu.half(), (0, 0, 0, action_pad - ACTION_DIM)))
         state_b = _h(state_b_cpu)
         mo_b = _h(mo_b_cpu)
@@ -4228,7 +4381,8 @@ class LingbotVlaV2Policy:
         torch.ops.rpu.lingbot_v2_moe_set_denoise_unroll(
             self._exp, state_w, state_b, wc, mo, mo_b, op, op_b, time_all,
             *self._fold_all,
-            STATE_DIM, ACTION_DIM, state_pad, action_pad, NUM_STEPS)
+            STATE_DIM, ACTION_DIM, state_pad, action_pad, NUM_STEPS,
+            tp8_encoder=tp8_encoder)
 
         self._denoise_state_pad = state_pad
         self._denoise_action_pad = action_pad
@@ -4239,6 +4393,9 @@ class LingbotVlaV2Policy:
         self._denoise_state_host = torch.zeros(1, state_pad, dtype=torch.float16)
         self._denoise_x0_host = torch.zeros(
             1, N_ACTION + 1, action_pad, dtype=torch.float16)
+        self._denoise_upload_rows = torch.zeros(1, dtype=torch.int64, device="cpu")
+        self._denoise_x0_host_row = self._denoise_x0_host.view(1, -1)
+        self._denoise_x0_row = self._denoise_x0.view(1, -1)
         # Native unroll only reads these DDR inputs into SPM; it never writes
         # them back. Thus the state pad and x0 row-0/pad initialized here stay
         # zero while each call overwrites only the complete logical regions.
@@ -4248,13 +4405,14 @@ class LingbotVlaV2Policy:
     def _denoise_unroll_run(self, state, noise, mask_r, S, real_S, p0,
                             dt, num_steps, action_plan):
         """Refresh stable padded inputs, then execute all Euler steps in one graph op."""
-        # Cross-device copy requires a contiguous destination. Fill the logical
-        # regions in small stable CPU staging slabs, then copy each complete
-        # padded slab into its stable RPU graph input.
+        # Publish each complete private input slab once through CPU->device copy.
+        # The native entry consumes these published owners on BUILD and REPLAY.
         self._denoise_state_host[:, :STATE_DIM].copy_(state)
         self._denoise_x0_host[:, 1:, :ACTION_DIM].copy_(noise)
         self._denoise_state.copy_(self._denoise_state_host)
         self._denoise_x0.copy_(self._denoise_x0_host)
+        # Both private owners were published by these CPU->device copies. No host
+        # writes intervene before native consumes them, including on REPLAY.
         self._cache.reset_to_position(S)
         prepared = self._prepared_graph_profile is not None
         dyn_dims = (
@@ -4271,7 +4429,7 @@ class LingbotVlaV2Policy:
                 self._exp, self._denoise_x0, self._denoise_state,
                 self._cache.k_caches, self._cache.v_caches, mask_r,
                 self._denoise_x_final, dt, S, p0, num_steps,
-                action_plan.selected.stage_tuple.physical_descriptor)
+                action_plan.selected.stage_tuple.physical_descriptor, True)
         return self._denoise_x_final[:, 1:, :ACTION_DIM].to("cpu").float()
 
     # ---------------------------------------------------------------- action
@@ -4310,7 +4468,20 @@ class LingbotVlaV2Policy:
                 request_metadata["real_len"]
             )
             self._action_execution_plan(prefill_plan.execution_len, 0)
+            if self._reserve_runtime_parameters(request_metadata, prefill_plan):
+                # Reserving static banks changes the physical planner budget.
+                prefill_plan = self._prefix_execution_plan(request_metadata["real_len"])
+            if getattr(self, "_vision_direct_prefix", False):
+                # Binding scatter targets changes the native Vision manifest.
+                # Install/refresh the stable owners before its dry selection;
+                # the later execution sees this same binding and descriptor.
+                self._build_prefix_direct(
+                    images, request_metadata["keep_img"], lang_tokens, lang_masks,
+                    torch.tensor(request_metadata["grid_key"], dtype=torch.long).reshape(-1, 3),
+                    request_metadata["merged_per_img"], prefill_plan,
+                    _run_vision=False)
             vision_plans = self._vision_execution_plans(request_metadata)
+            self._prime_runtime_parameters(vision_plans, prefill_plan)
         self._last_prefix_metadata = dict(request_metadata)
         state = state.float()
         noise = noise.float()
@@ -4341,7 +4512,7 @@ class LingbotVlaV2Policy:
                 (
                     embeds, position_ids, position_ids_rpu, dense_ds,
                     rope_cos_il, rope_sin_il,
-                    S, real_S, p0, prefill_plan,
+                    S, real_S, p0, prefill_a6_plan,
                 ) = self._build_prefix(
                     images, img_masks, lang_tokens, lang_masks,
                     prefill_plan, obs.get("image_grid_thw"),
@@ -4369,7 +4540,7 @@ class LingbotVlaV2Policy:
         if not self._multiview_spm_z2:
             self._vlm_fill(
                 embeds, position_ids, position_ids_rpu, dense_ds,
-                rope_cos_il, rope_sin_il, S, prefill_plan
+                rope_cos_il, rope_sin_il, S, prefill_a6_plan
             )
 
         graph_rope_offset = self._prepare_ready_suffix_rope(p0)
@@ -4397,7 +4568,7 @@ class LingbotVlaV2Policy:
             "prefill": (
                 composite_plan["children"][1]
                 if self._multiview_spm_z2 else {
-                    **prefill_plan.a6_plan.as_dict(include_candidates=False),
+                    **prefill_a6_plan.as_dict(include_candidates=False),
                     "component": LINGBOT2_TEXT_COMPONENT,
                     "stage": "prefill",
                     "execution_generation": self._component_generations[
@@ -4696,8 +4867,9 @@ def _build_lingbot_vla_v2_impl(
     execution_session=None,
     execution_generation=0,
     component_generations=None,
+    graph_runtime_policy=None,
 ):
-    """Build the LingBot-VLA V2 RPU runtime.
+    """Build the LingBot-VLA V2 device runtime.
 
     Args:
         ckpt:        path to the lingbot-vla-v2-6b checkpoint dir (sharded fp32 safetensors).
@@ -4718,6 +4890,15 @@ def _build_lingbot_vla_v2_impl(
     """
     native_cold = _Lingbot2MoeColdConfig.from_env()
     policy._lingbot2_moe_cold_config = native_cold
+    if graph_runtime_policy is None:
+        graph_runtime_policy = rpu_backend.graph.GraphRuntimePolicy.from_environment()
+    if graph_runtime_policy.lingbot2_multiview_spm_z2 != _env_exact_one(
+        "RPU_LINGBOT2_MULTIVIEW_SPM_Z2"
+    ):
+        graph_runtime_policy = dataclasses.replace(
+            graph_runtime_policy,
+            lingbot2_multiview_spm_z2=_env_exact_one("RPU_LINGBOT2_MULTIVIEW_SPM_Z2"),
+        )
     _validate_denoise_unroll()
     _validate_adarms_direct_schedule()
     (
@@ -4733,23 +4914,15 @@ def _build_lingbot_vla_v2_impl(
     from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
     from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLModel
 
-    # The expert reads the VLM's prefix KV cross-handle out of the shared DDR cache; ddr_flush
-    # keeps that cache coherent between the two handles (V1 proved this is required).
-    torch.rpu.set_ddr_flush(True)
-    # The direct builder leaves process-wide defaults to the caller; the public
-    # facade scopes and restores its runtime bundle. KV-insert hybrid routes
-    # handle aligned bulk and unaligned head/tail ranges without changing positions.
-    # AdaRMS fused broadcast requires compatible persistent per-layer SPM slots.
-    #
-    # Vision RoPE tables may reside in SPM. Image batching groups equal grids while
-    # preserving per-image attention. Fused mergers execute inside the vision Graph
-    # and change accumulation from the eager host path to device arithmetic.
-    # Patch embedding precision remains a separate explicit runtime choice.
-    # Outputs retain independent storage so callers can hold them across requests.
-    #
-    # Expert W8A16 quantizes only routed gate/up/down weights with per-channel
-    # FP16 scales. Router, attention, AdaRMS, shared expert, residual and action
-    # head remain FP16. It requires grouped experts and explicit opt-in.
+    # Runtime Graph CPU boundaries use explicit force flushes. Prefix KV is
+    # produced and consumed by the device across handles, so it needs no CPU
+    # cache maintenance here. Preserve the caller's normal-flush setting; keep
+    # the legacy non-runtime-graph builder's behavior unchanged.
+    if not native_cold.runtime_graph:
+        torch.rpu.set_ddr_flush(True)
+    # The public facade scopes cold kernel controls to this model. The direct
+    # builder preserves the caller's environment. Vision batches equal-size
+    # cameras; fused mergers and expert quantization follow the selected profile.
 
     # Qwen3-VL base dir resolution — CALL time, explicit source for diagnostics.
     # Precedence: explicit qwen3vl_base arg (threaded from from_checkpoint /
@@ -4791,6 +4964,9 @@ def _build_lingbot_vla_v2_impl(
             f"lingbot2: Qwen3-VL scaffold/checkpoint mismatch.\n  missing={missing[:8]}\n"
             f"  unexpected={unexpected[:8]}")
 
+    # load_state_dict(assign=True) transferred the checkpoint storage to vlm.
+    del sd
+
     _materialize_derived_buffers(vlm)
     _assert_no_meta(vlm, "after checkpoint load + derived-buffer materialization")
     vlm.eval()
@@ -4801,7 +4977,7 @@ def _build_lingbot_vla_v2_impl(
         torch.rpu.set_caching_allocator(True)
 
     text_model, vision_model = vlm.language_model, vlm.visual
-    # Publish partial ownership before the first irreversible swizzle/RPU
+    # Publish partial ownership before the first irreversible swizzle/device
     # allocation. The outer transaction can then retire any text/vision handle
     # installed before a later stage fails.
     policy._vlm = vlm
@@ -4811,10 +4987,13 @@ def _build_lingbot_vla_v2_impl(
     policy._gc_retirement_enabled = True
     policy._rpu_swizzle_started = True
 
-    # ---- Step A/C: swizzle text linears on CPU, THEN move to RPU (P1 order) ----
+    # ---- Step A/C: swizzle text linears on CPU, THEN move to device (P1 order) ----
     # RC-1: ckpt_reader normalizes source BF16/FP32 weights to CPU FP32, so the swizzle would
     # read element_size()==4 and emit a layout the fp16 kernel cannot consume. .half() must
     # precede BOTH the swizzle and .to("rpu"). The vision side casts its own weights explicitly.
+    if native_cold.runtime_graph:
+        from .runtime_graph import fold_lingbot_language_rmsnorm_
+        fold_lingbot_language_rmsnorm_(text_model)
     text_model.half()
     # VLM prefill W8A16 — opt-in, DEFAULT OFF (RPU_LINGBOT2_PREFILL_W8A16=1). Must land between
     # .half() and convert_linear_weights_inplace/.to('rpu'). Unset => the fp16 tower, unchanged.
@@ -4831,7 +5010,7 @@ def _build_lingbot_vla_v2_impl(
     else:
         convert_linear_weights_inplace(text_model, skip_names=set())
     if _env_exact_one("RPU_LINGBOT2_MULTIVIEW_SPM_Z2"):
-        # A retained physical arena cannot run an out-of-band RPU embedding
+        # A retained physical arena cannot run an out-of-band device embedding
         # lookup between replays.  Keep one host FP16 token table so arbitrary
         # admitted prompt bytes can refresh the stable P225 carrier using CPU
         # F.embedding + a DDR copy only.  This is Z2-only; generic execution
@@ -4855,6 +5034,7 @@ def _build_lingbot_vla_v2_impl(
         vision_config=cfg.vision_config,
         w8a16=_vis_w8,
         execution_chunk_size="auto" if z2_enabled else vision_chunk,
+        graph_runtime_policy=graph_runtime_policy,
     )
     _take_lingbot2_component_retirement(policy, vision_model, "vision")
     # Registering the merger weights is the one native authority: it enables
@@ -4863,9 +5043,16 @@ def _build_lingbot_vla_v2_impl(
     _fused_merger_on = rpu_env_bool("RPU_QWEN3VL_VISION_FUSED_MERGER")
     if _fused_merger_on:
         register_qwen3vl_vision_fused_merger(vision_model)
-    # Stage patch embedding for the RPU independently of the fused merger setup.
-    # RPU_QWEN3VL_VISION_PATCH_EMBED_DEVICE selects this path; changing the host
-    # FP32 GEMM to device FP16 changes its accumulation and rounding.
+    if native_cold.runtime_graph:
+        torch.ops.rpu.qwen3vl_vision_set_lingbot_tap_merger(
+            vision_model._rpu_vision_handle, True)
+    # ---- patch_embed on device (2026-07-29) ----------------------------------------------------
+    # vision.py's `_rpu_patch_embed_on_device` branch runs the folded patch_embed Linear on the
+    # device instead of as a host GEMM. It ships inside enable_qwen3_vl_vision_merger_on_device(),
+    # which lingbot2 does NOT call (we use the in-graph fused merger above instead), so this one
+    # branch had simply never been reachable here — the same "already in the .so, never called"
+    # story as the flags above. Staged here directly so the merger path is left alone.
+    #
     if os.environ.get("RPU_QWEN3VL_VISION_PATCH_EMBED_DEVICE") == "1":
         if not getattr(vision_model, "_rpu_patch_embed_on_device", False):
             from rpu_backend.runtime.weights import tp_col_swizzle_mc_weight
@@ -4902,11 +5089,21 @@ def _build_lingbot_vla_v2_impl(
             stage: dict(fields) for stage, fields in text_execution.items()
         }
         text_execution.setdefault("prefill", {})["chunk_size"] = "auto"
+    prefill_kv_pair = rpu_env_bool("RPU_LINGBOT2_PREFILL_KV_PAIR", default=False)
+    if prefill_kv_pair and not native_cold.runtime_graph:
+        raise ValueError("paired Prefill KV requires the retained LingBot runtime graph")
+    prefill_qk_norm_rope = rpu_env_bool("RPU_LINGBOT2_PREFILL_QK_NORM_ROPE", default=False)
+    if prefill_qk_norm_rope and not native_cold.runtime_graph:
+        raise ValueError("fused Prefill QK norm/RoPE requires the retained LingBot runtime graph")
     install_qwen3_vl_text_for_rpu(
         text_model, text_config=cfg.text_config, vision_config=cfg.vision_config,
         deepstack_lang_layers=deepstack_text_layers,
         enable_deepstack=True, max_seq_len=max_seq,
         scale_lists=_text_scale_lists(text_model),
+        prefill_kv_pair=prefill_kv_pair,
+        prefill_qk_norm_rope=prefill_qk_norm_rope,
+        **({"folded_rmsnorm": True, "prefill_kv_only": True}
+           if native_cold.runtime_graph else {}),
         execution_config=text_execution)
     _take_lingbot2_component_retirement(policy, text_model, "decoder")
     # The VLM only writes prefix KV; this checkpoint has no lm_head.
@@ -4954,6 +5151,7 @@ def _build_lingbot_vla_v2_impl(
         execution_session=execution_session,
         execution_generation=execution_generation,
         component_generations=component_generations,
+        graph_runtime_policy=graph_runtime_policy,
     )
     policy._rpu_swizzled = True
     return policy
@@ -4971,14 +5169,20 @@ def build_lingbot_vla_v2(
     _execution_session=None,
     _execution_generation=0,
     _component_generations=None,
+    graph_runtime_policy=None,
 ):
-    """Build one process-exclusive LingBot-VLA-V2 RPU runtime.
+    """Build one process-exclusive LingBot-VLA-V2 device runtime.
 
     CPU-only preflight failures release the process slot immediately. Once
-    swizzling/RPU materialization starts, a failed owner keeps the slot claimed
-    until its traceback is collected, preventing traceback-held RPU tensors from
+    swizzling/device materialization starts, a failed owner keeps the slot claimed
+    until its traceback is collected, preventing traceback-held device tensors from
     overlapping a replacement policy.
     """
+    if graph_runtime_policy is not None and not isinstance(
+        graph_runtime_policy, rpu_backend.graph.GraphRuntimePolicy
+    ):
+        raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
+
     from rpu_backend.api._execution import normalize_rpu_execution
 
     execution_config = normalize_rpu_execution(
@@ -5032,6 +5236,7 @@ def build_lingbot_vla_v2(
             execution_session=_execution_session,
             execution_generation=_execution_generation,
             component_generations=_component_generations,
+            graph_runtime_policy=graph_runtime_policy,
         )
         return result
     except BaseException as error:

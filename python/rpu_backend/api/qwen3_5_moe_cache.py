@@ -39,7 +39,7 @@ class Qwen3_5MoeCache(Qwen3_5Cache):
         except (TypeError, ValueError) as exc:
             raise ValueError(str(exc)) from exc
         from rpu_backend.adapters.qwen3_5_moe.cores import core_topology
-        topology = core_topology({"model": {"num_cores": num_cores}})
+        topology = core_topology({"model": {"num_cores": num_cores}}, config=config)
         text_config = getattr(config, "text_config", config)
         # Dense Qwen3.5's reduced-profile factory deliberately rejects MoE.
         # Reuse its cache implementation with this already validated geometry.
@@ -79,7 +79,7 @@ class Qwen3_5MoeCache(Qwen3_5Cache):
                 "Qwen3_5MoeCache.from_model requires a completely installed "
                 "35B-A3B model"
             )
-        expected = core_topology(getattr(model, "_rpu_execution", None))
+        expected = core_topology(getattr(model, "_rpu_execution", None), config=model.config)
         if topology_tuple(topology) != topology_tuple(expected):
             raise ValueError("Qwen3.5-MoE config no longer matches its installed core layout")
         validate_native_topology(state.handle, topology)

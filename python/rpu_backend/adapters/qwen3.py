@@ -154,7 +154,7 @@ _idempotent_patch_qwen3_rotary(Qwen3RotaryEmbedding)
 # _rpu_swizzled flag when the first finishes, or (for same-model
 # re-entry within one thread) hits the fast-path check above the lock.
 #
-# Note: D-17 single-handle restricts the process to one LIVE RPU model
+# Note: D-17 single-handle restricts the process to one LIVE device model
 # at a time, so cross-model serialization adds near-zero contention in
 # practice (users never run two concurrent .to('rpu') intentionally).
 _SWIZZLE_LOCK = threading.Lock()
@@ -227,7 +227,7 @@ def _validate_reduced_model_structure(model, topology):
     try:
         profile = qwen3_core_profile(model.config, topology.num_cores)
         # Exact 8B FP16 also needs whole-tree admission at budget8 before its
-        # bounded CPU-to-RPU migration. Other default8 paths stay unchanged.
+        # bounded CPU-to-device migration. Other default8 paths stay unchanged.
         if (topology.num_cores == 8 and model.config.hidden_size == 4096
                 and profile is None):
             raise ValueError("bounded 8B weight migration requires its exact plain FP16 profile")
@@ -317,7 +317,7 @@ def _check_profile(config) -> None:
         raise UnsupportedModelError(
             f"Qwen3 with profile (hidden_size={profile[0]}, "
             f"intermediate_size={profile[1]}, num_hidden_layers={profile[2]}, "
-            f"num_key_value_heads={profile[3]}) has no certified RPU execution "
+            f"num_key_value_heads={profile[3]}) has no certified device execution "
             "profile in this build. This deny-by-default result means the "
             "profile/precision/envelope combination has not completed hardware "
             "certification; it is not a claim that a future bounded or quantized "
@@ -568,7 +568,7 @@ class Qwen3Adapter:
         # construction stacks interceptors: the second __init__ captures the
         # first's `rpu_aware_to` as `original_to`, so `model.to('cpu')` would
         # chain through two interceptors. The single-handle gate (D-17) only
-        # catches two DIFFERENT live models on RPU — not double-wrap on the
+        # catches two DIFFERENT live models on device — not double-wrap on the
         # same instance. Short-circuit the `model.to` rewiring; the rest of
         # __init__ runs normally (cheap rebind of self.model / self._rpu_is_ready
         # is safe — to_rpu()'s own `_rpu_is_ready` guard prevents re-swizzle).
@@ -607,8 +607,8 @@ class Qwen3Adapter:
                     )
                 return self.to_rpu()
             # iter2 HIGH-3 + iter3 MEDIUM (codex): once the adapter has swizzled
-            # weights for RPU, `convert_linear_weights_inplace` is IRREVERSIBLE —
-            # moving the model back to CPU and then to RPU again would NOT
+            # weights for device, `convert_linear_weights_inplace` is IRREVERSIBLE —
+            # moving the model back to CPU and then to device again would NOT
             # re-swizzle (no-op via _rpu_is_ready) and the CPU forward path
             # would crash on swizzled weights. Reject any non-rpu target after
             # to_rpu() so the failure surfaces at the .to() call site.
@@ -629,7 +629,7 @@ class Qwen3Adapter:
             ):
                 from rpu_backend.api.errors import RPUBackendError as _RPUBackendError
                 raise _RPUBackendError(
-                    f"model.to({target!r}) rejected: weights have been swizzled for RPU "
+                    f"model.to({target!r}) rejected: weights have been swizzled for device "
                     "(an irreversible operation per `convert_linear_weights_inplace` semantics). "
                     "Reload the model fresh via `RPUModelForCausalLM.from_pretrained(...)` if you "
                     "need a CPU copy."
@@ -648,7 +648,7 @@ class Qwen3Adapter:
         model.to = rpu_aware_to
 
     def to_rpu(self):
-        """Step A → B → C: convert weights, all-layers-once patch, claim live-handle, return RPU-ready model.
+        """Step A → B → C: convert weights, all-layers-once patch, claim live-handle, return device-ready model.
 
         HIGH-3 (codex iter1): IDEMPOTENT for the same model instance. If
         `to_rpu()` was already called on this adapter, returns `self.model`
@@ -656,7 +656,7 @@ class Qwen3Adapter:
         weights) or re-claiming the live-handle gate (which would raise against
         ourself).
 
-        Pitfall 1 (P1 — CLAUDE.md §"Critical: Known Pitfalls"): SKIP_LINEAR_NAMES.
+        SKIP_LINEAR_NAMES ownership is documented in docs/pitfalls.md.
         Plain/W8 Qwen3 has no specialized `.dense` layers, so it uses an empty
         skip set. The on-install W4 recipe packs its seven decoder projections
         once and excludes them from the subsequent generic FP16 head swizzle.
@@ -716,7 +716,7 @@ class Qwen3Adapter:
                 "Qwen3Adapter.to_rpu(): another Qwen3 swizzle is currently in "
                 "progress in this process (module-level serialization). Gate your "
                 "caller so .to('rpu') runs once per model and does not race "
-                "with another RPU model load."
+                "with another device model load."
             )
         try:
             from rpu_backend.runtime.hw_attrs import (
@@ -759,7 +759,7 @@ class Qwen3Adapter:
             _claim_live_instance(self.model)
             try:
                 # Reuse HostDDR mappings for request temporaries before the
-                # first RPU allocation freezes the process allocator policy.
+                # first device allocation freezes the process allocator policy.
                 # A rejected second model must not change the live owner's policy.
                 torch.rpu.set_caching_allocator(True)
                 if self._large_quant:
@@ -782,6 +782,11 @@ class Qwen3Adapter:
             if self._large_quant:
                 self.model._rpu_kv_cache_layer_bank_size = 8
                 inner._rpu_kv_cache_layer_bank_size = 8
+            elif not self._is_w8a16 and self._quantization is None:
+                # Dense FP16 keeps each layer's ABI/address while cache reset
+                # publishes an owning K/V bank once instead of every view.
+                self.model._rpu_kv_cache_layer_bank_size = self.model.config.num_hidden_layers
+                inner._rpu_kv_cache_layer_bank_size = self.model.config.num_hidden_layers
             inner_state = vars(inner)
             had_instance_forward = "forward" in inner_state
             original_instance_forward = inner_state.get("forward")
@@ -834,7 +839,7 @@ class Qwen3Adapter:
                         execution_core_count=self._topology.num_cores,
                     )
                 elif int(self.model.config.hidden_size) >= 4096:
-                    # A full converted 8B/14B CPU decoder plus its RPU copy
+                    # A full converted 8B/14B CPU decoder plus its device copy
                     # can exceed the staging room of a 29-GiB host. Release
                     # each converted CPU layer before converting the next.
                     _stage_large_qwen3_weights_for_rpu(self.model)
@@ -1054,12 +1059,12 @@ def _push_lm_head_weight(causal_lm, handle: int) -> None:
     The weight must be col-partition swizzled for the SPM GEMM kernel
     (rpu_launch_linear_spm_to_spm_kernel with partition=1). Two cases:
 
-    (a) Weight already on RPU → assumed pre-swizzled (i.e., caller ran
+    (a) Weight already on device → assumed pre-swizzled (i.e., caller ran
         convert_linear_weights_inplace on the full CausalLM INCLUDING
-        lm_head BEFORE .to("rpu")). If lm_head was moved to RPU WITHOUT
+        lm_head BEFORE .to("rpu")). If lm_head was moved to device WITHOUT
         swizzling, the caller has a bug — we cannot detect this case.
     (b) Weight still on CPU → explicitly swizzled here via
-        transform_linear_weight(..., partition=1) before moving to RPU.
+        transform_linear_weight(..., partition=1) before moving to device.
 
     This mirrors legacy setup_fuse_lm_head() (model_converter.py:1421-1430).
     """
@@ -1115,9 +1120,9 @@ def _push_lm_head_weight(causal_lm, handle: int) -> None:
             causal_lm, "_rpu_lm_head_int8_cpu_ref"
         ):
             raise RPUBackendError(
-                "int8 lm_head is already on RPU but no unswizzled CPU "
+                "int8 lm_head is already on device but no unswizzled CPU "
                 "reference was saved; reload the model and move it through "
-                "the Qwen3 RPU adapter before enabling fused lm_head"
+                "the Qwen3 device adapter before enabling fused lm_head"
             )
         _stash_int8_lm_head_cpu_reference(causal_lm)
         lm_scale = causal_lm.lm_head.weight_scale.detach()
@@ -1137,7 +1142,7 @@ def _push_lm_head_weight(causal_lm, handle: int) -> None:
         return
 
     if lm_w.device.type == "rpu":
-        # Already swizzled + on RPU (common path: convert_linear_weights_inplace
+        # Already swizzled + on device (common path: convert_linear_weights_inplace
         # was called on the full CausalLM before .to("rpu")).
         lm_w = lm_w.to(torch.float16).contiguous()
     else:
@@ -1226,15 +1231,15 @@ def _apply_plain_lm_head_causal_append_for_rpu(causal_lm) -> None:
             if spans is not None:
                 if (input_ids is None) == (inputs_embeds is None):
                     raise AssertionError(
-                        "RPU continuation requires exactly one of input_ids or inputs_embeds"
+                        "device continuation requires exactly one of input_ids or inputs_embeds"
                     )
                 if labels is not None:
                     raise NotImplementedError(
-                        "RPU segmented continuation does not support labels/loss"
+                        "device segmented continuation does not support labels/loss"
                     )
                 if use_cache is False or kwargs.get("return_dict") is False:
                     raise NotImplementedError(
-                        "RPU continuation requires use_cache=True and return_dict=True"
+                        "device continuation requires use_cache=True and return_dict=True"
                     )
                 attention_mask, position_ids, cache_position = (
                     _canonicalize_plain_text_controls(
@@ -1308,7 +1313,7 @@ def _apply_fused_lm_head_for_rpu(causal_lm) -> int:
 
     Pushes lm_head weight (col-partition swizzled) to C++ once during patching.
     _push_lm_head_weight() handles the swizzle automatically: if the weight is
-    already on RPU it's assumed pre-swizzled; if on CPU it's explicitly
+    already on device it's assumed pre-swizzled; if on CPU it's explicitly
     transform_linear_weight(..., partition=1)'d.
 
     Prerequisites:
@@ -1456,7 +1461,7 @@ def _apply_fused_lm_head_for_rpu(causal_lm) -> int:
                     if (input_ids is None) == (inputs_embeds is None):
                         raise AssertionError("must provide exactly one of input_ids or inputs_embeds")
                     if use_cache is False or return_dict is False:
-                        raise NotImplementedError("RPU continuation requires use_cache=True and return_dict=True")
+                        raise NotImplementedError("device continuation requires use_cache=True and return_dict=True")
                     if self.lm_head.weight.dtype == torch.int8 and logits_to_keep != 1:
                         raise NotImplementedError("int8 continuation requires logits_to_keep=1")
                     from types import SimpleNamespace
@@ -1536,7 +1541,7 @@ def _apply_fused_lm_head_for_rpu(causal_lm) -> int:
                 )
         else:
             # Preserve the runner's precise invalid-cache/input error while
-            # keeping any CPU→RPU transfer outside capture.
+            # keeping any CPU→device transfer outside capture.
             if attention_mask is not None and attention_mask.device.type != "rpu":
                 attention_mask = attention_mask.to("rpu")
             if position_ids is not None and position_ids.device.type != "rpu":
@@ -1547,7 +1552,7 @@ def _apply_fused_lm_head_for_rpu(causal_lm) -> int:
 
         if _batch > 1 and not bool(self.model._rpu_batch_decode_enabled):
             raise AssertionError(
-                "RPU batch > 1 requires the Qwen3 batch-decode capability"
+                "device batch > 1 requires the Qwen3 batch-decode capability"
             )
 
         _runner_kwargs = dict(
@@ -1684,7 +1689,7 @@ def _run_fused_lm_head_decode_top1(
         getattr(causal_lm.model, "_rpu_batch_decode_enabled", False)
     ):
         raise AssertionError(
-            "RPU batch > 1 requires the Qwen3 batch-decode capability"
+            "device batch > 1 requires the Qwen3 batch-decode capability"
         )
     if seq_len != 1:
         raise NotImplementedError(
@@ -1733,9 +1738,6 @@ def _run_fused_lm_head_decode_top1(
         if position_ids is not None and position_ids.device.type != "rpu":
             position_ids = position_ids.to("rpu")
         capture_ctx = _nullcontext()
-
-    if input_ids is not None and input_ids.device.type != "rpu":
-        input_ids = input_ids.to("rpu")
 
     with capture_ctx:
         raw, pkv = _run_causal_decoder_forward(

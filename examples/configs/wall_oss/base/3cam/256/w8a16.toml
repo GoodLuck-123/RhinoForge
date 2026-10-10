@@ -1,0 +1,41 @@
+# Wall-OSS base: real cameras, H32, ten denoising steps, TP8.
+# Edit text_tokens and linear_acc32 in this file; no separate ACC/text config.
+# CPU and optional exact padding below are the selected T32 ACC16 settings.
+# For another input/text length, remove padding_rows and consult the performance report.
+# Paths resolve from the invocation directory; use the checkout root.
+
+[wall_oss]
+precision = "w8a16"
+vision_window = false
+vision_row_reuse = true
+vision_pair = true
+
+[input]
+fp16_checkpoint = "/path/to/wall-oss-0.5"
+w8_checkpoint = "/path/to/wall-oss-0.5-w8a16"
+batch_template = "/path/to/{cameras}cam{image_size}_t{text_tokens}.pt"
+image_size = [256, 256]
+cameras = 3
+text_tokens = 32
+text_length_scope = "instruction"
+action_horizon = 32
+num_steps = 10
+
+[cpu]
+threads = 12
+
+[rpu_execution.prefill]
+chunk_size = "auto"
+linear_acc32 = false
+
+[rpu_execution.vision]
+linear_acc32 = false
+
+[rpu_execution.action]
+linear_acc32 = false
+
+[run]
+warmup = 2
+runs = 5
+seed = 0
+output_dir = "./wall_base_results/3cam/256/w8a16_t32_acc16"

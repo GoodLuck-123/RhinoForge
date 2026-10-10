@@ -77,7 +77,7 @@ def _swizzle_leaf_linear(linear: nn.Linear, *, force_col_partition: bool = False
 def swizzle_projector_inplace(projector, *, num_cores=8) -> None:
     """Pi05-local SigLIP projector pre-swizzle (P1 double-swizzle belt).
 
-    Sets `_rpu_weights_converted` sentinel BEFORE move-to-RPU so
+    Sets `_rpu_weights_converted` sentinel BEFORE move-to-device so
     `_convert_siglip_projector_for_rpu` (siglip_converter.py:165) sees idempotent.
     Mirrors `_adapter.py:949-956` Step C verbatim.
 
@@ -142,7 +142,7 @@ def _prepare_final_norm_weights(expert, *, num_cores=8) -> None:
     already registers ``norm._rpu_dense_w_rp`` / ``_rpu_dense_b_rp`` on each
     layer's input/post_attention layernorm. The final norm (``expert.norm``)
     is not touched by that helper — it stays on CPU and runs in Python fp32
-    by default (adarms.py:445). For the fused denoise step we need it on RPU
+    by default (adarms.py:445). For the fused denoise step we need it on device
     in the same row-partition swizzled form.
 
     Idempotent: skips work if buffers are already registered.
@@ -178,7 +178,7 @@ def _swizzle_action_proj_weights(action_in_proj, action_out_proj) -> None:
     K=32 for action_in_proj satisfies num_ele_32B=16 alignment (K%16==0). The
     8-core default converter (root-Linear walker) is bypassed — calling it
     AND this helper would double-swizzle (P1 pitfall). The transformed
-    weight + bias are moved to RPU fp16. Caller MUST NOT also pass these
+    weight + bias are moved to device fp16. Caller MUST NOT also pass these
     modules through ``_convert_linear_weights_inplace``.
 
     Stored as ``_rpu_w_num_cores_1`` and ``_rpu_bias`` attributes (the bias
@@ -207,7 +207,7 @@ def _swizzle_action_proj_weights(action_in_proj, action_out_proj) -> None:
 
 
 def _precompute_adarms_cond_all(policy, num_steps: int) -> "torch.Tensor":
-    """Precompute the [num_steps, H_ada] adarms_cond tensor on RPU fp16.
+    """Precompute the [num_steps, H_ada] adarms_cond tensor on device fp16.
 
     The conditioning is deterministic from the time schedule (independent of
     x_t), so we materialize all num_steps cond vectors up front. Mirrors the
@@ -261,9 +261,9 @@ def _precompute_adarms_table(expert, cond_all, *, dense_w8a16: bool):
     """CPU-compute fixed-schedule modulation, using the installed dense dtype.
 
     Layout is [steps, attention/MLP per layer then final norm, scale/shift/gate].
-    Like RhinoVLA's table, CPU fp32 accumulation can differ from the RPU ACC16
+    Like RhinoVLA's table, CPU fp32 accumulation can differ from the device ACC16
     GEMV/ring. This is a numerical optimization candidate, not bitwise parity.
-    The native cold setter takes its own RPU copy and seals the step count.
+    The native cold setter takes its own device copy and seals the step count.
     """
     from rpu_backend.quant._common import (
         quantize_linear_per_channel, dequantize_linear_per_channel,

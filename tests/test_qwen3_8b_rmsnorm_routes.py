@@ -35,7 +35,7 @@ def qwen_rms_executable(tmp_path_factory):
     helpers = "\n".join(_block(source, marker) for marker in (
         "    bool ordinary_rmsnorm_route_enabled() const",
         "    RpuRmsNormSpmRoute consume_ordinary_rmsnorm_route(",
-        "    RpuRmsNormSpmRoute consume_decoder_rmsnorm_route(",
+        "    RpuRmsNormSpmRoute consume_wall_rmsnorm_route(",
         "    RpuRmsNormSpmRoute consume_delivery_rmsnorm_route(",
     ))
     consumer_source = (ROOT / "src/core/fmb_three_stage_chunk_plan.cpp").read_text()
@@ -45,10 +45,12 @@ def qwen_rms_executable(tmp_path_factory):
                           for name in ("CAUSAL_DECODER_ORDINARY_RMSNORM_SITE",
                                        "RHINOVLA_TEXT_HIGH_RMSNORM_SITE",
                                        "RHINOVLA_TEXT_HIGH_ACTIVATION_SITE",
-                                       "QWEN3VL_DELIVERY_RMS_SITE"))
-    calls = re.findall(r"rpu_launch_rmsnorm_spm_kernel\([\s\S]*?\);", source)
+                                       "QWEN3VL_DELIVERY_RMS_SITE", "kCausalDecoderRmsNormRowsSite"))
+    # The LingBot terminal-layer specialization has its own route tests.
+    ordinary_source = source.replace(_block(source, "    void emit_lingbot_prefill_kv_tail("), "")
+    calls = re.findall(r"rpu_launch_rmsnorm_spm_kernel\([\s\S]*?\);", ordinary_source)
     calls = [call for call in calls if "consume_ordinary_rmsnorm_route(" in call or
-             re.search(r"consume_decoder_rmsnorm_route\(rows,\s*h,\s*chunk.idx\)", call)]
+             re.search(r"consume_wall_rmsnorm_route\(rows,\s*h,\s*chunk.idx\)", call)]
     assert len(calls) == 5  # input, Q, K, post, final; execute actual launch arguments.
     dispatch = "\n".join(f"if (site == {index}) {{ {call} return; }}" for index, call in enumerate(calls))
     program = r'''
@@ -97,6 +99,9 @@ void rpu_launch_rmsnorm_spm_kernel(uint32_t input, uint32_t output, uint32_t gam
 }
 class CausalDecoderModel {
 public:
+    uint32_t wall_rmsnorm_capability_=RPU_RMSNORM_CAP_BASE;
+    bool decoder_mixed_precision_=false;
+    bool lingbot_folded_rmsnorm_=false;
     virtual ~CausalDecoderModel() = default;
     int64_t h = 4096, intermediate = 12288, layers = 36, q = 32, kv = 8, hd = 128, tp = 8;
     bool has_qk_norm_ = true, has_qkv_bias_ = false, use_silu_ = true, nvfp4_ = false;

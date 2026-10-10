@@ -148,7 +148,7 @@ void check_rhino_full_w8_projection(const at::Tensor& weight,
     TORCH_CHECK(weight.defined() && weight.device().type() == at::kPrivateUse1 &&
                     weight.scalar_type() == at::kChar && weight.is_contiguous() &&
                     weight.dim() == 2 && weight.size(0) == n && weight.size(1) == k,
-                "RhinoVLA full W8 requires contiguous INT8 RPU projection [", n, ",", k, "]");
+                "RhinoVLA full W8 requires contiguous INT8 device projection [", n, ",", k, "]");
     TORCH_CHECK(scale.defined() && scale.device() == weight.device() &&
                     scale.scalar_type() == at::kHalf && scale.is_contiguous() &&
                     scale.dim() == 1 && scale.numel() == n,
@@ -593,7 +593,7 @@ public:
             TORCH_CHECK(t.defined() && t.device().type() == at::kPrivateUse1 &&
                         t.scalar_type() == at::kHalf && t.is_contiguous(),
                         "RhinoVLAModel::set_denoise_loop_weights: ", name,
-                        " must be contiguous fp16 RPU tensor");
+                        " must be contiguous fp16 device tensor");
         };
         if (!next_io_w8a16) check_rpu(action_in_w, "action_in_w");
         check_rpu(action_in_b, "action_in_b");
@@ -749,7 +749,7 @@ public:
             TORCH_CHECK(t.defined() && t.device().type() == at::kPrivateUse1 &&
                         t.scalar_type() == at::kHalf && t.is_contiguous(),
                         "RhinoVLAModel::set_denoise_loop_adarms_tables: ", name,
-                        " must be contiguous fp16 RPU tensor");
+                        " must be contiguous fp16 device tensor");
         };
         check_rpu(pair_table, "pair_table");
         check_rpu(final_table, "final_table");
@@ -825,7 +825,7 @@ public:
                     "RhinoVLAModel::set_denoise_loop_time_proj_table before set_weights");
         TORCH_CHECK(table.defined() && table.device().type() == at::kPrivateUse1 &&
                     table.scalar_type() == at::kHalf && table.is_contiguous(),
-                    "RhinoVLA time-proj table must be contiguous fp16 RPU tensor");
+                    "RhinoVLA time-proj table must be contiguous fp16 device tensor");
         TORCH_CHECK(table.dim() == 2,
                     "RhinoVLA time-proj table must be [steps,H], got ",
                     table.sizes());
@@ -969,7 +969,7 @@ public:
                                 weight.is_contiguous() &&
                                 weight.size(0) == rows && weight.size(1) == cols &&
                                 weight.nbytes() == static_cast<size_t>(rows * cols * (w8a16 ? 1 : DWIDTH)),
-                            "RhinoVLA QKV/KV optimization requires contiguous uniform FP16/INT8 RPU projection [",
+                            "RhinoVLA QKV/KV optimization requires contiguous uniform FP16/INT8 device projection [",
                             rows, ",", cols, "]");
             };
             for (int64_t i = 0; i < N; ++i) {
@@ -988,7 +988,7 @@ public:
                 TORCH_CHECK(scale.defined() && scale.device() == q_w_list[0].device() &&
                                 scale.scalar_type() == at::kHalf && scale.is_contiguous() &&
                                 scale.dim() == 1 && scale.numel() == outputs,
-                            "RhinoVLA W8A16 requires natural contiguous FP16 RPU scale [N=", outputs, "]");
+                            "RhinoVLA W8A16 requires natural contiguous FP16 device scale [N=", outputs, "]");
                 // Installation is cold. Flush the source before reading its
                 // host mapping; no content reads or conversion occur in replay.
                 rpu_ddr_flush_force_sized(scale.data_ptr(), scale.nbytes());
@@ -1130,7 +1130,7 @@ public:
                     "RhinoVLAModel::forward cannot replace an installed "
                     "denoise loop with step execution; rebuild the owner");
         TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1,
-                    "RhinoVLAModel::forward: hidden_states must be on RPU device");
+                    "RhinoVLAModel::forward: hidden_states must be on device");
         TORCH_CHECK(hidden_states.is_contiguous(),
                     "RhinoVLAModel::forward: hidden_states must be contiguous "
                     "(downstream kernels use raw data_ptr())");
@@ -1147,7 +1147,7 @@ public:
                     hidden_size(), "], got dim=", (cond.defined() ? cond.dim() : -1),
                     " size=", (cond.defined() ? cond.size(0) : -1));
         TORCH_CHECK(cond.device().type() == at::kPrivateUse1,
-                    "RhinoVLAModel::forward: cond must be on RPU device");
+                    "RhinoVLAModel::forward: cond must be on device");
         TORCH_CHECK(cond.scalar_type() == at::kHalf,
                     "RhinoVLAModel::forward: cond must be fp16");
         TORCH_CHECK(cond.is_contiguous(),
@@ -1159,7 +1159,7 @@ public:
                     "RhinoVLAModel::forward: cos/sin must be defined");
         TORCH_CHECK(cos.device().type() == at::kPrivateUse1 &&
                     sin.device().type() == at::kPrivateUse1,
-                    "RhinoVLAModel::forward: cos/sin must be on RPU device");
+                    "RhinoVLAModel::forward: cos/sin must be on device");
         TORCH_CHECK(cos.scalar_type() == at::kHalf &&
                     sin.scalar_type() == at::kHalf,
                     "RhinoVLAModel::forward: cos/sin must be fp16");
@@ -1248,7 +1248,7 @@ public:
                     x0_rpu.device().type() == at::kPrivateUse1 &&
                     x0_rpu.is_contiguous(),
                     "RhinoVLA denoise loop x0 must be [1,", action_horizon_,
-                    ",", action_dim_pad_, "] contiguous fp16 RPU");
+                    ",", action_dim_pad_, "] contiguous fp16 device");
         TORCH_CHECK(action_mask_rpu.sizes() == x0_rpu.sizes() &&
                     action_mask_rpu.scalar_type() == at::kHalf &&
                     action_mask_rpu.device().type() == at::kPrivateUse1 &&
@@ -1265,7 +1265,7 @@ public:
                     state_rpu.device().type() == at::kPrivateUse1 &&
                     state_rpu.is_contiguous(),
                     "RhinoVLA denoise loop state must be [1,", state_dim_pad_,
-                    "] contiguous fp16 RPU");
+                    "] contiguous fp16 device");
         TORCH_CHECK(state_mask_rpu.sizes() == state_rpu.sizes() &&
                     state_mask_rpu.scalar_type() == at::kHalf &&
                     state_mask_rpu.device().type() == at::kPrivateUse1 &&
@@ -3441,7 +3441,7 @@ private:
 
     // Per-forward tensor refs (kept alive for graph execution/replay via
     // class-member assignment; run_all_layers is synchronous so refcount
-    // covers the full dispatch window). `cond_src_base_` is the live RPU
+    // covers the full dispatch window). `cond_src_base_` is the live device
     // dev addr of cond_ref_'s data_ptr — feeds the mutable-DMA cond scatter
     // so REPLAY end() picks up the per-forward base from this storage.
     at::Tensor cond_ref_;
@@ -3621,7 +3621,7 @@ at::Tensor rpu_rhino_vla_tanh_high_precision(const at::Tensor& input) {
     TORCH_CHECK(input.defined() && input.device().type() == at::kPrivateUse1 &&
                     input.scalar_type() == at::kHalf && input.is_contiguous() &&
                     input.dim() == 2 && input.size(0) == 10 && input.size(1) == 2048,
-                "RhinoVLA high precision gate TANH requires cold contiguous FP16 RPU [10,2048]");
+                "RhinoVLA high precision gate TANH requires cold contiguous FP16 device [10,2048]");
     rpu_require_high_precision_math_kernels();
     at::Tensor output = at::empty_like(input);
     rpu_launch_eltwise_unary_kernel(input, output, ValuOpType::TANH, RpuUnaryPrecision::HIGH);

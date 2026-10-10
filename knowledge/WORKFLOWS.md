@@ -43,27 +43,15 @@ license or redistribution basis, and cite it from a maintained page.
 ## Resolve conflicts
 
 For runnable examples, consult the [configuration index](../examples/configs/README.md)
-and validate the selected file with `examples/run_model.py --check-config`.
-Keep one canonical template per model/version/component/precision/workload;
-remove superseded copies and update script defaults, documentation and tests
-when reorganizing paths. Model TOML files belong in their family directories.
-The example catalog binds configuration identity and input settings; it does
-not expand the model's runtime admission or certify performance or quality.
-For performance comparisons, use the actual example command and bind the
-checkpoint, precision, input, execution settings, and runtime assets. For
-all example targets, keep persistent construction outside inference mode and
-apply the selected mode only to inference; see
-[host execution settings](../docs/runtime_config.md#host-execution-settings).
-Count retained Graph queues together with temporary capture and first-call
-validation queues when checking a fixed Graph arena pool. A successful replay
-alone does not cover the peak during cold construction.
-For steady-state timing, finish numerical checks and release their temporary
-exports before warming the real REPLAY path. The shared runner defaults to two
-warmup calls, reports them separately, and releases raw returned outputs after
-snapshotting them outside the timer. With `warmup >= 2`, omit
-`warmup_decode_steps` or match `input.decode_steps`; config validation rejects
-shorter warmup before model loading. Fixed-length tests use `stop_on_eos=false`.
-Two short decode calls do not warm later positions or signatures. See [performance measurement](../docs/performance.md).
+and validate the selected file with `examples/run.py --check-config`.
+Keep one canonical template per model/version/component/precision/workload.
+When reorganizing paths, retain documented compatibility aliases where semantics
+match; otherwise give explicit migration steps. Update defaults, documentation
+and tests together. New examples use canonical paths; old paths remain only for
+compatibility. See the [v1.2.0 upgrade guide](../docs/upgrading_1_2.md).
+Model TOML files belong in their family directories.
+Keep persistent model construction outside inference mode; apply the selected mode to inference only. Warm a new Graph with BUILD and REPLAY. With `warmup >= 2`, omit `warmup_decode_steps` or match `input.decode_steps`; fixed-length runs use `stop_on_eos=false`.
+Count retained, temporary-capture and validation queues against the same cold arena pool. Snapshot policy is per-instance and frozen; unsupported SDK/asset combinations use ordinary replay. See [runtime configuration](../docs/runtime_config.md).
 For cache-maintenance changes, trace the actual CPU reads and writes through
 their producing copy operations. Device-only handoffs retain storage and DMA
 ownership without republishing data; host-backed device copies still need both
@@ -75,9 +63,7 @@ See the [policy API](../docs/api_reference.md#policy-apis) and
 [model family map](synthesis/model-family-map.md#pi05).
 When adding quantized examples, trace the checkpoint loader and installed
 projection storage, not just the `dtype` label. Document the component scope
-and retain its admission controls. A controlled planning bound is not a
-certification: bind the exact recipe, input, numerical and lifetime evidence
-before widening its admitted scope. For caller factories, bind precision inputs,
+and retain its admission controls. Bind the recipe, input and lifetime requirements before extending a profile. For caller factories, bind precision inputs,
 reject conflicting factory settings and verify the installed model before
 inference. See [quantization](../docs/quantization.md).
 
@@ -87,62 +73,39 @@ points and runtime boundaries linked from [Examples](../docs/model_support.md)
 and follow [model validation policy](../docs/validation_policy.md). Update stale
 knowledge in the same change; do not preserve conflicting summaries.
 
+## Speech changes
 
-For the bounded Qwen3 speech APIs, start with the
-[speech profile](../docs/qwen3_audio_r1.zh.md). Keep the frozen checkpoint guards
-and TTS reviewed-source hashes before loading; do not install the upstream
-package over the pinned Transformers runtime. Normal CPU construction plus
-strict safetensors loading preserves TTS weights and nonpersistent RoPE buffers.
-Speech is a dedicated API, not a generic CausalLM/VLM registry alias. ASR prompt
-length changes clear the old Graph pair before audio execution,
-leaving launch arena capacity; same-length requests replay the pair. ASR audio
-blocks reuse the SigLIP fused host path with an exact ASR mode: fourteen heads
-padded to sixteen, 896-wide residuals, ERF GELU, original FP16 clamp and head
-scale. Its separate single-entry Graph is keyed by audio length and physical
-plan. Convolution remains CPU; conv_out, positions, valid-row selection, final
-ERF GELU/proj2 and prefill text/audio assembly retain features on RPU. Rebuild the
-native extension for the explicit audio-tail installation and assembly interfaces.
-The existing audio Graph includes ERF GELU and proj2 after proj1; its native
-profile hash and physical route manifest include that tail. Model-owned DDR
-staging stays stable, and the final output uses a refreshed mutable DMA base
-every call. Do not put the eager-only GELU/Linear wrappers directly in capture.
-TTS owns
-the Talker/Predictor decoder handles and, when the native
-`causal_decoder_set_tts_codec_mode` setter is present, a third codec-frontend handle
-under one process owner. Enable that mode only on the installed codec handle;
-its default-off state preserves other models' K RoPE parameters and layout hash.
-Retire all
-Graphs before their handles and weights. Preserve original CPU FP32 codec weights
-and fold LayerScale only into the new FP16 frontend copies; keep the original
-FP32 rotary frequencies. The frontend is limited to 1–63 frames, below its
-72-frame sliding window. Missing native setter selects CPU; arbitrary
-execution failures must remain visible. TTS declares five arenas before the first
-device allocation (four retained Graphs plus one immediate-launch slot), using
-the existing owner runtime policy. An incompatible frozen process plan requires
-a fresh process. Test retained outputs and close/reload across component handoffs.
-Speech loaders select the common caching allocator before device allocation.
-Reuse private KV storage with `reset_to_position(0)` at each new sequence;
-the causal path overwrites live rows before reading them. TTS speaker reuse is
-bounded to the latest decoded audio content, never just a file path or mtime.
-Its x-vector-only profile does not consume reference codec tokens. ASR CPU
-convolutions accumulate FP16-rounded weights in FP32 and round outputs back to
-FP16; preserve this boundary in reference comparisons.
-ASR uses channels-last CPU convolution storage without changing FP16 boundaries.
-Its causal-LM wrapper reuses the shared fused decode head and projects only the
-last prefill hidden position, retaining CPU single-token embedding lookup because
-its RPU launch costs more than the lookup. Prefill assembly stays on RPU. Do not enable
-that head on a base-model caller expecting hidden outputs. Retire the decoder
-before releasing that head. TTS Predictor's fixed 15-step greedy loop resets KV
-per frame; Talker still owns stopping and repetition penalties. Compare full
-tokens/waveforms when changing either route. CPU codec thread tuning belongs to
-the caller/CLI, not a hidden process-wide change inside the API.
-TTS output-head reuse is bound to the exact current CPU hidden object and is
-consumed once; never reuse a stale RPU decoder output after another replay.
-Talker prefill reuses the measured 28-layer/1024 envelope within 128 positions;
-evict only its old prefill Graph on a prompt-length change, retain decode and
-bounded prepared plans, and advance KV by logical tokens, excluding padding.
-Predictor retains its single decode Graph.
-Codec optimization replaces admitted FP32 transposed convolutions with matrix
-multiplication and adjacent-block overlap-add, plus 1x1 convolutions with matrix
-multiplication. Other convolutions retain their original path. Keep generation
-lengths and content checks alongside timings.
+Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these contracts:
+
+- Validate frozen checkpoints and prepared TTS source hashes before loading.
+  Construct TTS on CPU and load safetensors strictly, preserving nonpersistent
+  FP32 RoPE buffers. Apply compatibility edits only to the prepared source copy.
+- ASR uses explicit SigLIP audio mode: fourteen heads padded to sixteen,
+  896-wide residuals, ERF GELU, original FP16 clamp and head scale. The current
+  audio Graph includes both output projections and their GELU; its profile hash
+  and physical plan include that tail. Keep model-owned staging stable and refresh
+  the final output's mutable DMA address per call. Eager-only wrappers cannot be
+  inserted directly into capture.
+- ASR clears old text Graphs before audio execution on a prompt-length change.
+  Preserve CPU FP32 convolution of FP16-rounded weights and FP16 output boundaries.
+  Prefill input composition stays on device; single-token embedding lookup stays on CPU.
+  Enable the fused output head only for causal-LM callers and retire the decoder
+  before releasing that head.
+- TTS Talker, Predictor and optional codec share one owner policy and five arenas.
+  Enable `causal_decoder_set_tts_codec_mode` only on the installed codec handle;
+  its default-off state preserves other decoders' RoPE parameters and layout hash.
+  Keep original CPU FP32 codec weights; fold LayerScale into new frontend copies
+  before FP16 conversion and preserve FP32 rotary frequencies. Admit only 1–63
+  codec frames. Missing setter selects CPU; other failures propagate.
+- Reset logical KV position per sequence. Talker keeps EOS and repetition penalties;
+  Predictor uses a fixed 15-step greedy loop and resets KV per frame. Bind output-head
+  reuse to the exact current hidden object and consume it once. Speaker caching is
+  bounded to the latest decoded audio content, not a path or modification time.
+- Talker reuses the 28-layer/1024 prefill envelope within its 128-position cache.
+  Exclude physical padding from logical KV position; replace only the old prefill
+  Graph when prompt length changes. Predictor keeps one decode Graph; codec keeps
+  one current-frame Graph. Retire Graphs before handles and weights.
+- CPU codec matrix multiplication and adjacent-block overlap-add preserve output
+  lengths; other convolutions retain their original path. Keep thread settings
+  caller-controlled and check retained outputs, input changes and close/reload
+  when changing component handoffs.

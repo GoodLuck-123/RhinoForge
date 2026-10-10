@@ -1,7 +1,7 @@
 """HALO action expert 单步驱动（HaloStepRunner）：handle 装载 + prefix KV 灌入 + step。
 
 执行模型（一次 act step）：
-  host (fp32) ──组装 x_emb──> RPU fp16 ──halo_action_expert_step_forward──> hidden
+  host (fp32) ──组装 x_emb──> device fp16 ──halo_action_expert_step_forward──> hidden
   └ in_proj(x_t)+temb+sinpos → 行 1..16；embed_tokens(text_ids) → 行 0/17；
     fp32 → bf16 → fp16（对齐 HALO CUDA bf16 流水的舍入语义）。
   hidden 行 1..16 → host fp32 out_proj → v_t [16,14]。
@@ -628,7 +628,7 @@ def _plan_halo_fixed_execution(
 def _halo_profile_ctx():
     """``HALO_PROFILE=1`` 时开 ``torch.profiler``,否则 nullcontext(零开销)。
 
-    RPU op 在 profiler 里 = 每高层调用一个 fused 事件(``test_v5_e2e_perf.py`` 同口径);
+    device op 在 profiler 里 = 每高层调用一个 fused 事件(``test_v5_e2e_perf.py`` 同口径);
     ``GraphCache.capture(sig)`` 已把每次 forward 体裹进 ``record_function(sig.op_id)``,故
     ``halo_action_expert_step_cfg`` 等 op_id 自动成 profiler 事件,无需手动埋点。off 时
     ``with`` 的 ``as`` 目标为 ``None`` → 调用方据此跳过 dump。Profile-only 机制,不改算路。
@@ -702,7 +702,7 @@ class HaloCfgBranch:
     name: str
     branch_id: int
     cache: RPUCache
-    cos: torch.Tensor                 # rope_position 的 RoPE 表 [total_len,head_dim/2] fp16 RPU
+    cos: torch.Tensor                 # rope_position 的 RoPE 表 [total_len,head_dim/2] fp16 device
     sin: torch.Tensor
     prefix_len: int                   # 该分支 kv_len(cond 4706 / text 4698 / img 8)
     rope_position: int
@@ -745,7 +745,7 @@ def _swizzle_prefix_7d(
 class HaloStepRunner:
     """HALO action expert 单步 runner（经 :func:`build_halo_action_expert` 构造）。
 
-    字段所有权：全部 RPU 权重/表/cache 在 runner 存活期内有效；``_handle``
+    字段所有权：全部 device 权重/表/cache 在 runner 存活期内有效；``_handle``
     由 finalize 释放。``rope_position`` 是 query 行共享的常数 position。
     """
 
@@ -758,17 +758,17 @@ class HaloStepRunner:
     _handle: int
     _graph_cache: "rpu_backend.graph.GraphCache"
     _attn_mask: torch.Tensor                 # [1,1,cs,total_len] fp16 CPU，全 0
-    # RoPE 表(rope_position 的 cos/sin,[total_len,head_dim/2] fp16 RPU)。改为
+    # RoPE 表(rope_position 的 cos/sin,[total_len,head_dim/2] fp16 device)。改为
     # per-forward 传入 step_forward(对齐 qwenpi05 cos_ref_),CFG 三分支各传自己的表;
     # set_weights 仍收一份作基类契约+默认。runner 持有 cond 分支的表(与 handle 等寿命)。
     _cos: torch.Tensor
     _sin: torch.Tensor
-    _x_emb: torch.Tensor = dataclasses.field(init=False)       # [1,cs,H] fp16 RPU
+    _x_emb: torch.Tensor = dataclasses.field(init=False)       # [1,cs,H] fp16 device
     _handle_finalizer: object | None = dataclasses.field(
         init=False, default=None, repr=False
     )
     _closed: bool = dataclasses.field(init=False, default=False, repr=False)
-    # prefix 代数：每次 insert_prefix 换新 RPU 张量（DMA 指针变化），编进
+    # prefix 代数：每次 insert_prefix 换新 device 张量（DMA 指针变化），编进
     # GraphSignature 强制重 BUILD，禁止旧 graph 指针重放。（insert_prefix/step 路用。）
     _prefix_epoch: int = dataclasses.field(init=False, default=0)
     # CFG 分支分配代数：rollout_cfg/_forward_branch 路用。每次
@@ -1175,7 +1175,7 @@ def build_halo_action_expert(
         )
         # cache / attn_mask / runner 也必须在 try 内：weakref.finalize 只在
         # HaloStepRunner.__post_init__ 安装，若这几步失败而 handle 已建，孤儿 handle
-        # 不会被回收（"一进程一个 live RPU model" 约束下重试会留下注册实例 + RPU 资源）。
+        # 不会被回收（"一进程一个 live device model" 约束下重试会留下注册实例 + device 资源）。
         cache = RPUCache(
             num_layers=cfg.num_layers, batch_size=1, max_seq_len=max_seq_len,
             num_kv_heads=cfg.num_kv_heads, head_dim=cfg.head_dim, attn_tp=cfg.attn_tp)
@@ -1204,7 +1204,7 @@ def _cfg_branch_dyn_dims(cfg: HaloConfig, branch: HaloCfgBranch) -> List[int]:
 
     5 维:``num_layers`` / ``prefix_len``(=kv_len)/ ``rope_position`` / ``branch_id``
     (cache 银行身份)/ ``epoch``(分配代数,新分配 → 新 key → 重 BUILD)。
-    ``timestep`` / cfg-scales 故意**不**进 key(不进 RPU 图:timestep 经 mutable ``_x_emb``
+    ``timestep`` / cfg-scales 故意**不**进 key(不进 device 图:timestep 经 mutable ``_x_emb``
     缓冲、scales 在 host renorm;进 key 会破坏 build-once/replay-many + 让 replay 稳定门失效)。
     """
     return [cfg.num_layers, branch.prefix_len, branch.rope_position,

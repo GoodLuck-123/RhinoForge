@@ -1,0 +1,14 @@
+variables:
+  TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONNOUSERSITE: "1"
+  PIP_REQUIRE_VIRTUALENV: "true"
+  GIT_LFS_SKIP_SMUDGE: "1"
+  OMP_NUM_THREADS: "4"
+  MKL_NUM_THREADS: "4"
+
+host-runtime:
+  tags: [rhinoforge-host]
+  script:
+    # NavDP RNG contracts import diffusers directly; device-only checks report skips.
+    - bash scripts/ci/run_host_tests.sh

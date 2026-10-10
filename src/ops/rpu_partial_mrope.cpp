@@ -26,7 +26,10 @@
 #include <ATen/ATen.h>
 #include <ATen/record_function.h>
 #include <c10/util/Half.h>
+#include <array>
+#include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "rpu_ops.h"
@@ -159,7 +162,7 @@ void rpu_launch_partial_mrope_spm_kernel(
             cos.sizes() == sin.sizes() && rotary_dim > 0 &&
             (rotary_dim % 2) == 0 && cos.size(1) == rotary_dim / 2,
         "rpu_launch_partial_mrope_spm_kernel owned: cos/sin must be matching "
-        "contiguous FP16 RPU tables [rows,rotary_dim/2]");
+        "contiguous FP16 device tables [rows,rotary_dim/2]");
     TORCH_CHECK(
         pos_offset >= 0 && seq_len > 0 && pos_offset <= cos.size(0) &&
             seq_len <= cos.size(0) - pos_offset,
@@ -190,7 +193,7 @@ void rpu_launch_partial_mrope_spm_kernel(
         head_dim, rotary_dim, num_cores, &register_writer);
 }
 
-void rpu_launch_partial_mrope_qk_spm_kernel(
+static void launch_partial_mrope_qk_spm_kernel(
     uint32_t q_x_spm_addr,
     uint32_t q_y_spm_addr,
     uint32_t k_x_spm_addr,
@@ -203,7 +206,7 @@ void rpu_launch_partial_mrope_qk_spm_kernel(
     int64_t k_local_heads,
     int64_t head_dim,
     int64_t rotary_dim,
-    int num_cores) {
+    int num_cores, KernelId id) {
     const auto is_table = [](const at::Tensor& tensor) {
         return tensor.defined() &&
             tensor.device().type() == c10::DeviceType::PrivateUse1 &&
@@ -213,21 +216,24 @@ void rpu_launch_partial_mrope_qk_spm_kernel(
     TORCH_CHECK(is_table(cos_il) && is_table(sin_il) &&
                     cos_il.sizes() == sin_il.sizes() &&
                     cos_il.device() == sin_il.device() && cos_il.size(1) == 64,
-                "fused QK partial M-RoPE requires matching owned FP16 RPU "
+                "fused QK partial M-RoPE requires matching owned FP16 device "
                 "cos/sin tables [rows,64]");
     TORCH_CHECK(pos_offset >= 0 && pos_offset <= cos_il.size(0) &&
                     num_tokens > 0 && num_tokens <= cos_il.size(0) - pos_offset &&
                     static_cast<uint64_t>(pos_offset) <= UINT32_MAX,
                 "fused QK partial M-RoPE position exceeds table owner capacity");
     TORCH_CHECK(
-        pos_offset >= 0 && (num_tokens == 192 || num_tokens == 1) &&
+        pos_offset >= 0 &&
+            ((id == KernelId::QWEN3VL_PARTIAL_MROPE_QK_FUSED &&
+              (num_tokens == 192 || num_tokens == 1)) ||
+             (id == KernelId::WALL_BASE_PARTIAL_MROPE_QK_H32 && num_tokens == 32)) &&
             q_local_heads == 2 && k_local_heads == 1 && head_dim == 128 &&
             rotary_dim == 128 && num_cores == 8,
-        "fused QK partial M-RoPE supports only Qwen3-VL 2B "
-        "seq=192/1,qh=2,kh=1,dim=128,cores=8");
+        "fused QK partial M-RoPE requires Qwen3-VL seq192/1 or Wall H32 "
+        "with qh=2,kh=1,dim=128,cores=8");
 
     auto register_writer = RpuKernelGraph::active().stage_kernel_ddr_registers(
-        KernelId::QWEN3VL_PARTIAL_MROPE_QK_FUSED,
+        id,
         std::vector<GraphDdrRegisterOperandSpec>{
             GraphDdrRegisterOperandSpec{
                 GraphDdrRegisterAbi{
@@ -245,7 +251,7 @@ void rpu_launch_partial_mrope_qk_spm_kernel(
     rpu_ddr_flush(sin_il.data_ptr<c10::Half>());
     const uint64_t pos_off_u = static_cast<uint64_t>(pos_offset);
 
-    Kernel_t* kernel = GET_KERNEL(KernelId::QWEN3VL_PARTIAL_MROPE_QK_FUSED);
+    Kernel_t* kernel = GET_KERNEL(id);
     TORCH_CHECK(kernel != nullptr,
                 "Failed to get partial_mrope_qk_fused kernel");
     kernel->reset_regs();
@@ -279,6 +285,375 @@ void rpu_launch_partial_mrope_qk_spm_kernel(
         {0, 1, 2, 3, 4, 5, 6, 7});
 }
 
+void rpu_launch_partial_mrope_qk_spm_kernel(
+    uint32_t q_x, uint32_t q_y, uint32_t k_x, uint32_t k_y,
+    const at::Tensor& cos, const at::Tensor& sin, int64_t position,
+    int64_t tokens, int64_t q_heads, int64_t k_heads,
+    int64_t head_dim, int64_t rotary_dim, int cores) {
+    launch_partial_mrope_qk_spm_kernel(q_x, q_y, k_x, k_y, cos, sin,
+        position, tokens, q_heads, k_heads, head_dim, rotary_dim, cores,
+        KernelId::QWEN3VL_PARTIAL_MROPE_QK_FUSED);
+}
+
+// Wall Base uses distinct complete Q/K slabs, each updated in place. The
+// paired payload reuses the canonical FP16 arithmetic with grid.z selecting Q/K.
+void rpu_launch_wall_base_partial_mrope_qk_spm_kernel(
+    uint32_t q, uint32_t k, const at::Tensor& cos, const at::Tensor& sin,
+    int64_t position) {
+    constexpr int kCores = 8;
+    TORCH_CHECK(SPM_ALLOC.is_initialized(), "Wall paired RoPE requires initialized SPM");
+    const uint64_t base = SPM_ALLOC.addr(0, 0);
+    const std::pair<uint64_t, uint64_t> slabs[] = {{q, 32 * 2 * 128 * 2}, {k, 32 * 128 * 2}};
+    for (const auto& slab : slabs) {
+        const auto [address, bytes] = slab;
+        TORCH_CHECK(address != 0 && address >= base && address % 32 == 0 &&
+                        address - base <= SpmAllocator::SPM_USABLE - bytes,
+                    "Wall paired RoPE requires full aligned absolute SPM slabs");
+        for (int core = 0; core < kCores; ++core) {
+            TORCH_CHECK(static_cast<uint64_t>(SPM_ALLOC.addr(core, 0)) +
+                            address - base + bytes - 1 <= UINT32_MAX,
+                        "Wall paired RoPE SPM range exceeds register ABI");
+        }
+    }
+    TORCH_CHECK(slabs[0].first + slabs[0].second <= slabs[1].first ||
+                    slabs[1].first + slabs[1].second <= slabs[0].first,
+                "Wall paired RoPE Q/K slabs must not overlap");
+    TORCH_CHECK(KernelCache::instance().has_loaded(KernelId::WALL_BASE_PARTIAL_MROPE_QK_H32),
+                "Wall paired RoPE optional payload is unavailable");
+    launch_partial_mrope_qk_spm_kernel(q, q, k, k, cos, sin, position,
+        32, 2, 1, 128, 128, kCores, KernelId::WALL_BASE_PARTIAL_MROPE_QK_H32);
+}
+
+// Exact LingBot Prefill B1/M224/Q4/K1/HD128/TP8. Each of seven 32-token
+// blocks writes the original V32 learned-gamma norm to FP16 scratch, waits
+// for its SPM stores, then runs the original partial RoPE. Q and K stages
+// are unfolded; neither a cross-block barrier nor a new SPM allocation is
+// required. This separate optional entrypoint never widens the Qwen2B ABI.
+void rpu_launch_lingbot2_prefill_qk_norm_rope_m224_spm_kernel(
+    uint32_t q_abs, uint32_t k_abs,
+    uint32_t q_norm_abs, uint32_t k_norm_abs,
+    uint32_t q_gamma_abs, uint32_t k_gamma_abs,
+    const at::Tensor& cos, const at::Tensor& sin,
+    int64_t position, double eps) {
+    constexpr KernelId kId = KernelId::LINGBOT2_PREFILL_QK_NORM_ROPE_M224;
+    constexpr uint64_t kQBytes = 224 * 4 * 128 * sizeof(c10::Half);
+    constexpr uint64_t kKBytes = 224 * 128 * sizeof(c10::Half);
+    const auto table_ok = [](const at::Tensor& table) {
+        if (!(table.defined() &&
+            table.device().type() == c10::DeviceType::PrivateUse1 &&
+            table.scalar_type() == at::kHalf && table.dim() == 2 &&
+            table.layout() == c10::Layout::Strided && table.is_contiguous() &&
+            table.size(1) == 64 && table.storage_offset() >= 0)) return false;
+        const uint64_t storage_bytes = table.storage().nbytes();
+        const uint64_t offset = static_cast<uint64_t>(table.storage_offset());
+        return offset <= storage_bytes / sizeof(c10::Half) &&
+            table.nbytes() <= storage_bytes - offset * sizeof(c10::Half);
+    };
+    TORCH_CHECK(table_ok(cos) && table_ok(sin) && cos.sizes() == sin.sizes() &&
+                    cos.device() == sin.device(),
+                "M224 QK norm/RoPE requires matching owned FP16 device tables [rows,64]");
+    TORCH_CHECK(position >= 0 && position <= cos.size(0) &&
+                    224 <= cos.size(0) - position &&
+                    static_cast<uint64_t>(position) + 224 <= (uint64_t{1} << 32) / 128,
+                "M224 QK norm/RoPE range exceeds table owner or u32 table-byte offset");
+    const c10::Half epsilon(static_cast<float>(eps));
+    TORCH_CHECK(std::isfinite(eps) && eps > 0 &&
+                    std::isfinite(static_cast<float>(epsilon)) &&
+                    static_cast<float>(epsilon) > 0,
+                "M224 QK norm/RoPE requires positive finite FP16 epsilon");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(), "M224 QK norm/RoPE requires initialized SPM");
+    const uint64_t base = SPM_ALLOC.addr(0, 0);
+    const std::array<uint32_t, 6> addresses{
+        q_abs, k_abs, q_norm_abs, k_norm_abs, q_gamma_abs, k_gamma_abs};
+    const std::array<uint64_t, 6> bytes{kQBytes, kKBytes, kQBytes, kKBytes, 256, 256};
+    for (size_t i = 0; i < addresses.size(); ++i) {
+        const uint64_t address = addresses[i];
+        TORCH_CHECK(address >= base && (address & 255u) == 0 &&
+                        bytes[i] <= SpmAllocator::SPM_USABLE &&
+                        address - base <= SpmAllocator::SPM_USABLE - bytes[i] &&
+                        address + bytes[i] <= (uint64_t{1} << 32),
+                    "M224 QK norm/RoPE requires complete aligned absolute SPM operands");
+        for (size_t j = 0; j < i; ++j) {
+            TORCH_CHECK(address + bytes[i] <= addresses[j] ||
+                            static_cast<uint64_t>(addresses[j]) + bytes[j] <= address,
+                        "M224 QK norm/RoPE matrices, scratch and gamma extents overlap");
+        }
+    }
+    const auto ddr_ok = [](const at::Tensor& table) {
+        const uint64_t address = rhino_lkn::RpuGetDevAddr(table.data_ptr<c10::Half>());
+        return address != 0 && (address & 255u) == 0 &&
+            (address >> 8) <= UINT32_MAX &&
+            table.nbytes() <= (uint64_t{1} << 40) - address;
+    };
+    TORCH_CHECK(ddr_ok(cos) && ddr_ok(sin),
+                "M224 QK norm/RoPE tables violate the shift8 DDR ABI");
+    // Atomic availability is read-only; GET_KERNEL below is graph-aware and
+    // may reset its private kernel. Reject missing assets before staging.
+    TORCH_CHECK(KernelCache::instance().has_loaded(kId),
+                "M224 QK norm/RoPE optional kernel is absent");
+    auto* queue = GET_QUEUE(8);
+    TORCH_CHECK(queue != nullptr, "M224 QK norm/RoPE eight-core queue is absent");
+    auto& graph = RpuKernelGraph::active();
+    auto writer = graph.stage_kernel_ddr_registers(kId,
+        std::vector<GraphDdrRegisterOperandSpec>{
+            {{GraphDdrRegisterRole::SemanticInput, GraphDdrRegisterAccess::Read,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 0, 1}, cos},
+            {{GraphDdrRegisterRole::SemanticInput, GraphDdrRegisterAccess::Read,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 2, 3}, sin}});
+    auto* selected = GET_KERNEL(kId);
+    TORCH_CHECK(selected != nullptr, "M224 QK norm/RoPE graph kernel is absent");
+    auto& kernel = *selected;
+    graph.keep_alive(cos);
+    graph.keep_alive(sin);
+    rpu_ddr_flush(cos.data_ptr<c10::Half>());
+    rpu_ddr_flush(sin.data_ptr<c10::Half>());
+    kernel.reset_regs();
+    const auto u16 = [&kernel](uint32_t index, uint16_t value) {
+        TORCH_CHECK(kernel.set_regs(index, value) == rhino_lkn::kKernelRegOk,
+                    "M224 QK norm/RoPE u16 parameter rejected");
+    };
+    const auto u32 = [&u16](uint32_t index, uint32_t value) {
+        u16(index, static_cast<uint16_t>(value));
+        u16(index + 1, static_cast<uint16_t>(value >> 16));
+    };
+    u32(4, q_norm_abs); u32(6, q_abs);
+    u32(8, static_cast<uint32_t>(position));
+    u16(10, 128); u16(11, 4); u16(12, 224); u16(13, 128); u16(14, 1);
+    u32(15, k_norm_abs - q_norm_abs); u32(17, k_abs - q_abs);
+    u16(19, static_cast<uint16_t>(1 - 4));
+    const c10::Half reciprocal(1.0f / 128);
+    uint16_t reciprocal_bits = 0, epsilon_bits = 0;
+    static_assert(sizeof(c10::Half) == sizeof(uint16_t), "FP16 register width changed");
+    std::memcpy(&reciprocal_bits, &reciprocal, sizeof(reciprocal_bits));
+    std::memcpy(&epsilon_bits, &epsilon, sizeof(epsilon_bits));
+    u16(20, 128); u16(21, reciprocal_bits); u16(22, 256); u16(23, epsilon_bits);
+    u32(24, q_gamma_abs); u32(26, k_gamma_abs - q_gamma_abs);
+    writer.write(kernel);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(kernel, {1, 7, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
+}
+
+// Exact LingBot T51, Q4/K1, full-rotary HD128, TP8. Absolute in-place
+// operands share the installed paired payload; table position is independent
+// of the KV-cache row. active() also permits the lazy PASSTHROUGH Graph.
+void rpu_launch_lingbot2_qk_rope_t51_spm_kernel(
+    uint32_t q_abs, uint32_t k_abs, const at::Tensor& cos,
+    const at::Tensor& sin, int64_t position) {
+    constexpr KernelId kId = KernelId::QWEN3VL_PARTIAL_MROPE_QK_FUSED;
+    constexpr uint64_t kQBytes = 51 * 4 * 128 * 2;
+    constexpr uint64_t kKBytes = 51 * 128 * 2;
+    const auto table_ok = [](const at::Tensor& table) {
+        if (!(table.defined() &&
+            table.device().type() == c10::DeviceType::PrivateUse1 &&
+            table.scalar_type() == at::kHalf && table.dim() == 2 &&
+            table.layout() == c10::Layout::Strided && table.is_contiguous() &&
+            table.size(1) == 64 && table.storage_offset() >= 0)) return false;
+        const uint64_t storage_bytes = table.storage().nbytes();
+        const uint64_t offset = static_cast<uint64_t>(table.storage_offset());
+        return offset <= storage_bytes / sizeof(c10::Half) &&
+            table.nbytes() <= storage_bytes - offset * sizeof(c10::Half);
+    };
+    TORCH_CHECK(table_ok(cos) && table_ok(sin) && cos.sizes() == sin.sizes() &&
+                    cos.device() == sin.device(),
+                "T51 QK RoPE requires matching owned FP16 device tables [rows,64]");
+    TORCH_CHECK(position >= 0 && position <= cos.size(0) &&
+                    51 <= cos.size(0) - position &&
+                    static_cast<uint64_t>(position) + 51 <= (uint64_t{1} << 32) / 128,
+                "T51 QK RoPE row range exceeds table owner or u32 table-byte offset");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(), "T51 QK RoPE requires initialized SPM");
+    const uint64_t base = SPM_ALLOC.addr(0, 0);
+    const auto spm_ok = [base](uint32_t address, uint64_t bytes) {
+        return address >= base && (address & 31u) == 0 &&
+            bytes <= SpmAllocator::SPM_USABLE &&
+            uint64_t{address} - base <= SpmAllocator::SPM_USABLE - bytes &&
+            uint64_t{address} + bytes <= (uint64_t{1} << 32);
+    };
+    TORCH_CHECK(spm_ok(q_abs, kQBytes) && spm_ok(k_abs, kKBytes),
+                "T51 QK RoPE requires complete aligned absolute Q/K SPM extents");
+    TORCH_CHECK(uint64_t{q_abs} + kQBytes <= k_abs ||
+                    uint64_t{k_abs} + kKBytes <= q_abs,
+                "T51 QK RoPE Q/K in-place SPM extents overlap");
+    const auto ddr_ok = [](const at::Tensor& table) {
+        const uint64_t address = rhino_lkn::RpuGetDevAddr(table.data_ptr<c10::Half>());
+        return address != 0 && (address & 255u) == 0 &&
+            (address >> 8) <= UINT32_MAX &&
+            table.nbytes() <= (uint64_t{1} << 40) - address;
+    };
+    TORCH_CHECK(ddr_ok(cos) && ddr_ok(sin), "T51 QK RoPE tables violate the shift8 DDR ABI");
+
+    auto* queue = GET_QUEUE(8);
+    TORCH_CHECK(queue != nullptr, "LingBot2 T51 QK RoPE eight-core queue is absent");
+
+    auto& graph = RpuKernelGraph::active();
+    auto writer = graph.stage_kernel_ddr_registers(kId,
+        std::vector<GraphDdrRegisterOperandSpec>{
+            {{GraphDdrRegisterRole::SemanticInput, GraphDdrRegisterAccess::Read,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 0, 1}, cos},
+            {{GraphDdrRegisterRole::SemanticInput, GraphDdrRegisterAccess::Read,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 2, 3}, sin}});
+    // Graph-aware lookup binds the typed census staged above.
+    rhino_lkn::Kernel_t* selected = GET_KERNEL(kId);
+    TORCH_CHECK(selected != nullptr, "LingBot2 T51 QK RoPE required kernel is absent");
+    auto& kernel = *selected;
+    graph.keep_alive(cos);
+    graph.keep_alive(sin);
+    rpu_ddr_flush(cos.data_ptr<c10::Half>());
+    rpu_ddr_flush(sin.data_ptr<c10::Half>());
+    kernel.reset_regs();
+    const auto u16 = [&kernel](uint32_t index, uint16_t value) {
+        TORCH_CHECK(kernel.set_regs(index, value) == rhino_lkn::kKernelRegOk,
+                    "T51 QK RoPE u16 parameter rejected");
+    };
+    const auto u32 = [&u16](uint32_t index, uint32_t value) {
+        u16(index, static_cast<uint16_t>(value));
+        u16(index + 1, static_cast<uint16_t>(value >> 16));
+    };
+    u32(4, q_abs); u32(6, q_abs);
+    u32(8, static_cast<uint32_t>(position));
+    u16(10, 128); u16(11, 4); u16(12, 51); u16(13, 128); u16(14, 1);
+    // The installed selector performs both additions modulo2^32 / modulo2^16.
+    // Unsigned subtraction supports either physical order of the Q/K buffers.
+    const uint32_t delta = k_abs - q_abs;
+    u32(15, delta); u32(17, delta);
+    u16(19, static_cast<uint16_t>(1 - 4));
+    writer.write(kernel);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(kernel, {1, 1, 2}, {0, 1, 2, 3, 4, 5, 6, 7});
+}
+
+// The K warp retires its own RoPE tile before running the unchanged paired
+// writer. Q warps never enter that writer or its core lock. No new SPM.
+void rpu_launch_lingbot2_qk_rope_kv_t51_spm_kernel(
+    uint32_t q_abs, uint32_t k_off, uint32_t v_off,
+    const at::Tensor& cos, const at::Tensor& sin, int64_t rope_position,
+    at::Tensor& k_cache, at::Tensor& v_cache,
+    int64_t cache_position, int64_t spm_rows) {
+    constexpr KernelId kId = KernelId::LINGBOT2_QK_ROPE_KV_T51;
+    constexpr uint64_t kQBytes = 51 * 4 * 128 * sizeof(c10::Half);
+    constexpr uint64_t kKVBytes = 51 * 128 * sizeof(c10::Half);
+    TORCH_CHECK(RpuKernelGraph::has_active(),
+                "T51 QK RoPE/KV requires an active Graph context");
+    TORCH_CHECK(spm_rows >= 51 && cache_position >= 0 && cache_position % 16 == 0 &&
+                    static_cast<uint64_t>(cache_position) <= UINT32_MAX - 51,
+                "T51 QK RoPE/KV requires51 rows and an aligned u32 cache position");
+    const auto table_ok = [](const at::Tensor& table) {
+        if (!(table.defined() && table.device().type() == c10::DeviceType::PrivateUse1 &&
+            table.scalar_type() == at::kHalf && table.dim() == 2 &&
+            table.layout() == c10::Layout::Strided && table.is_contiguous() &&
+            table.size(1) == 64 && table.storage_offset() >= 0)) return false;
+        const uint64_t bytes = table.storage().nbytes();
+        const uint64_t offset = static_cast<uint64_t>(table.storage_offset());
+        return offset <= bytes / sizeof(c10::Half) &&
+            table.nbytes() <= bytes - offset * sizeof(c10::Half);
+    };
+    TORCH_CHECK(table_ok(cos) && table_ok(sin) && cos.sizes() == sin.sizes() &&
+                    cos.device() == sin.device(),
+                "T51 QK RoPE/KV requires matching owned FP16 [rows,64] tables");
+    TORCH_CHECK(rope_position >= 0 && rope_position <= cos.size(0) &&
+                    51 <= cos.size(0) - rope_position &&
+                    static_cast<uint64_t>(rope_position) + 51 <= (uint64_t{1} << 32) / 128,
+                "T51 QK RoPE/KV table window exceeds owner or u32 byte offset");
+    const auto cache_ok = [](const at::Tensor& cache) {
+        return cache.defined() && cache.device().type() == c10::DeviceType::PrivateUse1 &&
+            cache.scalar_type() == at::kHalf && cache.layout() == c10::Layout::Strided &&
+            cache.is_contiguous() && cache.storage_offset() == 0 && cache.dim() == 7 &&
+            cache.size(0) == 1 && cache.size(1) > 0 && cache.size(2) == 1 &&
+            cache.size(3) == 8 && cache.size(4) == 8 && cache.size(5) == 16 &&
+            cache.size(6) == 16 && cache.storage().nbytes() == cache.nbytes();
+    };
+    TORCH_CHECK(cache_ok(k_cache) && cache_ok(v_cache) &&
+                    cos.device() == k_cache.device() && cos.device() == v_cache.device() &&
+                    k_cache.size(1) == v_cache.size(1) &&
+                    (cache_position + 51 + 15) / 16 <= k_cache.size(1),
+                "T51 QK RoPE/KV requires matching full FP16 [1,S16,1,8,8,16,16] caches");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(), "T51 QK RoPE/KV requires initialized SPM");
+    const uint64_t base = SPM_ALLOC.addr(0, 0);
+    const auto spm_ok = [base](uint32_t address, uint64_t bytes) {
+        return address >= base && (address & 31u) == 0 &&
+            bytes <= SpmAllocator::SPM_USABLE &&
+            uint64_t{address} - base <= SpmAllocator::SPM_USABLE - bytes &&
+            uint64_t{address} + bytes <= (uint64_t{1} << 32);
+    };
+    TORCH_CHECK(spm_ok(q_abs, kQBytes), "T51 QK RoPE/KV Q absolute interval is invalid");
+    const auto convert = [base, &spm_ok](uint32_t offset) {
+        TORCH_CHECK((offset & 255u) == 0 && offset <= SpmAllocator::SPM_USABLE - kKVBytes,
+                    "T51 QK RoPE/KV input offset violates alignment or full extent");
+        const uint64_t address = SPM_ALLOC.addr(0, offset);
+        TORCH_CHECK(address == base + offset && address <= UINT32_MAX &&
+                        (address & 255u) == 0 && spm_ok(static_cast<uint32_t>(address), kKVBytes),
+                    "T51 QK RoPE/KV input offset-to-absolute conversion failed");
+        return static_cast<uint32_t>(address);
+    };
+    const uint32_t k_abs = convert(k_off), v_abs = convert(v_off);
+    const auto disjoint = [](uint64_t a, uint64_t a_bytes, uint64_t b, uint64_t b_bytes) {
+        return a <= b ? b - a >= a_bytes : a - b >= b_bytes;
+    };
+    TORCH_CHECK(disjoint(q_abs, kQBytes, k_abs, kKVBytes) &&
+                    disjoint(q_abs, kQBytes, v_abs, kKVBytes) &&
+                    disjoint(k_abs, kKVBytes, v_abs, kKVBytes),
+                "T51 QK RoPE/KV complete Q/K/V SPM intervals overlap");
+    const auto ddr_address = [](const at::Tensor& owner) {
+        const uint64_t address = RpuGetDevAddr(owner.data_ptr<c10::Half>());
+        TORCH_CHECK(address != 0 && (address & 255u) == 0 &&
+                        (address >> 8) <= UINT32_MAX &&
+                        owner.nbytes() <= (uint64_t{1} << 40) - address,
+                    "T51 QK RoPE/KV full DDR owner violates shift8 addressing");
+        return address;
+    };
+    const uint64_t c_addr = ddr_address(cos), s_addr = ddr_address(sin);
+    const uint64_t k_addr = ddr_address(k_cache), v_addr = ddr_address(v_cache);
+    TORCH_CHECK(disjoint(k_addr, k_cache.nbytes(), v_addr, v_cache.nbytes()) &&
+                    disjoint(k_addr, k_cache.nbytes(), c_addr, cos.nbytes()) &&
+                    disjoint(k_addr, k_cache.nbytes(), s_addr, sin.nbytes()) &&
+                    disjoint(v_addr, v_cache.nbytes(), c_addr, cos.nbytes()) &&
+                    disjoint(v_addr, v_cache.nbytes(), s_addr, sin.nbytes()),
+                "T51 QK RoPE/KV cache writes overlap another cache or table reads");
+    TORCH_CHECK(KernelCache::instance().has_loaded(kId),
+                "T51 QK RoPE/KV optional payload is absent");
+    auto* queue = GET_QUEUE(8);
+    TORCH_CHECK(queue != nullptr, "T51 QK RoPE/KV eight-core queue is absent");
+    auto& graph = RpuKernelGraph::active();
+    auto writer = graph.stage_kernel_ddr_registers(kId,
+        std::vector<GraphDdrRegisterOperandSpec>{
+            {{GraphDdrRegisterRole::SemanticInput, GraphDdrRegisterAccess::Read,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 0, 1}, cos},
+            {{GraphDdrRegisterRole::SemanticInput, GraphDdrRegisterAccess::Read,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 2, 3}, sin},
+            {{GraphDdrRegisterRole::KeyCache, GraphDdrRegisterAccess::Write,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 28, 29}, k_cache},
+            {{GraphDdrRegisterRole::ValueCache, GraphDdrRegisterAccess::Write,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 32, 33}, v_cache}});
+    Kernel_t* selected = GET_KERNEL(kId);
+    TORCH_CHECK(selected != nullptr, "T51 QK RoPE/KV optional payload is absent");
+    const at::Tensor* owners[] = {&cos, &sin, &k_cache, &v_cache};
+    for (const at::Tensor* owner : owners) {
+        graph.keep_alive(*owner);
+        rpu_ddr_flush(owner->data_ptr<c10::Half>());
+    }
+    auto& kernel = *selected;
+    kernel.reset_regs();
+    const auto u16 = [&kernel](uint32_t index, uint16_t value) {
+        TORCH_CHECK(kernel.set_regs(index, value) == kKernelRegOk,
+                    "T51 QK RoPE/KV rejected parameter ", index);
+    };
+    const auto u32 = [&u16](uint32_t index, uint32_t value) {
+        u16(index, static_cast<uint16_t>(value));
+        u16(index + 1, static_cast<uint16_t>(value >> 16));
+    };
+    u32(4, q_abs); u32(6, q_abs); u32(8, static_cast<uint32_t>(rope_position));
+    u16(10, 128); u16(11, 4); u16(12, 51); u16(13, 128); u16(14, 1);
+    const uint32_t delta = k_abs - q_abs;
+    u32(15, delta); u32(17, delta); u16(19, static_cast<uint16_t>(1 - 4));
+    u32(20, static_cast<uint32_t>(cache_position));
+    u16(22, 1); u16(23, 128); u16(24, 51);
+    u32(26, k_abs); u32(30, v_abs); u16(41, 8);
+    writer.write(kernel);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(kernel, {1, 4, 2}, {0, 1, 2, 3, 4, 5, 6, 7});
+    rpu_ddr_flush(k_cache.data_ptr<c10::Half>());
+    rpu_ddr_flush(v_cache.data_ptr<c10::Half>());
+}
+
 // Fixed production entry: typed DDR operands have the same owners/encodings
 // as the original tensor-owned RoPE and K-only V16 insert. This is the sole
 // boundary converting the public KV offset to the original absolute RoPE ABI.
@@ -294,10 +669,11 @@ void rpu_launch_pi05_k_rope_insert_spm_kernel(
                     plan.segment(0).kernel == KvInsertKernel::V16 &&
                     (plan.segment(0).position == 544 || plan.segment(0).position == 800 ||
                      plan.segment(0).position == 832 || plan.segment(0).position == 576 ||
-                     plan.segment(0).position == 864 || plan.segment(0).position == 896 || plan.segment(0).position == 608 || plan.segment(0).position == 640) &&
+                     plan.segment(0).position == 864 || plan.segment(0).position == 896 || plan.segment(0).position == 608 || plan.segment(0).position == 640 ||
+                     plan.segment(0).position == 672 || plan.segment(0).position == 928) &&
                     plan.segment(0).token_offset == 0 &&
                     plan.segment(0).rows == 64 && spm_rows == 64,
-                "Pi0.5 K-RoPE insert requires the complete M50/P544/P576/P608/P640/P800/P832/P864/P896/PAD16 V16 plan");
+                "Pi0.5 K-RoPE insert requires the complete M50/P544/P576/P608/P640/P672/P800/P832/P864/P896/P928/PAD16 V16 plan");
     constexpr uint32_t kBytes = 64 * 256 * sizeof(c10::Half);
     TORCH_CHECK((k_off & 255) == 0 &&
                     k_off <= SpmAllocator::SPM_USABLE - kBytes,
@@ -463,7 +839,7 @@ at::Tensor rpu_partial_mrope_test(
     TORCH_CHECK(input.device().type() == at::kPrivateUse1
                 && cos_il.device().type() == at::kPrivateUse1
                 && sin_il.device().type() == at::kPrivateUse1,
-                "partial_mrope_test: all inputs must be on RPU device");
+                "partial_mrope_test: all inputs must be on device");
 
     const int num_cores = input.dim() == 4 ? static_cast<int>(input.size(0)) : 1;
     TORCH_CHECK(num_cores >= 1 && num_cores <= 8,
@@ -542,7 +918,7 @@ at::Tensor rpu_partial_rope_1d_test(
     TORCH_CHECK(input.is_contiguous() && cos.is_contiguous() && sin.is_contiguous(),
                 "partial_rope_1d_test: inputs must be contiguous");
     TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                "partial_rope_1d_test: inputs must be on RPU device");
+                "partial_rope_1d_test: inputs must be on device");
     TORCH_CHECK(cos.size(1) == rotary_dim / 2,
                 "partial_rope_1d_test: cos.size(1)=", cos.size(1),
                 " must equal rotary_dim/2=", rotary_dim / 2);

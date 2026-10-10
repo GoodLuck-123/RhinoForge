@@ -1,0 +1,33 @@
+# TP8 HyVLA measurement template. Edit cameras/text_tokens directly.
+# Synthetic inputs use the checkpoint tokenizer; task quality is not evaluated.
+[hy_vla]
+precision = "fp16"
+resident_fp8_scale_layers = 0
+rmsnorm_vwarp = "auto"
+
+[input]
+checkpoint = "hy-embodied-0.5-vla-umi"
+source = "synthetic"
+cameras = 2
+text_tokens = 32
+prefix_len = "auto"
+num_steps = 10
+# instruction = "A prompt with at least text_tokens real checkpoint tokens ..."
+# reference = "/path/to/same_input_run/reference.pt"
+
+[rpu_execution.model]
+num_cores = 8
+
+[run]
+warmup = 3
+runs = 6
+seed = 0
+output_dir = "./hyvla_results/2cam/fp16"
+
+# Use the current native build and the two bundled REF aliases.
+# Source/build provenance is in manifests/dependency_manifest.v1.json.
+# Changing cameras/text_tokens does not require selecting another library.
+[libraries]
+native = "/path/to/current-build/rpu_backend.so"
+main = "/path/to/rpu_backend/src/rhinoOpLib_current.ref"
+expansion = "/path/to/rpu_backend/src/rhinoExpansionOpLib_current.ref"

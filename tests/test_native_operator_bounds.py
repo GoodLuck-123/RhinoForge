@@ -57,13 +57,24 @@ struct Tensor {
 };
 }
 using at::Tensor;
-struct SdpaTiling {};
+struct SdpaTiling { int tile_m_v16=0, tile_m=0, tile_k_v16=0, tile_k=0, tile_n_v16=0, tile_n=0; };
 void check_linear_w4a16_operands(const Tensor&, const Tensor&, const Tensor&, c10::optional<Tensor>) {
     throw std::runtime_error("FP16 admission fixture must not enter W4");
 }
 enum class RpuRmsNormSpmRoute { BASE, V16, V32, QWEN3VL_V64 };
-enum class KernelId { SDPA_FLASH_ATTN_SPM_16B, SDPA_FLASH_ATTN_SPM };
+enum class KernelId { SDPA_FLASH_ATTN_SPM_16B, SDPA_FLASH_ATTN_SPM, HYVLA_EXPERT_SDPA_M16_S51, HYVLA_EXPERT_SDPA_K128_S51, LINGBOT2_SDPA_T51_K275_TAIL };
 int64_t CeilDiv(int64_t n, int64_t d) { assert(d>0); return (n+d-1)/d; }
+bool rpu_hyvla_s51_key_rows_supported(int64_t) { throw std::runtime_error("ordinary fixture cannot select expert SDPA"); }
+constexpr int MASK_2D=1;
+bool rpu_lingbot2_sdpa_tail_t51_key_rows_supported(int64_t) {
+    throw std::runtime_error("ordinary fixture cannot select Lingbot SDPA");
+}
+struct KernelCache {
+    static KernelCache& instance() { static KernelCache cache; return cache; }
+    bool has_loaded(KernelId) { throw std::runtime_error("ordinary fixture cannot query specialized kernels"); }
+};
+void* get_specialized_queue(int) { throw std::runtime_error("ordinary fixture cannot request specialized queues"); }
+#define GET_QUEUE(cores) get_specialized_queue(cores)
 int staged=0;
 __FUNCTIONS__
 template<class F> void rejects(F&& f) {

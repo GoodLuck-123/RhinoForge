@@ -1,7 +1,7 @@
 """v5.0 owning module for RPUCache + RPUCache.from_model classmethod.
 
 Per ADR §2.5 + REQ SKEL-02 + REQ CUT-06 + DELETION-LEDGER §N0a: this
-file is the canonical home for the 7-D swizzled KV cache used by RPU
+file is the canonical home for the 7-D swizzled KV cache used by device
 fused attention. Predecessor: ``core/weights/cache.py`` (which is
 now a thin re-export per NS-09a / D-02b).
 
@@ -10,7 +10,7 @@ now a thin re-export per NS-09a / D-02b).
 the iter2 BLOCKER-1 ``_REQUIRED`` sentinel that distinguishes
 "max_new_tokens not given" from ``max_new_tokens=None``. The
 ``device='cpu'`` escape hatch (codex pass-4 HIGH-3) lets cheap
-CI / scaffold smoke tests verify factory sizing without RPU
+CI / scaffold smoke tests verify factory sizing without device
 allocation; production callers use the default ``device='rpu'``.
 
 NUM_CORES is imported from ``rpu_backend.core.weights.swizzle``
@@ -49,6 +49,33 @@ def _positive_int(name: str, value: int) -> int:
             f"RPUCache {name} must be a positive integer, got {value!r}"
         )
     return int(value)
+
+
+def _reset_view_witness(value):
+    return (value.untyped_storage()._cdata, value.untyped_storage().nbytes(),
+            value.data_ptr(), value.dtype, value.device, tuple(value.shape),
+            tuple(value.stride()), value.storage_offset())
+
+
+def _zero_whole_rpu_tensors(tensors):
+    """Batch complete aligned overwrites; other views retain scalar zero_."""
+    if not tensors:
+        return False
+    inference = torch.is_inference_mode_enabled()
+    for tensor in tensors:
+        if (not isinstance(tensor, torch.Tensor) or tensor.device.type != "rpu"
+                or not tensor.is_contiguous() or tensor.requires_grad
+                or tensor.is_inference() and not inference
+                or tensor.storage_offset() != 0):
+            return False
+        storage = tensor.untyped_storage()
+        if (tensor.nbytes != storage.nbytes()
+                or storage.data_ptr() % 256 or storage.nbytes() % 256):
+            return False
+    # Keep every empty occurrence: its shared version still changes.
+    blocks = [tensor.view(1, 1, -1) for tensor in tensors]
+    torch.ops.rpu.zero_contiguous_tensor_blocks_sized(blocks, 0)
+    return True
 
 
 def _prefill_padding_room(model, prefill_len: int) -> int:
@@ -90,7 +117,7 @@ def _prefill_padding_room(model, prefill_len: int) -> int:
 
 class RPUCache(HFCache):
     """
-    KV Cache for RPU fused attention in 7D swizzle format.
+    KV Cache for device fused attention in 7D swizzle format.
 
     K-cache shape: [batch, sKeyVx, nKVHeadVx, headDimVx, nKVHeadChunk, sKeyChunk, headDimChunk]
     V-cache shape: [batch, sValVx, nKVHeadVx, headDimVx, nKVHeadChunk, headDimChunk, sValChunk]
@@ -114,6 +141,7 @@ class RPUCache(HFCache):
         attn_tp: int = NUM_CORES,
         *,
         _layer_bank_size: int = 1,
+        _kv_layer_mask: tuple[bool, ...] | None = None,
     ):
         num_layers = _positive_int("num_layers", num_layers)
         batch_size = _positive_int("batch_size", batch_size)
@@ -122,6 +150,13 @@ class RPUCache(HFCache):
         head_dim = _positive_int("head_dim", head_dim)
         attn_tp = _positive_int("attn_tp", attn_tp)
         _layer_bank_size = _positive_int("_layer_bank_size", _layer_bank_size)
+        if _kv_layer_mask is not None:
+            if (not isinstance(_kv_layer_mask, tuple)
+                    or len(_kv_layer_mask) != num_layers
+                    or any(type(active) is not bool for active in _kv_layer_mask)):
+                raise ValueError("RPUCache _kv_layer_mask must contain one bool per layer")
+            if _layer_bank_size != 1:
+                raise ValueError("RPUCache selective KV allocation requires unbanked layers")
         # batch_size > 1 only allocates independent KV slots. The Qwen3 adapter
         # owns the explicit capability gate that allows those slots to be used
         # by batched prefill/decode; other architectures remain batch==1.
@@ -193,14 +228,21 @@ class RPUCache(HFCache):
                    self.nKVHeadChunk, self.sKeyChunk, self.headDimChunk)
         v_shape = (batch_size, self.sValVx, self.nKVHeadVx, self.headDimVx,
                    self.nKVHeadChunk, self.headDimChunk, self.sValChunk)
-        # Exact runtime-quantized 32B owns many persistent DDR mappings. Group
-        # its layers without changing the 7D ABI or aliasing any cache rows.
+        # Cold model policy may group persistent DDR mappings without changing
+        # the 7D ABI or aliasing any cache rows.
         # The default remains one allocation per layer. Cap grouping at
         # 512 MiB; an individually larger layer still uses its own allocation.
         layer_bytes = (batch_size * self.sKeyVx * self.nKVHeadVx * self.headDimVx
                        * self.nKVHeadChunk * self.sKeyChunk * self.headDimChunk * 2)
         bank_size = min(_layer_bank_size, max(1, (512 * 1024 * 1024) // layer_bytes))
+        reset_banks = ([], []) if bank_size > 1 else None
         for start in range(0, num_layers, bank_size):
+            if _kv_layer_mask is not None and not _kv_layer_mask[start]:
+                # Hybrid recurrent layers retain their logical indices without
+                # ever allocating the unused KV backing, even transiently.
+                self.k_caches.append(torch.empty(0, dtype=dtype, device=resolved_device))
+                self.v_caches.append(torch.empty(0, dtype=dtype, device=resolved_device))
+                continue
             count = min(bank_size, num_layers - start)
             k_cache = torch.zeros(
                 k_shape if count == 1 else (count, *k_shape),
@@ -213,6 +255,13 @@ class RPUCache(HFCache):
             # Views retain each owning bank for the complete cache lifetime.
             self.k_caches.extend([k_cache] if count == 1 else k_cache.unbind(0))
             self.v_caches.extend([v_cache] if count == 1 else v_cache.unbind(0))
+            if reset_banks is not None:
+                reset_banks[0].append((k_cache, _reset_view_witness(k_cache)))
+                reset_banks[1].append((v_cache, _reset_view_witness(v_cache)))
+        self._reset_groups = None if reset_banks is None else tuple(
+            (banks, tuple((value, _reset_view_witness(value)) for value in values))
+            for banks, values in zip(reset_banks, (self.k_caches, self.v_caches))
+        )
 
         # Track current position (sequence length written so far)
         self.position = 0
@@ -260,6 +309,26 @@ class RPUCache(HFCache):
         """Reset cache to empty state."""
         self.position = 0
         self._seen_tokens = 0
+        groups = getattr(self, "_reset_groups", None)
+        if groups is not None and len(self.k_caches) == len(self.v_caches):
+            for current, (banks, expected) in zip(
+                    (self.k_caches, self.v_caches), groups):
+                intact = (
+                    len(current) == len(expected)
+                    and all(value is original and _reset_view_witness(value) == witness
+                            for value, (original, witness) in zip(current, expected))
+                    and all(_reset_view_witness(bank) == witness for bank, witness in banks)
+                )
+                # Public layer lists are mutable. A replaced/reshaped view must
+                # clear only the current tensors, leaving retired rows alone.
+                for value in ([bank for bank, _ in banks] if intact else current):
+                    value.zero_()
+            return
+        if groups is None and len(self.k_caches) == len(self.v_caches):
+            tensors = [tensor for pair in zip(self.k_caches, self.v_caches)
+                       for tensor in pair]
+            if _zero_whole_rpu_tensors(tensors):
+                return
         for k_cache, v_cache in zip(self.k_caches, self.v_caches):
             k_cache.zero_()
             v_cache.zero_()
@@ -367,7 +436,7 @@ class RPUCache(HFCache):
         - computed ``max_seq_len <= 0``.
 
         ``device='cpu'`` is for cheap CI / scaffold smoke (factory
-        sizing verification without RPU allocation). Production callers
+        sizing verification without device allocation). Production callers
         omit it (default ``'rpu'``).
 
         ``batch_size > 1`` is available only when
@@ -484,7 +553,7 @@ class RPUCache(HFCache):
         """
         Convert RPUCache (7D swizzled) to HuggingFace DynamicCache format.
 
-        Unswizzles K/V cache tensors from RPU 7D format back to standard
+        Unswizzles K/V cache tensors from device 7D format back to standard
         [batch, num_kv_heads, seq_len, head_dim] and wraps in DynamicCache.
 
         Args:

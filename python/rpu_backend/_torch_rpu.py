@@ -86,7 +86,7 @@ def _is_in_bad_fork() -> bool:
     the question does not arise, because :func:`manual_seed_all` below touches
     no device state at all.
 
-    ⚠️ Narrow claim. This is NOT an assertion that an RPU process is safe to
+    ⚠️ Narrow claim. This is NOT an assertion that an device process is safe to
     fork — the SDK's device fd and DMA buffers are not fork-safe, and nothing
     here changes that. It says only that seeding is unaffected by a fork,
     which is the single question this hook is asked.
@@ -95,27 +95,10 @@ def _is_in_bad_fork() -> bool:
 
 
 def manual_seed_all(seed: int) -> None:
-    """Correct no-op: ``rpu`` has no device generator to seed.
+    """Keep CPU fallback RNG seeding under ``torch.manual_seed``.
 
-    ``torch.Generator(device='rpu')`` raises ("Please register
-    PrivateUse1HooksInterface..."), so ``torch.randn(..., device='rpu')`` is
-    served by the CPU fallback and draws from the CPU **global** RNG, which
-    ``torch.manual_seed`` seeds itself. Measured on device (2026-08-10, SDK
-    05E): after ``torch.manual_seed(1234)``, ``randn(64, device='rpu')`` and
-    ``randn(64).to('rpu')`` hash identically, and repeat across processes.
-
-    So the seed already takes effect, and this function has nothing left to do.
-    Registering it (with :func:`_is_in_bad_fork`) also retires PyTorch's
-    ``Set seed for `rpu` device does not take effect`` UserWarning — which was
-    false, and is the traced origin of a "manual_seed does not seed rpu
-    tensors" folklore that survived months in this repo's methodology.
-
-    It must stay a no-op rather than, say, re-seeding the CPU generator:
-    ``_manual_seed_impl`` calls this BEFORE ``default_generator.manual_seed``,
-    so doing anything here would only race the real seeding that follows.
-
-    ⚠️ ``torch.empty(..., device='rpu')`` is genuinely seedless — it returns
-    uninitialised DDR. No seed governs it, and none can.
+    The device has no separate generator. PyTorch calls this hook before
+    seeding its CPU generator, so the hook must leave that generator unchanged.
     """
     return None
 
@@ -124,7 +107,7 @@ _PRINT_PATCH_FLAG = "_rpu_prints_via_cpu"
 
 
 def _install_printable_rpu_tensors(torch_module: Any) -> None:
-    """Make ``repr()`` of an RPU tensor copy to host before reading its data.
+    """Make ``repr()`` of an device tensor copy to host before reading its data.
 
     Printing a tensor is not a debug luxury; PyTorch itself does it in ordinary
     control flow. ``torch/_dynamo/guards.py`` ID_MATCH builds every guard's
@@ -135,10 +118,10 @@ def _install_printable_rpu_tensors(torch_module: Any) -> None:
         except Exception:
             type_repr = f"<{type(val).__name__}>"
 
-    With ``val`` an RPU ``nn.Parameter`` that ``repr`` reached straight into
+    With ``val`` an device ``nn.Parameter`` that ``repr`` reached straight into
     device memory from the host and took the process down with SIGSEGV — which
     is not an ``Exception``, so their fallback could never catch it. Result:
-    ``torch.compile`` on any RPU module died while BUILDING ITS GUARDS, before
+    ``torch.compile`` on any device module died while BUILDING ITS GUARDS, before
     running a single op. ``print(param)`` at a prompt or in a debugger did the
     same thing.
 

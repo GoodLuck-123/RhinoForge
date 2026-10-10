@@ -24,6 +24,15 @@ def test_backbone_memo_survives_request_context_and_input_mutation(monkeypatch):
 
     monkeypatch.setattr(torch.Tensor, "to", cpu_to)
     monkeypatch.setattr(torch, "zeros", cpu_zeros)
+    assembled = []
+    def assemble(prefix, ids, parts, runs, prefix_is_embeddings=False):
+        assert prefix_is_embeddings is True
+        result = prefix.clone()
+        for part, (start, length) in zip(parts, runs.tolist()):
+            result[start:start + length].copy_(part)
+        assembled.append(result)
+        return result
+    monkeypatch.setattr(torch.ops.rpu, "assemble_inputs_embeds_parts", assemble, raising=False)
     def rope(*args, **kwargs):
         return torch.arange(4).reshape(1, 1, 4).expand(3, 1, 4), None
 
@@ -41,7 +50,8 @@ def test_backbone_memo_survives_request_context_and_input_mutation(monkeypatch):
         _rpu_last_execution_plan = {'component': runtime._VISION_COMPONENT,
                                    'generation': 0, 'dry_forward_agreement': True}
         def __call__(self, *args, **kwargs):
-            return visual
+            return kwargs["_rpu_merged_consumer"](
+                visual.pooler_output, visual.deepstack_features)
 
     class AtPlanning(Exception):
         pass
@@ -62,14 +72,19 @@ def test_backbone_memo_survives_request_context_and_input_mutation(monkeypatch):
               'image_grid_thw': torch.tensor([[1, 1, 2]])}
     with torch.inference_mode(), pytest.raises(AtPlanning):
         runtime.Gr00tN1d7VLA._backbone(owner, inputs)
-    first, deep = owner._emb_text_rpu, owner._ds_dense[0]
+    first, deep, prefix = owner._emb_text_rpu, owner._ds_dense[0], owner._emb_prefix_rpu
     visual.pooler_output.add_(10); visual.deepstack_features[0].add_(10)
     with torch.no_grad(), pytest.raises(AtPlanning):
         runtime.Gr00tN1d7VLA._backbone(owner, inputs)
     assert owner._emb_text_rpu is first and owner._ds_dense[0] is deep
-    assert not first.is_inference() and not deep.is_inference()
-    assert torch.equal(first[0, 1:3], visual.pooler_output.half())
-    assert torch.equal(deep[1:3], visual.deepstack_features[0].half())
+    assert owner._emb_prefix_rpu is prefix
+    assert not first.is_inference() and not deep.is_inference() and not prefix.is_inference()
+    assert torch.equal(first[0, 1:3], embedding.weight[15].half().expand(2, -1))
+    assert torch.count_nonzero(deep) == 0
+    assert len(assembled) == 2 and tuple(assembled[-1].shape) == (8, 3)
+    assert torch.equal(assembled[1][1:3], visual.pooler_output.half())
+    assert torch.equal(assembled[1][5:7], visual.deepstack_features[0].half())
+    assert torch.equal(assembled[0][1:3], visual.pooler_output.half() - 10)
     assert torch.count_nonzero(deep[[0, 3]]) == 0
     inputs['input_ids'][0, 0] = 3
     with torch.no_grad(), pytest.raises(AtPlanning):
@@ -77,4 +92,11 @@ def test_backbone_memo_survives_request_context_and_input_mutation(monkeypatch):
     assert owner._emb_text_rpu is not first
     assert torch.equal(owner._emb_text_rpu[0, 0], embedding.weight[3].half())
     assert torch.equal(first[0, 0], embedding.weight[1].half())
-    assert torch.equal(owner._emb_text_rpu[0, 1:3], visual.pooler_output.half())
+    assert torch.equal(owner._emb_text_rpu[0, 1:3], embedding.weight[15].half().expand(2, -1))
+    assert len(assembled) == 3
+    assert torch.equal(assembled[2][1:3], visual.pooler_output.half())
+    assert torch.equal(assembled[2][5:7], visual.deepstack_features[0].half())
+    assert owner._emb_assembly_ids.dtype == torch.int32
+    assert torch.equal(owner._emb_assembly_ids, inputs['input_ids'].reshape(-1).repeat(2).int())
+    assert owner._img_runs_cpu.tolist() == [[1, 2], [5, 2]]
+    assert not owner._emb_assembly_ids.is_inference() and not owner._img_runs_cpu.is_inference()

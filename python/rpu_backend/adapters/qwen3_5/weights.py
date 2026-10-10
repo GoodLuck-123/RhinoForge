@@ -1,7 +1,45 @@
-"""Cold storage preparation for the exact legacy Qwen3.8-27B text policy."""
+"""Cold storage preparation for exact large Qwen3.5 text profiles."""
 import torch
 
-from .quant_scope import FP16, W8A16, is_full_from_layer_types, resolve_quant_specs
+from .quant_scope import FP16, W8A16, W4A16_PGRP, is_full_from_layer_types, resolve_quant_specs
+
+
+def validate_modern_27b_cold_weights(inner, config, *, cold_cpu):
+    """Validate ordinary quantized raw leaves before any irreversible upload."""
+    tc = getattr(config, "text_config", config)
+    specs = resolve_quant_specs(is_full_from_layer_types(tc.layer_types), config.quant_config)
+    devices = ("cpu",) if cold_cpu else ("cpu", "rpu", "privateuseone")
+    quant_weights = {name + ".weight" for name in specs}
+    for name, value in (*inner.named_parameters(), *inner.named_buffers()):
+        # Nonpersistent rotary buffers retain their source FP32 dtype.
+        if name.endswith(("inv_freq", "original_inv_freq")):
+            continue
+        dtype = torch.int8 if name in quant_weights else torch.float16
+        if (value.device.type not in devices or value.dtype != dtype
+                or not value.is_contiguous()):
+            raise ValueError(f"Qwen3.5-27B cold tensor {name} has incompatible storage")
+    for name, spec in specs.items():
+        projection = inner.get_submodule(name)
+        weight = projection.weight
+        if (not isinstance(projection, torch.nn.Linear) or projection.bias is not None
+                or tuple(weight.shape) != (projection.out_features, projection.in_features)
+                or hasattr(projection, "_rpu_linear_partition")):
+            raise ValueError(f"Qwen3.5-27B projection {name} requires original raw Linear geometry")
+        if spec.method not in (W8A16, W4A16_PGRP):
+            raise ValueError("Qwen3.5-27B cold installation requires uniform W8/W4 projections")
+        scale = getattr(projection, "weight_scale", None)
+        expected = ((weight.shape[0],) if spec.method == W8A16 else
+                    (weight.shape[1] // spec.group_size, weight.shape[0]))
+        if (not isinstance(scale, torch.Tensor) or scale.device != weight.device
+                or scale.dtype != torch.float16 or not scale.is_contiguous()
+                or tuple(scale.shape) != expected):
+            raise ValueError(f"Qwen3.5-27B projection {name} requires raw FP16 scale {expected}")
+        if cold_cpu and (not bool(torch.isfinite(scale).all()) or not bool((scale > 0).all())):
+            raise ValueError(f"Qwen3.5-27B projection {name} requires finite positive scales")
+        if cold_cpu and spec.method == W4A16_PGRP:
+            lower, upper = torch.aminmax(weight)
+            if int(lower) < -8 or int(upper) > 7:
+                raise ValueError(f"Qwen3.5-27B projection {name} requires signed INT4 values [-8, 7]")
 
 
 def validate_legacy_cold_weights(inner, config, *, cold_cpu):
@@ -49,6 +87,12 @@ def pad_legacy_mlp_projection(weight, *, projection_name, logical_size, physical
     return padded
 
 
+def pad_dense_27b_mlp_projection(weight, *, projection_name, logical_size, physical_size):
+    """The modern W8 TP6 profile shares the exact int8 physical MLP layout."""
+    return pad_legacy_mlp_projection(weight, projection_name=projection_name,
+                                    logical_size=logical_size, physical_size=physical_size)
+
+
 def pad_legacy_mlp_scale(scale, *, projection_name):
     """New gate/up rows dequantize to zero with unit scale; down keeps [5120]."""
     if projection_name not in ("gate_proj", "up_proj", "down_proj"):
@@ -62,6 +106,10 @@ def pad_legacy_mlp_scale(scale, *, projection_name):
     padded = scale.new_ones(17472)
     padded[:expected].copy_(scale)
     return padded
+
+
+def pad_dense_27b_mlp_scale(scale, *, projection_name):
+    return pad_legacy_mlp_scale(scale, projection_name=projection_name)
 
 
 def pad_gdn_scalar(weight, *, num_heads, num_cores):

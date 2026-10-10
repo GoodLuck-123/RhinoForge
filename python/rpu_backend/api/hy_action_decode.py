@@ -1,44 +1,15 @@
-"""Hy-Embodied-0.5-VLA 的 action 解码 —— 归一化网格 → 物理双臂 EE 位姿。
+"""Hy-Embodied action decoding from normalized deltas to dual-arm EE poses.
 
-存在的理由
-    模型吐的是**归一化的 RT-相对增量**，不是可以直接下发的关节/位姿指令。
-    vendor 的评测封装（`robodojo_eval/policy_wrapper.py::_infer_chunk_wxyz`）在
-    交给机器人之前一定会走完下面这条链；RPU 交付此前只把归一化网格原样返回，
-    调用方一旦直接下发就是错的。同类交付上已经出过事故：LingBot-VLA-V2 的
-    `api/action_denorm.py` 记录了"漏掉反归一化 ⇒ 肩关节偏 1.84 rad ≈ 106°"。
+The decoder follows the vendor `_infer_chunk_wxyz` transform:
+1. Apply per-timestep act_std/act_mean, both shaped (50, 20).
+2. Convert the initial pose quaternion from wxyz to xyzw.
+3. For UMI checkpoints, convert the initial pose into the UMI frame.
+4. Convert relative 6D rotations and translations into poses: T_i = T_0 @ delta_T_i.
+5. Convert UMI results back to the robot frame and quaternions to wxyz.
+6. Drop row zero and return actions_wxyz[1:n+1].
 
-    ⇒ 本模块补上这一步，并由 `HyEmbodiedActionOutput.actions` 强制：**没配解码
-    器就抛异常**，绝不把归一化值伪装成物理动作。
-
-解码链（逐字对应 vendor）
-    1. `rel = actions[:, :20] * act_std + act_mean`
-       ⚠️ `act_std/act_mean` 形状是 **(50, 20)** —— **逐时间步**的统计量，不是
-          一条 20 维向量。当成 1-D 广播会把整个 chunk 算错。
-    2. 初始 EE 位姿 wxyz → xyzw
-    3. （UMI ckpt）`convert_frame_robo_to_umi`
-    4. `relative_to_dual_arm_poses(rel, initial_xyzw)`：6D 旋转 → 矩阵 →
-       `T_i = T_0 @ ΔT_i` → 位置 + 四元数
-    5. （UMI ckpt）`convert_frame_umi_to_robo`
-    6. xyzw → wxyz
-    7. **丢掉第 0 行** —— 第 0 行的增量≈0，对应"当前位姿"，vendor 下发的是
-       `actions_wxyz[1 : n+1]`
-
-⚠️⚠️ **口径：只能声明"与 vendor 代码一致"，不能声明"可下发真机"。**
-
-交付 golden 里**只有归一化的** `p7.action_valid20` —— vendor 没有留下解码后的参考
-轨迹，也没有留下当时的 `observation.state`。⇒ **不存在"物理动作 vs golden"这种对拍**，
-凡是这么说的都是把两件事混了。
-
-已经做到的：在隔离进程里跑 **vendor 官方 `_decode_actions` 源码**产出 oracle，再由
-另一个进程加载本模块比对，解码轨迹 `max_abs_diff 0.000e+00`（逐位相同）。
-⚠️ 那一轮是在**重放到主干之前**的基点上跑的，按本轮纪律记作**历史参考**；
-本模块自身在重放中未发生逻辑改动（仅措辞），但**重放后尚未重跑** ⇒ 标 NOT RUN。
-
-即使重跑通过，它也**只**支持"与 vendor 代码一致"。真机接入前仍必须：
-  ① 与机器人团队确认 `umi_coord_frame` / `umi_gripper_space` / EE 位姿帧与原点 /
-     夹爪量纲（见 DEPLOYMENT.md 的"未决契约"一节）—— 这是**业务契约**，
-     任何数值对拍都替代不了；
-  ② 首次上机必须有人在场并握住急停。
+HyEmbodiedActionOutput.actions requires a configured decoder. Physical commands
+also require the checkpoint's coordinate frame, origin and gripper units.
 """
 from __future__ import annotations
 
@@ -47,9 +18,7 @@ import pickle
 
 import numpy as np
 
-# vendor `robotwin_eval/transforms.py` 与 `hy_vla/utils/transform_utils.py` 的
-# 每一步旋转都用 scipy，这里照用同一个库：oracle 也是跑 vendor 那份 scipy 代码得到的，
-# 再换一套四元数实现只会多引入一层无法归因的差异。
+# Use the same rotation library as the vendor transform functions.
 try:
     from scipy.spatial.transform import Rotation as _R
 except ImportError as exc:                                  # pragma: no cover

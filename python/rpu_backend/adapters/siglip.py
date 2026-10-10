@@ -153,7 +153,7 @@ _SIGLIP_BRANCH_PRE_EMBEDDED = 2  # 3D hidden → encoder only
 # GraphCache (adapters/halo/vit_cache.py:342). HALO is already correct, so
 # generalising this key would have zero consumers; what is actually left is a
 # trap for the next caller. Generalise only when a real non-256 caller appears on
-# THIS path (followups_plan_20260811.md §1 B4).
+# this path.
 SIGLIP_SEQ_LEN = 256
 
 
@@ -225,7 +225,7 @@ def _quantize_and_swizzle_siglip_weight(
     if weight.device.type != "cpu":
         raise RuntimeError(
             "RPU_PI05_SIGLIP_W8A16 requires SigLIP encoder conversion before "
-            "moving weights to RPU"
+            "moving weights to device"
         )
     w_int8, scale = quantize_linear_per_channel(weight.contiguous())
     w_swizzled = transform_linear_weight(
@@ -339,7 +339,7 @@ def _siglip_destroy_handle(h):
 
 
 def _convert_siglip_weights_for_rpu(vision_tower, *, w8a16_default: bool = False, num_cores: int = 8):
-    """Convert SigLIP encoder weights: pad head_dim/intermediate, swizzle for RPU.
+    """Convert SigLIP encoder weights: pad head_dim/intermediate, swizzle for device.
 
     Modifications:
       - Q/K/V weights: pad head_dim 72->80, col swizzle
@@ -382,7 +382,7 @@ def _convert_siglip_weights_for_rpu(vision_tower, *, w8a16_default: bool = False
     orig_intermediate = layer0.mlp.fc1.out_features
     num_layers = len(encoder.layers)
 
-    # Pad to satisfy RPU kernel alignment: head_dim % 16 == 0, intermediate % 128 == 0
+    # Pad to satisfy device kernel alignment: head_dim % 16 == 0, intermediate % 128 == 0
     padded_head_dim = ((orig_head_dim + 15) // 16) * 16       # 72 -> 80
     padded_intermediate = ((orig_intermediate + 127) // 128) * 128  # 4304 -> 4352
     padded_qkv_out = num_heads * padded_head_dim               # 16 * 80 = 1280
@@ -498,10 +498,10 @@ def _convert_siglip_projector_for_rpu(projector, *, num_cores: int = 8):
     leaf._rpu_weights_converted = True
 
 
-# patch-reason: (a) Pi0.5 SigLIP embedding GEMM packing for RPU patch-emb kernel — §3a (a) hardware-constraint attribute injection
+# patch-reason: (a) Pi0.5 SigLIP embedding GEMM packing for device patch-emb kernel — §3a (a) hardware-constraint attribute injection
 # v5-05 D-03: forward replacement removed; direct handle path calls siglip_forward(handle, 4D, ...) directly.
 def patch_siglip_embeddings_for_rpu(embeddings_module, num_cores=8):
-    """Patch SiglipVisionEmbeddings for RPU fused patch embedding.
+    """Patch SiglipVisionEmbeddings for device fused patch embedding.
 
     Converts Conv2d(cin=3, cout=1152, k=14, s=14) into im2col + GEMM pipeline:
       - Weight: pad cin 3→16, reshape [cout, cin*kh*kw] = [1152, 3136], col-swizzle
@@ -565,7 +565,7 @@ def patch_siglip_embeddings_for_rpu(embeddings_module, num_cores=8):
               cin_orig, cin_padded, cout, K)
 
 
-# patch-reason: (a) SigLIP all-layers-once instance patch — §3a (a) run-different-op-on-RPU
+# patch-reason: (a) SigLIP all-layers-once instance patch — §3a (a) run-different-op-on-device
 _SIGLIP_RUNTIME_INSTALL_ATTRS = (
     "_test_siglip_weight_args_tuple",
     "_siglip_w8a16",
@@ -791,6 +791,11 @@ def patch_siglip_model_for_rpu_all_layers_once(vision_model, projector,
     _attn_tp = min(num_cores, num_heads)
     _siglip_sig_w8a16 = int(siglip_w8a16)
     _split_siglip_graph = _siglip_graph_enabled()
+    _private_serial_cpu_profile = num_cores == 4 and all(
+        weight.dtype == (torch.int8 if siglip_w8a16 else torch.float16)
+        for group in (q_w_list, k_w_list, v_w_list, o_w_list, fc1_w_list, fc2_w_list)
+        for weight in group
+    )
 
     def rpu_siglip_forward(self, pixel_values=None, **kwargs):
         h = self._rpu_vision_handle
@@ -808,7 +813,37 @@ def patch_siglip_model_for_rpu_all_layers_once(vision_model, projector,
 
         input_tensor = pixel_values
 
-        if input_tensor.device.type != 'rpu':
+        # Only intact private Pi serial slab views use native CPU ingress.
+        # Native admission independently checks the installed Vision4 profile.
+        _private_cpu_image = False
+        if (_num_images == 1 and _attn_tp == 4 and _num_layers == 27
+                and _private_serial_cpu_profile
+                and _num_heads == 16 and _padded_head_dim == 80
+                and type(h) is int and h > 0
+                and vars(self).get('_rpu_vision_num_cores') == 4
+                and vars(self).get('training') is False
+                and type(input_tensor) is torch.Tensor):
+            _slab = getattr(input_tensor, '_pi05_batch_slab', None)
+            _index = getattr(input_tensor, '_pi05_batch_index', None)
+            if (type(_slab) is torch.Tensor and type(_index) is int
+                    and 0 <= _index < 3
+                    and _slab.device.type == 'cpu' and _slab.dtype == torch.float16
+                    and tuple(_slab.shape) == (3, 3, 224, 224)
+                    and _slab.is_contiguous() and _slab.storage_offset() == 0
+                    and _slab.untyped_storage().nbytes() == _slab.numel() * _slab.element_size()
+                    and not _slab.requires_grad and not _slab.is_neg() and not _slab.is_conj()
+                    and input_tensor.device.type == 'cpu' and input_tensor.dtype == torch.float16
+                    and not input_tensor.requires_grad and not input_tensor.is_neg()
+                    and not input_tensor.is_conj()):
+                _view = _slab.narrow(0, _index, 1)
+                _private_cpu_image = (
+                    tuple(input_tensor.shape) == tuple(_view.shape)
+                    and tuple(input_tensor.stride()) == tuple(_view.stride())
+                    and input_tensor.storage_offset() == _view.storage_offset()
+                    and input_tensor.untyped_storage()._cdata == _slab.untyped_storage()._cdata
+                    and input_tensor.data_ptr() == _view.data_ptr()
+                )
+        if input_tensor.device.type != 'rpu' and not _private_cpu_image:
             input_tensor = input_tensor.to(dtype=torch.float16, device='rpu')
         elif input_tensor.dtype != torch.float16:
             input_tensor = input_tensor.to(dtype=torch.float16)
@@ -857,7 +892,7 @@ def patch_siglip_model_for_rpu_all_layers_once(vision_model, projector,
 
         # SigLIP-batch: a [N,3,H,W] input is patch-embedded + PACKED into
         # [1,N*256,1152] entirely in C++ (run_packed_patch_embed) inside this one
-        # encoder capture — no Python torch.cat (which on RPU goes through the
+        # encoder capture — no Python torch.cat (which on device goes through the
         # CPU fallback and leaves the result un-flushed → the downstream mutable
         # DMA reads stale DDR). The C++ patch_emb flushes each input image slice
         # (fused_patch_embedding step ①); the packed hidden stays in the graph's
@@ -887,22 +922,12 @@ def patch_siglip_model_for_rpu_all_layers_once(vision_model, projector,
                         else _SIGLIP_BRANCH_PRE_EMBEDDED),
         )
         if _split_siglip_graph:
-            # Route B restore (2026-06-04): wrap the COMBINED siglip_forward
-            # (patch-embed + encoder, handles 4D internally) in ONE capture like
-            # the fused encoder does, so patch-embed rides graph mode
-            # instead of the immediate/PASSTHROUGH shared queue (which trips the
-            # enqueu-after-build_batch WARN). main split the 4D path citing a
-            # RECORDING-NaN; verified the merged C++ no longer NaNs (siglip +
-            # pi05 multi both 0 WARN, finite/MSE OK). num_cores mix (1-core
-            # patch-emb + 8-core encoder) is auto-segmented by the graph runtime.
+            # Capture patch embedding and encoder together. The graph runtime
+            # segments the single-core embedding and eight-core encoder.
             with self._rpu_siglip_graph_cache.capture(_sig):
                 output = torch.ops.rpu.siglip_forward(
                     h, encoder_input, k_caches, v_caches,
                     _planned_stage_descriptor)
-            # FMB fast replay skips the layer body that allocates the native
-            # projector output. Copy only after capture executes its kernels:
-            # callers may retain several camera outputs before concatenating.
-            output = output.clone()
         else:
             output = torch.ops.rpu.siglip_forward(
                 h, encoder_input, k_caches, v_caches,
@@ -911,7 +936,7 @@ def patch_siglip_model_for_rpu_all_layers_once(vision_model, projector,
         # Release temporary SPM (subsystem boundary).
         # R-4: MUST stay OUTSIDE the capture scope — graph-aware
         # spm_alloc_reset_temporary marks the graph non-replayable
-        # (src/graph/graph_spm_reset_guard.cpp + docs/graph_rules.md §12.4).
+        # (src/graph/graph_spm_reset_guard.cpp + docs/architecture.md).
         torch.ops.rpu.spm_alloc_reset_temporary()
 
         # Return in HuggingFace format
@@ -1070,12 +1095,26 @@ def _shared_siglip_image_slab(images_list):
     return shared_slab if shared_slab_ok else None
 
 
-def _prepare_siglip_images(images_list):
-    """Convert camera inputs to fp16 RPU tensors, coalescing a marked slab."""
+def _prepare_siglip_images(images_list, vision_model=None):
+    """Prepare intact CPU camera slabs for the private native packed copy."""
     shared_slab = _shared_siglip_image_slab(images_list)
     if shared_slab is not None:
+        model_state = {} if vision_model is None else vars(vision_model)
+        cache = model_state.get("_rpu_cache")
+        cpu_packed = (
+            model_state.get("_rpu_vision_num_cores") == 8
+            and cache is not None
+            and (cache.num_layers, cache.num_kv_heads, cache.head_dim, cache.attn_tp)
+            == (27, 16, 80, 8)
+            and shared_slab.device.type == "cpu"
+            and len(images_list) in (2, 3)
+            and tuple(shared_slab.shape[1:]) == (3, 224, 224)
+            and not shared_slab.is_neg()
+            and not shared_slab.is_conj()
+            and not shared_slab.requires_grad
+        )
         packed = shared_slab.to(
-            dtype=torch.float16, device="rpu"
+            dtype=torch.float16, device="cpu" if cpu_packed else "rpu"
         ).contiguous()
         return [
             packed.narrow(0, index, 1)
@@ -1087,13 +1126,13 @@ def _prepare_siglip_images(images_list):
     ]
 
 
-# patch-reason: (a) SigLIP-batch all-RPU forward — bypass torch.cat + embed_image
+# patch-reason: (a) SigLIP-batch forward — bypass torch.cat + embed_image
 def _siglip_forward_images(vision_model, images_list):
-    """Run the RPU SigLIP encoder over a LIST of N camera images in ONE fused
+    """Run the device SigLIP encoder over a LIST of N camera images in ONE fused
     forward, returning the packed projector output [1, N*256, projection_dim].
 
-    All-RPU variant of the patched `rpu_siglip_forward` (the bound method): it
-    calls `torch.ops.rpu.siglip_forward_multi`, which patch-embeds + packs the N
+    Batched variant of the patched `rpu_siglip_forward` (the bound method): it
+    accepts intact exact TP8 CPU slabs for one private native copy and calls `torch.ops.rpu.siglip_forward_multi`, which patch-embeds + packs the N
     images in C++ (run_packed_patch_embed_list). So the Pi0.5 batched
     `embed_prefix` no longer needs `torch.cat(images)` (a CPU fallback that
     leaves its result un-flushed to DDR → the downstream mutable patch-emb DMA
@@ -1146,10 +1185,10 @@ def _siglip_forward_images(vision_model, images_list):
     )
 
     # The Pi0.5 batch-preprocessing fast path returns dim-0 views of one CPU
-    # slab. Upload that slab once, then pass contiguous views to the existing
-    # mutable per-image DMAs. Dynamic/missing-camera reference inputs have no
-    # marker and preserve the established one-upload-per-image path.
-    imgs = _prepare_siglip_images(images_list)
+    # slab. Keep exact CPU slabs on CPU for one native private packed copy;
+    # its fresh views feed the existing mutable per-image DMAs. Reference
+    # inputs have no marker and preserve the established one-upload-per-image path.
+    imgs = _prepare_siglip_images(images_list, vision_model)
 
     k_caches = [cache.k_caches[i] for i in range(_num_layers)]
     v_caches = [cache.v_caches[i] for i in range(_num_layers)]

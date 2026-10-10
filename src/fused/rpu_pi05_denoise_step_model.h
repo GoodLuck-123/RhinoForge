@@ -552,7 +552,7 @@ private:
     // Keepalives (prevent GC mid-forward).
     at::Tensor x0_ref_, cond_all_ref_, x_out_ref_;
 
-    // --------- Stable RPU staging tensor (set_weights allocates) ----
+    // --------- Stable device staging tensor (set_weights allocates) ----
     // Spec §3.3: data_ptr stable across step / sample_actions. Passed to
     // run_all_layers as hidden_states to satisfy FMB hidden_size_=1024
     // shape check; layer 0's emit_layer_input_dma reads from it via the

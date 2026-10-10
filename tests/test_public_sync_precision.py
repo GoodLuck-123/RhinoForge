@@ -36,17 +36,17 @@ def test_moe_owner_state_is_admitted_after_install():
     owner._rpu_qwen3_5_moe = None
 
 
-@pytest.mark.parametrize("kwargs,pixels,message", [
-    ({"_rpu_temporal_num_frames": 2}, (4, 8), "temporal_num_frames=1"),
-    ({"_rpu_camera_batch_count": 2}, (4, 8), "camera_batch_count=1"),
-    ({}, (2, 3, 32, 32), "flattened pixel patches"),
+@pytest.mark.parametrize("kwargs,pixels,error,message", [
+    ({"_rpu_temporal_num_frames": 2}, (4, 8), ValueError, "whole number of frame groups"),
+    ({"_rpu_camera_batch_count": 2}, (4, 8), ValueError, "K1 B2 camera group is unavailable"),
+    ({}, (2, 3, 32, 32), RuntimeError, "compact G0.5 vision input requires"),
 ])
-def test_qwen35_rejects_removed_packed_inputs_before_dispatch(kwargs, pixels, message):
+def test_qwen35_rejects_invalid_packed_inputs_before_dispatch(kwargs, pixels, error, message):
     from rpu_backend.adapters.qwen3_5 import vision
     owner = SimpleNamespace(_rpu_vision_handle=1, _rpu_vision_spatial_merge_size=2,
                             _rpu_vision_num_layers=0, _rpu_vision_kv_cache=object())
     before = vars(owner).copy()
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(error, match=message):
         vision._rpu_vision_forward(owner, torch.empty(pixels), torch.tensor([[1, 2, 2]]), **kwargs)
     assert vars(owner) == before
 

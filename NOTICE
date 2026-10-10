@@ -6,3 +6,11 @@ This product includes software developed by HUIXI-AI.
 The Huixi logo shown in the project README identifies the project organization.
 The Apache License 2.0 does not grant trademark rights beyond the uses stated
 in that license.
+
+InternVLA goal conditioning includes adaptations of InternNav token compression
+and positional encoding code. Copyright (c) 2025 Intern Robotics.
+The corresponding MIT license is included in LICENSES/InternNav-MIT.txt.
+
+LingBot action de-normalization adapts the LingBot-VLA-V2 Normalizer under
+Apache-2.0. Source revisions and modification scope are listed in
+THIRD_PARTY_NOTICES.md.

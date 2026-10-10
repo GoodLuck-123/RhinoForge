@@ -1,4 +1,4 @@
-"""Public LingBot-VLA-V2 policy facade for downstream RPU inference.
+"""Public LingBot-VLA-V2 policy facade for downstream device inference.
 
 The canonical user import is:
 
@@ -111,6 +111,9 @@ _PROFILE_ENV: dict[str, dict[str, str]] = {
 # runtime_env for a controlled A/B. Physical-Z2-only controls remain off here.
 _STRUCTURAL_ENV: dict[str, str] = {
     "RPU_LINGBOT2_GROUPED_EXPERTS": "0",
+    "RPU_LINGBOT2_SPARSE_EXPERTS": "0",
+    "RPU_LINGBOT2_RUNTIME_GRAPH": "0",
+    "RPU_LINGBOT2_ROUTED_GEMM": "0",
     "RPU_LINGBOT2_FP16_TOP4": "1",
     "RPU_LINGBOT2_DEBUG_DENSE_SOFT_ROUTER": "0",
     "RPU_LINGBOT2_DEBUG_DUMP_ROUTER_H": "0",
@@ -444,7 +447,7 @@ class Lingbot2ActionOutput:
 
 
 class Lingbot2Policy:
-    """Public LingBot-VLA-V2 (Qwen3-VL + 32-expert MoE action expert) RPU entry point.
+    """Public LingBot-VLA-V2 (Qwen3-VL + 32-expert MoE action expert) device entry point.
 
     Checkpoint, camera roster and precision profile are fixed at construction.
     Camera pixels, the task instruction and proprioception may change per call.
@@ -894,6 +897,25 @@ class Lingbot2Policy:
             env.update(_STRUCTURAL_ENV)
             env.update(_PROFILE_ENV[self._dtype])
             env.update(self._runtime_env)
+            if env.get("RPU_LINGBOT2_RUNTIME_GRAPH") == "1":
+                for key in ("RPU_LINGBOT2_VISION_DIRECT_PREFIX",
+                            "RPU_LINGBOT2_VISION_DIRECT_PREFIX_NO_OUTPUT"):
+                    if key not in self._runtime_env:
+                        env[key] = "1"
+            if env.get("RPU_LINGBOT2_SPARSE_EXPERTS") == "1":
+                # Sparse grouped Linear has its own weight ABI and does not
+                # consume the dense grouped activation-scaling chunk control.
+                # Replace profile defaults while retaining explicit conflicts
+                # for the cold configuration validator to reject.
+                if "RPU_LINGBOT2_GROUPED_EXPERTS" not in self._runtime_env:
+                    env["RPU_LINGBOT2_GROUPED_EXPERTS"] = "0"
+                if "RPU_L2_RCHUNK" not in self._runtime_env:
+                    env["RPU_L2_RCHUNK"] = "0"
+                if env.get("RPU_LINGBOT2_MULTIVIEW_SPM_Z2") == "1":
+                    raise ValueError(
+                        "RPU_LINGBOT2_SPARSE_EXPERTS=1 is not admitted by "
+                        "RPU_LINGBOT2_MULTIVIEW_SPM_Z2=1"
+                    )
 
             # The generic profile defaults to V2 unroll; an exact caller value
             # remains authoritative, and every other value disables it. Apply its
@@ -1300,7 +1322,7 @@ class Lingbot2Policy:
                     for im in images]
             enc = ip(images=arrs, return_tensors="pt")
             pixel_values = enc["pixel_values"]
-            return pixel_values.reshape(n, -1, pixel_values.shape[-1]).contiguous().float(), \
+            return pixel_values.reshape(n, -1, pixel_values.shape[-1]).contiguous().float(),\
                 enc["image_grid_thw"].reshape(n, 3).long()
 
         if mode == "exact":
@@ -1318,7 +1340,7 @@ class Lingbot2Policy:
                 pixel_values.append(enc["pixel_values"])
                 grids.append(torch.as_tensor(enc["image_grid_thw"]).reshape(-1, 3)[0])
             packed = torch.cat(pixel_values, dim=0)
-            return packed.reshape(n, -1, packed.shape[-1]).contiguous().float(), \
+            return packed.reshape(n, -1, packed.shape[-1]).contiguous().float(),\
                 torch.stack(grids, dim=0).long()
 
         # Compatibility preprocessing mode.
@@ -1335,7 +1357,7 @@ class Lingbot2Policy:
             pv.append(enc["pixel_values"])
             grid.append(enc["image_grid_thw"][0])
         pixel_values = torch.cat(pv, 0)
-        return pixel_values.reshape(n, -1, pixel_values.shape[-1]).contiguous().float(), \
+        return pixel_values.reshape(n, -1, pixel_values.shape[-1]).contiguous().float(),\
             torch.stack(grid, 0).long()
 
     def _encode_instruction(self, instruction: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1415,10 +1437,13 @@ class Lingbot2Policy:
 
         ``prefix_length_range`` is inclusive REAL prefix length: tokenizer
         padding has already been filtered, while adapter execution-tail padding
-        has not yet been appended.  When omitted, generic execution covers one
-        through ``max_lang_tokens`` REAL instruction tokens for the representative
-        image geometry.  Fixed-P225 multiview Z2 truthfully caps that default at
-        its physical envelope instead of falling back to generic execution.
+        has not yet been appended.  When omitted, the installed runtime-graph
+        direct-prefix mode fixes the REAL length to this observation; prompts
+        and images may change while that length stays fixed. Other generic
+        execution covers one through ``max_lang_tokens`` REAL instruction tokens
+        for the representative image geometry. Fixed-P225 multiview Z2 caps that
+        default at its physical envelope. Explicit ranges are passed unchanged
+        to the installed runtime's admission checks.
         """
         if not self._rpu_ready or not _runtime_policy_complete(self._policy):
             from rpu_backend.api.errors import RPUBackendError
@@ -1445,15 +1470,20 @@ class Lingbot2Policy:
             obs.get("lang_masks"), obs.get("image_grid_thw"),
         )
         if prefix_length_range is None:
-            lo = metadata["fixed_real_rows"] + 1
-            hi = metadata["fixed_real_rows"] + self._max_lang_tokens
-            if getattr(self._policy, "_multiview_spm_z2", False):
-                hi = min(hi, 225)
-            if hi < lo:
-                raise ValueError(
-                    "representative image geometry does not fit the fixed P225 "
-                    "multiview Z2 prompt envelope")
-            prefix_length_range = (lo, hi)
+            cold = getattr(self._policy, "_lingbot2_moe_cold_config", None)
+            if (getattr(self._policy, "_vision_direct_prefix", False)
+                    and getattr(cold, "runtime_graph", False)):
+                prefix_length_range = (metadata["real_len"], metadata["real_len"])
+            else:
+                lo = metadata["fixed_real_rows"] + 1
+                hi = metadata["fixed_real_rows"] + self._max_lang_tokens
+                if getattr(self._policy, "_multiview_spm_z2", False):
+                    hi = min(hi, 225)
+                if hi < lo:
+                    raise ValueError(
+                        "representative image geometry does not fit the fixed P225 "
+                        "multiview Z2 prompt envelope")
+                prefix_length_range = (lo, hi)
 
         t0 = time.perf_counter()
         profile = self._policy.prepare_graphs(

@@ -17,7 +17,7 @@ static std::string runtime_shared_object_path(
 }
 
 PYBIND11_MODULE(rpu_backend, m) {
-  m.doc() = "RPU backend extension";
+  m.doc() = "device backend extension";
 
   // Explicit startup chain: PrivateUse1 allocator/guard, then kernel cache.
   initialize_rpu_backend_runtime();
@@ -33,13 +33,13 @@ PYBIND11_MODULE(rpu_backend, m) {
   m.def("get_runtime_payload_paths", [] {
     void* sdk_symbol = dlsym(RTLD_DEFAULT, "RpuInit");
     TORCH_CHECK(sdk_symbol != nullptr,
-                "cannot resolve loaded RPU SDK symbol RpuInit");
+                "cannot resolve loaded device SDK symbol RpuInit");
     const void* launch_symbol = reinterpret_cast<const void*>(
         reinterpret_cast<uintptr_t>(&::rhino_lkn::RpuDdrAlloc));
     py::dict result;
     result["extension"] = runtime_shared_object_path(
         static_cast<const void*>(&KERNEL_LIST), "rpu_backend extension");
-    result["sdk"] = runtime_shared_object_path(sdk_symbol, "RPU SDK");
+    result["sdk"] = runtime_shared_object_path(sdk_symbol, "device SDK");
     result["launch"] = runtime_shared_object_path(
         launch_symbol, "Rhino launch library");
     result["oplibs"] = KernelCache::instance().loaded_oplib_paths();
@@ -72,25 +72,25 @@ PYBIND11_MODULE(rpu_backend, m) {
 
   // Cold process-wide tensor allocator policy.
   m.def("set_caching_allocator", &rpu_set_caching_allocator,
-        "Select the caching allocator before the first RPU tensor allocation");
+        "Select the caching allocator before the first device tensor allocation");
   m.def("get_caching_allocator", &rpu_get_caching_allocator, "Get caching allocator state");
   m.def("empty_cache", &rpu::empty_cache,
-        "Release cached RPU allocator blocks");
+        "Release cached device allocator blocks");
   m.def("get_memory_stats", &rpu_get_memory_stats_py,
-        "Get RPU caching allocator stats");
+        "Get device caching allocator stats");
   m.def("reset_peak_memory_stats", &rpu::reset_peak_memory_stats,
-        "Reset RPU allocator peak stats");
+        "Reset device allocator peak stats");
   m.def("reset_accumulated_memory_stats",
         &rpu::reset_accumulated_memory_stats,
-        "Reset RPU allocator accumulated stats");
+        "Reset device allocator accumulated stats");
 
   // DDR flush switch
   m.def("set_ddr_flush", &rpu_set_ddr_flush, "Enable/disable DDR flush operations");
   m.def("get_ddr_flush", &rpu_get_ddr_flush, "Get DDR flush state");
   m.def("set_ddr_flush_force", &rpu_set_ddr_flush_force,
-        "Enable/disable CPU<->RPU boundary force DDR flush");
+        "Enable/disable CPU<->device boundary force DDR flush");
   m.def("get_ddr_flush_force", &rpu_get_ddr_flush_force,
-        "Get CPU<->RPU boundary force DDR flush state");
+        "Get CPU<->device boundary force DDR flush state");
 
   // Profile reset (call before profiling runs to clear warmup data)
   m.def("reset_profile_accumulators", &rpu_reset_profile_accumulators, "Reset all profile accumulators");
@@ -359,6 +359,6 @@ PYBIND11_MODULE(rpu_backend, m) {
   // 拿到,__init__.py re-export 到顶层名字。
   graph_pybind::add_bindings(m);
   m.def("reset_graph_cache", &invalidate_registered_rpu_kernel_graphs,
-        "Invalidate all live top-level RPU graphs between forwards");
+        "Invalidate all live top-level device graphs between forwards");
 
 }  // end pybind module

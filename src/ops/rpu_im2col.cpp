@@ -1,4 +1,4 @@
-// rpu_im2col.cpp — Im2col kernel launch wrapper for RPU.
+// rpu_im2col.cpp — Im2col kernel launch wrapper for device.
 //
 // Extracts patches from an input feature map (NHWC, in SPM) into a column matrix
 // (in SPM) suitable for GEMM. Used to convert Conv2d(stride==kernel_size) into

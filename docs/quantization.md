@@ -17,9 +17,8 @@ for both source and converted files.
 
 The Qwen3 converter replaces the seven decoder projection weights with signed
 INT8 values and one FP16 scale per output channel. Other floating tensors remain
-FP16 by default. In v1.0.0 every generated W8A16 checkpoint is Source-only
-because no public immutable derived checkpoint identity or hash is bound. The
-14B local-conversion recipe uses an untied INT8 `lm_head` and FP16 embeddings:
+FP16 by default. The 14B local-conversion recipe uses an untied INT8 `lm_head`
+and FP16 embeddings:
 
 ```bash
 python -m rpu_backend.quant.convert_qwen3 \
@@ -34,8 +33,6 @@ Options:
 - `--quant-lm-head` writes an untied, quantized `lm_head`; and
 - `--quant-embed-tokens` also quantizes the embedding and requires
   `--quant-lm-head`. This embedding path remains Source-only.
-
-All Qwen3 W8A16 converter outputs remain Source-only in v1.0.0.
 
 Use the same options when running the checkpoint verifier:
 
@@ -88,10 +85,8 @@ The default Pi0.5 conversion is W8A16 for the VLM decoder and action-expert
 decoder projections. Vision encoder, AdaRMS dense layers, action projection,
 and processor sidecars remain FP16 or unchanged.
 
-Pi0.5 W8A16 and mixed W4A16-G32-KV8 outputs are Source-only in v1.0.0: the
-release binds no public immutable derived checkpoint identity or hash for them.
-Their exact same-quantization oracle and checkpoint-owned task evidence also
-remain pending.
+Select the matching [Pi0.5 profile](../examples/configs/pi05/README.md) and
+preserve the generated quantization metadata with the checkpoint.
 
 ```bash
 python -m rpu_backend.quant.convert_pi05 \
@@ -126,9 +121,7 @@ sidecars remain FP16 or unchanged.
 `--keep-int8` accepts a comma-separated list of projection names for a
 controlled mixed-precision W4 experiment. `--real-w4` is the legacy CLI name
 for the mixed profile and automatically keeps the K/V projection weights at W8.
-Both W4 modes are Source-only evaluation paths and require their own immutable
-asset identity, exact same-quantization oracle, and checkpoint-owned task
-evidence before promotion.
+Keep the fake-W4 diagnostic tensors separate from the runtime mixed-W4 format.
 
 The converter deliberately omits a stale remapped checkpoint so the Pi0.5
 loader can regenerate it from the new quantized tensors.
@@ -158,17 +151,18 @@ python -m rpu_backend.quant.convert_wall_oss_w8a16 \
   --dst /path/to/wall-oss-W8A16
 ```
 
-The W4 converter supports per-channel scales by default and group-wise scales
-when `--group-size` is positive. A positive group size must divide the input
-dimension of every converted W4 layer:
+The W4 converter defaults to group-wise scales with `--group-size 32`.
+Use `--group-size 0` for legacy per-channel scales. A positive group size must
+divide the input dimension of every converted W4 layer:
 
 ```bash
 # Per-channel W4.
 python -m rpu_backend.quant.convert_wall_oss \
   --src /path/to/wall-oss-source \
-  --dst /path/to/wall-oss-W4A16
+  --dst /path/to/wall-oss-W4A16 \
+  --group-size 0
 
-# Group-wise W4; 32 is the existing evaluation setting.
+# Group-wise W4 (default).
 python -m rpu_backend.quant.convert_wall_oss \
   --src /path/to/wall-oss-source \
   --dst /path/to/wall-oss-W4A16-g32 \
@@ -177,7 +171,7 @@ python -m rpu_backend.quant.convert_wall_oss \
 
 Do not pass a non-empty `--keep-int8` to the current Wall-OSS W4 converter. The
 runtime does not consume that mixed-precision metadata, so the converter rejects
-the option. Wall-OSS W4 remains Source-only.
+the option. Both decoder experts, including expert-0 Down, use INT4.
 
 The W4A16 runtime consumes only the packed group representation. For an input
 width `K` and group size 32, existing helpers repeat each one-dimensional
@@ -207,18 +201,17 @@ and legacy text bundles keep their separate formats.
 
 The [v3 W8 configurations](../examples/configs/rhinovla/v3/README.md) pass
 `expert_w8a16` and `full_w8a16` to a caller-owned, trusted runtime factory.
-`w8a16.toml` quantizes the action expert's Q/K/V/O and gate/up/down projections.
+`expert_w8a16.toml` quantizes the action expert's Q/K/V/O and gate/up/down projections.
 `full_expert_w8a16.toml` also selects its AdaRMS condition projections.
 Both use INT8 weights with FP16 scales and activations; neither template selects
 vision, prefix-language or action-IO quantization. The runner verifies actual
 installed expert storage rather than accepting a precision label from the
 factory. Checkpoint composition and preprocessing remain owned by that factory.
 
-## Source-only helpers
+## Runtime conversion helpers
 
-Hy-Embodied W8/W4 are runtime-derived evaluation paths. v1.0.0 binds no public
-immutable derived checkpoint identity or hash for them, so they are
-Source-only; the public FP16/W16 profile does not transfer its status.
+Hy-Embodied W8/W4 are runtime-derived paths with no offline export CLI. Select
+the input and conversion recipe in the [Hy-Embodied guide](../examples/configs/hy_embodied/README.md).
 
 `rpu_backend.quant.convert_qwen3_w4a16` is an in-memory evaluation helper for
 Qwen3 0.6B. It is not a general offline `--src`/`--dst` converter and does not
@@ -227,8 +220,8 @@ release profile says otherwise.
 
 The public `rpu_backend.quant` package exports
 `quantize_linear_per_channel` and `dequantize_linear_per_channel` for converter
-authors. INT4 packing helpers are implementation-facing and their availability
-does not imply model support.
+authors. INT4 packing helpers are implementation-facing; use the
+[model profiles](model_support.md) to select supported configurations.
 
 ## Metadata and loading
 
@@ -252,7 +245,7 @@ Before publishing or selecting a quantized profile:
 4. compare sampled or complete dequantized weights with the FP16 source;
 5. load the checkpoint through its public RhinoForge entry point and confirm
    fail-fast rejection of mismatched profiles;
-6. compare RPU with the exact quantized same-dtype reference for implementation
+6. compare device with the exact quantized same-dtype reference for implementation
    parity, then compare retained task quality against the frozen FP16 or CPU
    FP32 anchor under [Model validation policy](validation_policy.md);
 7. verify warmup and graph lifecycle behavior; and

@@ -24,7 +24,7 @@ outputs for:
 - the maximum admitted cache length; and
 - two different inputs with the same shapes.
 
-Keep the CPU reference instance separate. RPU weight transformation is in place
+Keep the CPU reference instance separate. device weight transformation is in place
 and cannot be reversed safely.
 
 **Done means:** the same pinned inputs reproduce both reference contracts
@@ -160,7 +160,7 @@ python examples/causal_lm.py --config examples/configs/<model>/<checkpoint>/<pre
 ```
 
 Update [Model assets](model_assets.md) with the source, revision, destination,
-and hashes, and update [Model execution and profiling](model_testing.md) only
+and hashes, and update [Run and debug models](model_testing.md) only
 when the entry-point inventory changes. Keep release-only environment values
 out of TOML; use [Runtime configuration](runtime_config.md) as the allowlist.
 

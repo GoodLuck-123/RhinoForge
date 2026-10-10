@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import json
 from pathlib import Path
+import runpy
 import sys
 from types import ModuleType, SimpleNamespace
 import weakref
@@ -15,15 +16,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _runner(monkeypatch):
-    spec = importlib.util.spec_from_file_location("warmup_runner", ROOT / "examples/_runner.py")
-    runner = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(runner)
-    common = ModuleType("_common")
-    common.config_metadata = lambda config: config["example"]
-    monkeypatch.setitem(sys.modules, "_common", common)
+    runner = importlib.import_module("examples.common.measurement")
+    common = importlib.import_module("examples.common.config")
+    monkeypatch.setattr(common, "cpu_runtime", lambda: SimpleNamespace(**vars(importlib.import_module("examples.common.cpu"))))
+    monkeypatch.setattr(common, "example_profiles", lambda: {"test.warmup": {"id": "test.warmup"}})
     monkeypatch.setitem(sys.modules, "rpu_backend", ModuleType("rpu_backend"))
     performance = ModuleType("rpu_backend.runtime.performance")
     performance._profile_ctx = lambda _: contextlib.nullcontext()
+    performance._hwperf_aggregate_file = lambda path: {}
+    performance._hwperf_collect_files = lambda path: []
+    performance._hwperf_format_block = lambda item: ""
     monkeypatch.setitem(sys.modules, "rpu_backend.runtime.performance", performance)
     monkeypatch.setattr(runner, "_provenance", lambda _: {})
     monkeypatch.setattr(torch, "manual_seed", lambda _: None)
@@ -108,7 +110,7 @@ def test_runnable_catalog_templates_include_replay_warmup():
 def test_short_decode_warmup_is_only_an_explicit_cold_diagnostic(
         monkeypatch, tmp_path, template, warmup, warmup_decode_steps):
     monkeypatch.syspath_prepend(str(ROOT / "examples"))
-    import _common
+    from examples.common import config as _common
 
     source = (ROOT / "examples/configs" / template).read_text()
     source = source.replace("warmup = 2\n", "" if warmup is None else f"warmup = {warmup}\n")

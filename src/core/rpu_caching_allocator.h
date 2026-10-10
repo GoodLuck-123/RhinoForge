@@ -1,5 +1,5 @@
 // rpu_caching_allocator.h
-// RPU Caching Allocator - Inspired by CUDA CachingAllocator
+// device Caching Allocator - Inspired by CUDA CachingAllocator
 //
 // This allocator implements a caching strategy similar to CUDA's CachingAllocator:
 // - Allocations are cached and reused when possible
@@ -8,9 +8,9 @@
 // - Adjacent free blocks are merged to reduce fragmentation
 //
 // Key differences from CUDA version:
-// - No stream support (RPU is single-threaded)
+// - No stream support (device is single-threaded)
 // - Simpler design without CUDA graph support
-// - Adapted for RPU memory constraints (32-byte alignment for DMA)
+// - Adapted for device memory constraints (32-byte alignment for DMA)
 
 #pragma once
 

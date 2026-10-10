@@ -27,6 +27,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>   // T4: -inf fill for the windowed mask
 #include <utility>  // T4: windowed_mask_cache_ keyed by (chunk.len, chunk.kv_seq_len)
 #include "rpu_bounded_shape_map.h"
@@ -340,13 +341,23 @@ public:
         at::IntArrayRef planned_stage_descriptor)
     {
         TORCH_CHECK(num_layers() > 0, "Gemma4Model::forward before set_weights");
-        TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1,
-                    "Gemma4Model::forward: hidden_states must be on RPU device");
+        const bool cpu_inputs = hidden_states.device().is_cpu();
+        TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1 || cpu_inputs,
+                    "Gemma4Model::forward: hidden_states must be on CPU or device device");
+        if (cpu_inputs) {
+            TORCH_CHECK(has_ple_ && hidden_states.dim() == 3 &&
+                            hidden_states.size(0) == 1 && hidden_states.size(1) > 0 &&
+                            hidden_states.size(2) == hidden_size() &&
+                            hidden_states.scalar_type() == at::kHalf &&
+                            hidden_states.is_contiguous() && !hidden_states.requires_grad(),
+                        "Gemma4Model::forward: CPU hidden_states require PLE and "
+                        "contiguous inference FP16 [1, seq, hidden]");
+        }
         TORCH_CHECK(position >= 0, "Gemma4Model::forward: position must be >= 0");
 
-        seq_len_ = hidden_states.size(1);
+        const int64_t request_seq_len = hidden_states.size(1);
         detail::validate_fmb_planning_shape(
-            seq_len_, position, "Gemma4Model::forward");
+            request_seq_len, position, "Gemma4Model::forward");
         TORCH_CHECK(
             chunk_size == 0 || planned_stage_descriptor.empty(),
             "RPU_PLANNER_REJECT:EXACT_MISMATCH: Gemma4 forward received "
@@ -355,6 +366,25 @@ public:
             !planned_stage_descriptor.empty(),
             "RPU_PLANNER_REJECT:CAPABILITY: Gemma4 production forward "
             "requires a COMPLETE native stage-plan descriptor");
+        // Validate both CPU producers before mutating a live model binding.
+        if (has_ple_) {
+            TORCH_CHECK(side_input.has_value() && side_input->defined(),
+                        "Gemma4Model::forward: side_input required when PLE present");
+            // Keep the existing flattened/core-major PLE extent contract.
+            TORCH_CHECK(side_input->numel() == num_layers() * request_seq_len * ple_dim_,
+                        "Gemma4Model::forward: side_input numel must be "
+                        "num_layers*seq*ple_dim, got ", side_input->numel());
+            TORCH_CHECK(side_input->scalar_type() == at::kHalf &&
+                        (side_input->device().is_cpu() ||
+                         side_input->device().type() == at::kPrivateUse1),
+                        "Gemma4Model::forward: side_input must be fp16 CPU or device");
+            if (cpu_inputs) {
+                TORCH_CHECK(side_input->device().is_cpu() && !side_input->requires_grad(),
+                            "Gemma4Model::forward: CPU hidden_states require inference CPU side_input");
+            }
+        }
+        at::Tensor live_hidden = hidden_states;
+        seq_len_ = request_seq_len;
         set_chunk_size_override(0);
 
         // dynamic_config also has planning-only callers. Only a real forward
@@ -366,17 +396,38 @@ public:
 
         // T6 PLE: per-layer side-input [num_layers, seq, ple_dim]. The per-layer
         // slice is DMA-broadcast per replay; its src ptr drifts per forward so the
-        // mutable-DMA base is refreshed here (caller owns the flush).
+        // mutable-DMA base is refreshed here after publishing the live input.
         if (has_ple_) {
-            TORCH_CHECK(side_input.has_value() && side_input->defined(),
-                        "Gemma4Model::forward: side_input required when PLE present");
-            // Core-major scatter layout [num_layers, NUM_CORES, seq, ple_dim/NUM_CORES];
-            // only the total element count is contractual (read by per-core offset).
-            TORCH_CHECK(side_input->numel() == num_layers() * seq_len_ * ple_dim_,
-                        "Gemma4Model::forward: side_input numel must be "
-                        "num_layers*seq*ple_dim, got ", side_input->numel());
-            side_input_ = side_input->contiguous();
-            rpu_ddr_flush_force(side_input_.data_ptr<c10::Half>());
+            if (cpu_inputs) {
+                const auto side_cpu = side_input->contiguous();
+                const auto options = at::TensorOptions().dtype(at::kHalf).device(at::kPrivateUse1);
+                // Both CPU producers are complete before the first decoder DMA.
+                // Publish their fresh DDR owners together on every forward.
+                live_hidden = at::empty(hidden_states.sizes(), options);
+                auto prepared_side = at::empty(side_cpu.sizes(), options);
+                std::memcpy(live_hidden.data_ptr(), hidden_states.data_ptr(), hidden_states.nbytes());
+                std::memcpy(prepared_side.data_ptr(), side_cpu.data_ptr(), side_cpu.nbytes());
+                if (g_rpu_ddr_flush_force_enabled) {
+                    void* destinations[2] = {live_hidden.data_ptr(), prepared_side.data_ptr()};
+                    size_t sizes[2] = {live_hidden.nbytes(), prepared_side.nbytes()};
+                    ::rhino_lkn::RpuDdrFlushBatch(destinations, sizes, 2);
+#if defined(__aarch64__)
+                    // Keep the former scalar large-range completion boundary.
+                    __asm__ volatile("dsb sy" ::: "memory");
+#endif
+                }
+                if (RpuKernelGraph::has_active()) {
+                    RpuKernelGraph::active().keep_alive(prepared_side);
+                }
+                side_input_ = std::move(prepared_side);
+            } else if (side_input->device().is_cpu()) {
+                // This synchronous copy publishes the fresh owned DDR tensor.
+                // Direct device callers still require their dirty-alias boundary.
+                side_input_ = side_input->contiguous().to(hidden_states.device());
+            } else {
+                side_input_ = side_input->contiguous();
+                rpu_ddr_flush_force(side_input_.data_ptr<c10::Half>());
+            }
             side_live_base_ = RpuGetDevAddr(side_input_.data_ptr<c10::Half>());
         }
 
@@ -401,13 +452,13 @@ public:
             const int64_t kv_align = Align(total_kv, (int64_t)16);
             at::Tensor marker = at::zeros({seq_len_, kv_align},
                 at::TensorOptions().dtype(at::kHalf).device(at::kCPU));
-            return run_all_layers(hidden_states, k_caches, v_caches,
+            return run_all_layers(live_hidden, k_caches, v_caches,
                                   std::optional<at::Tensor>(marker), position,
                                   /*is_causal=*/false,
                                   /*planned_chunk_size=*/0,
                                   planned_stage_descriptor);
         }
-        return run_all_layers(hidden_states, k_caches, v_caches,
+        return run_all_layers(live_hidden, k_caches, v_caches,
                               attention_mask, position, is_causal,
                               /*planned_chunk_size=*/0,
                               planned_stage_descriptor);
@@ -1380,7 +1431,7 @@ private:
     std::vector<WindowedMask> windowed_masks_;
     // Host mask memo by (qn, kv). The decode cursor advances every step, so this
     // cache must be bounded. CPU entries are safe to evict: sdpa_prepare_mask copies
-    // their contents into separate stable RPU slots before DMA captures addresses.
+    // their contents into separate stable device slots before DMA captures addresses.
     // A cache miss rebuilds the host mask in O(qn * win_len).
     static constexpr size_t kMaxWindowedMasks = 256;
     rpu::BoundedShapeMap<std::pair<int64_t, int64_t>, at::Tensor, rpu::PairHash>

@@ -7,10 +7,14 @@
 // slot's lifetime. The registry holds one (a, b, out) tensor triple per
 // distinct ShapeKey on the FusedModelBase::Impl, indexed by
 // (batch, seq, hidden, dtype, device). Same shape → same data_ptr.
-// Multi-key replay (A→B→A) returns the original A pointers.
+// Multi-key replay (A→B→A) returns the original A pointers while A's graph
+// remains live. Opted-in owners retire entries after all referencing graphs
+// retire; an evicted A gets fresh buffers for its next BUILD.
 #pragma once
 
 #include <unordered_map>
+#include <algorithm>
+#include <memory>
 #include <ATen/ATen.h>
 #include <c10/core/Device.h>
 
@@ -48,6 +52,8 @@ public:
         at::Tensor        b;
         at::Tensor        out;
         at::TensorOptions opts;  // captured at first insert
+        bool graph_scoped = false;
+        std::vector<std::weak_ptr<const uint8_t>> graph_lifetimes;
     };
 
     // Returns the entry for `key`, allocating missing fields lazily.
@@ -57,7 +63,11 @@ public:
     // a mutable DMA referencing the caller's per-forward `hidden_states`
     // directly through add_dma_kernel_mutable.
     const Entry& get(const ShapeKey& key, at::TensorOptions opts,
-                     bool need_ab, bool need_out);
+                     bool need_ab, bool need_out,
+                     bool graph_scoped = false,
+                     std::weak_ptr<const uint8_t> graph_lifetime = {});
+
+    size_t size() const noexcept { return store_.size(); }
 
     // Bound on distinct shapes per handle. Entries cannot be evicted: output_tensor_
     // and the DDR ping-pong bases are baked into DMA nodes at BUILD. Releasing an
@@ -72,18 +82,42 @@ private:
 
 inline const DdrBufferRegistry::Entry&
 DdrBufferRegistry::get(const ShapeKey& key, at::TensorOptions opts,
-                        bool need_ab, bool need_out) {
+                        bool need_ab, bool need_out, bool graph_scoped,
+                        std::weak_ptr<const uint8_t> graph_lifetime) {
+    if (graph_scoped) {
+        // Graph destruction/invalidation retires its token only after execution
+        // and recorded resources are finished. Keep every still-live graph's
+        // buffers, including when several signatures share one ShapeKey.
+        store_.erase_if([](Entry& e) {
+            auto& owners = e.graph_lifetimes;
+            owners.erase(std::remove_if(owners.begin(), owners.end(),
+                [](const auto& owner) { return owner.expired(); }), owners.end());
+            return e.graph_scoped && owners.empty();
+        });
+    }
     bool inserted = false;
     Entry& e = store_.touch(key, &inserted);
     if (inserted) {
         e.opts = opts;
+        e.graph_scoped = graph_scoped;
     } else {
+        TORCH_CHECK(e.graph_scoped == graph_scoped,
+                    "DdrBufferRegistry: cannot change a live entry's lifetime policy");
         TORCH_CHECK(e.opts.dtype()  == opts.dtype()  &&
                     e.opts.device() == opts.device() &&
                     e.opts.layout() == opts.layout(),
                     "DdrBufferRegistry: TensorOptions mismatch on reuse for "
                     "(batch=", key.batch, " seq=", key.seq,
                     " hidden=", key.hidden, ")");
+    }
+    if (graph_scoped && !graph_lifetime.expired()) {
+        const bool recorded = std::any_of(
+            e.graph_lifetimes.begin(), e.graph_lifetimes.end(),
+            [&](const auto& owner) {
+                return !owner.owner_before(graph_lifetime) &&
+                       !graph_lifetime.owner_before(owner);
+            });
+        if (!recorded) e.graph_lifetimes.push_back(std::move(graph_lifetime));
     }
     std::vector<int64_t> shape_vec{key.batch, key.seq, key.hidden};
 

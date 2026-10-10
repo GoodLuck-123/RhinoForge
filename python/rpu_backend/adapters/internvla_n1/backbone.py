@@ -1,8 +1,8 @@
-"""Controlled InternVLA-N1 System-2 Qwen2.5-VL-7B RPU evaluator.
+"""Controlled InternVLA-N1 System-2 Qwen2.5-VL-7B device evaluator.
 
 System-2 produces `vlm_tokens = hidden_states[-1][:, -4:, :]` = [1,4,3584] (the final-layer
 hidden at the 4 latent-query positions) consumed by NavDP System-1. This adapter runs the
-28-layer text decoder on RPU through the generic `causal_decoder_*` op family — the SAME fused
+28-layer text decoder on device through the generic `causal_decoder_*` op family — the SAME fused
 subsystem Wall-OSS reuses (`src/fused/rpu_qwen3_model.{cpp,h}`); NO new C++.
 
 Delta vs `adapters/wall_oss/llm.py`:
@@ -114,12 +114,12 @@ def _validate_checkpoint_profile(store: _SafeTensorStore) -> None:
 
 
 class Qwen25VLBackbone:
-    """Stock Qwen2.5-VL-7B text decoder on RPU (System-2 prefill).
+    """Stock Qwen2.5-VL-7B text decoder on device (System-2 prefill).
 
     Construct via :func:`build_qwen25vl_backbone`. Call :meth:`forward_embeds` with
     pre-assembled `inputs_embeds` [1, seq, 3584] (vision scattered into image-token
     positions + latent queries appended) and real 3D M-RoPE `position_ids` [seq, 3];
-    returns the final-normed `last_hidden` [1, seq, 3584] on RPU. Slice `[:, -4:, :]`
+    returns the final-normed `last_hidden` [1, seq, 3584] on device. Slice `[:, -4:, :]`
     for the vlm_tokens.
     """
 
@@ -335,7 +335,7 @@ def build_qwen25vl_backbone(
     asset_manifest: Mapping[str | Path, str] | None = None,
     rpu_execution=None,
 ) -> Qwen25VLBackbone:
-    """Load the stock Qwen2.5-VL-7B text decoder and install it on RPU.
+    """Load the stock Qwen2.5-VL-7B text decoder and install it on device.
 
     Args:
         ckpt_dir: dir with config.json + model.safetensors(.index.json) (stock keys).

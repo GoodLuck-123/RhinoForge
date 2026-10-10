@@ -1,5 +1,3 @@
-# Public configuration; provide your own checkpoint and input assets.
-
 [example]
 profile_id = "qwen3_5-35b-a3b.mixed-e4m3.text-tp6"
 registry_alias = "qwen3_5-35b-a3b-mixed"
@@ -9,6 +7,7 @@ architecture = "Qwen3_5MoeForConditionalGeneration"
 
 [input]
 prompt = "A compiler translates source code into executable instructions. Its main stages are"
+# At most 31 decode calls after the prefill token; stop earlier at EOS.
 decode_steps = 31
 
 [run]
@@ -17,8 +16,6 @@ runs = 3
 hwperf = false
 profile = false
 seed = 0
-
-[rpu_execution]
 
 [rpu_execution.model]
 num_cores = 6

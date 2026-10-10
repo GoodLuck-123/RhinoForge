@@ -172,7 +172,7 @@ _ADARMS_RUNTIME_INSTALL_ATTRS = (
 
 
 def _prepare_adarms_dense_weights(model):
-    """Swizzle per-layer AdaRMS dense weights for RPU row-partition GEMM.
+    """Swizzle per-layer AdaRMS dense weights for device row-partition GEMM.
 
     For each layer x each of {input_layernorm, post_attention_layernorm}:
       [3H, H] -> transform_linear_weight(partition=0, num_cores=8) -> row-partition swizzle
@@ -246,7 +246,7 @@ def _prepare_adarms_dense_weights(model):
     return attn_w, attn_b, mlp_w, mlp_b
 
 
-# patch-reason: (a) AdaRMS all-layers-once instance patch — §3a (a) run-different-op-on-RPU
+# patch-reason: (a) AdaRMS all-layers-once instance patch — §3a (a) run-different-op-on-device
 def patch_adarms_model_for_rpu_all_layers_once(
     model, *, runtime_policy=None,
 ) -> int:
@@ -257,13 +257,13 @@ def patch_adarms_model_for_rpu_all_layers_once(
     Steps:
       1. Preserve the published install while preparing replacement state
       2. Gather per-layer attention / MLP / AdaRMS dense weights
-      3. Extract cos/sin from rotary_emb on RPU device (kernel format)
+      3. Extract cos/sin from rotary_emb on device device (kernel format)
       4. Prepare cache and replacement forward state
       5. Configure and tentatively publish a pending handle, then retire old
       6. Replace model.forward with a method that:
          - validates preconditions (use_cache, batch, adarms_cond, devices)
          - resolves inputs_embeds / input_ids
-         - normalizes adarms_cond to [hidden_size] fp16 RPU contiguous
+         - normalizes adarms_cond to [hidden_size] fp16 device contiguous
          - auto-creates RPUCache on first call (D-14)
          - computes is_causal per D-13 contract
          - calls torch.ops.rpu.adarms_forward(handle, ...)
@@ -347,7 +347,7 @@ def patch_adarms_model_for_rpu_all_layers_once(
         _prepare_adarms_dense_weights(model)
 
     # ------------------------------------------------------------------ #
-    # Step 2: cos/sin on RPU (kernel format [max_pos, head_dim/2])
+    # Step 2: cos/sin on device (kernel format [max_pos, head_dim/2])
     # ------------------------------------------------------------------ #
     config = model.config
     head_dim = config.head_dim
@@ -438,11 +438,11 @@ def patch_adarms_model_for_rpu_all_layers_once(
         # -- Preconditions (Python-side guards before the C++ op, T-04-06) --
         if output_attentions:
             raise AssertionError(
-                "AdaRMS (RPU all-layers-once): output_attentions is not supported"
+                "AdaRMS (device all-layers-once): output_attentions is not supported"
             )
         if output_hidden_states:
             raise AssertionError(
-                "AdaRMS (RPU all-layers-once): output_hidden_states is not supported"
+                "AdaRMS (device all-layers-once): output_hidden_states is not supported"
             )
         # D-14 relaxed: use_cache=False is legitimate for Pi0.5 denoise_step
         # (see pi05_converter._patched_denoise_step -> paligemma_with_expert.forward
@@ -453,7 +453,7 @@ def patch_adarms_model_for_rpu_all_layers_once(
         # actual correctness check.
         if adarms_cond is None:
             raise AssertionError(
-                "AdaRMS (RPU all-layers-once): adarms_cond is required"
+                "AdaRMS (device all-layers-once): adarms_cond is required"
             )
 
         # -- Input resolution (mutual exclusion) --
@@ -484,7 +484,7 @@ def patch_adarms_model_for_rpu_all_layers_once(
         # action_out_proj's CPU weights dispatch correctly and v_t lands on
         # the same device as x_t (CPU) for the `x_t + dt * v_t` update at :858.
         orig_device = hidden_states.device
-        # Auto-route CPU inputs to RPU (matches v2 pattern in pi05_converter.py:826
+        # Auto-route CPU inputs to device (matches v2 pattern in pi05_converter.py:826
         # where rpu_gemma_model_forward does `inputs_embeds.to(dtype=fp16, device=model_device)`
         # unconditionally).
         if hidden_states.device.type != 'rpu':
@@ -500,7 +500,7 @@ def patch_adarms_model_for_rpu_all_layers_once(
             )
         seq_len = hidden_states.shape[1]
 
-        # -- cond normalization ([hidden_size] fp16 RPU contiguous) (T-04-05) --
+        # -- cond normalization ([hidden_size] fp16 device contiguous) (T-04-05) --
         cond_rpu = adarms_cond.to(dtype=torch.float16, device='rpu')
         if cond_rpu.dim() == 2 and cond_rpu.shape[0] == 1:
             cond_rpu = cond_rpu.squeeze(0)
@@ -721,7 +721,7 @@ def patch_adarms_model_for_rpu_all_layers_once(
         torch.ops.rpu.adarms_set_chunk_envelope(handle, _max_seq, 0)
 
         # Task 4.3: stash cos/sin on model so
-        # _install_fused_denoise_handle can reuse the already-allocated RPU
+        # _install_fused_denoise_handle can reuse the already-allocated device
         # tensors without a second allocation.
         model._gemma_rope_cos = cos_cached
         model._gemma_rope_sin = sin_cached

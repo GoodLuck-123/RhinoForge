@@ -165,7 +165,7 @@ def _layer_type_ids(layer_types: list[str]) -> list[int]:
 
 def _require_attr(obj: Any, attr: str, owner: str) -> Any:
     if not hasattr(obj, attr):
-        raise RPUBackendError(f"Gemma2 RPU patch requires {owner}.{attr}")
+        raise RPUBackendError(f"Gemma2 device patch requires {owner}.{attr}")
     return getattr(obj, attr)
 
 
@@ -223,7 +223,7 @@ def _validate_gemma2_cache(
 ) -> RPUCache:
     if not isinstance(cache, RPUCache):
         raise RPUBackendError(
-            "Gemma2 RPU path requires past_key_values to be an RPUCache "
+            "Gemma2 device path requires past_key_values to be an RPUCache "
             f"instance, got {type(cache).__name__}"
         )
 
@@ -238,14 +238,14 @@ def _validate_gemma2_cache(
     expected_attn_tp = int(attn_tp)
     if expected_attn_tp <= 0:
         raise RPUBackendError(
-            "Gemma2 RPU cache layout requires positive attn_tp; got "
+            "Gemma2 device cache layout requires positive attn_tp; got "
             f"{expected_attn_tp}"
         )
 
     effective_kv_slots = NUM_CORES * expected_num_kv_heads // expected_attn_tp
     if effective_kv_slots <= 0:
         raise RPUBackendError(
-            "Gemma2 RPU cache layout requires attn_tp to leave at least one "
+            "Gemma2 device cache layout requires attn_tp to leave at least one "
             f"effective KV slot; got attn_tp={expected_attn_tp}, "
             f"num_kv_heads={expected_num_kv_heads}, NUM_CORES={NUM_CORES}"
         )
@@ -277,7 +277,7 @@ def _validate_gemma2_cache(
         )
     if mismatches:
         raise RPUBackendError(
-            "Gemma2 RPU cache layout mismatch for attn_tp="
+            "Gemma2 device cache layout mismatch for attn_tp="
             f"{expected_attn_tp}; create RPUCache with the adapter's "
             f"_rpu_attn_tp. Mismatches: {', '.join(mismatches)}"
         )
@@ -308,13 +308,13 @@ def _select_gemma2_attention_mask(
                     break
         if selected is None:
             raise RPUBackendError(
-                "Gemma2 RPU requires additive attention mask tensor; "
+                "Gemma2 device requires additive attention mask tensor; "
                 "attention_mask dict contains no tensor values"
             )
 
     if not torch.is_tensor(selected):
         raise RPUBackendError(
-            "Gemma2 RPU requires additive attention mask tensor or dict of "
+            "Gemma2 device requires additive attention mask tensor or dict of "
             f"tensors, got {type(selected).__name__}"
         )
 
@@ -323,22 +323,22 @@ def _select_gemma2_attention_mask(
     expected_tail = (int(query_len), int(key_value_len))
     if dims not in (2, 3, 4):
         raise RPUBackendError(
-            "Gemma2 RPU requires additive attention mask with rank 2, 3, or "
+            "Gemma2 device requires additive attention mask with rank 2, 3, or "
             f"4 and trailing shape {expected_tail}; got shape {shape}"
         )
     if tuple(shape[-2:]) != expected_tail:
         raise RPUBackendError(
-            "Gemma2 RPU requires additive attention mask with trailing shape "
+            "Gemma2 device requires additive attention mask with trailing shape "
             f"{expected_tail}; got shape {shape}. Batch padding masks such "
-            "as [batch, seq] must be converted before the Gemma2 RPU path."
+            "as [batch, seq] must be converted before the Gemma2 device path."
         )
 
     selected = selected.to(dtype=torch.float16).cpu().contiguous()
     if bool((selected > 0).any().item()):
         raise RPUBackendError(
-            "Gemma2 RPU requires additive attention mask values <= 0. "
+            "Gemma2 device requires additive attention mask values <= 0. "
             "Batch padding masks such as [batch, seq] with positive keep "
-            "values must be converted before the Gemma2 RPU path."
+            "values must be converted before the Gemma2 device path."
         )
     return selected
 
@@ -364,12 +364,12 @@ def patch_gemma2_model_for_rpu_all_layers_once(model: Any) -> int:
         ):
             return int(existing_handle)
         raise RPUBackendError(
-            "Gemma2 RPU ready marker is incomplete; reload the model instead "
+            "Gemma2 device ready marker is incomplete; reload the model instead "
             "of retrying a broken install."
         )
     if getattr(model, "_rpu_gemma2_install_started", False) or existing_handle is not None:
         raise RPUBackendError(
-            "Gemma2 RPU installation previously started but did not complete; "
+            "Gemma2 device installation previously started but did not complete; "
             "reload the model to avoid double-swizzling weights."
         )
 
@@ -379,7 +379,7 @@ def patch_gemma2_model_for_rpu_all_layers_once(model: Any) -> int:
     config = _require_attr(model, "config", "model")
     layers = list(_require_attr(model, "layers", "model"))
     if not layers:
-        raise RPUBackendError("Gemma2 RPU patch requires at least one layer")
+        raise RPUBackendError("Gemma2 device patch requires at least one layer")
     _require_attr(model, "embed_tokens", "model")
     norm = _require_attr(model, "norm", "model")
     _require_attr(norm, "weight", "model.norm")
@@ -416,14 +416,14 @@ def patch_gemma2_model_for_rpu_all_layers_once(model: Any) -> int:
     if rotary is None:
         rotary = getattr(layers[0].self_attn, "rotary_emb", None)
     if rotary is None:
-        raise RPUBackendError("Gemma2 RPU patch could not locate rotary embedding")
+        raise RPUBackendError("Gemma2 device patch could not locate rotary embedding")
 
     cfg_num_kv_heads = int(config.num_key_value_heads)
     # PaliGemma2 remains a downgraded recertification scaffold. Keep its native
     # GQA geometry unchanged; the abandoned KV-replication experiment must not
     # mutate checkpoint Parameters behind an unsupported public entry point.
     effective_num_kv_heads = cfg_num_kv_heads
-    # Everything below may replace Parameters or allocate RPU tensors. A
+    # Everything below may replace Parameters or allocate device tensors. A
     # partial failure is not retryable on the same model instance.
     model._rpu_gemma2_install_started = True
 
@@ -435,7 +435,7 @@ def patch_gemma2_model_for_rpu_all_layers_once(model: Any) -> int:
     # H-NEW7 fix: explicit .to('rpu') when building per-layer weight lists.
     # Otherwise the C++ handle captures at::Tensor refs to the current device
     # (CPU at patch-time inside .to('rpu')), and the later decoder.to('rpu') in
-    # the parent caller swaps Parameter.data to new RPU tensors -- leaving the
+    # the parent caller swaps Parameter.data to new device tensors -- leaving the
     # C++ refs pointing at the now-stale CPU tensors. Mirrors siglip.py:350-369.
     _w_to_rpu = lambda w: w.to(dtype=torch.float16, device="rpu")
     q_w_list = [_w_to_rpu(layer.self_attn.q_proj.weight) for layer in layers]
@@ -496,20 +496,20 @@ def patch_gemma2_model_for_rpu_all_layers_once(model: Any) -> int:
         **kwargs,
     ):
         if output_attentions:
-            raise AssertionError("Gemma2 RPU path does not support output_attentions")
+            raise AssertionError("Gemma2 device path does not support output_attentions")
         if output_hidden_states:
             raise AssertionError(
-                "Gemma2 RPU path does not support output_hidden_states"
+                "Gemma2 device path does not support output_hidden_states"
             )
         if use_cache is False:
-            raise AssertionError("Gemma2 RPU path requires use_cache=True")
+            raise AssertionError("Gemma2 device path requires use_cache=True")
         if input_ids is not None and inputs_embeds is not None:
             raise AssertionError(
-                "Gemma2 RPU path requires exactly one of input_ids or inputs_embeds"
+                "Gemma2 device path requires exactly one of input_ids or inputs_embeds"
             )
         if input_ids is None and inputs_embeds is None:
             raise AssertionError(
-                "Gemma2 RPU path requires exactly one of input_ids or inputs_embeds"
+                "Gemma2 device path requires exactly one of input_ids or inputs_embeds"
             )
         if input_ids is not None:
             inputs_embeds = self.embed_tokens(input_ids.cpu())
@@ -540,7 +540,7 @@ def patch_gemma2_model_for_rpu_all_layers_once(model: Any) -> int:
         if past_key_values is None:
             # P7.1h L1: _rpu_cache eager init in patch 末尾 (见 line ~554 下方),
             # 不再 forward 内 lazy。Dynamo trace 时 attr 已存在,不会烘 hasattr
-            # guard,Call 2+ 才能 replay 命中。详见 docs/graph_rules.md §6.6。
+            # guard,Call 2+ 才能 replay 命中。详见 docs/architecture.md。
             self._rpu_cache.reset_to_position(0)
             past_key_values = self._rpu_cache
         past_key_values = _validate_gemma2_cache(

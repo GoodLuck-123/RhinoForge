@@ -104,6 +104,10 @@ void add_bindings(py::module_& m) {
         .value("ForceOff", GraphHostOpDeferMode::ForceOff)
         .value("ForceOn", GraphHostOpDeferMode::ForceOn);
 
+    py::enum_<GraphBatchSnapshotMode>(m, "GraphBatchSnapshotMode")
+        .value("Auto", GraphBatchSnapshotMode::Auto)
+        .value("Off", GraphBatchSnapshotMode::Off);
+
     py::class_<GraphRuntimePolicy>(m, "GraphRuntimePolicy")
         .def(py::init([](
                  bool fast_replay_skip_sync,
@@ -118,7 +122,9 @@ void add_bindings(py::module_& m) {
                  size_t lkn_instr_buf_mb,
                  bool qwen35_legacy_27b_sdk_budget,
                  int execution_core_count,
-                 size_t graph_arena_count) {
+                 size_t graph_arena_count,
+                 GraphBatchSnapshotMode batch_snapshot_mode,
+                 bool qwen35_dense_27b_sdk_budget) {
                  GraphRuntimePolicy result;
                  result.fast_replay_skip_sync = fast_replay_skip_sync;
                  result.force_oneshot_on_replay = force_oneshot_on_replay;
@@ -136,6 +142,8 @@ void add_bindings(py::module_& m) {
                      qwen35_legacy_27b_sdk_budget;
                  result.execution_core_count = execution_core_count;
                  result.graph_arena_count = graph_arena_count;
+                 result.batch_snapshot_mode = batch_snapshot_mode;
+                 result.qwen35_dense_27b_sdk_budget = qwen35_dense_27b_sdk_budget;
                  validate_graph_runtime_policy(result);
                  return result;
              }),
@@ -151,7 +159,9 @@ void add_bindings(py::module_& m) {
              py::arg("lkn_instr_buf_mb"),
              py::arg("qwen35_legacy_27b_sdk_budget") = false,
              py::arg("execution_core_count") = 8,
-             py::arg("graph_arena_count") = 0)
+             py::arg("graph_arena_count") = 0,
+             py::arg("batch_snapshot_mode") = GraphBatchSnapshotMode::Auto,
+             py::arg("qwen35_dense_27b_sdk_budget") = false)
         .def("prepare_arenas", &prepare_graph_runtime_arenas);
 
     py::class_<GraphSegmentCensus>(m, "GraphSegmentCensus")
@@ -188,6 +198,10 @@ void add_bindings(py::module_& m) {
         .def_readonly("companion_rc", &GraphSegmentExecution::companion_rc);
 
     py::class_<GraphStats>(m, "GraphStats")
+        .def_readonly("batch_snapshot_mode", &GraphStats::batch_snapshot_mode)
+        .def_readonly("batch_snapshot_available", &GraphStats::batch_snapshot_available)
+        .def_readonly("batch_snapshot_effective_contracts", &GraphStats::batch_snapshot_effective_contracts)
+        .def_readonly("batch_snapshot_fallback_reason", &GraphStats::batch_snapshot_fallback_reason)
         .def_readonly("graph_lifetime_id", &GraphStats::graph_lifetime_id)
         .def_readonly("build_generation", &GraphStats::build_generation)
         .def_readonly("execution_ordinal", &GraphStats::execution_ordinal)
@@ -298,6 +312,10 @@ void add_bindings(py::module_& m) {
         .def("cache_invariant_ok",  &RpuGraphCache::cache_invariant_ok);
 
     py::class_<RpuGraphCache::Snapshot>(m, "GraphCacheEntrySnapshot")
+        .def_readonly("batch_snapshot_mode", &RpuGraphCache::Snapshot::batch_snapshot_mode)
+        .def_readonly("batch_snapshot_available", &RpuGraphCache::Snapshot::batch_snapshot_available)
+        .def_readonly("batch_snapshot_effective_contracts", &RpuGraphCache::Snapshot::batch_snapshot_effective_contracts)
+        .def_readonly("batch_snapshot_fallback_reason", &RpuGraphCache::Snapshot::batch_snapshot_fallback_reason)
         .def_readonly("signature",                  &RpuGraphCache::Snapshot::signature)
         .def_readonly("kernel_count",               &RpuGraphCache::Snapshot::kernel_count)
         .def_readonly("segment_count",              &RpuGraphCache::Snapshot::segment_count)

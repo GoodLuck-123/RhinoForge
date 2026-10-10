@@ -1,4 +1,4 @@
-// rpu_slice.cpp - Slice kernel implementation for RPU
+// rpu_slice.cpp - Slice kernel implementation for device
 #include "rhino_launch_buffer.h"
 #include "rhino_launch_program.h"
 #include "rhino_launch_queue.h"
@@ -55,13 +55,40 @@ static void validate_slice_spm_interval(uint64_t address,
                 " interval is outside every current allocator core's SPM");
 }
 
+// BASE slice selects core-local SPM when address registers are below
+// 0x40000000 and reg4/5 are zero. Strip the hardware base rather than
+// the allocator origin, preserving its reserved prefix and per-core shape.
+static uint32_t slice_per_core_local_address(
+    uint32_t address, size_t byte_count, int num_cores) {
+    constexpr uint64_t kSpmStart = 0x40000000ULL;
+    constexpr uint64_t kCoreStride = 0x1000000ULL;
+    const uint64_t base0 = SPM_ALLOC.addr(0, 0);
+    TORCH_CHECK(base0 >= kSpmStart && base0 < kSpmStart + kCoreStride &&
+                    address >= base0 && address - base0 <= SpmAllocator::SPM_USABLE &&
+                    byte_count <= SpmAllocator::SPM_USABLE - (address - base0),
+                "slice_spm: per-core mode requires a complete core-zero SPM interval");
+    const uint64_t local_address = address - kSpmStart;
+    TORCH_CHECK(byte_count > 0 && local_address < kCoreStride &&
+                    byte_count <= kCoreStride - local_address,
+                "slice_spm: per-core local interval exceeds the hardware address window");
+    for (int core = 0; core < num_cores; ++core) {
+        const uint64_t base = SPM_ALLOC.addr(core, 0);
+        TORCH_CHECK(base == base0 + static_cast<uint64_t>(core) * kCoreStride,
+                    "slice_spm: per-core allocator origins must have identical local offsets");
+        validate_slice_spm_interval(
+            kSpmStart + static_cast<uint64_t>(core) * kCoreStride + local_address,
+            byte_count, "per-core local");
+    }
+    return static_cast<uint32_t>(local_address);
+}
+
 // ======================== Slice kernel launch ========================
 void rpu_launch_slice_kernel(const at::Tensor &input,
                              at::Tensor &output,
                              const SliceParams &params) {
 
     TORCH_CHECK(input.device().type() == c10::DeviceType::PrivateUse1,
-                "input not on RPU");
+                "input not on device");
 
     // Ensure output has same dtype as input
     if (output.scalar_type() != input.scalar_type()) {
@@ -446,7 +473,7 @@ void rpu_launch_slice_kernel(const at::Tensor &input,
         wq->enqueu_kernel(*kernel, {(uint16_t)grid_dim_x, (uint16_t)grid_dim_y, (uint16_t)grid_dim_z}, {0});
     }
 
-    // Flush output, 确保 CPU 能读到 RPU 写入的最新数据
+    // Flush output, 确保 CPU 能读到 device 写入的最新数据
     // rpu_ddr_flush(out_ptr);
 
     // ==================== SPM 版本 (注释保留) ====================
@@ -462,7 +489,8 @@ void rpu_launch_slice_kernel(const at::Tensor &input,
 // kernels as the eager rpu_launch_slice_kernel above (and my insert_slice — slice
 // is insert_slice with src/dest flipped). Differs in: operands ALREADY in SPM
 // (caller passes byte addresses, in256/out256=0, no DDR 256b path), graph-aware
-// kernel fetch, multi-core broadcast (each core slices its OWN per-core SPM). The
+// kernel fetch, and optional validated per-core local addressing. Default
+// addresses retain global semantics. The
 // read-side start_offset is folded into in_addr (reg18 / reg30-31 left 0), exactly
 // like insert_slice folds the write-side offset into out_addr. Assumes contiguous
 // (step=1) slices, <=2 differing axes — covers the GDN chunk (slice chunk i along
@@ -471,7 +499,7 @@ void rpu_launch_slice_spm_kernel(uint32_t input_spm_addr, uint32_t output_spm_ad
                                  const std::vector<int64_t>& input_shape,
                                  const std::vector<int64_t>& output_shape,
                                  const std::vector<int64_t>& begins,
-                                 int num_cores) {
+                                 int num_cores, bool per_core_local) {
     const int64_t ndim = (int64_t)input_shape.size();
     TORCH_CHECK(ndim >= 1 && (int64_t)output_shape.size() == ndim &&
                     (int64_t)begins.size() == ndim,
@@ -581,8 +609,16 @@ void rpu_launch_slice_spm_kernel(uint32_t input_spm_addr, uint32_t output_spm_ad
     constexpr uint16_t in256 = 0;   // SPM; never admit the DDR input mode.
     constexpr uint16_t out256 = 0;  // SPM; never admit the DDR output mode.
     static_assert(in256 == 0 && out256 == 0);
-    const uint32_t in_addr = static_cast<uint32_t>(in_addr_size);
-    const uint32_t out_addr = output_spm_addr;
+    uint32_t in_addr = static_cast<uint32_t>(in_addr_size);
+    uint32_t out_addr = output_spm_addr;
+    if (per_core_local) {
+        // Validate every participating core before staging a Graph proof or
+        // changing kernel registers. Include the full declared input, not
+        // just the strided slice's read envelope.
+        slice_per_core_local_address(input_spm_addr, input_byte_count, num_cores);
+        in_addr = slice_per_core_local_address(in_addr, read_byte_count, num_cores);
+        out_addr = slice_per_core_local_address(out_addr, output_byte_count, num_cores);
+    }
 
     const std::string kernel_name =
         (last_axis == ndim - 1) ? "slice_last_dim_axis" : "slice_single_axis";
@@ -705,7 +741,7 @@ at::Tensor rpu_slice_spm_test(const at::Tensor& input, c10::IntArrayRef begins,
                               c10::IntArrayRef sizes) {
     TORCH_CHECK(input.scalar_type() == at::kHalf, "slice_spm_test: fp16 only");
     TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                "slice_spm_test: input must be on RPU");
+                "slice_spm_test: input must be on device");
     const int64_t ndim = input.dim();
     TORCH_CHECK((int64_t)begins.size() == ndim && (int64_t)sizes.size() == ndim,
                 "slice_spm_test: begins/sizes rank must match input");

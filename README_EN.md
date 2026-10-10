@@ -13,7 +13,7 @@
 
 </div>
 
-RhinoForge exposes the Rhino Processing Unit (RPU) as `torch.rpu`. It combines
+RhinoForge exposes the Rhino device as `torch.rpu`. It combines
 model adapters, fused model runtimes, graph capture and replay, SPM memory
 management, multi-core execution, offline quantization, and a model-porting
 template in one PyTorch backend.
@@ -22,9 +22,12 @@ The distribution name is `rhinoforge`; the Python import remains
 `rpu_backend`. RhinoForge is inference-only and does not support training or
 fine-tuning.
 
+This source tree targets **v1.2.0**. See the [changelog](CHANGELOG.md)
+and [upgrade guide](docs/upgrading_1_2.md) before updating an existing installation.
+
 ## Highlights
 
-- **PyTorch integration:** use the RPU through the standard custom-device path
+- **PyTorch integration:** use the device through the standard custom-device path
   and `torch.rpu` APIs.
 - **Model deployment:** run text, vision-language, vision, and VLA profiles
   through model-specific adapters and TOML examples.
@@ -50,17 +53,18 @@ the directory layout, precision choices, and input requirements.
 
 Supply your own model weights and requests. Configurations and runtime admission
 checks constrain each checkpoint, precision, core count, and input envelope.
-Controlled and Source-only examples retain their restrictions; a template is
-not model certification.
+
+Qwen3 ASR/TTS use dedicated speech entry points. Follow the
+[speech guide](docs/qwen3_audio.md) for downloads and commands.
 
 ## Quick start
 
-The current source requires Python 3.12, a configured RPU board environment,
+The current source requires Python 3.12, a configured device board environment,
 and matching Rhino Launch and operator assets. Follow
 [Build the current development source](docs/development_build.md) to create an
 isolated environment and install the dependencies defined in
-[pyproject.toml](pyproject.toml). Use the `vision` or `vla` extra for those entry
-points.
+[pyproject.toml](pyproject.toml). Use the `vision`, `vla` or `audio` extra for the corresponding
+entry points.
 
 1. Configure the external runtime paths and install the current source using
    the build guide.
@@ -73,13 +77,19 @@ points.
 python examples/verify_install.py --check-config
 python examples/verify_install.py
 cp examples/configs/qwen3/text/0_6b/fp16.toml qwen3.local.toml
-python examples/run_model.py --config qwen3.local.toml --check-config
-python examples/run_model.py --config qwen3.local.toml
+cat >> qwen3.local.toml <<'TOML'
+
+[logging]
+level = "INFO"
+TOML
+python examples/run.py --config qwen3.local.toml --check-config
+python examples/run.py --config qwen3.local.toml
 ```
 
-[Model execution and profiling](docs/model_testing.md) describes the TOML
-runner, quantization, and profiling entry points. Obtain model checkpoints,
-Rhino Launch, and operator assets from their respective distributors.
+The example sets `logging.level="INFO"` to display generated text. The default
+`ERROR` level shows errors and separately controlled summaries.
+[Run and debug models](docs/model_testing.md) describes the TOML
+runner, quantization and diagnostic entry points.
 
 See [Getting started](docs/getting_started.md) for installation and a first run.
 
@@ -87,14 +97,15 @@ See [Getting started](docs/getting_started.md) for installation and a first run.
 
 | Topic | Document |
 |---|---|
+| v1.2.0 changes and migration | [Changelog](CHANGELOG.md) · [Upgrade guide](docs/upgrading_1_2.md) |
 | Install current source | [Development build](docs/development_build.md) |
 | Installation and first run | [Getting started](docs/getting_started.md) |
+| Speech recognition and synthesis | [Qwen3 ASR/TTS](docs/qwen3_audio.md) |
 | Examples | [Example directory and entry points](examples/README.md) |
 | Restricted Launch and operator assets | [Restricted runtime assets](docs/runtime_assets.md) |
 | Model checkpoints | [Model assets](docs/model_assets.md) |
 | Runtime and TOML parameters | [Runtime configuration](docs/runtime_config.md) |
-| Model execution, testing, and profiling | [Model execution and profiling](docs/model_testing.md) |
-| Reproducible performance measurement | [Performance measurement](docs/performance.md) |
+| Model execution, testing, and profiling | [Run and debug models](docs/model_testing.md) |
 | Proportionate validation | [Model validation policy](docs/validation_policy.md) |
 | Runtime design | [Architecture](docs/architecture.md) |
 | Python and C++ APIs | [API reference](docs/api_reference.md) |
@@ -106,6 +117,6 @@ See [Getting started](docs/getting_started.md) for installation and a first run.
 ## License
 
 RhinoForge source code is licensed under the
-[Apache License 2.0](LICENSE). Model checkpoints, Rhino Launch, the combined
-operator asset, and other third-party materials are governed by their own terms
+[Apache License 2.0](LICENSE). Model checkpoints, Rhino Launch, the main and
+expansion operator assets, and other third-party materials are governed by their own terms
 and are not licensed by this repository's `LICENSE` file.

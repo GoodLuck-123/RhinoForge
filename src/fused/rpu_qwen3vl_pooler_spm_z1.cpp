@@ -1147,7 +1147,7 @@ void validate_text_hidden(const at::Tensor& hidden, const char* op) {
                     hidden.size(0) == 1 &&
                     hidden.size(1) == kExecutionLen &&
                     hidden.size(2) == kTextHidden,
-                op, ": text_hidden must be contiguous FP16 RPU "
+                op, ": text_hidden must be contiguous FP16 device "
                 "[1,128,2048]");
 }
 
@@ -1183,7 +1183,7 @@ void stage_non_image_rows_locked(Qwen3VlPoolerZ1State& s,
     const uint64_t hidden_dev_addr =
         ::rhino_lkn::RpuGetDevAddr(hidden.data_ptr<c10::Half>());
     TORCH_CHECK(hidden_dev_addr != 0,
-                "qwen3vl_pooler_spm_z1: text_hidden resolved a zero RPU "
+                "qwen3vl_pooler_spm_z1: text_hidden resolved a zero device "
                 "address");
     s.hidden_prefix_src_base = hidden_dev_addr;
     s.hidden_suffix_src_base = hidden_dev_addr;
@@ -1246,7 +1246,7 @@ void bind_non_image_rows_outer_fast_locked(
         ::rhino_lkn::RpuGetDevAddr(hidden.data_ptr<c10::Half>());
     TORCH_CHECK(hidden_dev_addr != 0,
                 "qwen3vl_pooler_spm_z1 outer fast text_hidden resolved a "
-                "zero RPU address");
+                "zero device address");
     guard.bind_fast_mutable_dma(
         s.hidden_prefix_src_base, hidden, GraphOuterFastDmaSide::Source,
         /*byte_begin=*/0, prefix_bytes);

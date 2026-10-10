@@ -93,7 +93,7 @@ def _copy_w8_projection(weight, scale, *, n, k, copy_weight=True):
     # NumPy-owned storage so replacing one layer releases its raw CPU pages,
     # instead of retaining a second full model while HostDDR banks grow.
     # The subsequent swizzle and device copy keep their existing byte layout.
-    # The one-step 32B RPU loader keeps safetensors-backed CPU weights until
+    # The one-step 32B device loader keeps safetensors-backed CPU weights until
     # the existing per-layer swizzle copies them into device banks. Copying
     # the entire raw model first exhausts non-CMA CPU RAM on the target board.
     return (torch.from_numpy(weight.numpy().copy()) if copy_weight else weight), scale.clone()
@@ -138,7 +138,7 @@ def load_qwen3_vl_runtime_imagetext(
 ):
     """Strict CPU loading; W8 stays raw and W4 is packed exactly once.
 
-    The internal 32B W8 one-step RPU path retains checkpoint mappings instead
+    The internal 32B W8 one-step device path retains checkpoint mappings instead
     of copying all raw weights. Checkpoint files must remain unchanged during
     loading/migration; tensors own their mappings after safe_open closes.
     Ordinary CPU loading still returns independent weight copies.
@@ -154,7 +154,7 @@ def load_qwen3_vl_runtime_imagetext(
     if _mmap_w8_weights and not (
         config.text_config.hidden_size == 5120 and config.quant_config["method"] == "w8a16"
     ):
-        raise ValueError("mapped runtime weights require the exact 32B W8 RPU loading path")
+        raise ValueError("mapped runtime weights require the exact 32B W8 device loading path")
     directory = _resolve_checkpoint_dir(ckpt_dir, **resolve_kwargs)
     source_config = json.loads((directory / "config.json").read_text())
     if (not is_qwen3_vl_runtime_quant_config(source_config)

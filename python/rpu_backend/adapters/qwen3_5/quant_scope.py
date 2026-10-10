@@ -1,7 +1,7 @@
 """Qwen3.5 quantization scope and per-projection precision contract.
 
 Shared by the offline converter (``rpu_backend.quant.convert_qwen3_5``), the
-checkpoint loader (``adapters/qwen3_5/loader.py``) and the RPU install path
+checkpoint loader (``adapters/qwen3_5/loader.py``) and the device install path
 (``text.py::_iter_text_projections``). Keeping one list avoids the failure mode
 where a checkpoint is converted over one set of modules and loaded over another.
 
@@ -29,7 +29,7 @@ DECLARED_DTYPES = (FP16, W8A16, "w4a16")
 
 # The first Qwen3.8-27B W8A16 bundle predates the v1/v2 declaration used by
 # ``convert_qwen3_5``.  It quantizes the MLP and full-attention projections,
-# leaves all GDN projections in FP16, and stores MTP scales even though the RPU
+# leaves all GDN projections in FP16, and stores MTP scales even though the device
 # text path intentionally does not instantiate MTP.  Keep this policy explicit
 # instead of treating it as the v1 uniform-W8 format (which would silently ask
 # for scales on every GDN projection).
@@ -288,6 +288,94 @@ def validate_legacy_text_profile(config) -> bool:
             "Qwen3.8 legacy text profile requires the original 27B semantics; "
             f"mismatched fields: {sorted(set(mismatches))}")
     resolve_quant_specs(is_full_from_layer_types(layer_types), quant)
+    return True
+
+
+def validate_modern_27b_profile(config, *, allow_fp16=False) -> bool:
+    """Validate official 27B semantics and uniform quantization, without torch.
+
+    Other sizes and the independently validated legacy policy return False.
+    An apparent modern 27B with conflicting metadata raises before allocation.
+    ``allow_fp16`` is for source conversion/capacity inspection only; public
+    runtime admission currently requires uniform W8 or W4 group32.
+    """
+    tc = _config_value(config, "text_config", config)
+    if _config_value(tc, "hidden_size") != 5120:
+        return False
+    if validate_legacy_text_profile(config):
+        return False
+    bad = []
+    geometry = dict(_LEGACY_TEXT_GEOMETRY, vocab_size=248320)
+    for name, expected in geometry.items():
+        value = _config_value(tc, name)
+        if type(value) is not int or value != expected:
+            bad.append(name)
+    expected_layers = ([LINEAR_ATTENTION] * 3 + [FULL_ATTENTION]) * 16
+    if list(_config_value(tc, "layer_types", ()) or ()) != expected_layers:
+        bad.append("layer_types")
+    for name, expected in (("model_type", "qwen3_5_text"), ("hidden_act", "silu"),
+                           ("attention_bias", False), ("attn_output_gate", True),
+                           ("rms_norm_eps", 1e-6), ("use_cache", True)):
+        value = _config_value(tc, name, True if name == "attn_output_gate" else None)
+        if value != expected or (isinstance(expected, bool) and type(value) is not bool):
+            bad.append(name)
+    if _config_value(tc, "full_attention_interval", 4) != 4:
+        bad.append("full_attention_interval")
+    if _config_value(tc, "mlp_only_layers", ()):
+        bad.append("mlp_only_layers")
+    for owner in (config, tc):
+        for name in ("quantization_config", "num_experts", "adaptive_mode"):
+            if _config_value(owner, name):
+                bad.append(name)
+    if tc is not config and _config_value(tc, "quant_config") is not None:
+        bad.append("text_config.quant_config")
+    rope = _config_value(tc, "rope_parameters")
+    expected_rope = dict(rope_type="default", rope_theta=10_000_000,
+                         partial_rotary_factor=0.25, mrope_interleaved=True,
+                         mrope_section=[11, 11, 10])
+    if not isinstance(rope, Mapping):
+        bad.append("rope_parameters")
+    else:
+        for name, expected in expected_rope.items():
+            value = rope.get(name)
+            if name == "mrope_section" and isinstance(value, tuple):
+                value = list(value)
+            if value != expected or (isinstance(expected, bool) and type(value) is not bool):
+                bad.append("rope_parameters." + name)
+    if _config_value(config, "tie_word_embeddings") is not False:
+        bad.append("tie_word_embeddings")
+    if tc is not config:
+        if (_config_value(config, "model_type") != "qwen3_5"
+                or _config_value(config, "image_token_id") != 248056):
+            bad.append("conditional_generation")
+        vc = _config_value(config, "vision_config")
+        for name, expected in dict(depth=27, num_heads=16, hidden_size=1152,
+                intermediate_size=4304, out_hidden_size=5120, in_channels=3,
+                patch_size=16, temporal_patch_size=2, spatial_merge_size=2,
+                num_position_embeddings=2304).items():
+            value = _config_value(vc, name)
+            if type(value) is not int or value != expected:
+                bad.append("vision_config." + name)
+        if (_config_value(vc, "hidden_act") != "gelu_pytorch_tanh"
+                or _config_value(vc, "deepstack_visual_indexes", ())
+                or _config_value(vc, "quant_config")
+                or _config_value(vc, "quantization_config")):
+            bad.append("vision_config.semantics")
+    if bad:
+        raise ValueError("official Qwen3.5-27B requires exact dense semantics; mismatched fields: "
+                         + ", ".join(sorted(set(bad))))
+    quant = _config_value(config, "quant_config")
+    if quant is None:
+        if allow_fp16:
+            return True
+        raise ValueError("official Qwen3.5-27B FP16 is not admitted: long-VL capacity validation "
+                         "exceeds the supported board memory; use uniform W8 or W4 group32")
+    specs = set(resolve_quant_specs(is_full_from_layer_types(expected_layers), quant).values())
+    if (len(specs) != 1 or next(iter(specs)) not in
+            (QuantSpec(W8A16), QuantSpec(W4A16_PGRP, 32))):
+        raise ValueError("official Qwen3.5-27B requires uniform W8 or W4 group32 text projections")
+    if quant.get("storage", "int8") != "int8" or quant.get("scale_dtype", "float16") != "float16":
+        raise ValueError("official Qwen3.5-27B requires int8 raw storage and FP16 scales")
     return True
 
 

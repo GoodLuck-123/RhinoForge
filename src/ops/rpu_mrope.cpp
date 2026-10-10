@@ -184,7 +184,7 @@ void rpu_launch_mrope_spm_kernel(
                     cos.sizes() == sin.sizes() &&
                     cos.size(1) == head_dim / 2,
                 "rpu_launch_mrope_spm_kernel owned: cos/sin must be matching "
-                "contiguous FP16 RPU tables [rows,head_dim/2]");
+                "contiguous FP16 device tables [rows,head_dim/2]");
     TORCH_CHECK(position_ids.defined() &&
                     position_ids.device().type() ==
                         c10::DeviceType::PrivateUse1 &&
@@ -193,7 +193,7 @@ void rpu_launch_mrope_spm_kernel(
                     position_ids.is_contiguous() &&
                     position_ids.dim() == 2 && position_ids.size(1) == 3,
                 "rpu_launch_mrope_spm_kernel owned: position_ids must be a "
-                "contiguous int32 RPU Tensor [rows,3]");
+                "contiguous int32 device Tensor [rows,3]");
     TORCH_CHECK(pos_offset >= 0 && seq_len > 0 &&
                     pos_offset <= cos.size(0) &&
                     seq_len <= cos.size(0) - pos_offset &&
@@ -254,7 +254,7 @@ static void launch_qwen3vl_4b_decode_qk_norm_mrope(
             tensor.dim() == 2 && tensor.size(0) > 0 && tensor.size(1) == 64;
     };
     TORCH_CHECK(table_ok(cos) && table_ok(sin) && cos.sizes() == sin.sizes(),
-                "4B decode QK fusion requires matching contiguous FP16 [rows,64] RPU tables");
+                "4B decode QK fusion requires matching contiguous FP16 [rows,64] device tables");
     TORCH_CHECK(position_ids.defined() &&
                     position_ids.device().type() == c10::DeviceType::PrivateUse1 &&
                     position_ids.scalar_type() == at::kInt &&

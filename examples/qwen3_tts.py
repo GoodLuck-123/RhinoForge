@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--language", choices=("Chinese", "English"), default="Chinese")
     parser.add_argument("--max-new-tokens", type=int, default=64)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--threads", type=int, default=4, help="CPU intra-op threads; R1 codec benefits from 8")
+    parser.add_argument("--threads", type=int, default=4, help="CPU intra-op threads")
     args = parser.parse_args()
     if args.threads < 1:
         parser.error("threads must be positive")

@@ -1,5 +1,7 @@
-# Public configuration; provide your own checkpoint and input assets.
-
+# Official dense Qwen3-8B source, converted once during cold installation.
+# Decoder seven projections: symmetric INT4/G32; lm_head: INT4/G32.
+# TP8/B1, default ACC16; bounded P128/D7 ACC16 numerics/Graph checks archived.
+# Unmeasured length/ACC combinations and task quality are not certified.
 [example]
 profile_id = "qwen3-8b.w4a16-g32-lm-head.text"
 registry_alias = "qwen3-8b"
@@ -21,8 +23,6 @@ runs = 5
 hwperf = false
 profile = false
 seed = 0
-
-[rpu_execution]
 
 [rpu_execution.model]
 num_cores = 8

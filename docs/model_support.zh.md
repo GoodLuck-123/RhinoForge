@@ -1,27 +1,15 @@
-# 示例与运行范围
+# 模型入口与运行范围
 
-简体中文 | [English](model_support.md)
+**简体中文** | [English](model_support.md)
 
-[`examples/`](../examples/README.md) 提供统一的 `run_model.py` 入口和模型专用脚本。
-TOML 配置在 [`examples/configs/`](../examples/configs/README.md) 下按模型、组件、
-精度和工作量归档。
+从[模型示例](../examples/README.zh.md)选择 TOML，按模型指南准备权重和输入，执行 `python examples/run.py --config PATH --check-config` 后运行。检查命令只验证配置。
 
-选择配置并准备对应 checkpoint 与输入后，先运行
-`python examples/run_model.py --config PATH --check-config`。该命令不加载权重或访问
-板卡，只检查配置，不验证 checkpoint 或认证模型质量。对应运行合同见
-[模型运行](model_testing.zh.md)、[API 参考](api_reference.zh.md)和
-[量化说明](quantization.zh.md)。
+支持范围按 checkpoint、精度、核数、输入形状和长度确定，由加载器与运行时准入检查执行。受控入口还需模板声明的 opt-in；详细参数见[配置索引](../examples/configs/CONFIGURATIONS.md)。
 
-## 通用运行边界
+权重与请求数据由调用方提供。安装依赖见[模型资产](model_assets.zh.md)和[运行时资产](runtime_assets.zh.md)；调用方式见[运行与调试](model_testing.zh.md)、[API](api_reference.zh.md)和[量化](quantization.zh.md)。
 
-每个 checkpoint 和请求的实际范围由运行时准入检查决定。配置文件不代表其他尺寸、
-精度、核数、图像数量或输入长度也适用。Source-only 和受控示例保留各自精确的输入
-限制与 opt-in 开关；历史验证记录不代表当前运行时，也不构成新的模型认证。
+## Qwen3 语音
 
-模型权重、请求数据、Rhino Launch 和算子资产分别获取，其格式、来源和许可要求见
-[模型资产](model_assets.zh.md)与[运行时资产](runtime_assets.zh.md)。保留公开
-Wall-OSS 底座适配；公开交付不包含私有应用模型、数据或部署定制。
-
-## Qwen3 语音模型
-
-新增独立的 `Qwen3ASRModel` 和 `Qwen3TTSModel` 混合推理接口。精确 checkpoint、CPU/RPU 分工、输入限制和 R1 实测见[语音迁移报告](qwen3_audio_r1.zh.md)。这两个接口不经过通用 CausalLM/VLM registry；运行验证不等同于识别质量、音色相似度或实时性能认证。
+`Qwen3ASRModel` 和 `Qwen3TTSModel` 提供独立的 ASR/TTS 入口，由 CPU 和设备组件
+共同执行。固定资产、输入范围、源码准备和进程所有权见[语音指南](qwen3_audio.zh.md)。
+这两个接口不经过文本/视觉 TOML runner 或 CausalLM/VLM registry。

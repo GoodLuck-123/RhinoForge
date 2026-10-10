@@ -29,7 +29,7 @@ inline uint32_t align256(uint32_t v) { return (v + 255u) & ~255u; }
 // Python binds the same cold choice to ViT set_weights and these optional
 // tensors. Their presence is this launcher's sole authority.
 
-// 校验 + 取形状。nxc/sc 都是 [4, G, D] fp16 RPU contiguous（member-major）。
+// 校验 + 取形状。nxc/sc 都是 [4, G, D] fp16 device contiguous（member-major）。
 struct MergerDims { int64_t G, D, N, per_core; };
 
 MergerDims check_member_major(const at::Tensor& t, const char* who,
@@ -38,7 +38,7 @@ MergerDims check_member_major(const at::Tensor& t, const char* who,
                 who, ": expected member-major [4, G, D], got ", t.sizes());
     TORCH_CHECK(t.scalar_type() == at::kHalf, who, ": must be FP16");
     TORCH_CHECK(t.is_contiguous(), who, ": must be contiguous");
-    TORCH_CHECK(t.device().type() == at::kPrivateUse1, who, ": must be on the RPU device");
+    TORCH_CHECK(t.device().type() == at::kPrivateUse1, who, ": must be on the device");
     // D_override != 0 ⇒ 输入是 proj1 **之前**的 [4,G,K]，链路其余部分按 D 走。
     const int64_t G = t.size(1), D = D_override ? D_override : t.size(2), N = G * D;
     // 分片要求能被核数整除。G*D = 147*2048 = 301056 ⇒ 37632/核。

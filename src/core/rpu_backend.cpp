@@ -19,6 +19,7 @@
 #include "rpu_ops.h"
 #include "rpu_host_argmax.h"
 #include "rpu_tensor_ops.h"
+#include "rpu_profile.h"
 #include "graph/execution_coordinator.h"
 
 #include "rpu_runtime_state.h"  // v5-07: g_chunk_size_override + g_debug_tensors + 9 accessors (D-06)
@@ -31,7 +32,7 @@
 // 上面的 <torch/extension.h> / <ATen/...> 已经被 include,这里直接用 ::完整名。
 void dispatch_graph_aware_cpu_fallback(const c10::OperatorHandle& op,
                                        torch::jit::Stack* stack);
-// 支线 S (docs/graph_rules.md §12.4):spm_alloc_reset_temporary graph-aware
+// 支线 S (docs/architecture.md):spm_alloc_reset_temporary graph-aware
 // 入口。RECORDING 期 mark_non_replayable + 仍执行 host reset;REPLAYING 期
 // TORCH_CHECK fail;PASSTHROUGH/BUILT 走原 eager 行为。实现在
 // src/graph/graph_spm_reset_guard.cpp,同样为避免 graph_runtime.h 污染本 TU。
@@ -156,7 +157,7 @@ void rpu_qwen3vl_scatter_row_parts_unflushed_(
     const at::Tensor& row_indices,
     at::TensorList sources) {
   TORCH_CHECK(destination.device().type() == c10::DeviceType::PrivateUse1,
-              "qwen3vl_scatter_row_parts_unflushed_: destination must be on RPU");
+              "qwen3vl_scatter_row_parts_unflushed_: destination must be on device");
   TORCH_CHECK(row_indices.device().is_cpu() &&
                   row_indices.scalar_type() == at::kLong &&
                   row_indices.dim() == 1 && row_indices.is_contiguous(),
@@ -165,7 +166,7 @@ void rpu_qwen3vl_scatter_row_parts_unflushed_(
   TORCH_CHECK(destination.scalar_type() == at::kHalf &&
                   destination.dim() == 2 && destination.is_contiguous(),
               "qwen3vl_scatter_row_parts_unflushed_: destination must be "
-              "contiguous RPU fp16 2D");
+              "contiguous device fp16 2D");
   TORCH_CHECK(!sources.empty(),
               "qwen3vl_scatter_row_parts_unflushed_: sources must be non-empty");
   TORCH_CHECK(!destination.requires_grad(),
@@ -178,7 +179,7 @@ void rpu_qwen3vl_scatter_row_parts_unflushed_(
     const auto device_type = source.device().type();
     TORCH_CHECK(device_type == c10::DeviceType::CPU ||
                     device_type == c10::DeviceType::PrivateUse1,
-                "qwen3vl_scatter_row_parts_unflushed_: source must be on CPU or RPU");
+                "qwen3vl_scatter_row_parts_unflushed_: source must be on CPU or device");
     TORCH_CHECK(source.scalar_type() == at::kHalf && source.dim() == 2 &&
                     source.is_contiguous() &&
                     source.size(1) == destination.size(1),
@@ -237,12 +238,17 @@ void rpu_qwen3vl_scatter_row_parts_unflushed_(
       if (dst_run != src_run) {
         std::memcpy(dst_run, src_run, run_bytes);
       }
+      // Host-visible producers own publication, including exact CPU aliases.
+      // The decoder's mutable DMA no longer flushes its device input.
+      if (run_bytes != 0) {
+        rpu_ddr_flush_force_sized(dst_run, run_bytes);
+      }
       begin = end;
     }
     index_offset += source.size(0);
   }
-  // Intentionally no DDR flush: the decoder prologue force-flushes the
-  // complete stable input immediately before its mutable DMA consumes it.
+  // Keep the historical dispatcher name; publication is a host boundary,
+  // independent of the optional intra-device flush policy.
 }
 
 void rpu_qwen3vl_gather_embedding_from_rpu_unflushed_(
@@ -253,11 +259,11 @@ void rpu_qwen3vl_gather_embedding_from_rpu_unflushed_(
   TORCH_CHECK(destination.device().type() == c10::DeviceType::PrivateUse1 &&
                   vocabulary.device().type() == c10::DeviceType::PrivateUse1,
               "qwen3vl_gather_embedding_from_rpu_unflushed_: destination and "
-              "vocabulary must be on RPU");
+              "vocabulary must be on device");
   TORCH_CHECK(token_ids.device().is_cpu() ||
                   token_ids.device().type() == c10::DeviceType::PrivateUse1,
               "qwen3vl_gather_embedding_from_rpu_unflushed_: token_ids must "
-              "be on CPU or host-visible RPU DDR");
+              "be on CPU or host-visible device DDR");
   TORCH_CHECK(destination.scalar_type() == at::kHalf &&
                   vocabulary.scalar_type() == at::kHalf,
               "qwen3vl_gather_embedding_from_rpu_unflushed_: destination and "
@@ -301,6 +307,69 @@ void rpu_qwen3vl_gather_embedding_from_rpu_unflushed_(
     if (token_id == skip_token_id) continue;
     std::memcpy(dst + row * width, vocab + token_id * width, row_bytes);
   }
+  if (destination.nbytes() != 0) {
+    // This direct memcpy bypasses ATen's CPU upload/copy publication.
+    // Stable decode slots must expose the newly gathered token every replay.
+    rpu_ddr_flush_force_sized(dst, destination.nbytes());
+  }
+}
+
+at::Tensor rpu_qwen3_5_decode_embedding_cpu(
+    const at::Tensor& weight, const at::Tensor& token_ids,
+    int64_t padding_idx, bool scale_grad_by_freq, bool sparse) {
+  TORCH_CHECK(weight.device().type() == c10::DeviceType::PrivateUse1 &&
+                  weight.scalar_type() == at::kHalf && weight.dim() == 2 &&
+                  weight.is_contiguous(),
+              "qwen3_5_decode_embedding_cpu: weight must be contiguous device FP16 2D");
+  TORCH_CHECK(token_ids.device().is_cpu() &&
+                  token_ids.scalar_type() == at::kLong &&
+                  token_ids.dim() == 2 && token_ids.size(0) == 1 &&
+                  token_ids.size(1) > 0 && token_ids.is_contiguous(),
+              "qwen3_5_decode_embedding_cpu: ids must be contiguous CPU int64 [1,N], N > 0");
+  // Match public embedding's current raw-weight read, including CPU aliases.
+  // Gather afresh every call; neither the vocabulary nor the CPU output is cached.
+  auto cpu_weight = rpu_to_cpu_zerocopy(weight, /*flush=*/false);
+  return at::embedding(cpu_weight, token_ids, padding_idx,
+                       scale_grad_by_freq, sparse);
+}
+
+void rpu_qwen3vl_publish_inputs(at::TensorList tensors) {
+  // Validate the complete adapter-owned batch before publishing any range.
+  for (const at::Tensor& tensor : tensors) {
+    TORCH_CHECK(tensor.device().type() == c10::DeviceType::PrivateUse1 &&
+                    tensor.scalar_type() == at::kHalf && tensor.is_contiguous(),
+                "qwen3vl_publish_inputs: inputs must be contiguous device fp16");
+    TORCH_CHECK(!tensor.requires_grad(),
+                "qwen3vl_publish_inputs: inference inputs only");
+  }
+  if (!g_rpu_ddr_flush_force_enabled) return;
+  std::vector<void*> ptrs;
+  std::vector<size_t> sizes;
+  ptrs.reserve(tensors.size());
+  sizes.reserve(tensors.size());
+  for (const at::Tensor& tensor : tensors) {
+    if (tensor.nbytes() == 0) continue;
+    void* ptr = tensor.data_ptr();
+    const size_t bytes = tensor.nbytes();
+    bool duplicate = false;
+    for (size_t i = 0; i < ptrs.size(); ++i) {
+      if (ptrs[i] == ptr && sizes[i] == bytes) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (!duplicate) {
+      ptrs.push_back(ptr);
+      sizes.push_back(bytes);
+    }
+  }
+  if (!ptrs.empty()) {
+    rhino_lkn::RpuDdrFlushBatch(ptrs.data(), sizes.data(), ptrs.size());
+#if defined(__aarch64__)
+    // Retain the scalar large-range flush's system-wide completion.
+    __asm__ volatile("dsb sy" ::: "memory");
+#endif
+  }
 }
 
 // =============================================================================
@@ -326,8 +395,8 @@ static int parse_log_level_env_or_default() {
 std::atomic<int> g_rpu_debug_level{parse_log_level_env_or_default()};
 bool g_rpu_profile_enabled = false; // 控制性能分析输出
 RpuTensorAllocatorPolicy g_rpu_tensor_allocator_policy;
-bool g_rpu_ddr_flush_enabled = false; // intra-RPU flush perf knob (默认关闭)
-bool g_rpu_ddr_flush_force_enabled = true; // CPU<->RPU boundary flush (默认开启)
+bool g_rpu_ddr_flush_enabled = false; // intra-device flush perf knob (默认关闭)
+bool g_rpu_ddr_flush_force_enabled = true; // CPU<->device boundary flush (默认开启)
 
 // Thread-local profile data
 #if RPU_PROFILE_ENABLED
@@ -360,7 +429,7 @@ void rpu_set_caching_allocator(bool enabled) {
   const auto result = g_rpu_tensor_allocator_policy.claim(enabled);
   TORCH_CHECK(
       result != RpuTensorAllocatorPolicy::ClaimResult::kConflict,
-      "RPU tensor allocator policy is already frozen to ",
+      "device tensor allocator policy is already frozen to ",
       g_rpu_tensor_allocator_policy.snapshot().caching ? "caching" : "direct",
       "; cannot switch to ", enabled ? "caching" : "direct",
       " in the same process. Start a fresh Python process to use a different policy.");
@@ -507,7 +576,7 @@ at::Tensor host_top1_impl(
   const bool on_rpu =
       logits.device().type() == c10::DeviceType::PrivateUse1;
   TORCH_CHECK(on_rpu || logits.device().is_cpu(),
-              "host top1: logits must be on CPU or RPU, got ",
+              "host top1: logits must be on CPU or device, got ",
               logits.device());
   TORCH_CHECK(logits.scalar_type() == at::kHalf,
               "host top1: logits must be fp16, got ",
@@ -533,7 +602,7 @@ at::Tensor host_top1_impl(
 
 at::Tensor rpu_lm_head_logits_top1(const at::Tensor& logits) {
   TORCH_CHECK(logits.device().type() == c10::DeviceType::PrivateUse1,
-              "lm_head_logits_top1: logits must be on RPU device");
+              "lm_head_logits_top1: logits must be on device");
   return host_top1_impl(logits, /*copy_result_to_rpu=*/true);
 }
 
@@ -559,7 +628,7 @@ void rpu_zero_contiguous_tensor_blocks_sized(
   }
   for (const at::Tensor& tensor : tensors) {
     TORCH_CHECK(tensor.device().type() == c10::DeviceType::PrivateUse1,
-                "zero_contiguous_tensor_blocks_sized: every tensor must be on RPU");
+                "zero_contiguous_tensor_blocks_sized: every tensor must be on device");
     TORCH_CHECK(tensor.is_contiguous() && tensor.dim() >= 2,
                 "zero_contiguous_tensor_blocks_sized: tensors must be contiguous "
                 "with a block dimension");
@@ -570,6 +639,8 @@ void rpu_zero_contiguous_tensor_blocks_sized(
     TORCH_CHECK(!tensor.requires_grad(),
                 "zero_contiguous_tensor_blocks_sized: inference tensors only");
   }
+  // Match zero_: pending Graph writes must finish before the host overwrite.
+  graph_aware_rpu_to_cpu_zerocopy_sync();
   for (const at::Tensor& tensor : tensors) {
     const size_t block_bytes = static_cast<size_t>(tensor.nbytes()) /
         static_cast<size_t>(tensor.size(1));
@@ -588,6 +659,10 @@ void rpu_zero_contiguous_tensor_blocks_sized(
   if (!flush_ptrs.empty()) {
     rhino_lkn::RpuDdrFlushBatch(
         flush_ptrs.data(), flush_sizes.data(), flush_ptrs.size());
+#if defined(__aarch64__)
+    // Cache reset replaces scalar publication of potentially large ranges.
+    __asm__ volatile("dsb sy" ::: "memory");
+#endif
   }
 }
 
@@ -599,10 +674,10 @@ at::Tensor rpu_lm_head_logits_top2_rescore_cpu(
   TORCH_CHECK(logits.device().type() == c10::DeviceType::PrivateUse1 &&
                   logits.scalar_type() == at::kHalf &&
                   logits.dim() >= 1 && logits.is_contiguous(),
-              "lm_head_logits_top2_rescore_cpu: logits must be contiguous RPU fp16");
+              "lm_head_logits_top2_rescore_cpu: logits must be contiguous device fp16");
   TORCH_CHECK(hidden.device().type() == c10::DeviceType::PrivateUse1 &&
                   hidden.scalar_type() == at::kHalf && hidden.is_contiguous(),
-              "lm_head_logits_top2_rescore_cpu: hidden must be contiguous RPU fp16");
+              "lm_head_logits_top2_rescore_cpu: hidden must be contiguous device fp16");
   TORCH_CHECK(raw_weight.device().is_cpu() &&
                   raw_weight.scalar_type() == at::kHalf &&
                   raw_weight.dim() == 2 && raw_weight.is_contiguous(),
@@ -844,7 +919,7 @@ static void initialize_rpu_backend_runtime() {
     }
     TORCH_CHECK(
         g_rpu_backend_lifecycle == RpuBackendLifecycleState::kCold,
-        "RPU backend runtime cannot be reinitialized after shutdown");
+        "device backend runtime cannot be reinitialized after shutdown");
 
     TORCH_CHECK(rpu_hw_perf_runtime_compatible(),
                 "RhinoForge requires the sanitized Release Rhino Launch runtime");
@@ -908,7 +983,7 @@ void rpu_shutdown() {
     rhino_lkn::RpuDdrShutdown();
 
     if (log_at(3)) {
-        std::cout << "[RPU] Shutdown complete - all cached resources released" << std::endl;
+        std::cout << "[device] Shutdown complete - all cached resources released" << std::endl;
     }
 }
 
@@ -1004,13 +1079,13 @@ Tensor isfinite_fallback_to_cpu(const Tensor &self) {
 // 声明：实际实现在 rpu_fused_attention.cpp
 // at::Tensor rpu_fused_qkv_attention(...) - 见 rpu_ops.h
 
-// ================== Custom RPU Ops Namespace ==================
+// ================== Custom device Ops Namespace ==================
 // Define custom ops under rpu:: namespace for direct dispatch (bypass pybind11 overhead)
 
 // Multi-core Conv2d accepting pre-converted NHWC tensors (no layout conversion overhead)
 static at::Tensor rpu_conv2d_mc_nhwc(
-    const at::Tensor& input_nhwc,   // [batch, inh, inw, cin_padded] NHWC on RPU
-    const at::Tensor& weight_nhwc,  // [cout, kh, kw, cin_padded] NHWC on RPU
+    const at::Tensor& input_nhwc,   // [batch, inh, inw, cin_padded] NHWC on device
+    const at::Tensor& weight_nhwc,  // [cout, kh, kw, cin_padded] NHWC on device
     const c10::optional<at::Tensor>& bias_opt,
     at::IntArrayRef stride,
     at::IntArrayRef padding,
@@ -1059,7 +1134,7 @@ static at::Tensor rpu_conv2d_mc_nhwc(
     at::Tensor output_nhwc = at::empty(
         {N, outh, outw, num_flt_v16_elems}, input_nhwc.options());
 
-    // Input/weight already NHWC contiguous on RPU — just flush
+    // Input/weight already NHWC contiguous on device — just flush
     rpu_ddr_flush(const_cast<void*>(static_cast<const void*>(input_nhwc.data_ptr())));
     rpu_ddr_flush(const_cast<void*>(static_cast<const void*>(weight_nhwc.data_ptr())));
     if (has_bias) rpu_ddr_flush(bias_ptr);

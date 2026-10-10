@@ -898,6 +898,8 @@ def test_close_uses_execution_session_shutdown(install_runtime, monkeypatch):
 def test_staged_32b_streams_after_claim_without_second_swizzle(
     monkeypatch, install_runtime
 ):
+    from rpu_backend.graph import GraphRuntimePolicy
+    monkeypatch.setattr(GraphRuntimePolicy, "prepare_arenas", lambda _: True)
     from rpu_backend.quant import load as w8a16_load
 
     model = _Model()

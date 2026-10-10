@@ -1,4 +1,4 @@
-"""Reusable construction helpers for the RhinoVLA RPU action expert."""
+"""Reusable construction helpers for the RhinoVLA device action expert."""
 from __future__ import annotations
 
 import copy

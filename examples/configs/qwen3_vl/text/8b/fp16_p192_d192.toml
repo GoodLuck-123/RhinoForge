@@ -1,5 +1,3 @@
-# Public configuration; provide your own checkpoint and input assets.
-
 [example]
 profile_id = "qwen3-vl-8b.fp16.text"
 registry_alias = "qwen3-vl-8b"

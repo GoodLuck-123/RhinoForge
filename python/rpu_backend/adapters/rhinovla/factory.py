@@ -44,7 +44,7 @@ def _validate_official_assets(model_root, checkpoint):
 
 
 def _load_official_model(model_root, checkpoint):
-    """Strict CPU FP32 source model; this function never imports native RPU."""
+    """Strict CPU FP32 source model; this function never imports native device."""
     import torch
     from omegaconf import OmegaConf
 

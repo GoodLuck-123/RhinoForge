@@ -43,7 +43,7 @@ def test_navdp_host_loop_continues_the_init_rng_stream(monkeypatch) -> None:
     runtime = NavdpRuntime.__new__(NavdpRuntime)
     runtime._require_execution_session = lambda: None
     runtime._denoise_unroll = False
-    runtime._predict_noise = lambda action, *_: torch.zeros_like(action)
+    runtime._predict_noise = lambda action, *_, **kwargs: torch.zeros_like(action)
     goal = torch.zeros(1, 1, 384)
     rgbd = torch.zeros(1, 32, 384)
 

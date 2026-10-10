@@ -50,12 +50,12 @@ void rpu_launch_l2norm_spm_kernel(uint32_t in_spm_addr, uint32_t out_spm_addr,
 }
 
 // Isolated test harness (mirrors partial_mrope_test): DMA [M,D] in, run l2norm
-// (single core), DMA back. input fp16 RPU; returns x*rsqrt(sum(x^2,-1)+eps).
+// (single core), DMA back. input fp16 device; returns x*rsqrt(sum(x^2,-1)+eps).
 at::Tensor rpu_l2norm_test(const at::Tensor& input, double eps) {
     TORCH_CHECK(input.dim() == 2 && input.scalar_type() == at::kHalf,
                 "l2norm_test: input must be 2D fp16 [M, D]");
     TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                "l2norm_test: input must be on RPU");
+                "l2norm_test: input must be on device");
     const int64_t M = input.size(0), D = input.size(1);
     if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
 

@@ -1,4 +1,4 @@
-// rpu_memcpy.cpp - DDR to SPM memory copy for RPU backend (multi-core)
+// rpu_memcpy.cpp - DDR to SPM memory copy for device backend (multi-core)
 //
 // 功能: 将 DDR 上的 fp16 tensor 拷贝到 8 个 core 的 SPM 上
 // 每个 core 获得相同的数据副本
@@ -11,6 +11,7 @@
 #include "rpu_ops.h"
 #include "rpu_spm_allocator.h"  // for SPM_ALLOC (LOCAL-mode offset extraction)
 #include <c10/util/Half.h>
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -240,7 +241,7 @@ static void validate_fp16_dma_owner_slice(const at::Tensor& tensor,
                     tensor.scalar_type() == at::kHalf &&
                     tensor.layout() == c10::Layout::Strided &&
                     tensor.is_contiguous(),
-                caller, ": owner must be a contiguous FP16 RPU Tensor");
+                caller, ": owner must be a contiguous FP16 device Tensor");
     const size_t tensor_bytes = tensor.nbytes();
     TORCH_CHECK(byte_count > 0 && byte_begin <= tensor_bytes &&
                     byte_count <= tensor_bytes - byte_begin,
@@ -1159,7 +1160,14 @@ void rpu_launch_ddr_broadcast_spm_dma_immediate(c10::Half* ddr_ptr,
                 "ddr_broadcast_spm_dma_immediate: single-DMA cap is 8 MB, "
                 "got ", bytes, " bytes (auto-split is future work)");
 
-    rpu_ddr_flush(ddr_ptr);
+    if (g_rpu_ddr_flush_enabled) {
+        const uintptr_t address = reinterpret_cast<uintptr_t>(ddr_ptr);
+        if (bytes <= std::numeric_limits<uintptr_t>::max() - address) {
+            rhino_lkn::RpuDdrFlush(ddr_ptr, bytes);
+        } else {
+            rpu_ddr_flush(ddr_ptr);
+        }
+    }
     const uint64_t ddr_abs = RpuGetDevAddr(ddr_ptr);
 
     Queue_t* wq = QueueCache::instance().get(static_cast<uint8_t>(num_cores));
@@ -1213,6 +1221,127 @@ void rpu_launch_spm_copy_ddr_dma_immediate(uint32_t spm_addr_unified,
 
     // Post-flush so subsequent host reads see DMA-written data.
     rpu_ddr_flush(ddr_ptr);
+}
+
+// Internal companion of assemble_inputs_embeds_parts(prefix_is_embeddings).
+// The assembler admits tensor geometry/current SPM first. This synchronous
+// helper retains the caller's Tensor owners and temporary until completion;
+// QueueCache owns only immediate/one-shot queues, never GraphCache entries.
+void rpu_launch_assembled_prefix_parts_dma_immediate(
+    const at::Tensor& prefix, at::TensorList parts, const at::Tensor& runs,
+    const at::Tensor& output, uint32_t spm, int64_t chunk_rows) {
+    RpuKernelGraph::check_direct_immediate_dma_allowed(
+        "assembled_prefix_parts_dma_immediate");
+    const size_t bytes = prefix.nbytes();
+    TORCH_CHECK(bytes > 0 && bytes % 16 == 0 &&
+                output.nbytes() == bytes,
+                "assembled_prefix_parts_dma_immediate: invalid prefix/output DMA bytes");
+    const int64_t* run_data = runs.data_ptr<int64_t>();
+    const int64_t row_bytes = prefix.size(1) * static_cast<int64_t>(sizeof(c10::Half));
+    TORCH_CHECK(row_bytes > 0 && row_bytes % 16 == 0 && chunk_rows > 0 &&
+                chunk_rows <= static_cast<int64_t>(SpmAllocator::SPM_PLANNING_BUDGET) / row_bytes &&
+                chunk_rows <= prefix.size(0),
+                "assembled_prefix_parts_dma_immediate: invalid scratch row geometry");
+    const size_t scratch_bytes = static_cast<size_t>(chunk_rows) * row_bytes;
+    for (size_t index = 0; index < parts.size(); ++index) {
+        const size_t part_bytes = parts[index].nbytes();
+        TORCH_CHECK(part_bytes > 0 && part_bytes % 16 == 0,
+                    "assembled_prefix_parts_dma_immediate: invalid part DMA bytes");
+        TORCH_CHECK(run_data[2 * index] >= 0 &&
+                    static_cast<uint64_t>(run_data[2 * index]) <= bytes / row_bytes &&
+                    part_bytes <= bytes - static_cast<size_t>(run_data[2 * index]) * row_bytes,
+                    "assembled_prefix_parts_dma_immediate: part outside assembled rows");
+    }
+
+    // Resolve every full logical owner range before publication or queue work.
+    // The lease and caller's Tensor/ScopedTemporary owners cover the complete
+    // synchronous submission, including every reuse of the scratch region.
+    std::vector<RpuDeviceDmaEndpointRequest> requests;
+    requests.reserve(parts.size() + 3);
+    requests.push_back({RpuGetDevAddr(prefix.data_ptr()), bytes,
+                        "assembled_prefix_parts_dma_immediate/prefix"});
+    for (const auto& part : parts) {
+        requests.push_back({RpuGetDevAddr(part.data_ptr()), part.nbytes(),
+                            "assembled_prefix_parts_dma_immediate/part"});
+    }
+    const size_t output_index = requests.size();
+    requests.push_back({RpuGetDevAddr(output.data_ptr()), bytes,
+                        "assembled_prefix_parts_dma_immediate/output"});
+    const size_t scratch_index = requests.size();
+    requests.push_back({spm_unified_to_per_core_abs(/*core=*/0, spm), scratch_bytes,
+                        "assembled_prefix_parts_dma_immediate/scratch"});
+    for (const auto& request : requests) {
+        TORCH_CHECK(request.device_addr != 0 && (request.device_addr & 15u) == 0 &&
+                    request.bytes > 0 && request.bytes % 16 == 0 &&
+                    request.bytes <= std::numeric_limits<uint64_t>::max() - request.device_addr,
+                    "assembled_prefix_parts_dma_immediate: invalid DMA address/range");
+    }
+    std::vector<RpuDmaEndpoint> endpoints(requests.size());
+    [[maybe_unused]] auto submission_lease = rpu_resolve_device_dma_endpoints(
+        requests.data(), requests.size(), endpoints.data());
+    for (size_t index = 0; index < endpoints.size(); ++index) {
+        TORCH_CHECK(endpoints[index] && requests[index].bytes <=
+                    std::numeric_limits<size_t>::max() - endpoints[index].offset,
+                    "assembled_prefix_parts_dma_immediate: invalid managed DMA offset");
+    }
+
+    Queue_t* wq = QueueCache::instance().get(/*core_num=*/1);
+    try {
+        auto publish_source = [&](const at::Tensor& source) {
+            const size_t source_bytes = source.nbytes();
+            auto* pointer = source.data_ptr<c10::Half>();
+            if (g_rpu_ddr_flush_enabled) {
+                const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+                if (source_bytes <= std::numeric_limits<uintptr_t>::max() - address) {
+                    rhino_lkn::RpuDdrFlush(pointer, source_bytes);
+                } else {
+                    rpu_ddr_flush(pointer);
+                }
+            }
+        };
+        publish_source(prefix);
+        for (const auto& part : parts) publish_source(part);
+        auto* output_pointer = output.data_ptr<c10::Half>();
+        rpu_ddr_flush(output_pointer);
+        auto shifted = [&](size_t index, size_t offset) {
+            auto endpoint = endpoints[index];
+            endpoint.offset += offset;
+            return endpoint;
+        };
+        for (int64_t first = 0; first < prefix.size(0); first += chunk_rows) {
+            const int64_t length = std::min(chunk_rows, prefix.size(0) - first);
+            const size_t chunk_bytes = static_cast<size_t>(length) * row_bytes;
+            const size_t first_byte = static_cast<size_t>(first) * row_bytes;
+            rpu_add_dma_checked(*wq, shifted(0, first_byte), endpoints[scratch_index],
+                                chunk_bytes, /*ch=*/0,
+                                "assembled_prefix_parts_dma_immediate/prefix_chunk");
+            for (size_t index = 0; index < parts.size(); ++index) {
+                const int64_t start = run_data[2 * index];
+                const int64_t begin = std::max(first, start);
+                const int64_t end = std::min(first + length,
+                                            start + run_data[2 * index + 1]);
+                if (begin >= end) continue;
+                rpu_add_dma_checked(*wq,
+                    shifted(index + 1, static_cast<size_t>(begin - start) * row_bytes),
+                    shifted(scratch_index, static_cast<size_t>(begin - first) * row_bytes),
+                    static_cast<size_t>(end - begin) * row_bytes, /*ch=*/0,
+                    "assembled_prefix_parts_dma_immediate/part_chunk");
+            }
+            rpu_add_dma_checked(*wq, endpoints[scratch_index], shifted(output_index, first_byte),
+                                chunk_bytes, /*ch=*/0,
+                                "assembled_prefix_parts_dma_immediate/output_chunk");
+        }
+        submit_immediate_batch(wq, "assembled_prefix_parts_dma_immediate");
+        rpu_ddr_flush(output_pointer);
+    } catch (...) {
+        // Every normal submission waits and discards its completed state.
+        // On SDK/add failure, destroy cached immediate queues before the
+        // caller releases scratch/owners; destruction drains pending work and
+        // drops partially built arenas. GraphCache's private queues stay owned
+        // by their entries and are not in QueueCache.
+        QueueCache::instance().clear();
+        throw;
+    }
 }
 
 // Byte-granular DDR → core-0 SPM copy (immediate). The Half-typed broadcast helper
@@ -1272,7 +1401,22 @@ void rpu_launch_ddr_scatter_spm_dma_immediate(c10::Half* ddr_base,
                 "ddr_scatter_spm_dma_immediate: single-DMA cap is 8 MB, got ",
                 bytes);
 
-    rpu_ddr_flush(ddr_base);
+    if (g_rpu_ddr_flush_enabled) {
+        const size_t core_steps = static_cast<size_t>(num_cores - 1);
+        const uint64_t stride = static_cast<uint64_t>(core_stride_bytes);
+        const bool bounded = core_stride_bytes >= 0 &&
+            (core_steps == 0 ||
+             stride <= (std::numeric_limits<size_t>::max() - bytes) / core_steps);
+        const size_t span = bounded ? bytes + core_steps * stride : 0;
+        const uintptr_t address = reinterpret_cast<uintptr_t>(ddr_base);
+        if (bounded && span <= std::numeric_limits<uintptr_t>::max() - address) {
+            rhino_lkn::RpuDdrFlush(ddr_base, span);
+        } else {
+            // Raw callers may use a negative stride. Preserve their existing
+            // publication when no forward byte range can be represented.
+            rpu_ddr_flush(ddr_base);
+        }
+    }
     const uint64_t ddr_abs = RpuGetDevAddr(ddr_base);
 
     Queue_t* wq = QueueCache::instance().get(static_cast<uint8_t>(num_cores));

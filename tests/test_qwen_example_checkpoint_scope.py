@@ -15,11 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture
 def common(monkeypatch):
     monkeypatch.syspath_prepend(str(ROOT / "examples"))
-    spec = importlib.util.spec_from_file_location("_common", ROOT / "examples/_common.py")
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, "_common", module)
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module("examples.common.config")
 
 
 def qwen3_metadata(size, quantized=False):
@@ -117,9 +113,7 @@ def test_wrong_qwen3_precision_rejects_before_tokenizer_and_weights(common, tmp_
     monkeypatch.setattr(rpu_backend.model_registry, "model_path", lambda _: Path(checkpoint))
     tokenizer = Mock(side_effect=AssertionError("must reject before tokenizer/weight loading"))
     monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", tokenizer)
-    spec = importlib.util.spec_from_file_location("_scope_text_runner", ROOT / "examples/_text_vision_runners.py")
-    runner = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(runner)
+    runner = importlib.import_module("examples.runners.qwen3.runner")
     with pytest.raises(common.ConfigError, match="precision/scope"):
-        runner._prepare_text_vision(cfg, SimpleNamespace(owner=None))
+        runner.prepare(cfg, SimpleNamespace(owner=None))
     tokenizer.assert_not_called()

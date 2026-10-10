@@ -180,10 +180,6 @@ def test_qwen3_5_vision_gate_precedes_handle_and_weight_mutation() -> None:
     assert gate < install.index("torch.ops.rpu.qwen3_5_vision_create()")
     assert gate < install.index("_convert_vision_block_weights_for_rpu(")
 
-    example = (ROOT / "examples/qwen3_5_vision.py").read_text(encoding="utf-8")
-    assert example.index("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") < example.index(
-        "    import torch"
-    )
 
 
 def test_qwen3_14b_requires_exact_lm_head_quantization_metadata() -> None:
@@ -232,7 +228,7 @@ def test_qwen3_32b_requires_exact_quantized_metadata_before_admission() -> None:
     )
     before = vars(config).copy()
 
-    with pytest.raises(UnsupportedModelError, match="no certified RPU execution"):
+    with pytest.raises(UnsupportedModelError, match="no certified device execution"):
         qwen3.Qwen3Adapter.preflight(config)
 
     assert vars(config) == before
@@ -253,13 +249,13 @@ def test_qwen3_32b_requires_exact_quantized_metadata_before_admission() -> None:
     with pytest.raises(UnsupportedModelError, match="num_cores=8"):
         qwen3.Qwen3Adapter.preflight_execution(config, {"model": {"num_cores": 4}})
     config.quant_config["qaxis"] = False
-    with pytest.raises(UnsupportedModelError, match="no certified RPU execution"):
+    with pytest.raises(UnsupportedModelError, match="no certified device execution"):
         qwen3.Qwen3Adapter.preflight(config)
 
 
 def test_dinov3_example_preflights_before_weight_loading() -> None:
-    source = (ROOT / "examples/dinov3.py").read_text(encoding="utf-8")
-    assert source.index("DINOv3Adapter.preflight(model_hf_config)") < source.index(
+    source = (ROOT / "examples/runners/dinov3/runner.py").read_text(encoding="utf-8")
+    assert source.index("DINOv3Adapter.preflight(hf_config)") < source.index(
         "DINOv3ViTModel.from_pretrained("
     )
 

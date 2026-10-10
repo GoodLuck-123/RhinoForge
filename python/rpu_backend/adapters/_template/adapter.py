@@ -3,7 +3,7 @@
 Copy this directory to ``python/rpu_backend/adapters/<your_arch>/`` and edit
 the placeholders, OR extract this file's body into a single
 ``python/rpu_backend/adapters/<your_arch>.py`` per the v5 flat-layout
-convention. See ``docs/porting_guide.md#hello-world-skeleton`` for the full
+convention. See ``docs/new_model_step_by_step.md`` for the full
 walkthrough.
 
 This consolidated template replaces the v4 5-file pattern
@@ -21,8 +21,8 @@ sections within this file:
 
 References:
 
-- v3 framework contract: ``docs/architecture.md#fusedmodelbase-v3--framework-contract``
-- 5-step porting checklist: ``docs/porting_guide.md#5-step-porting-checklist``
+- v3 framework contract: ``docs/architecture.md#fusedmodelbase-contract``
+- Porting checklist: ``docs/model_porting.md``
 - Pitfall traps: ``docs/pitfalls.md``
 - Concrete examples in tree:
   - ``python/rpu_backend/adapters/qwen3.py`` (Qwen3 reference)
@@ -75,7 +75,7 @@ def load(repo_id: str, dtype: torch.dtype = torch.float16,
 
     Args:
         repo_id: HF Hub repo or local path.
-        dtype: target dtype; most RPU ports require fp16.
+        dtype: target dtype; most device ports require fp16.
         **hf_kwargs: forwarded to AutoModelForCausalLM.from_pretrained;
                      ``device_map`` / ``torch_dtype`` are owned by this loader.
 
@@ -84,10 +84,10 @@ def load(repo_id: str, dtype: torch.dtype = torch.float16,
         RPUUnsupportedDtypeError: dtype != fp16 (port-dependent).
         ImportError: missing optional dependency (port-dependent).
 
-    See ``docs/porting_guide.md`` Step 1 for the full walkthrough.
+    See ``docs/new_model_step_by_step.md`` for the full walkthrough.
     """
     raise NotImplementedError(
-        "see docs/porting_guide.md Step 1 — Port HF model body to C++"
+        "see docs/new_model_step_by_step.md — Port HF model body to C++"
     )
 
 
@@ -95,8 +95,7 @@ def load(repo_id: str, dtype: torch.dtype = torch.float16,
 # Section 2 — Weights: per-Linear partition selection + swizzle
 # =============================================================================
 #
-# P1 SKIP_LINEAR_NAMES rule (CLAUDE.md "Pitfall red flags" +
-# docs/pitfalls.md#p1--double-swizzle): specialized Linear modules (e.g.,
+# SKIP_LINEAR_NAMES (docs/pitfalls.md): specialized Linear modules (e.g.,
 # ``PiGemmaRMSNorm.dense``) MUST be in ``SKIP_LINEAR_NAMES`` OR save/restore
 # weights around ``swizzle_model_inplace``. For plain CausalLM ports the 7
 # standard Linears (q/k/v/o/gate/up/down_proj) all use the recursive walk —
@@ -116,7 +115,7 @@ SKIP_LINEAR_NAMES: set[str] = set()
 
 def swizzle(model: nn.Module,
             partition_overrides: Optional[dict] = None) -> None:
-    """Swizzle every leaf Linear in ``model`` to RPU layout in place.
+    """Swizzle every leaf Linear in ``model`` to device layout in place.
 
     Uses ``rpu_backend.runtime.weights.swizzle_model_inplace`` as the canonical
     recursive walker. Auto-detects row vs col partition:
@@ -140,10 +139,10 @@ def swizzle(model: nn.Module,
     See ``docs/api_reference.md#weight-conversion-api`` for the canonical
     swizzle entry point + RPUCache 7-D layout reference.
 
-    See ``docs/porting_guide.md`` Step 2 for the full walkthrough.
+    See ``docs/new_model_step_by_step.md`` for the full walkthrough.
     """
     raise NotImplementedError(
-        "see docs/porting_guide.md Step 2 — Swizzle weights"
+        "see docs/new_model_step_by_step.md — Swizzle weights"
     )
 
 
@@ -151,8 +150,8 @@ def swizzle(model: nn.Module,
 # Section 3 — Patches: §3a (a)/(b) residual patches only
 # =============================================================================
 #
-# §3a triage criteria (design notes 2026-04-22 §3a):
-#   (a) Forward-path op-tensor layout mismatch (RPU [b,s,h,d] vs torch
+# Patch placement criteria:
+#   (a) Forward-path op-tensor layout mismatch (device [b,s,h,d] vs torch
 #       [b,h,s,d]) where upstream HF exposes no seam.
 #       → Keep here; "# patch-reason: (a) <where + why>".
 #   (b) Model-specific hardware-constraint attribute injection (for example,
@@ -165,9 +164,8 @@ def swizzle(model: nn.Module,
 #   (e) Pure weight transformation.
 #       → Move to Section 2 (weights).
 #
-# scripts/check_patch_reasons.py enforces 100% comment coverage in CI; every
-# def patch_* MUST have a "# patch-reason: (a)" or "(b)" comment on the line
-# above. Categories (c)/(d)/(e) MUST NOT appear in this section.
+# Document each patch_* function with a "# patch-reason: (a)" or "(b)"
+# comment above it. Place categories (c)/(d)/(e) in the sections listed above.
 #
 # Idempotent class-level installer pattern (from adapters/pi05/patches.py):
 #
@@ -189,10 +187,10 @@ def patch_template_forward_path_layout(*args: Any, **kwargs: Any) -> None:
     """Placeholder for a §3a (a) op-tensor layout patch.
 
     Most ports do NOT need this. Delete this stub for ports without (a)
-    patches. See ``docs/porting_guide.md`` Step 3 for the full walkthrough.
+    patches. See ``docs/new_model_step_by_step.md`` for the full walkthrough.
     """
     raise NotImplementedError(
-        "see docs/porting_guide.md Step 3 — Declare SPM + register handle"
+        "see docs/new_model_step_by_step.md — Declare SPM + register handle"
     )
 
 
@@ -241,7 +239,7 @@ def apply_rpu_runtime(model: nn.Module,
     """Apply per-instance hw attribute defaults + first-forward hooks.
 
     Args:
-        model: RPU-resident model returned by ``<ArchName>Adapter.to_rpu()``.
+        model: device-resident model returned by ``<ArchName>Adapter.to_rpu()``.
         hw_attrs: optional dict {name: value} for cold-set attribute injection.
                   Each name must be in ``_A9_SUPPORTED_ATTRS`` or
                   ``RPUConfigError`` raises.
@@ -253,10 +251,10 @@ def apply_rpu_runtime(model: nn.Module,
           (so subsequent forwards REPLAY the cached graph; hot-set requires
           ``rpu_backend.reset_graph_cache()``).
 
-    See ``docs/porting_guide.md`` Step 3 for the full walkthrough.
+    See ``docs/new_model_step_by_step.md`` for the full walkthrough.
     """
     raise NotImplementedError(
-        "see docs/porting_guide.md Step 3 — Declare SPM + register handle"
+        "see docs/new_model_step_by_step.md — Declare SPM + register handle"
     )
 
 
@@ -282,7 +280,7 @@ def apply_rpu_runtime(model: nn.Module,
 #         def to_rpu(model, hw_attrs=None):
 #             # 1. patch model classes (idempotent via _rpu_patched flags)
 #             # 2. swizzle weights (Section 2)
-#             # 3. move to RPU
+#             # 3. move to device
 #             # 4. apply runtime hw attrs (Section 4)
 #             return model
 #

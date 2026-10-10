@@ -50,7 +50,7 @@
 //     Section 3 Round 6 debug session proved multi-group REPLAY is
 //     non-deterministic for SigLIP regardless of runtime knob).
 //   - 10 PersistentPerLayer + 2 Persistent buffers; no `.preload_callback`
-//     on any BufferDecl (SigLIP uses one-shot `.preload_fn` per PATTERNS.md,
+//     on any BufferDecl (SigLIP uses one-shot `.preload_fn` as configured,
 //     NOT Gemma-style per-buffer callbacks).
 //
 // Framework contract: docs/architecture.md#fusedmodelbase-v3--framework-contract
@@ -71,6 +71,8 @@
 #include <array>
 #include <optional>
 #include <cstdint>
+#include <cstring>
+#include <limits>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -141,12 +143,56 @@ struct PatchEmbeddingLiveBases {
     uint64_t output = 0;
 };
 
+// Merge only complete image views of one live backing allocation. Recompute
+// this proof every forward; it authorizes one acquire, not reuse of DDR data.
+static bool packed_image_acquire_span(
+    const std::vector<at::Tensor>& images, int64_t cin_orig,
+    void*& span, size_t& nbytes) {
+    if (images.size() < 2 ||
+        images.size() > PatchEmbeddingLiveBases::kMaxPackedImages) return false;
+    const auto& first = images.front();
+    if (!first.defined() || first.device().type() != at::kPrivateUse1 ||
+        first.scalar_type() != at::kHalf || first.dim() != 4 ||
+        first.size(0) != 1 || first.size(1) != cin_orig ||
+        first.size(2) <= 0 || first.size(3) <= 0 ||
+        !first.is_contiguous() || first.is_neg() || first.is_conj()) return false;
+    const auto storage = first.storage();
+    const auto* owner = storage.unsafeGetStorageImpl();
+    const auto base = reinterpret_cast<uintptr_t>(storage.data());
+    const size_t capacity = storage.nbytes();
+    const auto limit = std::numeric_limits<uintptr_t>::max();
+    if (owner == nullptr || base == 0 || capacity == 0 ||
+        capacity > limit - base) return false;
+    const auto storage_end = base + capacity;
+    const auto begin = reinterpret_cast<uintptr_t>(first.data_ptr<c10::Half>());
+    if (begin < base || begin >= storage_end) return false;
+    auto end = begin;
+    for (const auto& image : images) {
+        if (!image.defined() || image.device() != first.device() ||
+            image.scalar_type() != at::kHalf || image.dim() != 4 ||
+            image.size(0) != 1 || image.size(1) != cin_orig ||
+            image.size(2) != first.size(2) || image.size(3) != first.size(3) ||
+            !image.is_contiguous() || image.is_neg() || image.is_conj()) return false;
+        const auto live_storage = image.storage();
+        if (live_storage.unsafeGetStorageImpl() != owner ||
+            live_storage.data() != storage.data() ||
+            live_storage.nbytes() != capacity) return false;
+        const auto ptr = reinterpret_cast<uintptr_t>(image.data_ptr<c10::Half>());
+        const size_t bytes = image.nbytes();
+        if (ptr != end || bytes == 0 || bytes > storage_end - end) return false;
+        end += bytes;
+    }
+    span = first.data_ptr<c10::Half>();
+    nbytes = end - begin;
+    return true;
+}
+
 // Writes this image's [num_patches, cout] patch embedding into `out`
 // ([1, total_seq, cout]) at sequence row `seq_off`. `img_slot` selects a
 // stable per-image live-base slot for the mutable input DMA: the SigLIP-batch
 // path packs N images through ONE captured graph, so a single shared live-base
 // would make every image read the LAST image's pixels on REPLAY (mutable-DMA
-// trap — CLAUDE.md "Fixed DMA trap"). The output/pos_emb live-bases stay shared
+// trap — docs/pitfalls.md). The output/pos_emb live-bases stay shared
 // (same packed-tensor base / same registered pos_emb across all N images).
 //
 // `offsets` are the 6 SPM temp-buffer offsets, allocated ONCE by the caller and
@@ -158,9 +204,9 @@ struct PatchEmbeddingLiveBases {
 // gemm_out). reset_temporary between images clears that tracking → async DMA
 // vs GEMM race → non-deterministic REPLAY.
 static void fused_patch_embedding(
-    const at::Tensor& input_nchw,    // [1, cin_orig, H, W] fp16 RPU DDR
-    const at::Tensor& weight,        // [cout, K] fp16 RPU DDR, col-swizzled (1 core)
-    const at::Tensor& pos_emb_fused, // [1, num_patches, cout] fp16 RPU DDR
+    const at::Tensor& input_nchw,    // [1, cin_orig, H, W] fp16 device DDR
+    const at::Tensor& weight,        // [cout, K] fp16 device DDR, col-swizzled (1 core)
+    const at::Tensor& pos_emb_fused, // [1, num_patches, cout] fp16 device DDR
     int64_t kh, int64_t kw,
     int64_t cin_orig, int64_t cin_padded, int64_t cout,
     int64_t strideh, int64_t stridew,
@@ -199,8 +245,8 @@ static void fused_patch_embedding(
     // rewrite.
     //
     // NOTE: input_nchw MUST already be DDR-coherent here. The driver
-    // (run_packed_patch_embed_core's per-image loop) flushes each image before
-    // this call — the flush lives at the batch driver, explicit, rather than
+    // (run_packed_patch_embed_core) acquires the proven packed span or each
+    // image before this call — the acquire stays at the batch driver rather than
     // buried per-helper. See the rpu_ddr_flush_force there for the why (a
     // torch.cat / CPU-fallback input is left un-flushed → stale DDR).
     // Per-image live-base slot (see fn doc): each packed image bakes a distinct
@@ -268,7 +314,7 @@ static void fused_patch_embedding(
     // No flush is needed here; unlike the per-forward conditioning input in
     // rpu_adarms_model.cpp, pos_emb_fused is immutable after installation and is
     // patch_emb_pos_emb_, a registered weight whose only host write is the
-    // set_weights-time CPU->RPU copy, and rpu_copy_impl already force-flushes
+    // set_weights-time CPU->device copy, and rpu_copy_impl already force-flushes
     // that boundary (rpu_tensor_ops.inc). Nothing writes it per forward, so
     // there are no CPU-dirty lines left for this DMA to miss.
     live_bases.position = ::rhino_lkn::RpuGetDevAddr(
@@ -336,7 +382,7 @@ static void check_siglip_w8a16_scale_lists(
             const at::Tensor& w = weights[i];
             TORCH_CHECK(w.device().type() == at::kPrivateUse1 && w.is_contiguous(),
                         "siglip_set_weights: ", name, "[", i,
-                        "] must be contiguous RPU tensor");
+                        "] must be contiguous device tensor");
             TORCH_CHECK(w.scalar_type() == at::kHalf || w.scalar_type() == at::kChar,
                         "siglip_set_weights: ", name, "[", i,
                         "] must be fp16 or int8, got ", w.scalar_type());
@@ -350,7 +396,7 @@ static void check_siglip_w8a16_scale_lists(
                             && scale.device().type() == at::kPrivateUse1
                             && scale.is_contiguous(),
                             "siglip_set_weights: ", name, "_scale[", i,
-                            "] must be 1D contiguous fp16 RPU tensor");
+                            "] must be 1D contiguous fp16 device tensor");
                 TORCH_CHECK(scale.numel() == w.size(0),
                             "siglip_set_weights: ", name, "_scale[", i,
                             "].numel()=", scale.numel(),
@@ -441,7 +487,7 @@ public:
                         weight.is_contiguous() && bias.is_contiguous() &&
                         weight.dim() == 2 && weight.size(0) == 1024 && weight.size(1) == 896 &&
                         bias.dim() == 1 && bias.size(0) == 1024,
-                    "audio projection requires RPU FP16 swizzled [1024,896] weight and [1024] bias");
+                    "audio projection requires device FP16 swizzled [1024,896] weight and [1024] bias");
         audio_proj2_w_ = weight;
         audio_proj2_b_ = bias;
         invalidate_model_state();
@@ -484,6 +530,7 @@ public:
 
 
     void set_configured_chunk_size(int64_t chunk_size) {
+        clear_private_serial_cpu_slab();
         TORCH_CHECK(chunk_size == 0
                         || (chunk_size >= 16 && chunk_size % 16 == 0),
                     "SigLIP chunk size must be 0 (auto) or a positive "
@@ -572,6 +619,7 @@ public:
         at::TensorList fc1_ws_list, at::TensorList fc2_ws_list)
     {
         TORCH_CHECK(!audio_mode_, "audio weights are immutable after profile installation");
+        clear_private_serial_cpu_slab();
         int64_t N = static_cast<int64_t>(q_w_list.size());
         TORCH_CHECK(N > 0, "siglip_set_weights: empty weight lists");
         TORCH_CHECK(num_heads > 0 && head_dim > 0 && hidden_size > 0
@@ -608,7 +656,7 @@ public:
                         && t.device().type() == at::kPrivateUse1
                         && t.is_contiguous(),
                         "siglip_set_weights: ", name,
-                        " must be fp16 contiguous RPU tensor, got dtype=",
+                        " must be fp16 contiguous device tensor, got dtype=",
                         t.scalar_type(), " device=", t.device().type(),
                         " contiguous=", t.is_contiguous());
         };
@@ -636,7 +684,7 @@ public:
                                 && list[i].device().type() == at::kPrivateUse1
                                 && list[i].is_contiguous(),
                                 "siglip_set_weights: ", name, "[", i,
-                                "] must be fp16 contiguous RPU tensor, got dtype=",
+                                "] must be fp16 contiguous device tensor, got dtype=",
                                 list[i].scalar_type(), " device=",
                                 list[i].device().type(), " contiguous=",
                                 list[i].is_contiguous());
@@ -847,6 +895,7 @@ public:
     void set_patch_emb_params(const at::Tensor& weight, const at::Tensor& pos_emb,
                               int64_t kernel_size, int64_t stride)
     {
+        clear_private_serial_cpu_slab();
         TORCH_CHECK(weight.defined() && weight.dim() == 2,
                     "siglip_set_patch_emb: weight must be defined 2D");
         TORCH_CHECK(pos_emb.defined(),
@@ -860,7 +909,7 @@ public:
                 TORCH_CHECK(tensor->scalar_type() == at::kHalf &&
                                 tensor->device().type() == at::kPrivateUse1 &&
                                 tensor->is_contiguous(),
-                            "Pi0.5 SigLIP patch/position weights must remain FP16 RPU");
+                            "Pi0.5 SigLIP patch/position weights must remain FP16 device");
         }
 
         patch_emb_weight_ = weight;
@@ -889,10 +938,47 @@ public:
         std::vector<at::Tensor>& v_caches,
         at::IntArrayRef planned_stage_descriptor)
     {
+        auto retire_failed_slab = c10::make_scope_exit(
+            [&] { private_serial_cpu_slab_published_ = false; });
+        if (!g_rpu_ddr_flush_force_enabled) private_serial_cpu_slab_published_ = false;
         TORCH_CHECK(num_layers() > 0,
                     "SigLIPModel::forward called before set_weights");
-        TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                    "SigLIPModel::forward: input must be on RPU device");
+        const bool cpu_image = input.device().is_cpu();
+        TORCH_CHECK(cpu_image || input.device().type() == at::kPrivateUse1,
+                    "SigLIPModel::forward: input must be on device device");
+        if (cpu_image) {
+            TORCH_CHECK(has_patch_emb_ && installed_model_state_generation() != 0 &&
+                            num_cores() == 4 && attn_tp() == 4 && mlp_tp() == 4 &&
+                            pe_kh_ == 14 && pe_kw_ == 14 && pe_strideh_ == 14 && pe_stridew_ == 14 &&
+                            pe_cin_orig_ == 3 && pe_cout_ == 1152 && hidden_size() == 1152 &&
+                            num_layers() == 27 && intermediate_size() == 4352 &&
+                            num_q_heads() == 16 && num_kv_heads() == 16 && head_dim() == 80 &&
+                            orig_head_dim_ == 72 && projection_dim_ == 2048 &&
+                            pi05_vision_supported_owner(),
+                        "SigLIP CPU single-image ingress requires the installed Pi Vision4 profile");
+            TORCH_CHECK(input.scalar_type() == at::kHalf && input.is_contiguous() &&
+                            input.sizes() == at::IntArrayRef({1, 3, 224, 224}) &&
+                            !input.requires_grad() && !input.is_neg() && !input.is_conj(),
+                        "SigLIP CPU single-image ingress requires a complete plain FP16 image");
+            const auto storage = input.storage();
+            const auto base = reinterpret_cast<uintptr_t>(storage.data());
+            const auto ptr = reinterpret_cast<uintptr_t>(input.const_data_ptr());
+            const auto limit = std::numeric_limits<uintptr_t>::max();
+            TORCH_CHECK(storage.unsafeGetStorageImpl() != nullptr && base != 0 &&
+                            storage.nbytes() <= limit - base && ptr >= base &&
+                            ptr - base <= storage.nbytes() &&
+                            input.nbytes() <= storage.nbytes() - (ptr - base),
+                        "SigLIP CPU single-image ingress exceeds its live storage");
+            TORCH_CHECK(k_caches.size() == static_cast<size_t>(num_layers()) &&
+                            v_caches.size() == k_caches.size(),
+                        "SigLIP CPU single-image ingress requires the installed device KV caches");
+            for (size_t layer = 0; layer < k_caches.size(); ++layer) {
+                TORCH_CHECK(k_caches[layer].defined() && v_caches[layer].defined() &&
+                                k_caches[layer].device().type() == at::kPrivateUse1 &&
+                                v_caches[layer].device().type() == at::kPrivateUse1,
+                            "SigLIP CPU single-image ingress requires device KV caches");
+            }
+        }
         TORCH_CHECK(input.is_contiguous(),
                     "SigLIPModel::forward: input must be contiguous");
         TORCH_CHECK(input.dim() == 3 || input.dim() == 4,
@@ -944,24 +1030,27 @@ public:
             auto cancel_patch_prologue = c10::make_scope_exit(
                 [&] { cancel_external_physical_manifest_prologue(); });
             hidden_states = run_packed_patch_embed(
-                input, /*consume_external_prologue=*/true);
+                input, /*consume_external_prologue=*/true, cpu_image);
             packed_image_count = image_batch_count_;
             at::Tensor result = forward_packed(
                 hidden_states, packed_image_count, k_caches, v_caches,
                 planned_stage_descriptor);
             cancel_patch_prologue.release();
+            retire_failed_slab.release();
             return result;
         } else {
             hidden_states = input;
         }
 
-        return forward_packed(
+        at::Tensor result = forward_packed(
             hidden_states, packed_image_count, k_caches, v_caches,
             planned_stage_descriptor);
+        retire_failed_slab.release();
+        return result;
     }
 
     // ========================================================================
-    // forward_multi — all-RPU SigLIP-batch entry. Takes the N camera images as
+    // forward_multi — SigLIP-batch entry. Takes the N camera images as
     // a LIST of [1,C,H,W] tensors (no torch.cat upstream), packs them into one
     // [1, N*256, hidden] hidden via run_packed_patch_embed_list, then runs the
     // identical encoder + projector tail as forward(). image_batch_count_ = N
@@ -982,14 +1071,51 @@ public:
                     "call siglip_model_set_patch_emb before forward_multi");
         TORCH_CHECK(images.size() > 0,
                     "SigLIPModel::forward_multi: empty image list");
+        TORCH_CHECK(images.front().defined(),
+                    "SigLIPModel::forward_multi: undefined image");
+        const bool cpu_images = images.front().device().is_cpu();
+        if (cpu_images) {
+            TORCH_CHECK(
+                (images.size() == 2 || images.size() == 3) && num_cores() == 8 &&
+                    pe_kh_ == 14 && pe_kw_ == 14 && pe_strideh_ == 14 && pe_stridew_ == 14 &&
+                    pe_cin_orig_ == 3 && pe_cout_ == 1152 && hidden_size() == 1152 && num_layers() == 27 &&
+                    intermediate_size() == 4352 && num_q_heads() == 16 &&
+                    num_kv_heads() == 16 && head_dim() == 80 && orig_head_dim_ == 72 &&
+                    projection_dim_ == 2048 && pi05_vision_supported_owner(),
+                "SigLIP CPU camera ingress requires the exact packed TP8 Pi profile");
+            TORCH_CHECK(k_caches.size() == static_cast<size_t>(num_layers()) &&
+                            v_caches.size() == k_caches.size(),
+                        "SigLIP CPU camera ingress requires the installed device KV caches");
+            for (size_t layer = 0; layer < k_caches.size(); ++layer) {
+                TORCH_CHECK(k_caches[layer].defined() && v_caches[layer].defined() &&
+                                k_caches[layer].device().type() == at::kPrivateUse1 &&
+                                v_caches[layer].device().type() == at::kPrivateUse1,
+                            "SigLIP CPU camera ingress requires device KV caches");
+            }
+        }
         for (const auto& im : images) {
-            TORCH_CHECK(im.device().type() == at::kPrivateUse1,
-                        "SigLIPModel::forward_multi: each image must be on RPU device");
+            TORCH_CHECK(im.defined(), "SigLIPModel::forward_multi: undefined image");
+            TORCH_CHECK(cpu_images ? im.device().is_cpu()
+                                   : im.device().type() == at::kPrivateUse1,
+                        "SigLIPModel::forward_multi: mixed or unsupported image devices");
             TORCH_CHECK(im.is_contiguous(),
                         "SigLIPModel::forward_multi: each image must be contiguous");
             TORCH_CHECK(im.dim() == 4,
                         "SigLIPModel::forward_multi: each image must be 4D [1,C,H,W], "
                         "got ", im.dim(), "D");
+            if (cpu_images) {
+                TORCH_CHECK(im.scalar_type() == at::kHalf &&
+                                im.sizes() == at::IntArrayRef({1, 3, 224, 224}) &&
+                                !im.is_neg() && !im.is_conj() && !im.requires_grad(),
+                            "SigLIP CPU camera ingress requires complete plain FP16 images");
+                const auto storage = im.storage();
+                const auto base = reinterpret_cast<uintptr_t>(storage.data());
+                const auto ptr = reinterpret_cast<uintptr_t>(im.const_data_ptr());
+                TORCH_CHECK(base != 0 && ptr >= base &&
+                                ptr - base <= storage.nbytes() &&
+                                im.nbytes() <= storage.nbytes() - (ptr - base),
+                            "SigLIP CPU camera ingress exceeds its live storage");
+            }
         }
 
         // Patch-embed + pack all N images into [1, N*256, hidden] (sets
@@ -1034,7 +1160,7 @@ public:
 
     at::Tensor patch_embed(const at::Tensor& input) {
         TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                    "SigLIPModel::patch_embed: input must be on RPU device");
+                    "SigLIPModel::patch_embed: input must be on device");
         TORCH_CHECK(input.is_contiguous(),
                     "SigLIPModel::patch_embed: input must be contiguous");
         TORCH_CHECK(input.dim() == 4,
@@ -1053,7 +1179,7 @@ public:
                     "SigLIPModel::patch_embed_multi: empty image list");
         for (const auto& im : images) {
             TORCH_CHECK(im.device().type() == at::kPrivateUse1,
-                        "SigLIPModel::patch_embed_multi: each image must be on RPU");
+                        "SigLIPModel::patch_embed_multi: each image must be on device");
             TORCH_CHECK(im.is_contiguous(),
                         "SigLIPModel::patch_embed_multi: each image must be contiguous");
             TORCH_CHECK(im.dim() == 4 && im.size(0) == 1,
@@ -1077,7 +1203,7 @@ public:
                     "SigLIPModel::forward_packed: hidden input must be 3D, got ",
                     hidden_states.dim(), "D");
         TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1,
-                    "SigLIPModel::forward_packed: hidden input must be on RPU");
+                    "SigLIPModel::forward_packed: hidden input must be on device");
         TORCH_CHECK(hidden_states.is_contiguous(),
                     "SigLIPModel::forward_packed: hidden input must be contiguous");
         TORCH_CHECK(packed_image_count > 0,
@@ -1143,7 +1269,7 @@ public:
         // GUARD (design note §2 三件套 ①): host-side per-chunk SPM budget
         // pre-check BEFORE dispatch. The probe note proved a naive single-chunk
         // 1564-token forward exhausts the 8 MB SPM block and enters an infinite
-        // allocator retry that POISONS the whole RPU board (run-queue wedged
+        // allocator retry that POISONS the whole device board (run-queue wedged
         // until reboot). The framework's auto chunk-size scan
         // (compute_chunks_impl) already rejects an over-budget seq with a clear
         // TORCH_CHECK on the same planner path used by the per-forward override,
@@ -1164,7 +1290,7 @@ public:
                         "SigLIPModel::forward_packed: even the minimum chunk "
                         "(cs=16) per-chunk SPM peak (", peak, " B) exceeds the "
                         "usable SPM budget (", usable, " B). Refusing to dispatch "
-                        "— a naive oversize forward would wedge the RPU board. "
+                        "— a naive oversize forward would wedge the device board. "
                         "seq_len=", seq_len, ", hidden=", hidden_size(), ".");
         }
 
@@ -2414,6 +2540,107 @@ protected:
         return true;
     }
 
+    struct PrivateSerialCpuSlabSpan {
+        const void* owner = nullptr;
+        uintptr_t base = 0;
+        size_t capacity = 0;
+        bool operator==(const PrivateSerialCpuSlabSpan& other) const {
+            return owner == other.owner && base == other.base && capacity == other.capacity;
+        }
+    };
+
+    void clear_private_serial_cpu_slab() {
+        private_serial_cpu_slab_published_ = false;
+        private_serial_cpu_slab_ = at::Tensor();
+        private_serial_cpu_slab_span_ = {};
+        private_serial_cpu_slab_generation_ = 0;
+    }
+
+    bool private_serial_cpu_slab_span(
+        const at::Tensor& slab, PrivateSerialCpuSlabSpan& span) const {
+        constexpr size_t bytes = 903168;
+        if (!slab.defined() || slab.device().type() != at::kPrivateUse1 ||
+            slab.scalar_type() != at::kHalf || !slab.is_contiguous() ||
+            slab.requires_grad() || slab.is_neg() || slab.is_conj() ||
+            slab.sizes() != at::IntArrayRef({3, 3, 224, 224}) || slab.storage_offset() != 0)
+            return false;
+        const auto storage = slab.storage();
+        const auto ptr = reinterpret_cast<uintptr_t>(slab.data_ptr());
+        const auto limit = std::numeric_limits<uintptr_t>::max();
+        if (storage.unsafeGetStorageImpl() == nullptr || storage.data() != slab.data_ptr() ||
+            storage.nbytes() != bytes || slab.nbytes() != bytes || ptr == 0 ||
+            bytes > limit - ptr || ptr + bytes > limit - 63)
+            return false;
+        auto* owner = ::rhino_lkn::RpuGetHostddr(slab.data_ptr());
+        const auto base = owner == nullptr ? 0 :
+            reinterpret_cast<uintptr_t>(owner->get_cpu_ptr());
+        const size_t capacity = owner == nullptr ? 0 : owner->get_memory_size();
+        if (base == 0 || capacity == 0 || capacity > limit - base ||
+            (ptr & ~uintptr_t(63)) < base ||
+            ((ptr + bytes + 63) & ~uintptr_t(63)) > base + capacity)
+            return false;
+        span = {owner, base, capacity};
+        return true;
+    }
+
+    bool prepare_private_serial_cpu_slab(const at::Tensor& input, at::Tensor& image) {
+        // Retain the previous owner locally while revoking publication authority.
+        // An exception never commits an unpublished replacement or reaches its DMA.
+        const bool was_published = private_serial_cpu_slab_published_;
+        const at::Tensor previous = private_serial_cpu_slab_;
+        private_serial_cpu_slab_published_ = false;
+        constexpr size_t bytes = 903168;
+        constexpr int64_t image_elements = 150528;
+        const uint64_t generation = installed_model_state_generation();
+        if (!g_rpu_ddr_flush_force_enabled || generation == 0 || num_cores() != 4 ||
+            !input.device().is_cpu() || input.scalar_type() != at::kHalf ||
+            !input.is_contiguous() || input.requires_grad() || input.is_neg() || input.is_conj() ||
+            input.sizes() != at::IntArrayRef({1, 3, 224, 224}) ||
+            input.strides() != at::IntArrayRef({image_elements, 50176, 224, 1}) ||
+            input.storage_offset() < 0 || input.storage_offset() % image_elements != 0 ||
+            input.storage_offset() / image_elements >= 3)
+            return false;
+        const auto storage = input.storage();
+        const auto source = reinterpret_cast<uintptr_t>(storage.data());
+        const auto limit = std::numeric_limits<uintptr_t>::max();
+        const auto index = input.storage_offset() / image_elements;
+        if (storage.unsafeGetStorageImpl() == nullptr || source == 0 ||
+            storage.nbytes() != bytes || bytes > limit - source || input.nbytes() != 301056 ||
+            reinterpret_cast<uintptr_t>(input.const_data_ptr()) != source + index * 301056)
+            return false;
+        PrivateSerialCpuSlabSpan current;
+        if (was_published && private_serial_cpu_slab_generation_ == generation &&
+            private_serial_cpu_slab_span(previous, current) && current == private_serial_cpu_slab_span_) {
+            const auto target = reinterpret_cast<uintptr_t>(previous.data_ptr());
+            if (!(source + bytes <= target || target + bytes <= source)) return false;
+            // No device writer or public alias exists for this private raw-input
+            // bank. Compare every producer byte, including the two other cameras.
+            if (std::memcmp(storage.data(), previous.data_ptr(), bytes) == 0) {
+                image = previous.narrow(0, index, 1);
+                private_serial_cpu_slab_published_ = true;
+                return true;
+            }
+        }
+        at::Tensor fresh = at::empty(
+            {3, 3, 224, 224}, at::TensorOptions().dtype(at::kHalf).device(at::kPrivateUse1));
+        TORCH_CHECK(private_serial_cpu_slab_span(fresh, current),
+                    "SigLIP private serial CPU slab lacks its complete SDK owner span");
+        const auto target = reinterpret_cast<uintptr_t>(fresh.data_ptr());
+        TORCH_CHECK(source + bytes <= target || target + bytes <= source,
+                    "SigLIP private serial CPU slab aliases its CPU producer");
+        std::memcpy(fresh.data_ptr(), storage.data(), bytes);
+        rpu_ddr_flush_force_sized(fresh.data_ptr(), bytes);
+#if defined(__aarch64__)
+        asm volatile("dsb sy" ::: "memory");
+#endif
+        image = fresh.narrow(0, index, 1);
+        private_serial_cpu_slab_ = std::move(fresh);
+        private_serial_cpu_slab_span_ = current;
+        private_serial_cpu_slab_generation_ = generation;
+        private_serial_cpu_slab_published_ = true;
+        return true;
+    }
+
     // ========================================================================
     // run_packed_patch_embed_core — pack N per-image [1,C,H,W] tensors through
     // fused_patch_embedding into one [1, N*num_patches, hidden] tensor, each at
@@ -2425,15 +2652,58 @@ protected:
     // patch_emb temp before the encoder. Sets image_batch_count_ = N.
     //
     // Shared by both the single-tensor 4D forward (run_packed_patch_embed, which
-    // slices [N,C,H,W] into the vector) and the all-RPU list path (forward_multi
+    // slices [N,C,H,W] into the vector) and the all-device list path (forward_multi
     // via run_packed_patch_embed_list, which receives N distinct image tensors).
     // ========================================================================
     at::Tensor run_packed_patch_embed_core(
-        const std::vector<at::Tensor>& images,
-        bool consume_external_prologue) {
-        if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
+        const std::vector<at::Tensor>& input_images,
+        bool consume_external_prologue, bool admit_private_cpu_single_image = false) {
+        std::vector<at::Tensor> images = input_images;
         int64_t N = static_cast<int64_t>(images.size());
         TORCH_CHECK(N > 0, "run_packed_patch_embed: empty image list");
+        const bool copied_cpu_input = images.front().device().is_cpu();
+        bool private_serial_slab = false;
+        if (!g_rpu_ddr_flush_force_enabled) private_serial_cpu_slab_published_ = false;
+        if (copied_cpu_input) {
+            TORCH_CHECK(N != 1 || admit_private_cpu_single_image,
+                        "SigLIP private CPU single image requires the validated forward entry");
+            // Only the validated reduced-core N1 entry can retain a private slab.
+            if (N == 1 && admit_private_cpu_single_image)
+                private_serial_slab = prepare_private_serial_cpu_slab(images.front(), images.front());
+            if (!private_serial_slab) {
+                // forward/forward_multi validate their exact CPU profiles before the prologue.
+                // Non-admitted inputs retain the original fresh N1/packed copy.
+                at::Tensor private_images = at::empty(
+                    {N, 3, 224, 224}, at::TensorOptions().dtype(at::kHalf).device(at::kPrivateUse1));
+                if (N == 1) {
+                    // The fresh private N1 destination must cover the complete
+                    // logical image and the SDK's rounded cache-maintenance span.
+                    const auto storage = private_images.storage();
+                    const auto ptr = reinterpret_cast<uintptr_t>(private_images.data_ptr());
+                    const size_t bytes = private_images.nbytes();
+                    const auto limit = std::numeric_limits<uintptr_t>::max();
+                    auto* owner = ::rhino_lkn::RpuGetHostddr(private_images.data_ptr());
+                    const auto base = owner == nullptr ? 0 :
+                        reinterpret_cast<uintptr_t>(owner->get_cpu_ptr());
+                    const size_t capacity = owner == nullptr ? 0 : owner->get_memory_size();
+                    TORCH_CHECK(storage.unsafeGetStorageImpl() != nullptr &&
+                                    storage.data() == private_images.data_ptr() &&
+                                    private_images.storage_offset() == 0 && storage.nbytes() == bytes &&
+                                    bytes == 301056 && ptr != 0 && bytes <= limit - ptr &&
+                                    ptr + bytes <= limit - 63 && owner != nullptr && base != 0 &&
+                                    capacity != 0 && capacity <= limit - base &&
+                                    (ptr & ~uintptr_t(63)) >= base &&
+                                    ((ptr + bytes + 63) & ~uintptr_t(63)) <= base + capacity,
+                                "SigLIP private CPU single image lacks its complete SDK owner span");
+                }
+                for (int64_t i = 0; i < N; ++i) {
+                    at::Tensor image = private_images.narrow(0, i, 1);
+                    std::memcpy(image.data_ptr(), images[i].const_data_ptr(), images[i].nbytes());
+                    images[i] = std::move(image);
+                }
+            }
+        }
+        if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
         int64_t H = images[0].size(2);
         int64_t W = images[0].size(3);
         int64_t HW = H * W;
@@ -2487,17 +2757,45 @@ protected:
                 GraphSignature{}, "siglip_patch_encoder_merged");
         }
 
+        void* image_acquire_span = nullptr;
+        size_t image_acquire_bytes = 0;
+        const bool packed_image_span = packed_image_acquire_span(
+            images, pe_cin_orig_, image_acquire_span, image_acquire_bytes);
+        const bool private_single_image = copied_cpu_input && N == 1;
+        if (private_single_image) {
+            image_acquire_span = images.front().data_ptr();
+            image_acquire_bytes = images.front().nbytes();
+        }
+        TORCH_CHECK(!copied_cpu_input || packed_image_span || private_single_image,
+                    "SigLIP private CPU copy must cover one complete image span");
+        if ((packed_image_span || private_single_image) && !private_serial_slab) {
+            // All image DMA sources share this exact contiguous range. Acquire
+            // it once before the first DMA, including on every warm REPLAY.
+            rpu_ddr_flush_force_sized(image_acquire_span, image_acquire_bytes);
+            if (copied_cpu_input) {
+#if defined(__aarch64__)
+                asm volatile("dsb sy" ::: "memory");
+#endif
+            }
+        }
         for (int64_t i = 0; i < N; ++i) {
-            // ② Flush each image at the batch driver, before its mutable input
+            // ② Flush each unmerged image before its mutable input
             // DMA reads it (fused_patch_embedding step ①). A batched caller's
             // image may be a torch.cat / CPU-fallback result that PyTorch left
             // un-flushed to device DDR → the DMA would read stale bytes →
             // non-deterministic output. Idempotent for already-coherent inputs
             // (e.g. the 4D single-image .to('rpu') path), so N=1 stays
-            // byte-identical. (CLAUDE.md "mutable DMA reading a torch.cat result
-            // MUST be fed a flushed tensor"; memory rpu-adapter-pitfalls #5.)
-            rpu_ddr_flush_force(
-                const_cast<c10::Half*>(images[i].data_ptr<c10::Half>()));
+            // byte-identical. Flush concatenated input before mutable DMA.
+            if (packed_image_span || private_single_image) {
+                // The acquire above covers this complete image view.
+            } else if (images[i].size(0) > 0 && images[i].size(1) >= pe_cin_orig_) {
+                rpu_ddr_flush_force_sized(
+                    images[i].data_ptr<c10::Half>(), images[i].nbytes());
+            } else {
+                // Legacy list/patch-only inputs need not cover the raw DMA's
+                // cin_orig * H * W span in their logical tensor view.
+                rpu_ddr_flush_force(images[i].data_ptr<c10::Half>());
+            }
             // C-1: step (1) bakes RpuGetDevAddr(images[i]) into
             // patch_emb_input_live_base[i], read at end(). `images` is a local
             // vector — on the TensorList path (forward_multi) the elements are
@@ -2533,7 +2831,8 @@ protected:
     // of a contiguous [N,C,H,W] is already contiguous, so .contiguous() is a
     // metadata no-op (no kernel/copy). N=1 stays byte-identical to before.
     at::Tensor run_packed_patch_embed(
-        const at::Tensor& input, bool consume_external_prologue) {
+        const at::Tensor& input, bool consume_external_prologue,
+        bool admit_private_cpu_single_image = false) {
         int64_t N = input.size(0);
         std::vector<at::Tensor> images;
         images.reserve(N);
@@ -2541,10 +2840,10 @@ protected:
             images.push_back(input.slice(0, i, i + 1).contiguous());
         }
         return run_packed_patch_embed_core(
-            images, consume_external_prologue);
+            images, consume_external_prologue, admit_private_cpu_single_image);
     }
 
-    // All-RPU list path (forward_multi): the N camera images arrive as distinct
+    // All-device list path (forward_multi): the N camera images arrive as distinct
     // [1,C,H,W] tensors — no torch.cat upstream, no slice here.
     at::Tensor run_packed_patch_embed_list(
         at::TensorList images, bool consume_external_prologue) {
@@ -3191,6 +3490,12 @@ private:
     int64_t pe_cin_orig_ = 0, pe_cin_padded_ = 0, pe_cout_ = 0;
     int64_t pe_strideh_ = 0, pe_stridew_ = 0;
     bool has_patch_emb_ = false;
+    // Device-read-only, model-private CPU-origin bank; recorded Graphs own
+    // their exact N1 views when a later miss retires this member's bank.
+    at::Tensor private_serial_cpu_slab_;
+    PrivateSerialCpuSlabSpan private_serial_cpu_slab_span_;
+    uint64_t private_serial_cpu_slab_generation_ = 0;
+    bool private_serial_cpu_slab_published_ = false;
     PatchEmbeddingLiveBases patch_embedding_live_bases_;
 };
 

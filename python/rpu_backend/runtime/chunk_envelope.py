@@ -46,12 +46,9 @@ def make_lookup(table, table_location: str):
         if env is None:
             raise RuntimeError(
                 f"no certified chunk envelope for {key} "
-                f"(arch, num_layers, hidden_size). This combination has never "
-                f"been measured on hardware, and running it on the auto chunk "
-                f"planner risks busting SPM and WEDGING the board. Measure it on "
-                f"a RESETTABLE board, then add the row to {table_location} AND to "
-                f"docs/roadmap/chunk_certified_envelope.md — the two change "
-                f"together."
+                f"(arch, num_layers, hidden_size). Validate the SPM capacity "
+                f"and add the supported bound to {table_location} before running "
+                f"this profile. See docs/runtime_config.md."
             )
         return env
     return chunk_envelope_for

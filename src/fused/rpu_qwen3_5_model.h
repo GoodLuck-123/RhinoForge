@@ -20,13 +20,18 @@
 #pragma once
 
 #include "fused_model_base.h"
+#include "g05_nvfp4.h"
 #include "rpu_helpers.h"          // SdpaConfig, SdpaKernelType, sdpa_is_valid_chunk_size
+#include "rpu_math_precision.h"
 
 #include <ATen/ATen.h>
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
+
+enum class RpuRmsNormSpmRoute : int64_t;
 
 namespace v3 {
 
@@ -79,7 +84,8 @@ public:
         at::TensorList gdn_in_z_scale_list, at::TensorList gdn_out_scale_list,
         at::TensorList gdn_q_scale_list, at::TensorList gdn_k_scale_list,
         at::TensorList gdn_v_scale_list, at::TensorList gdn_b_bg_scale_list,
-        at::TensorList gdn_a_bg_scale_list);
+        at::TensorList gdn_a_bg_scale_list,
+        at::TensorList nvfp4_tensor_scales = {});
 
     // Per-forward entry. gdn_states / conv_states are parallel-indexed (full
     // slots empty). Stashed for the GDN seam, then run_all_layers.
@@ -124,7 +130,7 @@ public:
     // interleaved M-RoPE table built from THIS forward's 3D position_ids (image/
     // text layout ⇒ input-dependent, can't be a static weight-time table). The
     // adapter rebuilds cos/sin each forward and calls this before the forward op.
-    // Tables are [N, rotary_dim/2] fp16 on RPU, indexed by absolute position
+    // Tables are [N, rotary_dim/2] fp16 on device, indexed by absolute position
     // (kernel reads [pos_offset + token]). Text-only degenerates to arange.
     void set_prefill_rope(const at::Tensor& cos, const at::Tensor& sin);
 
@@ -144,6 +150,8 @@ public:
         uint64_t token, int64_t cap, int64_t chunk_size,
         int64_t max_kv_len, int64_t envelope_chunk);
     void set_linear_acc32(bool enabled);
+    // G05 opt-in, bound once before weights. Linear accumulation is separate.
+    void set_high_precision(bool enabled);
     void set_fast_replay(bool enabled);
     // G0.5 action expert: all-full-attention Qwen3.5 with host-precomputed
     // AdaLN modulation and sparse per-layer read-only prefix KV.
@@ -262,6 +270,8 @@ private:
         const LayoutContext& layout) const;
     std::vector<int64_t> gdn_mask_schedule_arguments(
         const FmbThreeStageChunkPlan& plan) const;
+    bool use_g05_gdn_local_slice(int64_t rows) const;
+    std::vector<int64_t> g05_gdn_local_slice_arguments(int64_t rows) const;
     int gdn_tp() const { return num_cores() == 8 ? 8 : 4; }
     int lm_head_tp() const { return num_cores() == 8 ? 8 : 4; }
     int64_t text_ring_route(int64_t rows, int64_t cols) const;
@@ -283,6 +293,7 @@ private:
     void consume_manifest_route(
         FmbRouteFamily family, int64_t site_id,
         int64_t selector, int64_t invocation = 0);
+    at::Tensor prepare_decode_cpu_input(const at::Tensor& hidden_states);
     at::Tensor forward_impl(
         const at::Tensor& hidden_states,
         std::vector<at::Tensor>& k_caches,
@@ -301,21 +312,166 @@ private:
         int64_t chunk_idx,
         uint32_t input, const at::Tensor& weight, uint32_t output,
         int64_t m, int64_t n, int64_t k, int partition, int num_cores,
-        uint32_t bias_spm_addr = 0, const at::Tensor& scale = {});
-    // Full-attention layer emission (Qwen3 causal-decoder path; mirrors
-    // CausalDecoderModel::build_layer_subgraph minus M-RoPE / DeepStack).
-    void build_full_attention(int layer_idx, const ChunkInfo& chunk);
-    // Shared post-mixer tail (post_norm + MLP + final_norm + output). Contract:
-    // residual stream in "input_norm" (== "residual2" alias). See the .cpp definition.
-    void emit_mlp_and_output(int layer_idx, const ChunkInfo& chunk);
+        uint32_t bias_spm_addr = 0, const at::Tensor& scale = {},
+        int nvfp4_family = -1, int layer = -1);
+    bool use_action_nvfp4(int64_t rows) const;
+    std::vector<int64_t> action_nvfp4_arguments(int family) const;
+    RpuUnaryPrecision unary_precision() const;
+    RpuRmsNormSpmRoute rmsnorm_route(int64_t rows, int64_t cols) const;
+    int64_t high_precision_site() const;
+    std::vector<int64_t> high_precision_arguments() const;
+    void consume_high_precision_math();
+    // Full-attention layer emission. Optional exact G05 Text owner norm sets
+    // the caller's layer-local flag only after successful COMPLETE emission.
+    void build_full_attention(int layer_idx, const ChunkInfo& chunk,
+                              bool* text_owner_norm_emitted = nullptr,
+                              bool* action_norm_emitted = nullptr);
+    // Shared tail: ordinary full raw in input_norm, or owner raw there plus
+    // full normalized residual1 when this layer's owner flag is true.
+    void emit_mlp_and_output(int layer_idx, const ChunkInfo& chunk,
+                             bool text_owner_norm_emitted = false, bool action_norm_emitted = false);
+    bool has_text_fp16_projection_owners() const;
+    void prepare_text_owner_rms();
+    bool use_text_owner_rms(const FmbThreeStageChunkPlan& plan,
+        int64_t physical_len, int64_t logical_len, int64_t position, int64_t batch) const;
+    std::vector<int64_t> text_owner_rms_arguments(int64_t logical_len = 245) const;
+    void launch_text_owner_rms(int layer, const ChunkInfo& chunk);
+    void prepare_text_gdn_owner_rms();
+    bool use_text_gdn_owner_rms(const FmbThreeStageChunkPlan& plan,
+        int64_t physical_len, int64_t logical_len, int64_t position, int64_t batch) const;
+    std::vector<int64_t> text_gdn_owner_rms_arguments(int64_t logical_len = 245) const;
+    void launch_text_gdn_owner_rms(int layer, const ChunkInfo& chunk);
+    void prepare_text_mlp_tail();
+    bool use_text_mlp_tail(const FmbThreeStageChunkPlan& plan,
+        int64_t physical_len,int64_t logical_len,int64_t position,int64_t batch) const;
+    bool text_mlp_tail_handoff(int layer,const ChunkInfo& chunk,bool producer);
+    std::vector<int64_t> text_mlp_tail_arguments(int64_t logical_len = 245) const;
+    void launch_text_mlp_tail(int layer,const ChunkInfo& chunk);
+    void prepare_text_silu_round_mul();
+    bool use_text_silu_round_mul(const FmbThreeStageChunkPlan& plan,
+        int64_t physical_len,int64_t logical_len,int64_t position,int64_t batch) const;
+    bool use_text_silu_round_mul(int64_t rows);
+    std::vector<int64_t> text_silu_round_mul_arguments(int64_t logical_len = 245) const;
+    void launch_text_silu_round_mul(int layer,const ChunkInfo& chunk);
+    void prepare_text_gateup_pair();
+    bool use_text_gateup_pair(int64_t rows) const;
+    int64_t text_gateup_pair_site() const;
+    std::vector<int64_t> text_gateup_pair_arguments() const;
+    void launch_text_gateup_pair(int layer, const ChunkInfo& chunk);
     void load_adaptive_mod_row(int64_t row);
+    bool use_action_mod_body() const;
+    std::vector<int64_t> action_mod_body_arguments(int64_t body) const;
+    void prepare_action_gateup_resident();
+    void prepare_action_down_partial();
+    bool use_action_down_partial(int64_t rows, int64_t layer) const;
+    std::vector<int64_t> action_down_partial_arguments(bool preload) const;
+    void preload_action_down_partial();
+    void launch_action_down_partial(int layer, const ChunkInfo& chunk);
+    void prepare_action_nvfp4_o_resident();
+    bool use_action_nvfp4_o_resident(int64_t rows) const;
+    int64_t action_nvfp4_o_resident_site() const;
+    std::vector<int64_t> action_nvfp4_o_resident_arguments(int64_t layer, int64_t preload) const;
+    void preload_action_nvfp4_o_resident();
+    void launch_action_nvfp4_o_resident(int layer, const ChunkInfo& chunk);
+    void prepare_action_nvfp4_down_resident();
+    bool use_action_nvfp4_down_resident(int64_t rows, int64_t layer) const;
+    int64_t action_nvfp4_down_resident_site() const;
+    std::vector<int64_t> action_nvfp4_down_resident_arguments(int64_t layer, int64_t preload) const;
+    void preload_action_nvfp4_down_resident();
+    void launch_action_nvfp4_down_resident(int layer, const ChunkInfo& chunk);
+    void prepare_action_o_resident();
+    bool use_action_o_resident(int64_t rows) const;
+    std::vector<int64_t> action_o_resident_arguments(int64_t layer, bool preload) const;
+    void preload_action_o_resident();
+    void launch_action_o_resident(int layer, const ChunkInfo& chunk);
+    void prepare_action_attn_sigmoid_mul();
+    bool use_action_attn_sigmoid_mul(int64_t rows) const;
+    std::vector<int64_t> action_attn_sigmoid_mul_arguments() const;
+    void launch_action_attn_sigmoid_mul(int layer, const ChunkInfo& chunk);
+    void prepare_action_nvfp4_swiglu();
+    bool use_action_nvfp4_swiglu(int64_t rows) const;
+    int64_t action_nvfp4_swiglu_site() const;
+    std::vector<int64_t> action_nvfp4_swiglu_arguments() const;
+    void launch_action_nvfp4_swiglu(int layer, const ChunkInfo& chunk);
+    void prepare_action_silu_round_mul();
+    bool use_action_silu_round_mul(int64_t rows) const;
+    std::vector<int64_t> action_silu_round_mul_arguments() const;
+    void launch_action_silu_round_mul(int layer, const ChunkInfo& chunk);
+    void prepare_action_silu_high_mul();
+    bool use_action_silu_high_mul(int64_t rows) const;
+    std::vector<int64_t> action_silu_high_mul_arguments() const;
+    void launch_action_silu_high_mul(int layer, const ChunkInfo& chunk);
+    void prepare_action_gateup_pair();
+    bool use_action_gateup_pair(int64_t rows) const;
+    int64_t action_gateup_pair_site() const;
+    std::vector<int64_t> action_gateup_pair_arguments() const;
+    void launch_action_gateup_pair(int layer, const ChunkInfo& chunk);
+    void prepare_action_q_gate();
+    bool use_action_q_gate(int64_t rows) const;
+    std::vector<int64_t> action_q_gate_arguments() const;
+    void launch_action_q_gate(int layer, const ChunkInfo& chunk);
+    void prepare_action_qkv_gate();
+    bool use_action_qkv_gate(int64_t rows) const;
+    std::vector<int64_t> action_qkv_gate_arguments() const;
+    void launch_action_qkv_gate(int layer, const ChunkInfo& chunk);
+    void prepare_action_nvfp4_qk_norm_rope();
+    bool use_action_nvfp4_qk_norm_rope(int64_t rows,int64_t prefix) const;
+    std::vector<int64_t> action_nvfp4_qk_norm_rope_arguments() const;
+    void launch_action_nvfp4_qk_norm_rope(int layer,const ChunkInfo& chunk,
+        const at::Tensor& query_cos,const at::Tensor& query_sin,int64_t query_position);
+    void prepare_action_gate_kv_owner();
+    bool use_action_gate_kv_owner(int64_t rows, int64_t prefix) const;
+    std::vector<int64_t> action_gate_kv_owner_arguments(int64_t prefix) const;
+    void launch_action_gate_kv_owner(int layer, const ChunkInfo& chunk);
+    void prepare_action_owner_cache();
+    bool use_action_owner_cache(int64_t rows, int64_t max_prefix) const;
+    std::vector<int64_t> action_qkv_gate_owner_only_arguments() const;
+    std::vector<int64_t> action_k_owner_norm_rope_arguments() const;
+    std::vector<int64_t> action_owner_cache_arguments(const KvInsertSegmentPlan& plan) const;
+    void prepare_action_owner_cache_joint();
+    bool use_action_owner_cache_joint(int64_t rows,int64_t prefix) const;
+    std::vector<int64_t> action_owner_cache_joint_abi() const;
+    std::vector<int64_t> action_owner_cache_joint_arguments(const KvInsertSegmentPlan& plan) const;
+    void launch_action_qkv_gate_owner_only(int layer, const ChunkInfo& chunk);
+    void launch_action_k_owner_norm_rope(int layer, const ChunkInfo& chunk);
+    void launch_action_owner_cache_insert(int layer, const ChunkInfo& chunk, const KvInsertSegmentPlan& plan);
+    void prepare_action_kv_owner();
+    bool use_action_kv_owner(int64_t rows) const;
+    std::vector<int64_t> action_kv_owner_arguments() const;
+    void launch_action_kv_owner(int layer, const ChunkInfo& chunk);
+    bool use_action_gateup_resident(int64_t rows) const;
+    int64_t action_gateup_resident_layers() const;
+    std::vector<int64_t> action_gateup_resident_arguments(int64_t layer, int64_t projection) const;
+    void preload_action_gateup_resident();
+    void launch_action_gateup_resident(int64_t layer, int64_t projection, uint32_t output);
+    int64_t action_norm_route(int64_t rows) const;
+    std::vector<int64_t> action_norm_arguments(int64_t rows) const;
+    void prepare_action_newton_norm_shift();
+    bool use_action_newton_norm_shift(int64_t rows) const;
+    std::vector<int64_t> action_newton_norm_shift_arguments() const;
+    void apply_action_newton_norm_shift(uint32_t input, uint32_t output, const ChunkInfo& chunk);
+    int64_t action_residual_route(int64_t rows) const;
+    void prepare_action_tail();
+    bool use_action_tail(int64_t rows) const;
+    std::vector<int64_t> action_tail_arguments() const;
+    void launch_action_tail(int layer, const ChunkInfo& chunk);
+    void prepare_action_mlp_tail();
+    bool use_action_mlp_tail(const FmbThreeStageChunkPlan& plan, int64_t rows) const;
+    bool action_mlp_tail_handoff(int layer, const ChunkInfo& chunk, bool producer);
+    std::vector<int64_t> action_mlp_tail_arguments() const;
+    void launch_action_mlp_tail(int layer, const ChunkInfo& chunk);
+    bool use_action_ring_rtc_residual(int64_t rows) const;
+    std::vector<int64_t> action_ring_rtc_residual_arguments() const;
+    void launch_action_ring_rtc_residual(
+        uint32_t input, uint32_t residual, uint32_t output,
+        int64_t ring_site, const ChunkInfo& chunk);
     void apply_adaptive_norm(
         uint32_t input, uint32_t output, const ChunkInfo& chunk);
     void apply_adaptive_residual_gate(
         uint32_t output, uint32_t residual, const ChunkInfo& chunk);
     void apply_raw_residual_gate(
         uint32_t output, uint32_t residual, uint32_t gate,
-        int64_t seq_len);
+        int64_t seq_len, int64_t route);
     void emit_action_input_projection();
     void emit_action_output_projection();
     struct ActionRtcTraceOutputs {
@@ -343,9 +499,14 @@ private:
 public:
     // Unified Gated-DeltaNet token mixer. Shared setup/proj/tail with an if(decode) split
     // for the divergent conv + delta-rule core: decode (seq=1) = recurrent single step;
-    // prefill (chunk.len = C*N, C=64) = chunked delta-rule. Reads residual1 and writes
-    // residual2 = residual1 + mixer; updates recurrent_state + conv_state DDR caches.
-    void build_gdn(int layer_idx, const ChunkInfo& chunk, bool decode);
+    // prefill (chunk.len = C*N, C=64) = chunked delta-rule. Reads input_norm and
+    // adds the original residual1. Ordinary output is full raw residual2;
+    // owner output is raw owner rows plus full normalized residual1.
+    // Recurrent_state and conv_state DDR updates are unchanged.
+    // Exact GDN prefill may publish owner-normalized output; decode leaves
+    // this optional layer-local result untouched and keeps the full raw ABI.
+    void build_gdn(int layer_idx, const ChunkInfo& chunk, bool decode,
+                   bool* text_owner_norm_emitted = nullptr);
     at::Tensor* conv_state_for_layer(int layer_idx);
     // PREFILL 时 planner 实际选中的 chunk_size。基类的 get_last_resolved_chunk_size()
     // 每次 compute_chunks 都覆写,而 decode(seq_len=1 → 固定 cs=16)跑在 prefill 之后,
@@ -372,7 +533,7 @@ private:
         at::Tensor q_ws, k_ws, v_ws, o_ws, attn_gate_ws;
         at::Tensor gate_ws, up_ws, down_ws;
         // GDN mixer weights (linear_attention layers only). in_proj_* / out_proj
-        // are col/row-swizzled for rpu GEMM; conv_w is the DDR-repacked
+        // are col/row-swizzled for device GEMM; conv_w is the DDR-repacked
         // [num_cores, Kc, ld_pad] conv1d weight; A_log/dt_bias/norm_w are plain.
         // The conv_dim channel order is reordered so each core's contiguous slice
         // holds [2 q-heads | 2 k-heads | 2 v-heads] (see adapter weight prep).
@@ -387,11 +548,19 @@ private:
     std::vector<int64_t> kvinsert_cost_weight_identity() const override {
         if (layer_weights_.empty()) return {};
         std::vector<int64_t> identity{1};
+        if (high_precision_) {
+            identity.push_back(high_precision_site());
+            const auto math = high_precision_arguments();
+            identity.insert(identity.end(), math.begin(), math.end());
+        }
         if (num_cores() != 8) {
             const auto topology = cold_topology_arguments();
             identity.insert(identity.end(), topology.begin(), topology.end());
         }
         append_kvinsert_cost_scalar_identity(identity, eps_);
+        identity.push_back(static_cast<int64_t>(action_nvfp4_.enabled()));
+        for (const auto& table : action_nvfp4_.values)
+            append_kvinsert_cost_tensor_identity(identity, table);
         identity.insert(identity.end(), {
             static_cast<int64_t>(linear_acc32_),
             static_cast<int64_t>(has_gdn_),
@@ -402,6 +571,141 @@ private:
             static_cast<int64_t>(has_mrope_),
             static_cast<int64_t>(chunk_size_cap_),
             static_cast<int64_t>(sdpa_kernel_)});
+        if (text_gateup_pair_available_) identity.insert(identity.end(),
+            {text_gateup_pair_w8_ ? 3 : 2, 1, text_gateup_pair_site()});
+        if (!action_mode_ && text_silu_round_mul_available_) {
+            const auto args=text_silu_round_mul_arguments();
+            identity.insert(identity.end(),args.begin(),args.end());
+        }
+        if (!action_mode_ && text_mlp_tail_available_) {
+            const auto args=text_mlp_tail_arguments();
+            identity.insert(identity.end(),args.begin(),args.end());
+        }
+        if (!action_mode_ && text_owner_rms_available_) {
+            const auto args = text_owner_rms_arguments();
+            identity.insert(identity.end(), args.begin(), args.end());
+        }
+        if (!action_mode_ && text_gdn_owner_rms_available_) {
+            const auto args = text_gdn_owner_rms_arguments();
+            identity.insert(identity.end(), args.begin(), args.end());
+        }
+        if (use_g05_gdn_local_slice(256)) {
+            // Same weights, different BASE slice launch/address schedule.
+            identity.insert(identity.end(), {5, 1});
+            const auto schedule = g05_gdn_local_slice_arguments(256);
+            identity.insert(identity.end(), schedule.begin(), schedule.end());
+        }
+        if (action_mode_) {
+            identity.push_back(static_cast<int64_t>(action_norm_shift_available_));
+            if (high_precision_) {
+                identity.push_back(static_cast<int64_t>(action_newton_norm_shift_available_));
+                if (use_action_newton_norm_shift(action_len_)) {
+                    identity.push_back(5482108007151016838LL);
+                    const auto args = action_newton_norm_shift_arguments();
+                    identity.insert(identity.end(), args.begin(), args.end());
+                }
+            }
+            identity.push_back(static_cast<int64_t>(action_mod_body_w8_));
+            identity.push_back(static_cast<int64_t>(action_mod_body_fp16_));
+            identity.push_back(static_cast<int64_t>(action_gated_residual_available_));
+            identity.push_back(static_cast<int64_t>(action_rtc_norm_shift_available_));
+            identity.push_back(static_cast<int64_t>(action_sub_gated_residual_available_));
+            identity.push_back(static_cast<int64_t>(action_rtc_sub_gated_residual_available_));
+            identity.push_back(static_cast<int64_t>(action_ring_rtc_residual_available_));
+            identity.push_back(1); // Versioned G05 per-body modulation schedule.
+            identity.push_back(action_gateup_resident_w8_ ? 4 : 3); // W8 six layers / FP16 three layers.
+            identity.push_back(static_cast<int64_t>(action_gateup_resident_.size()));
+            identity.push_back(static_cast<int64_t>(action_gateup_resident_available_));
+            identity.push_back(static_cast<int64_t>(action_gateup_resident_w8_));
+            identity.push_back(static_cast<int64_t>(action_down_partial_available_));
+            append_kvinsert_cost_tensor_identity(identity, action_down_partial_);
+            identity.push_back(static_cast<int64_t>(action_nvfp4_o_resident_available_));
+            append_kvinsert_cost_tensor_identity(identity, action_nvfp4_o_resident_.first);
+            append_kvinsert_cost_tensor_identity(identity, action_nvfp4_o_resident_.second);
+            if (use_action_nvfp4_o_resident(action_len_)) {
+                identity.push_back(action_nvfp4_o_resident_site());
+                const auto args = action_nvfp4_o_resident_arguments(0, -1);
+                identity.insert(identity.end(), args.begin(), args.end());
+            }
+            identity.push_back(static_cast<int64_t>(action_nvfp4_down_resident_available_));
+            append_kvinsert_cost_tensor_identity(identity, action_nvfp4_down_resident_.first);
+            append_kvinsert_cost_tensor_identity(identity, action_nvfp4_down_resident_.second);
+            if (use_action_nvfp4_down_resident(action_len_,0)) {
+                identity.push_back(action_nvfp4_down_resident_site());
+                const auto args = action_nvfp4_down_resident_arguments(0, -1);
+                identity.insert(identity.end(), args.begin(), args.end());
+            }
+            identity.push_back(static_cast<int64_t>(action_o_resident_available_));
+            identity.push_back(static_cast<int64_t>(action_o_resident_n128_));
+            identity.push_back(static_cast<int64_t>(action_o_resident_.size()));
+            for (const auto& owner : action_o_resident_)
+                append_kvinsert_cost_tensor_identity(identity, owner);
+            identity.push_back(1); // Versioned KV owner/fanout schedule.
+            identity.push_back(static_cast<int64_t>(action_kv_owner_available_));
+            identity.push_back(static_cast<int64_t>(action_kv_owner_w8_));
+            identity.push_back(1); // Versioned Q/gate double-base launch.
+            identity.push_back(static_cast<int64_t>(action_q_gate_available_));
+            identity.push_back(static_cast<int64_t>(action_q_gate_w8_));
+            identity.push_back(1); // Versioned W8 Q/gate + KV owner launch.
+            identity.push_back(static_cast<int64_t>(action_qkv_gate_available_));
+            identity.push_back(3); // Bounded P0/P181/P245/P%16=1 owner transport.
+            identity.insert(identity.end(),{161,449,16,1,0,245,181});
+            identity.push_back(static_cast<int64_t>(action_owner_cache_joint_available_));
+            if (action_owner_cache_joint_available_) {
+                const auto args = action_owner_cache_joint_abi();
+                identity.insert(identity.end(),args.begin(),args.end());
+            }
+            identity.push_back(static_cast<int64_t>(action_owner_cache_available_));
+            identity.push_back(static_cast<int64_t>(action_nvfp4_qk_norm_rope_available_));
+            if (action_nvfp4_qk_norm_rope_available_) {
+                const auto args = action_nvfp4_qk_norm_rope_arguments();
+                identity.insert(identity.end(), args.begin(), args.end());
+            }
+            identity.push_back(static_cast<int64_t>(action_gate_kv_owner_available_));
+            if (action_gate_kv_owner_available_) {
+                const auto args = action_gate_kv_owner_arguments(0);
+                identity.insert(identity.end(), args.begin(), args.end());
+            }
+            identity.push_back(1); // Versioned DDR Gate/Up double-base launch.
+            identity.push_back(static_cast<int64_t>(action_gateup_pair_available_));
+            identity.push_back(static_cast<int64_t>(action_gateup_pair_w8_));
+            identity.push_back(static_cast<int64_t>(action_gateup_pair_nvfp4_));
+            if (action_gateup_pair_available_)
+                identity.push_back(action_gateup_pair_site());
+            identity.push_back(1); // Versioned rounded BASE SiLU/MUL fusion.
+            identity.push_back(static_cast<int64_t>(action_silu_round_mul_available_));
+            if (high_precision_) {
+                identity.push_back(static_cast<int64_t>(action_silu_high_mul_available_));
+                if (use_action_silu_high_mul(action_len_)) {
+                    identity.push_back(5790657297908870019LL);
+                    const auto args = action_silu_high_mul_arguments();
+                    identity.insert(identity.end(), args.begin(), args.end());
+                }
+            }
+            identity.push_back(static_cast<int64_t>(action_tail_available_));
+            if (action_tail_available_) {
+                const auto args = action_tail_arguments();
+                identity.insert(identity.end(),args.begin(),args.end());
+            }
+            identity.push_back(static_cast<int64_t>(action_mlp_tail_available_));
+            if (action_mlp_tail_available_) {
+                const auto args = action_mlp_tail_arguments();
+                identity.insert(identity.end(),args.begin(),args.end());
+            }
+            identity.push_back(static_cast<int64_t>(action_attn_sigmoid_mul_available_));
+            if (action_attn_sigmoid_mul_available_) {
+                const auto args = action_attn_sigmoid_mul_arguments();
+                identity.insert(identity.end(),args.begin(),args.end());
+            }
+            identity.push_back(static_cast<int64_t>(action_nvfp4_swiglu_available_));
+            if (use_action_nvfp4_swiglu(action_len_)) {
+                identity.push_back(action_nvfp4_swiglu_site());
+                const auto args = action_nvfp4_swiglu_arguments();
+                identity.insert(identity.end(), args.begin(), args.end());
+            }
+            for (const auto& owner : action_gateup_resident_)
+                append_kvinsert_cost_tensor_identity(identity, owner);
+        }
         identity.push_back(static_cast<int64_t>(layer_weights_.size()));
         for (const auto& weights : layer_weights_) {
             for (const auto* tensor : {
@@ -426,9 +730,21 @@ private:
         return identity;
     }
 
+    G05Nvfp4Tables             action_nvfp4_;
+    bool                       action_nvfp4_o_resident_available_ = false;
+    std::pair<at::Tensor, at::Tensor> action_nvfp4_o_resident_;
+    bool                       action_nvfp4_down_resident_available_ = false;
+    std::pair<at::Tensor, at::Tensor> action_nvfp4_down_resident_;
     std::vector<LayerWeights>  layer_weights_;
     std::vector<uint8_t>       layer_is_full_;
     at::Tensor                 cos_, sin_, final_norm_w_;
+    // One private decode input. Published owners are never written again;
+    // changed bytes/generation get a fresh owner, while Graph owns old leases.
+    at::Tensor                 decode_cpu_input_owner_;
+    std::vector<uint8_t>       decode_cpu_input_bytes_;
+    uint64_t                   decode_cpu_input_generation_ = 0;
+    bool                       decode_cpu_input_published_ = false;
+    std::mutex                 decode_cpu_input_mutex_;
     // PREFILL interleaved M-RoPE tables (B channel; set per-forward via
     // set_prefill_rope). Empty until set → build_full_attention falls back to
     // cos_/sin_ (correct for text-only, where interleaved == arange).
@@ -446,8 +762,51 @@ private:
     int64_t                    last_prefill_chunk_size_ = 0;  // prefill 的 resolved cs(decode 不覆写); 见 last_prefill_chunk_size()
     int64_t                    chunk_size_cap_ = 0;           // cold per-handle prefill cap; 0 = auto
     bool                       linear_acc32_ = false;          // cold per-handle GEMM accumulation mode
+    bool                       high_precision_ = false;        // G05 Newton norms and HIGH SiLU
+    bool                       high_precision_bound_ = false;
     bool                       has_gdn_ = false;
     bool                       action_mode_ = false;
+    bool                       action_norm_shift_available_ = false;
+    bool                       action_newton_norm_shift_available_ = false;
+    bool                       action_gated_residual_available_ = false;
+    bool                       action_rtc_norm_shift_available_ = false;
+    bool                       action_sub_gated_residual_available_ = false;
+    bool                       action_rtc_sub_gated_residual_available_ = false;
+    bool                       action_ring_rtc_residual_available_ = false;
+    bool                       action_gateup_resident_available_ = false;
+    bool                       action_gateup_resident_w8_ = false;
+    bool                       action_down_partial_available_ = false;
+    at::Tensor                 action_down_partial_; // Layer0 first672 columns, INT8[8,344064].
+    bool                       action_o_resident_available_ = false;
+    bool                       action_o_resident_n128_ = false;
+    bool                       action_mod_body_w8_ = false;
+    bool                       action_mod_body_fp16_ = false;
+    bool                       action_kv_owner_available_ = false;
+    bool                       action_kv_owner_w8_ = false;
+    bool                       action_q_gate_available_ = false;
+    bool                       action_q_gate_w8_ = false;
+    bool                       action_qkv_gate_available_ = false;
+    bool                       action_owner_cache_available_ = false;
+    bool                       action_owner_cache_joint_available_ = false;
+    bool                       action_gate_kv_owner_available_ = false;
+    bool                       action_nvfp4_qk_norm_rope_available_ = false;
+    bool                       action_gateup_pair_available_ = false;
+    bool                       action_gateup_pair_w8_ = false;
+    bool                       action_gateup_pair_nvfp4_ = false;
+    bool                       action_silu_round_mul_available_ = false;
+    bool                       action_silu_high_mul_available_ = false;
+    bool                       action_nvfp4_swiglu_available_ = false;
+    bool                       action_attn_sigmoid_mul_available_ = false;
+    bool                       action_tail_available_ = false;
+    bool                       action_mlp_tail_available_ = false;
+    bool                       text_mlp_tail_available_ = false;
+    bool                       text_silu_round_mul_available_ = false;
+    bool                       text_gateup_pair_available_ = false;
+    bool                       text_gateup_pair_w8_ = false;
+    bool                       text_owner_rms_available_ = false;
+    bool                       text_gdn_owner_rms_available_ = false;
+    std::vector<at::Tensor>     action_gateup_resident_; // FP16 layers 1..3 / W8 1..6, [core, Gate | Up]
+    std::vector<at::Tensor>     action_o_resident_; // W8 ACC16: six [core, four O layers] bundles.
     bool                       action_descriptor_include_io_ = false;
     int64_t                    action_descriptor_route_flags_ = 0;
     FmbGraphLifecycle          action_descriptor_graph_lifecycle_ =
@@ -457,6 +816,7 @@ private:
     bool                       retained_prefill_graph_ = false;
     at::Tensor                 adaptive_mod_ref_;
     uint64_t                   adaptive_mod_live_base_ = 0;
+    uint32_t                   adaptive_mod_row_offset_ = 0;
     std::vector<int64_t>       action_prefix_lens_;
     at::Tensor                 action_input_w_, action_input_b_;
     at::Tensor                 action_output_w_, action_output_b_;

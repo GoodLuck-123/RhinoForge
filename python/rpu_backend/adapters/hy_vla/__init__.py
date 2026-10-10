@@ -1,4 +1,4 @@
-"""Hy-Embodied-0.5-VLA 的 RPU adapter。
+"""Hy-Embodied-0.5-VLA 的 device adapter。
 
 Hy-VLA 由 HYViT2 AnyRes ViT、HunYuanVL MoT 双权重 VLM 和共享 attention
 的 flow-matching action expert 组成。native 入口分别为 hyvit2_*、

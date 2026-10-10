@@ -99,6 +99,7 @@ set(RPU_OPS_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/ops/rpu_slice.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ops/rpu_permute.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ops/rpu_gdn_recurrent.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ops/rpu_gr00t_adaln.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ops/rpu_pad.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ops/rpu_reduce.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ops/rpu_pi05_down_pair.cpp"
@@ -130,7 +131,7 @@ add_library(rpu_backend SHARED
     ${RPU_GRAPH_SOURCES}
 )
 
-target_link_libraries(rpu_backend PRIVATE ${TORCH_LIBRARIES})
+target_link_libraries(rpu_backend PRIVATE ${TORCH_LIBRARIES} ${CMAKE_DL_LIBS})
 target_include_directories(rpu_backend PRIVATE
     ${TORCH_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}

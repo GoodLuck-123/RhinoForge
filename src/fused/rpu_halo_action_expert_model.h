@@ -11,7 +11,7 @@
 // M1/M2 边界: 本 commit 输入是 host 已合成的 hidden_states x_emb [1, cs, 1536]
 // fp16 — boundary 投影 (action in/out proj、time embedding) 仍在 host (M1)。
 // M2 才把 boundary 入模。proof 边界: 本 commit 只编译为目标 (skeleton + 层体),
-// 尚无 RPU 硬件正确性证据 (not-proven)。
+// 尚无 device 硬件正确性证据 (not-proven)。
 //
 // 数学正确性的关键: 行掩码 merge (out = x_text*text_mask + x_act*act_mask) 与
 // 双 GEMM 是逐行独立运算, 所以"先合并 norm 输出再双 GEMM"与逐行选权重等价。
@@ -35,7 +35,7 @@ public:
     ~HaloActionExpertModel() override;
 
     // 单层 act 孪生权重 (布局与基类 LayerWeights 主权重逐一对应):
-    //   q/k/v/o_w     [out, in]  col/row-partition 预 swizzle fp16 (RPU DDR)
+    //   q/k/v/o_w     [out, in]  col/row-partition 预 swizzle fp16 (device DDR)
     //   q/k_norm_w    [head_dim] fp16
     //   input/post_norm_w [hidden] fp16
     //   gate/up/down_w [out, in] fp16
@@ -70,7 +70,7 @@ public:
         at::TensorList v_bias_list);
 
     // 绑定 act 孪生权重 + 行掩码。必须在基类 set_weights 之后调用。
-    //   text_row_mask: [chunk_size] fp16 RPU contig, 取值 {0,1}; 1 = text 行
+    //   text_row_mask: [chunk_size] fp16 device contig, 取值 {0,1}; 1 = text 行
     //                  (走基类权重), 0 = action 行 (走孪生权重)。本函数在 host
     //                  侧展开成 5 个宽度的常量掩码张量 (act = 1 - text)。
     //   chunk_size:    HALO act 模式的固定 query 长度 (=18); 掩码与 SPM 槽按
@@ -95,13 +95,13 @@ public:
         int64_t prefix_len, int64_t requested_chunk_size);
 
     // 一次 act step。I/O 契约:
-    //   x_emb       [1, chunk_size, hidden=1536] fp16 RPU contig — host 已合成
+    //   x_emb       [1, chunk_size, hidden=1536] fp16 device contig — host 已合成
     //               的混排 hidden (M1 boundary 在 host)。
     //   k/v_caches  基类 7-D swizzled KV cache; 本步在 prefix_len 处追加。
     //   attn_mask_4d 显式 additive mask, 末两维 [chunk_size, prefix+cs]
     //               (基类 sdpa_prepare_mask 降维 + MASK_2D)。
     //   prefix_len  KV prefix 长度 (HALO act: 4706)。
-    // 返回: 末隐藏 [1, chunk_size, hidden] fp16 RPU (含双 final_norm) —— 基类
+    // 返回: 末隐藏 [1, chunk_size, hidden] fp16 device (含双 final_norm) —— 基类
     //   output DMA 的 output_tensor_ (graph 写目标)。调用方须在 capture 作用域
     //   **退出后**读 (此时图已 end() 执行写入); 切勿在作用域内提前 copy —— 那会
     //   读到尚未执行的全 0 output_tensor_ (见 fused_model_base.cpp:1066-1086 契约)。
@@ -181,7 +181,7 @@ private:
     std::vector<MoeLayerWeights> moe_layers_;   // [num_layers] act 孪生权重
     at::Tensor final_norm_moe_w_;               // [hidden] act 侧 final RMSNorm γ
     at::Tensor text_row_mask_;                  // [chunk_size] 原始行掩码 (keepalive)
-    // 宽度 -> [chunk_size, width] fp16 RPU 常量掩码 (Persistent 槽 preload 源)。
+    // 宽度 -> [chunk_size, width] fp16 device 常量掩码 (Persistent 槽 preload 源)。
     std::unordered_map<int64_t, at::Tensor> text_mask_ddr_, act_mask_ddr_;
     int64_t moe_chunk_size_ = 0;                // 掩码/槽固化的 chunk_size (0 = 未设)
     PreparedMask prepared_mask_halo_;           // 每 forward 在 dynamic_config 重备

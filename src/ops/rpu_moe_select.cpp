@@ -20,6 +20,8 @@
 
 #include <c10/util/Half.h>
 
+#include <array>
+#include <cmath>
 #include <cstdint>
 
 using namespace ::rhino_lkn;
@@ -141,6 +143,200 @@ void launch_scatter_axis0_mask(
 }
 
 }  // namespace
+
+void rpu_launch_moe_exact_topk_dense_route_fp16_spm_kernel(
+    uint32_t scores_spm_addr, uint32_t expert_ids_u16_spm_addr,
+    uint32_t weights_spm_addr, uint32_t mask_u16_spm_addr,
+    int64_t n, int64_t c, int64_t k, c10::Half routed_scale,
+    int num_cores) {
+    TORCH_CHECK(n >= 1 && n <= 128 && c == 32 && k == 4,
+                "moe_exact_topk_dense_route: require E32/K4 and 1..128 token rows");
+    TORCH_CHECK(num_cores >= 1 && num_cores <= 8,
+                "moe_exact_topk_dense_route: num_cores must be in [1,8]");
+    TORCH_CHECK(std::isfinite(static_cast<float>(routed_scale)) &&
+                    static_cast<float>(routed_scale) > 0.0f,
+                "moe_exact_topk_dense_route: routed_scale must be positive finite FP16");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "moe_exact_topk_dense_route: SPM allocator is not initialized");
+    const uint32_t base = SPM_ALLOC.addr(0, 0);
+    const uint64_t bytes = static_cast<uint64_t>(n) * c * sizeof(c10::Half);
+    const std::array<uint32_t, 4> addresses{{
+        scores_spm_addr, expert_ids_u16_spm_addr,
+        weights_spm_addr, mask_u16_spm_addr}};
+    for (size_t i = 0; i < addresses.size(); ++i) {
+        TORCH_CHECK(addresses[i] >= base && addresses[i] % 32 == 0 &&
+                        uint64_t(addresses[i]) - base <=
+                            uint64_t(SpmAllocator::SPM_USABLE) - bytes,
+                    "moe_exact_topk_dense_route: invalid absolute core-0 SPM interval");
+        for (size_t j = 0; j < i; ++j)
+            TORCH_CHECK(uint64_t(addresses[i]) + bytes <= addresses[j] ||
+                            uint64_t(addresses[j]) + bytes <= addresses[i],
+                        "moe_exact_topk_dense_route: all four operands must be disjoint");
+    }
+    Kernel_t* kernel = GET_KERNEL(KernelId::LINGBOT2_TOPK_DENSE_ROUTE_SAFE);
+    TORCH_CHECK(kernel != nullptr,
+                "moe_exact_topk_dense_route: optional lingbot2_topk_dense_route_safe is absent");
+    kernel->reset_regs();
+    for (size_t i = 0; i < addresses.size(); ++i) {
+        kernel->set_regs(2 * i, static_cast<uint16_t>(addresses[i]));
+        kernel->set_regs(2 * i + 1, static_cast<uint16_t>(addresses[i] >> 16));
+    }
+    kernel->set_regs(8, static_cast<uint16_t>(c));
+    kernel->set_regs(10, static_cast<uint16_t>(2));
+    kernel->set_regs(11, static_cast<uint16_t>(1));
+    kernel->set_regs(12, static_cast<uint16_t>(1));
+    kernel->set_regs(13, static_cast<uint16_t>(k));
+    kernel->set_regs(14, static_cast<uint16_t>(1));  // descending
+    kernel->set_regs(15, static_cast<uint16_t>(0xfc00));  // negative infinity
+    kernel->set_regs(16, static_cast<uint16_t>(2));
+    kernel->set_regs(17, static_cast<uint16_t>(1));  // Normalize selected probabilities
+    kernel->set_regs(18, static_cast<uint16_t>(static_cast<float>(routed_scale) != 1.0f));
+    kernel->set_regs(19, routed_scale.x);
+    kernel->set_regs(64, static_cast<uint16_t>(n));
+    kernel->set_regs(65, static_cast<uint16_t>(1));
+    kernel->set_regs(66, static_cast<uint16_t>(1));
+    auto* queue = GET_QUEUE(num_cores);
+    queue->set_broadcast_mode(true);
+    std::vector<uint8_t> cores;
+    for (int core = 0; core < num_cores; ++core) cores.push_back(static_cast<uint8_t>(core));
+    queue->enqueu_kernel(*kernel, {static_cast<uint16_t>(n), 1, 1}, cores);
+}
+
+void rpu_launch_lingbot2_topk_e32_k4_lane2_safe_spm_kernel(
+    uint32_t scores_spm_addr, uint32_t expert_ids_u16_spm_addr,
+    uint32_t weights_spm_addr, uint32_t mask_u16_spm_addr,
+    int64_t n, int64_t c, int64_t k, c10::Half routed_scale,
+    int num_cores) {
+    // The owning model cold-admits zero correction bias, canonical expert IDs,
+    // and sigmoid scores. The integer reduction keys require finite [0,1]
+    // FP16 scores (either signed zero is valid); raw SPM data is not read here.
+    TORCH_CHECK((n == 51 || n == 64) && c == 32 && k == 4,
+                "lingbot2_fixed_topk: require E32/K4 and 51 or 64 token rows");
+    TORCH_CHECK(num_cores >= 1 && num_cores <= 8,
+                "lingbot2_fixed_topk: num_cores must be in [1,8]");
+    TORCH_CHECK(std::isfinite(static_cast<float>(routed_scale)) &&
+                    static_cast<float>(routed_scale) > 0.0f,
+                "lingbot2_fixed_topk: routed_scale must be positive finite FP16");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "lingbot2_fixed_topk: SPM allocator is not initialized");
+    const uint32_t base = SPM_ALLOC.addr(0, 0);
+    const uint64_t bytes = static_cast<uint64_t>(n) * c * sizeof(c10::Half);
+    const std::array<uint32_t, 4> addresses{{
+        scores_spm_addr, expert_ids_u16_spm_addr,
+        weights_spm_addr, mask_u16_spm_addr}};
+    for (size_t i = 0; i < addresses.size(); ++i) {
+        TORCH_CHECK(bytes <= uint64_t(SpmAllocator::SPM_USABLE) &&
+                        addresses[i] >= base && addresses[i] % 32 == 0 &&
+                        uint64_t(addresses[i]) - base <=
+                            uint64_t(SpmAllocator::SPM_USABLE) - bytes,
+                    "lingbot2_fixed_topk: invalid absolute core-0 SPM interval");
+        for (size_t j = 0; j < i; ++j)
+            TORCH_CHECK(uint64_t(addresses[i]) + bytes <= addresses[j] ||
+                            uint64_t(addresses[j]) + bytes <= addresses[i],
+                        "lingbot2_fixed_topk: all four operands must be disjoint");
+    }
+    Kernel_t* kernel = GET_KERNEL(KernelId::LINGBOT2_TOPK_E32_K4_LANE2_SAFE);
+    TORCH_CHECK(kernel != nullptr,
+                "lingbot2_fixed_topk: optional lingbot2_topk_e32_k4_lane2_safe is absent");
+    kernel->reset_regs();
+    for (size_t i = 0; i < addresses.size(); ++i) {
+        kernel->set_regs(2 * i, static_cast<uint16_t>(addresses[i]));
+        kernel->set_regs(2 * i + 1, static_cast<uint16_t>(addresses[i] >> 16));
+    }
+    // Preserve the SAFE parameter ABI and its selected-sum/epsilon/scale tail.
+    kernel->set_regs(8, static_cast<uint16_t>(c));
+    kernel->set_regs(10, static_cast<uint16_t>(2));
+    kernel->set_regs(11, static_cast<uint16_t>(1));
+    kernel->set_regs(12, static_cast<uint16_t>(1));
+    kernel->set_regs(13, static_cast<uint16_t>(k));
+    kernel->set_regs(14, static_cast<uint16_t>(1));  // descending
+    kernel->set_regs(15, static_cast<uint16_t>(0xfc00));  // negative infinity
+    kernel->set_regs(16, static_cast<uint16_t>(2));
+    kernel->set_regs(17, static_cast<uint16_t>(1));  // Normalize selected probabilities
+    kernel->set_regs(18, static_cast<uint16_t>(static_cast<float>(routed_scale) != 1.0f));
+    kernel->set_regs(19, routed_scale.x);
+    kernel->set_regs(64, static_cast<uint16_t>(n));
+    kernel->set_regs(65, static_cast<uint16_t>(1));
+    kernel->set_regs(66, static_cast<uint16_t>(1));
+    auto* queue = GET_QUEUE(num_cores);
+    queue->set_broadcast_mode(true);
+    std::vector<uint8_t> cores;
+    for (int core = 0; core < num_cores; ++core) cores.push_back(static_cast<uint8_t>(core));
+    queue->enqueu_kernel(*kernel, {static_cast<uint16_t>(n), 1, 1}, cores);
+}
+
+void rpu_launch_lingbot2_topk_compact_inverse_spm_kernel(
+    uint32_t scores_spm_addr, uint32_t expert_ids_u16_spm_addr,
+    uint32_t route_spm_addr, uint32_t mask_u16_spm_addr,
+    uint32_t weights_transposed_spm_addr, uint32_t membership_transposed_spm_addr,
+    c10::Half routed_scale) {
+    // Exact T51/Tp64/E32/K4, core 0. The owner cold-admits sigmoid scores,
+    // canonical expert IDs and zero correction bias, and retains the external
+    // full route fill and relay. Padding rows obey the lane2 score contract.
+    TORCH_CHECK(std::isfinite(static_cast<float>(routed_scale)) &&
+                    static_cast<float>(routed_scale) > 0.0f,
+                "lingbot2_topk_compact: routed_scale must be positive finite FP16");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "lingbot2_topk_compact: SPM allocator is not initialized");
+    const uint64_t base = SPM_ALLOC.addr(0, 0);
+    const std::array<uint32_t, 6> addresses{{
+        scores_spm_addr, expert_ids_u16_spm_addr, route_spm_addr,
+        mask_u16_spm_addr, weights_transposed_spm_addr, membership_transposed_spm_addr}};
+    // Validate the complete route owner, including all padded compact fields.
+    constexpr std::array<uint64_t, 6> bytes{{4096, 4096, 9472, 4096, 4096, 4096}};
+    for (size_t i = 0; i < addresses.size(); ++i) {
+        const uint64_t address = addresses[i];
+        TORCH_CHECK(bytes[i] <= uint64_t(SpmAllocator::SPM_USABLE) &&
+                        address >= base && address % 32 == 0 &&
+                        address - base <= uint64_t(SpmAllocator::SPM_USABLE) - bytes[i] &&
+                        address + bytes[i] <= (uint64_t{1} << 32),
+                    "lingbot2_topk_compact: invalid absolute core-0 SPM interval");
+        for (size_t j = 0; j < i; ++j)
+            TORCH_CHECK(address + bytes[i] <= addresses[j] ||
+                            uint64_t(addresses[j]) + bytes[j] <= address,
+                        "lingbot2_topk_compact: all six operands must be disjoint");
+    }
+    constexpr auto id = KernelId::LINGBOT2_TOPK_COMPACT_INVERSE_E32_T51_TP64;
+    TORCH_CHECK(KernelCache::instance().has_loaded(id),
+                "lingbot2_topk_compact: optional fused payload is absent");
+    auto* queue = GET_QUEUE(1);
+    TORCH_CHECK(queue != nullptr, "lingbot2_topk_compact: missing core-0 queue");
+    Kernel_t* kernel = GET_KERNEL(id);
+    TORCH_CHECK(kernel != nullptr, "lingbot2_topk_compact: missing fused kernel");
+    kernel->reset_regs();
+    kernel->set_regs(0, scores_spm_addr);
+    kernel->set_regs(2, expert_ids_u16_spm_addr);
+    kernel->set_regs(4, route_spm_addr);
+    kernel->set_regs(6, mask_u16_spm_addr);
+    // Preserve lane2's original selected-sum/epsilon/scale parameter ABI.
+    kernel->set_regs(8, static_cast<uint16_t>(32));
+    kernel->set_regs(9, static_cast<uint16_t>(0));
+    kernel->set_regs(10, static_cast<uint16_t>(2));
+    kernel->set_regs(11, static_cast<uint16_t>(1));
+    kernel->set_regs(12, static_cast<uint16_t>(1));
+    kernel->set_regs(13, static_cast<uint16_t>(4));
+    kernel->set_regs(14, static_cast<uint16_t>(1));
+    kernel->set_regs(15, static_cast<uint16_t>(0xfc00));
+    kernel->set_regs(16, static_cast<uint16_t>(2));
+    kernel->set_regs(17, static_cast<uint16_t>(1));
+    kernel->set_regs(18, static_cast<uint16_t>(static_cast<float>(routed_scale) != 1.0f));
+    kernel->set_regs(19, routed_scale.x);
+    kernel->set_regs(20, weights_transposed_spm_addr);
+    kernel->set_regs(22, membership_transposed_spm_addr);
+    kernel->set_regs(24, uint32_t(route_spm_addr + 4096));
+    kernel->set_regs(26, uint32_t(route_spm_addr + 4608));
+    kernel->set_regs(28, uint32_t(route_spm_addr + 5120));
+    kernel->set_regs(30, uint32_t(route_spm_addr + 5376));
+    kernel->set_regs(64, static_cast<uint16_t>(8));
+    kernel->set_regs(65, static_cast<uint16_t>(1));
+    kernel->set_regs(66, static_cast<uint16_t>(1));
+    // Both barriers count all eight resident warps. Full U32 counter writes
+    // must be recorded on every launch, including retained Graph replay.
+    kernel->set_regs(128, uint32_t{0});
+    kernel->set_regs(130, uint32_t{0});
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {8, 1, 1}, {0});
+}
 
 void rpu_launch_backend_moe_select_fp16_spm(
     uint32_t scores_token_major_addr,

@@ -12,10 +12,8 @@ checkpoint 不继承其 FP16 来源或其他尺寸的状态。使用前检查[�
 ## Qwen3 W8A16
 
 Qwen3 converter 把七个 decoder projection weight 转成 signed INT8，并为每个 output
-channel 保存一个 FP16 scale；其他浮点 tensor 默认保留 FP16。v1.0.0 中所有
-生成的 W8A16 checkpoint 均为 Source-only，因为未绑定公开不可变派生
-checkpoint 身份或 hash。14B 本地转换 recipe 使用 untied INT8 `lm_head`和
-FP16 embedding：
+channel 保存一个 FP16 scale；其他浮点 tensor 默认保留 FP16。
+14B 本地转换 recipe 使用 untied INT8 `lm_head` 和 FP16 embedding：
 
 ```bash
 python -m rpu_backend.quant.convert_qwen3 \
@@ -29,8 +27,6 @@ python -m rpu_backend.quant.convert_qwen3 \
 - `--skip-modules NAME [NAME ...]` 排除匹配 decoder projection；
 - `--quant-lm-head` 写入 untied quantized `lm_head`；
 - `--quant-embed-tokens` 同时量化 embedding，并要求 `--quant-lm-head`；此路径仍为 Source-only。
-
-所有 Qwen3 W8A16 converter 输出在 v1.0.0 中均保持 Source-only。
 
 使用相同选项运行 verifier：
 
@@ -76,9 +72,8 @@ python -m rpu_backend.quant.convert_qwen3_vl --bits 4 --src AWQ_DIR --dst W4_DIR
 默认 Pi0.5 转换把 VLM decoder 和 action-expert decoder projection 转为 W8A16。Vision
 encoder、AdaRMS dense、action projection 和 processor sidecar 保持 FP16 或不变。
 
-Pi0.5 W8A16 和 mixed W4A16-G32-KV8 输出在 v1.0.0 中均为 Source-only：
-发布版本未为它们绑定公开不可变派生 checkpoint 身份或 hash；精确同量化 oracle
-与 checkpoint 自有任务证据也仍待完成。
+选择匹配的 [Pi0.5 配置](../examples/configs/pi05/README.md)，并随 checkpoint
+保留生成的量化元数据。
 
 ```bash
 python -m rpu_backend.quant.convert_pi05 \
@@ -102,7 +97,7 @@ python -m rpu_backend.quant.convert_pi05 \
   --fake-w4 --real-w4
 ```
 
-该 runtime profile 是 mixed W4A16-G32-KV8，并非纯 W4。仅量化声明的 Gemma
+该 runtime profile 使用 mixed W4A16-G32-KV8。仅量化声明的 Gemma
 VLM/action-expert Linear projection 权重：q/o/gate/up/down 沿 K 使用 symmetric
 W4 group-size-32，K/V projection 权重保持 W8；activation 与 KV cache 均保持
 FP16。Checkpoint 中逻辑 FP16 scale shape 为 `[K/32, N]`，加载时再转成 packed
@@ -111,9 +106,8 @@ pgrp ABI 的 controller-striped 布局。SigLIP、AdaRMS dense、action projecti
 
 `--keep-int8` 接受逗号分隔 projection name，用于受控 W4 mixed-precision 实验。
 `--real-w4` 是该 mixed profile 的遗留 CLI 名称，会自动让 K/V projection 权重
-保持 W8。两种 W4 都是 Source-only 评估路径；提升前需有独立不可变资产身份、
-精确同量化 oracle 与 checkpoint 自有任务证据。Converter 会删除旧 remapped
-checkpoint，让 loader 从新量化 tensor 重建。
+保持 W8。fake-W4 诊断张量与 runtime mixed-W4 格式分开使用。Converter 会删除
+旧 remapped checkpoint，让 loader 从新量化 tensor 重建。
 
 ### Action NVFP4 优化格式
 
@@ -138,16 +132,17 @@ python -m rpu_backend.quant.convert_wall_oss_w8a16 \
   --dst /path/to/wall-oss-W8A16
 ```
 
-W4 默认使用 per-channel scale；`--group-size` 为正时使用 group-wise scale，并且必须
-整除每个转换层的 input dimension：
+W4 默认使用 `--group-size 32` 的 group-wise scale；`--group-size 0` 选择旧版
+per-channel scale。正分组大小必须整除每个转换层的 input dimension：
 
 ```bash
 # Per-channel W4。
 python -m rpu_backend.quant.convert_wall_oss \
   --src /path/to/wall-oss-source \
-  --dst /path/to/wall-oss-W4A16
+  --dst /path/to/wall-oss-W4A16 \
+  --group-size 0
 
-# Group-wise W4；32 是现有评估配置。
+# Group-wise W4，默认配置。
 python -m rpu_backend.quant.convert_wall_oss \
   --src /path/to/wall-oss-source \
   --dst /path/to/wall-oss-W4A16-g32 \
@@ -155,7 +150,7 @@ python -m rpu_backend.quant.convert_wall_oss \
 ```
 
 当前 Wall-OSS W4 converter 拒绝非空 `--keep-int8`，因为 runtime 不消费该 mixed
-precision metadata。Wall-OSS W4 保持 Source-only。
+precision metadata。两个 decoder expert 的投影均使用 INT4，包括 expert0 Down。
 
 W4A16 runtime 只接受 packed group representation。输入宽度为 `K`、group size 为 32
 时，现有 helper 会把一维 per-output-channel scale 重复成 `K / 32` 组，再生成
@@ -163,19 +158,17 @@ controller-striped layout；不要添加模型专用 packing 或 tile override�
 Linear 都使用共享 generated auto-tiling，见
 [Linear 自动分块](../knowledge/concepts/linear-autotiling.md)。
 
-## Source-only helper
+## 运行时转换 helper
 
-Hy-Embodied W8/W4 是 runtime 派生的评估路径。v1.0.0 未为它们绑定公开
-不可变派生 checkpoint 身份或 hash，因此状态为 Source-only；公开 FP16/W16
-profile 的状态不转移。
+Hy-Embodied W8/W4 在运行时转换，没有离线导出 CLI。输入和转换配方见
+[Hy-Embodied 指南](../examples/configs/hy_embodied/README.md)。
 
 `rpu_backend.quant.convert_qwen3_w4a16` 是 Qwen3 0.6B 的 in-memory 评估 helper，
 不是通用离线 `--src/--dst` converter，也不生成可分发 checkpoint；除非精确 release
 配置另行声明，应视为 Source-only。
 
 公开 `rpu_backend.quant` 导出 `quantize_linear_per_channel` 和
-`dequantize_linear_per_channel` 供 converter 作者使用。INT4 packing helper 属于实现层，
-其存在不代表模型支持。
+`dequantize_linear_per_channel` 供 converter 作者使用。INT4 packing helper 属于实现层；模型范围见[示例](model_support.zh.md)。
 
 ## Metadata 与加载
 
@@ -195,10 +188,10 @@ metadata 或重命名 scale tensor。
 3. 检查输出 manifest、metadata、tensor name/dtype/shape 和 file hash；
 4. 对比采样或完整 dequantized weight 与 FP16 来源；
 5. 通过公开 RhinoForge 入口加载，并确认 mismatch profile fail fast；
-6. RPU 对精确量化同 dtype 参考验证实现一致性，再按
+6. 设备对精确量化同 dtype 参考验证实现一致性，再按
    [验证策略](validation_policy.zh.md)对固定 FP16/CPU FP32 anchor 检查任务质量；
 7. 验证 warmup 和 Graph lifecycle；
 8. 在新进程运行公开 E2E TOML example。
 
 量化结果应与浮点来源分别记录，并注明精确 checkpoint 和执行配置。
-[示例](model_support.zh.md)存在或 weight cosine 通过均不等于 E2E 支持。
+E2E 准入使用对应[模型配置](model_support.zh.md)及其验证要求。

@@ -1,5 +1,6 @@
-# Public configuration; provide your own checkpoint and input assets.
-
+# Runtime scope: Text7 + lm_head w4a16; Vision W8A16; activations FP16.
+# W4 uses preserved AWQ/G32 at 2B/4B/8B and RTN/G32 at 32B.
+# 31 decode calls + the prefill token = 32 output tokens.
 [example]
 profile_id = "qwen3-vl-8b-runtime-w4a16.w4a16.multimodal"
 registry_alias = "qwen3-vl-8b-runtime-w4a16"
@@ -15,7 +16,7 @@ prompt = "Describe this image in one sentence."
 prefill_tokens = 430
 decode_steps = 31
 stop_on_eos = false
-images = ["assets/example.ppm"]
+images = ["/path/to/image_640x480.png"]
 
 [run]
 warmup = 2
@@ -24,8 +25,6 @@ inference_mode = false
 hwperf = false
 profile = false
 seed = 0
-
-[rpu_execution]
 
 [rpu_execution.model]
 num_cores = 8

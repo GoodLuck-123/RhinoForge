@@ -1,99 +1,37 @@
-# Model execution and profiling
+# Run and debug models
 
 [简体中文](model_testing.zh.md) | English
 
-The model scripts in `examples/` are direct entry points. The unified runner
-applies documented TOML environment settings and optional Torch profiling to
-the same scripts. Configurations are archived by model; see
-[model examples](../examples/README.md) for paths and precision semantics.
-The [full catalog](../examples/configs/README.md) includes Qwen3.5 Text and VL,
-separate Qwen3-VL components, and precision, core-count and input-length variants.
-Its `[example]/[input]/[run]` format (Pi0.5 uses `[pi05]`) works through the same
-entry points. A few independent integration templates use `[runner]/[model]`;
-each model has one canonical layout, without duplicate compatibility templates.
-Do not mix fields from the two formats.
+Select a TOML from [model examples](../examples/README.md). Runners live in `examples/runners/`; shared configuration and execution code is in `examples/common/`.
 
-## Run one configuration
+## Run
 
 ```sh
-python examples/run_model.py --config examples/configs/qwen3/text/0_6b/fp16.toml --check-config
-python examples/run_model.py --config examples/configs/qwen3_vl/vl/4b/w8a16.toml
-python examples/pi05.py --config examples/configs/pi05/2cam/w8a16_action_nvfp4.toml
+python examples/run.py --config examples/configs/qwen3/text/0_6b/fp16.toml --check-config
+python examples/run.py --config examples/configs/qwen3_vl/vl/4b/w8a16.toml
+python examples/run.py --config examples/configs/pi05/2cam/w8a16_action_nvfp4.toml
 ```
 
-`--check-config` does not load a model or access a board. Replace placeholder
-paths before execution. Model, image, batch and output paths in TOML are
-relative to the command's working directory. Quantized directories must carry
-the metadata expected by their loader; changing a filename does not convert
-weights. See [quantization](quantization.md).
+Replace placeholder paths and supply the checkpoint and inputs required by the model guide. Relative paths resolve from the command's working directory. `--check-config` validates configuration without loading weights or accessing a device. Quantized checkpoints require the loader's metadata; see [quantization](quantization.md).
 
-Examples requiring preprocessed tensors use caller-supplied CPU tensor mappings
-from the selected public checkpoint's processor. A component example does not
-represent the complete robot policy or application. Runtime checks govern the
-admitted input envelope. Historical qualification records do not define the
-current implementation or expand the scope of an example.
+Preprocessed-input examples accept CPU tensor mappings produced by the checkpoint's processor. Follow the selected model's shape and component requirements.
 
-## Torch profile
+## Execution controls
 
-Qwen and policy templates use `[run].profile = true` or `--profile`. Independent
-integration templates using `[runner/model/request]` use this section:
+- `run.warmup` defaults to two calls: BUILD followed by REPLAY for a new Graph signature. Set `run.runs` for subsequent calls.
+- With `warmup >= 2`, omit `warmup_decode_steps` or match `input.decode_steps`. Explicit `warmup=0` or `1` allows shortened cold-path diagnostics.
+- Decode steps count calls after the prefill token. EOS may stop generation early; fixed-length runs use `stop_on_eos=false` in both phases.
+- `run.output_dir` selects the output directory. Check the runner's `report.json` for output files and Graph state.
 
-```toml
-[runner.torch_profile]
-enabled = true
-output = "profiles/torch_trace.json"
-record_shapes = false
-profile_memory = false
-with_stack = false
-```
+## Diagnose a call
 
-For catalog configurations, use `[run].profile = true` or `--profile` instead.
-This collects one extra diagnostic inference after the timed runs. Set
-`run.warmup` and `run.runs` explicitly; short comparisons can use two warmups and
-two or three samples with `input.decode_steps = 32`. Preserve all other input
-and execution settings; omit `warmup_decode_steps` so warmup follows that limit.
-Decode steps count calls after the first prefill token; EOS can stop them early.
-Long-decode templates run only when explicitly selected. Example images are
-placeholders, not the fixtures used for earlier performance reports.
+`--profile` or `[run].profile=true` adds one Torch profiler call after ordinary execution. Enable shapes, memory or stacks only when needed. Traces can contain application data; store them outside the source tree.
 
-The shared runner defaults to two warmup calls so a lazy Graph can BUILD and
-then REPLAY before measured samples. It records their call latencies separately
-in `warmup_wall_ms_runs`; these do not enter the measured summary. Explicit
-`warmup=0` or `1` remains available for cold-path diagnostics. With `warmup >= 2`,
-`warmup_decode_steps` must be omitted or equal `input.decode_steps`, so both warmup
-calls visit the measured decode workload, including later positions and shapes.
-Shortened decode warmup is allowed only with explicit cold diagnostic counts.
-For fixed-length comparisons, set `stop_on_eos=false` in both phases.
-See [performance measurement](performance.md#separate-startup-and-steady-state)
-for validation cleanup and the timing boundary.
-
-The profiler wraps one execution. Profile collection changes timing, so collect
-unprofiled latency separately. Keep shape, memory and stack collection disabled
-unless the diagnosis needs them. The trace output can contain application data.
-For the complete runner settings see [runtime configuration](runtime_config.md).
-
-## Hardware performance trace
-
-The public example runner rejects `hwperf=true` during configuration checks.
-Use the installed runtime's hardware profiler only for a specific unresolved
-operator or synchronization question. Keep tracing separate from steady-state
-latency measurement. Record the exact kernel asset and input shape, and retain
-low-level traces with the application owner rather than in the source tree.
-
-## Focused checks
-
-Check that the board is idle, acquire its device lock and use an isolated
-environment bound to the intended worktree. Use one representative case per
-changed path: normally 3–10 replays, or 2 warmups and 5–10 performance samples.
-Confirm computational-path correctness before recording accumulated numerical
-differences. Stop after the affected checks pass; see
-[validation](validation_policy.md) and [performance](performance.md).
+The public runner rejects `hwperf=true`. For a device-specific issue, use the installed runtime's profiler and record the matching asset and input shape. See [runtime configuration](runtime_config.md) for controls and [validation](validation_policy.md) for focused checks.
 
 ## Qwen3 speech
 
-Speech uses the dedicated `examples/qwen3_asr.py` and `examples/qwen3_tts.py`
-entry points. Install the `audio` extra and use the frozen assets and TTS source
-preparation described in the [R1 speech guide](qwen3_audio_r1.zh.md). These scripts
-are independent of the text/vision TOML runner. Host checks are
-`tests/test_qwen3_asr.py`, `tests/test_qwen3_tts.py` and
-`tests/test_qwen3_tts_source.py`; they do not need board execution.
+Use `examples/qwen3_asr.py` and `examples/qwen3_tts.py` with the `audio` extra.
+The [speech guide](qwen3_audio.md) provides checkpoint downloads, TTS source
+preparation and complete commands. These dedicated scripts run independently
+of the text/vision TOML runner.

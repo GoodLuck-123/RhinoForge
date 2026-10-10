@@ -18,12 +18,12 @@ Class lifecycle:
   - ``Pi05Policy.from_lerobot_policy(...)`` — convenience wrapper that lazy-imports
     ``rpu_backend.adapters.pi05.Pi05Adapter`` (the internal orchestrator owns
     the swizzle / patch lock per G1-A).
-  - ``Pi05Policy.to('rpu')`` — irreversible CPU→RPU mutation routed through
+  - ``Pi05Policy.to('rpu')`` — irreversible CPU→device mutation routed through
     ``self._adapter.to_rpu()``.
   - ``Pi05Policy.select_action(batch)`` — public inference API; CR-R5 BLOCKER 7
     queue-pin loop CPU-pins ``_action_queue`` entries.
   - ``Pi05Policy._forward_rpu(batch, ...)`` — internal MSE-harness path; AM-7
-    requires ``_rpu_ready`` before claiming the RPU path.
+    requires ``_rpu_ready`` before claiming the device path.
 """
 from __future__ import annotations
 import os
@@ -88,6 +88,7 @@ class Pi05Policy:
         vlm_chunk_size: int | None = None,
         rpu_execution=None,
         optimized_profile=None,
+        graph_runtime_policy=None,
         **lerobot_kwargs: Any,
     ) -> "Pi05Policy":
         """D-01 canonical (delegates to loader.py per D-3-03).
@@ -96,6 +97,10 @@ class Pi05Policy:
         ``rpu_backend.adapters.pi05.loader`` (v5-02 D-12 relocated from
         ``transformers/pi05/``).
         """
+        if graph_runtime_policy is not None:
+            from rpu_backend.graph import GraphRuntimePolicy
+            if not isinstance(graph_runtime_policy, GraphRuntimePolicy):
+                raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
         if not isinstance(trust_remote_code, bool):
             raise TypeError(
                 "Pi05Policy.from_pretrained: trust_remote_code must be bool, "
@@ -135,6 +140,8 @@ class Pi05Policy:
                     if execution_explicit
                     else {}
                 ),
+                **({"graph_runtime_policy": graph_runtime_policy}
+                   if graph_runtime_policy is not None else {}),
                 **lerobot_kwargs,
             )
         bind_profile(policy, profile)
@@ -162,6 +169,7 @@ class Pi05Policy:
         *,
         rpu_execution=None,
         optimized_profile=None,
+        graph_runtime_policy=None,
     ) -> "Pi05Policy":
         """D-01 convenience.
 
@@ -170,6 +178,10 @@ class Pi05Policy:
         relocated from ``transformers/pi05/adapter.py``; the class body now
         sits in the package's ``__init__.py``).
         """
+        if graph_runtime_policy is not None:
+            from rpu_backend.graph import GraphRuntimePolicy
+            if not isinstance(graph_runtime_policy, GraphRuntimePolicy):
+                raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
         # ADR §6.2 / codex G1-A literal: lazy import; lock + class both in adapters/pi05/__init__.py.
         from rpu_backend.adapters.pi05 import Pi05Adapter
         from rpu_backend.api._execution import PI05_EXECUTION_COMPONENTS, PI05_EXECUTION_SUPPORTED
@@ -190,7 +202,9 @@ class Pi05Policy:
             supported_components=PI05_EXECUTION_COMPONENTS,
         )
         with profile_environment_scope(profile, rpu_execution):
-            inst._adapter = Pi05Adapter(lerobot_policy)
+            inst._adapter = Pi05Adapter(
+                lerobot_policy, **({"graph_runtime_policy": graph_runtime_policy}
+                                  if graph_runtime_policy is not None else {}))
         inst._rpu_ready = inst._adapter._rpu_is_ready
         inst._rpu_execution = execution_config
         text_config = getattr(inst._adapter, "_vlm_execution", {})
@@ -234,7 +248,7 @@ class Pi05Policy:
         ):
             raise RPUBackendError(
                 f"Pi05Policy.to({device!r}) rejected: weights are swizzled for "
-                "RPU (irreversible). Reload a fresh policy for another device."
+                "device (irreversible). Reload a fresh policy for another device."
             )
         self._lerobot_policy.to(device)
         return self
@@ -322,8 +336,8 @@ class Pi05Policy:
         """Public inference API (D-04). Returns CPU tensor (D-CR3-SELECT1).
 
         CR-R5 BLOCKER 7: after lerobot.select_action populates `_action_queue`
-        from predict_action_chunk (RPU-resident on RPU path), walk the queue
-        and `.cpu()` each entry IN-PLACE so zero RPU tensors survive.
+        from predict_action_chunk (device-resident on device path), walk the queue
+        and `.cpu()` each entry IN-PLACE so zero device tensors survive.
         """
         batch = _validate_batch(batch, entry_point="Pi05Policy.select_action")
 
@@ -376,7 +390,7 @@ class Pi05Policy:
                      num_steps: "int | None" = None) -> torch.Tensor:
         """D-701 internal surface — MSE harness path.
 
-        return_chunk=True -> predict_action_chunk (RPU tensor).
+        return_chunk=True -> predict_action_chunk (device tensor).
         return_chunk=False -> self.select_action (CPU-pinned, AM-2).
         AM-7: requires `_rpu_ready` (set by Pi05Policy.to('rpu')).
         """

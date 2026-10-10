@@ -21,7 +21,8 @@ vision）恰恰就是 mask 的定义域。
     empty_cameras            = 0        # ⇒ 缺相机不会补空图，直接少一段
     image_features 的键序     = top_head, hand_left, hand_right   ← 相机顺序
 
-⚠️ 产出的 prefix 侧张量恒为 **240 行**（2 + 3×58 + 64），与 `prefix_len=S` 无关 ——
+⚠️ prefix 侧张量三相机为 **240 行**（2 + 3×58 + 64），两相机为
+**192 行**（2 + 2×58 + 64 = 182，加 10 行无效尾部），与 `prefix_len=S` 无关 ——
 `HyVlaRunner` 自己按 `[:S]` 切（`runtime.py` 的 `prefill_mask[:S,:S]` /
 `cat([denoise_mask[:,:S], denoise_mask[:,-51:]])`）。所以这里不要提前切。
 """
@@ -261,6 +262,14 @@ def prefix_masks(n_images: int, grid: int, lang_masks: torch.Tensor):
     pad_masks = torch.cat(pad_parts, dim=1)
     att_masks = torch.tensor(att, dtype=torch.bool)[None]
     modality_mask = torch.tensor(modality, dtype=torch.bool)[None]
+    if n_images == 2:
+        # Keep 64 language slots; only the physical tail is padded. It must
+        # remain invisible to both prefix and suffix attention, with no extra
+        # valid tokens or camera segment. Three-camera fixtures stay unchanged.
+        padding = (-pad_masks.shape[1]) % 16
+        pad_masks = F.pad(pad_masks, (0, padding), value=False)
+        att_masks = F.pad(att_masks, (0, padding), value=False)
+        modality_mask = F.pad(modality_mask, (0, padding), value=False)
     return pad_masks, att_masks, modality_mask, idx_ranges, full_ranges
 
 

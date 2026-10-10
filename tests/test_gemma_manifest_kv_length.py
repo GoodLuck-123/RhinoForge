@@ -316,6 +316,7 @@ def test_rms_vector_routes_preserve_legacy_abi_and_use_canonical_schedule():
         (canonical_v16, "RMS_NORM_SPM_V16"),
         (canonical_v32, "RMS_NORM_SPM_V32"),
     ):
-        assert f"GET_KERNEL(KernelId::{kernel})" in route
+        assert f"KernelId::{kernel}" in route
+        assert "GET_KERNEL(" in route
         assert re.search(r"grid_x\s*=\s*8\s*;", route)
         assert re.search(r"reg3\s*=\s*static_cast<uint16_t>\(M / 8\)\s*;", route)

@@ -1,5 +1,5 @@
 // rpu_conv2d.cpp
-// RPU Conv2d kernel wrapper (DDR + SPM versions)
+// device Conv2d kernel wrapper (DDR + SPM versions)
 //
 // Uses conv_fp16_{f1|f3|fn}_spm_16b_w128x128_k{tile_k}_1core_buf1_lpaddr_univ
 // kernels from rhinoOpLib. Data layout: NHWC in SPM.
@@ -706,10 +706,10 @@ at::Tensor rpu_conv2d(
         int64_t ph = padding[0], pw = padding.size() > 1 ? padding[1] : padding[0];
         int64_t dh = dilation[0], dw = dilation.size() > 1 ? dilation[1] : dilation[0];
 
-        // cin must be divisible by 16 for RPU kernel
+        // cin must be divisible by 16 for device kernel
         if (Cin % 16 != 0) {
             if (log_at(2))
-                std::cout << "[RPU] CONV2D CPU_FALLBACK: cin=" << Cin
+                std::cout << "[device] CONV2D CPU_FALLBACK: cin=" << Cin
                           << " not divisible by 16" << std::endl;
             goto cpu_fallback;
         }
@@ -729,7 +729,7 @@ at::Tensor rpu_conv2d(
                 KernelId kid = select_conv_kernel_id(Kh, Kw, tile_k);
                 if (GET_KERNEL(kid)) {
                     if (log_at(4))
-                        std::cout << "[RPU] CONV2D single-core" << std::endl;
+                        std::cout << "[device] CONV2D single-core" << std::endl;
 
                     // NCHW -> NHWC
                     at::Tensor input_nhwc  = input.permute({0, 2, 3, 1}).contiguous();
@@ -815,7 +815,7 @@ at::Tensor rpu_conv2d(
                 if (!GET_KERNEL(kid_mc)) continue;
 
                 if (log_at(4))
-                    std::cout << "[RPU] CONV2D multi-core (" << nc << " cores)"
+                    std::cout << "[device] CONV2D multi-core (" << nc << " cores)"
                               << std::endl;
 
                 at::Tensor input_nhwc  = input.permute({0, 2, 3, 1}).contiguous();
@@ -878,13 +878,13 @@ at::Tensor rpu_conv2d(
         }
 
         if (log_at(2))
-            std::cout << "[RPU] CONV2D CPU_FALLBACK: no RPU path available" << std::endl;
+            std::cout << "[device] CONV2D CPU_FALLBACK: no device path available" << std::endl;
     }
 
 cpu_fallback:
     {
         if (log_at(2))
-            std::cout << "[RPU] CONV2D CPU_FALLBACK" << std::endl;
+            std::cout << "[device] CONV2D CPU_FALLBACK" << std::endl;
         auto input_dtype = input.scalar_type();
         auto cpu_input  = rpu_to_cpu_zerocopy(input).to(at::kFloat);
         auto cpu_weight = rpu_to_cpu_zerocopy(weight).to(at::kFloat);

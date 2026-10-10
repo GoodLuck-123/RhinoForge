@@ -27,8 +27,8 @@ release profile.
    [Adapter registry](../../docs/model_porting.md#6-register-the-adapter)
 7. **Run board-free gates, then exact-profile board gates.** Check early
    rejection, deterministic discovery, sizing and imports first; then verify
-   CPU/RPU numerics, warmup stability, graph lifecycle, multiple inputs, and
-   the maximum admitted envelope. [Verification gates](../../docs/model_porting.md#8-verification-gates)
+   CPU/device numerics, warmup stability, graph lifecycle, multiple inputs, and
+   the maximum admitted envelope. [Verification gates](../../docs/model_porting.md#8-focused-verification)
 8. **Publish evidence or narrow the claim.** A missing operation, unsafe memory
    plan, or hard semantic gate blocks that profile. Incomplete parity or task
    evidence keeps it Experimental or Source-only; it is not a reason to widen

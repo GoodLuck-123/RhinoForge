@@ -1,5 +1,5 @@
-# Public configuration; provide your own checkpoint and input assets.
-
+# Controlled evaluation only; no device numeric/Graph/performance certification.
+# See docs/model_assets.md for asset identity limits.
 [example]
 profile_id = "qwen3-vl-32b.w8a16.multimodal-controlled"
 registry_alias = "qwen3-vl-32b-w8a16"
@@ -14,7 +14,7 @@ QWEN3_VL_32B_ALLOW_GRAPH_BLOCKED = "1"
 component = "multimodal"
 prompt = "Describe the image."
 decode_steps = 4
-images = ["assets/example.ppm"]
+images = ["/path/to/image.png"]
 
 [run]
 warmup = 2

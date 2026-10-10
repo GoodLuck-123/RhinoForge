@@ -1,7 +1,7 @@
 # Runtime profiles
 
 A RhinoForge runtime profile is the complete execution contract for one model
-configuration. It is not a loose collection of environment switches.
+configuration. Bind its settings before installation.
 
 ## Profile identity
 
@@ -10,12 +10,11 @@ Treat a profile as a tuple of:
 - model/checkpoint revision and precision or quantization format;
 - admitted input, sequence, image/view, batch, and action envelope;
 - immutable per-handle execution planning;
-- RhinoForge, Rhino Launch, and combined operator-asset runtime set; and
+- RhinoForge, Rhino Launch, and main/expansion operator-asset runtime set; and
 - effective public runtime configuration.
 
 Changing any member creates a new profile that needs its own admission,
-correctness, lifecycle, and performance evidence. An architecture-name match or
-registry alias does not inherit another profile's support status.
+correctness and lifecycle checks.
 
 ## Configuration layers
 
@@ -79,8 +78,7 @@ selectors to reproduce an older run.
 
 - [Runtime configuration](../../docs/runtime_config.md)
 - [Examples](../../docs/model_support.md)
-- [Model execution and profiling](../../docs/model_testing.md)
-- [Performance measurement](../../docs/performance.md)
+- [Run and debug models](../../docs/model_testing.md)
 - [Restricted runtime assets](../../docs/runtime_assets.md)
 - [Automatic residual reduction](allreduce-routing.md)
 - [Generated Linear auto-tiling](linear-autotiling.md)

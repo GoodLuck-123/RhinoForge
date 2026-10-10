@@ -133,16 +133,16 @@ static std::tuple<at::Tensor, at::Tensor> rpu_apply_rotary_pos_emb_fallback(
   return std::make_tuple(q_out, k_out);
 }
 
-// High-level RoPE interface for RPU unified layout
+// High-level RoPE interface for device unified layout
 // Uses llama_rope kernel with grid.x = seq_len for prefill
 // cos/sin must be in [max_seq_len, head_dim//2] format for kernel path
 // Formula: y = (x * cos) + (rotate_half(x) * sin)
 //
-// Input layout: [batch, seq_len, heads, head_dim] (RPU unified layout)
+// Input layout: [batch, seq_len, heads, head_dim] (device unified layout)
 // Note: This is different from PyTorch standard [batch, heads, seq_len, head_dim]
 std::tuple<at::Tensor, at::Tensor> rpu_apply_rotary_pos_emb(
-    const at::Tensor &query,     // [batch, seq_len, heads, head_dim] (RPU unified)
-    const at::Tensor &key,       // [batch, seq_len, heads, head_dim] (RPU unified)
+    const at::Tensor &query,     // [batch, seq_len, heads, head_dim] (device unified)
+    const at::Tensor &key,       // [batch, seq_len, heads, head_dim] (device unified)
     const at::Tensor &cos,       // [seq_len, head_dim] or [max_seq, head_dim//2]
     const at::Tensor &sin,       // [seq_len, head_dim] or [max_seq, head_dim//2]
     const at::Tensor &position_ids  // [batch, seq_len] (unused, for API compatibility)
@@ -150,7 +150,7 @@ std::tuple<at::Tensor, at::Tensor> rpu_apply_rotary_pos_emb(
   RECORD_FUNCTION("rpu::apply_rotary_pos_emb", {query, key, cos, sin});
 
   TORCH_CHECK(query.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_apply_rotary_pos_emb: query must be on RPU");
+              "rpu_apply_rotary_pos_emb: query must be on device");
   TORCH_CHECK(query.dim() == 4, "rpu_apply_rotary_pos_emb expects 4D input [batch, seq_len, heads, head_dim]");
 
   // Input layout: [batch, heads, seq_len, head_dim] (PyTorch standard)
@@ -203,13 +203,13 @@ std::tuple<at::Tensor, at::Tensor> rpu_apply_rotary_pos_emb(
   }
 
   auto q_contig = query.contiguous();
-  auto k_contig = key.contiguous(); 
+  auto k_contig = key.contiguous();
 
   // query/key: [1, seq_len, heads, head_dim] contiguous has same memory layout as [seq_len, heads, head_dim]
   // No view/squeeze needed - just use data pointers directly
   TORCH_CHECK(q_contig.is_contiguous() && k_contig.is_contiguous(),
               "rpu_apply_rotary_pos_emb: query and key must be contiguous");
-         
+
   c10::Half *q_ptr = const_cast<c10::Half*>(q_contig.data_ptr<c10::Half>());
   c10::Half *k_ptr = const_cast<c10::Half*>(k_contig.data_ptr<c10::Half>());
 

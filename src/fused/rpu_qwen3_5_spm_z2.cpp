@@ -172,7 +172,7 @@ void stage_non_image_rows_locked(Qwen3_5Z2State& s,
                     hidden.dim() == 3 && hidden.size(0) == 1 &&
                     hidden.size(1) == s.execution_len &&
                     hidden.size(2) == kCanaryTextHidden,
-                "qwen3_5_spm_z2: hidden must be contiguous fp16 RPU [1,128,2048]");
+                "qwen3_5_spm_z2: hidden must be contiguous fp16 device [1,128,2048]");
     TORCH_CHECK(s.text_port_addr != 0 && s.image_slice_addr != 0,
                 "qwen3_5_spm_z2: physical text port is not bound");
 

@@ -34,7 +34,7 @@ from rpu_backend.api.errors import (
 from rpu_backend.adapters.qwen3_5.quant_scope import (
     FP16, W4A16_PGRP, LEGACY_W8A16_PROFILE, is_full_from_layer_types,
     normalize_quant_config, resolve_quant_specs, scale_key,
-    validate_legacy_text_profile,
+    validate_legacy_text_profile, validate_modern_27b_profile,
 )
 from rpu_backend.runtime.log import _LOG
 
@@ -59,6 +59,7 @@ def parse_quant_config(config):
         quant = normalize_quant_config(is_full, quant)
         resolve_quant_specs(is_full, quant)
         validate_legacy_text_profile(config)
+        validate_modern_27b_profile(config)
     except ValueError as exc:
         raise UnsupportedModelError(str(exc)) from exc
 
@@ -404,7 +405,7 @@ def load_qwen3_5_model(
     """
     if dtype is not torch.float16:
         raise RPUUnsupportedDtypeError(
-            f"Qwen3.5 requires dtype=torch.float16, got {dtype}. RPU kernels are "
+            f"Qwen3.5 requires dtype=torch.float16, got {dtype}. device kernels are "
             "fp16-primary.")
 
     if config is None:
@@ -423,7 +424,7 @@ def load_qwen3_5_model(
         model = AutoModelForImageTextToText.from_pretrained(
             pretrained_name_or_path, torch_dtype=dtype, **load_kwargs)
         # text_config.dtype=bfloat16 overrides from_pretrained(dtype=fp16); the
-        # RPU install path requires fp16.
+        # device install path requires fp16.
         return model.half().eval()
 
     ckpt_dir = Path(pretrained_name_or_path).expanduser()

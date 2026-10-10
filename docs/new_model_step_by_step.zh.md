@@ -19,7 +19,7 @@
 - 最大允许 cache 长度；
 - shape 相同的两个不同输入。
 
-CPU 参考实例保持独立。RPU 权重转换是原地操作，不能安全逆转。
+CPU 参考实例保持独立。设备权重转换是原地操作，不能安全逆转。
 
 **Done：** 不使用 RhinoForge 时，固定输入可重复产生两个 reference 契约。
 
@@ -129,7 +129,7 @@ python examples/causal_lm.py --config examples/configs/<model>/<checkpoint>/<pre
 ```
 
 在[模型资产](model_assets.zh.md)更新来源、revision、destination 和 hash；只有入口表
-变化时才更新[模型运行与性能分析](model_testing.zh.md)。Release-only 环境值不得放入
+变化时才更新[模型运行与调试](model_testing.zh.md)。Release-only 环境值不得放入
 TOML；以[运行时配置](runtime_config.zh.md)为 allowlist。
 
 运行现有无板卡检查：
@@ -145,7 +145,7 @@ python -m pytest \
 
 ## 8. 运行配置门禁并晋级
 
-在新进程中使用 release 匹配依赖和资产构建，然后在 RPU 板卡运行精确 TOML。证据包括：
+在新进程中使用 release 匹配依赖和资产构建，然后在 设备 板卡运行精确 TOML。证据包括：
 
 - [验证策略](validation_policy.zh.md)固定的硬语义、同 dtype 实现一致性、CPU FP32
   anchor 和代表性任务门禁；

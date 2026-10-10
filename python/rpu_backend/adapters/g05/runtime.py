@@ -1,7 +1,8 @@
-"""Galaxea G0.5 Qwen3.5 VLM runtime on RPU.
+"""Galaxea G0.5 Qwen3.5 VLM runtime on device.
 
 The canonical G0.5 components reuse the shipping Qwen3.5 fused runtime.
-Single-frame vision uses its experimental vision path. Action I/O projections and FP16 Euler run on RPU while time
+Single-frame and canonical K=6 factorized-temporal vision use its experimental
+vision path. Action I/O projections and FP16 Euler run on device while time
 conditioning remains on the host. BAR and training are intentionally unsupported.
 """
 from __future__ import annotations
@@ -26,19 +27,20 @@ from rpu_backend.adapters.g05.action import (
     _rpu_g05_inference_fm,
     patch_g05_action_expert_for_rpu,
 )
-
-
-_G05_LAYER_TYPES = tuple(
-    "full_attention" if (i + 1) % 4 == 0 else "linear_attention"
-    for i in range(24)
+from rpu_backend.adapters.g05.quant import (
+    check_installed_weight_dtype,
+    check_installed_linear_accumulation,
+    normalize_linear_accumulation,
+    validate_linear_accumulation,
+    normalize_math_precision, validate_math_precision,
+    check_installed_math_precision, require_g05_high_math_native,
+    linear_execution_config,
+    normalize_weight_dtype,
+    normalize_action_weight_dtype, check_installed_action_weight_dtype,
+    require_g05_action_nvfp4_native,
+    quantize_g05_text_weights,
 )
-_G05_VLM_PROFILE = (
-    2048, 6144, 24, 8, 2, 256,
-    16, 16, 128, 128, 4,
-    False, "silu", "embedding", "lm_head", None, True,
-    1.0e-6, 10_000_000.0, "default", (11, 11, 10), True, 0.25,
-    _G05_LAYER_TYPES,
-)
+
 _INSTALL_LOCK = threading.Lock()
 _VISION_PATCH_LOCK = threading.Lock()
 _POLICY_INSTALL_LOCK = threading.Lock()
@@ -181,6 +183,12 @@ def _transactional_g05_policy_install(function):
     """Serialize composite publication and restore host hooks on failure."""
     @functools.wraps(function)
     def wrapped(policy, *args, **kwargs):
+        weight_dtype = normalize_weight_dtype(kwargs.get("weight_dtype", "fp16"))
+        action_weight_dtype = normalize_action_weight_dtype(
+            kwargs.get("action_weight_dtype"), weight_dtype=weight_dtype)
+        accumulation = normalize_linear_accumulation(
+            kwargs.get("linear_accumulation", "acc32"))
+        math_precision = normalize_math_precision(kwargs.get("math_precision", "base"))
         if not _POLICY_INSTALL_LOCK.acquire(blocking=False):
             raise RuntimeError("another G0.5 policy installation is in progress")
         snapshots = ()
@@ -193,6 +201,11 @@ def _transactional_g05_policy_install(function):
         try:
             if getattr(policy, "_rpu_g05_policy_ready", False):
                 if _g05_policy_runtime_ready(policy):
+                    check_installed_weight_dtype(policy, weight_dtype)
+                    check_installed_action_weight_dtype(
+                        policy, action_weight_dtype, weight_dtype=weight_dtype)
+                    check_installed_linear_accumulation(policy, accumulation)
+                    check_installed_math_precision(policy, math_precision)
                     requested = kwargs.get("rpu_execution")
                     if requested is not None:
                         max_seq_len = kwargs.get("max_seq_len", 2048)
@@ -233,6 +246,8 @@ def _transactional_g05_policy_install(function):
                     (
                         "forward",
                         "_rpu_g05_vision_forward_impl",
+                        "_rpu_g05_temporal_pe",
+                        "_rpu_g05_math_precision",
                         "_rpu_execution",
                         "_rpu_execution_component_id",
                         "_rpu_execution_generation",
@@ -252,6 +267,7 @@ def _transactional_g05_policy_install(function):
                         "_rpu_g05_max_seq_len",
                         "_rpu_g05_owner",
                         "_rpu_g05_original_decode",
+                        "_rpu_g05_math_precision",
                         "_rpu_execution",
                         "_rpu_execution_component_id",
                         "_rpu_execution_generation",
@@ -281,6 +297,8 @@ def _transactional_g05_policy_install(function):
                         "_rpu_g05_original_encode_time",
                         "_rpu_g05_original_forward",
                         "_rpu_g05_action_ready",
+                        "_rpu_g05_action_weight_dtype",
+                        "_rpu_g05_math_precision",
                         "_rpu_execution",
                         "_rpu_execution_component_id",
                         "_rpu_execution_generation",
@@ -295,6 +313,10 @@ def _transactional_g05_policy_install(function):
                         "_forward_embed",
                         "_rpu_g05_original_inference_fm",
                         "inference_fm",
+                        "_rpu_g05_certified_k1_vision",
+                        "_rpu_g05_acc16_experiment",
+                        "_rpu_g05_linear_accumulation",
+                        "_rpu_g05_math_precision",
                         "_rpu_execution",
                         "_execution_session",
                     ),
@@ -313,8 +335,16 @@ def _transactional_g05_policy_install(function):
                     policy,
                     (
                         "_rpu_g05_original_predict_action",
+                        "_rpu_g05_original_policy_forward",
+                        "_rpu_g05_ensure_sample_list",
+                        "_rpu_g05_original_discrete_action",
+                        "discrete_action",
+                        "_rpu_g05_fm_only_customer_release",
+                        "forward",
                         "predict_action",
                         "_rpu_g05_policy_ready",
+                        "_rpu_g05_math_precision",
+                        "_rpu_g05_action_weight_dtype",
                         "_rpu_execution",
                         "_rpu_execution_generation",
                         "_rpu_g05_execution_components",
@@ -396,7 +426,230 @@ def _g05_token_index(model):
         ):
             return token_index
     raise TypeError(
-        "G0.5 RPU direct fusion could not resolve the model's TOKEN_INDEX enum"
+        "G0.5 device direct fusion could not resolve the model's TOKEN_INDEX enum"
+    )
+
+
+def _is_vla_rtc_fm_release(policy, model) -> bool:
+    """Recognize the exact K1 mixed FM+AR profile whose public output is FM."""
+    model_config = getattr(model, "cfg", None)
+    vision_config = getattr(
+        getattr(model, "vision_tower", None), "config", None
+    )
+    fm_helper = getattr(model, "fm_helper", None)
+    return (
+        (type(policy).__module__, type(policy).__name__)
+        == ("vla_rtc.models.g05.g05_policy_qwen35", "G05PolicyQwen35")
+        and (type(model).__module__, type(model).__name__)
+        == ("vla_rtc.models.g05.g05_model_qwen35", "G05ModelQwen35")
+        and bool(getattr(policy, "continuous_action", False))
+        and bool(getattr(policy, "discrete_action", False))
+        and bool(getattr(policy, "return_continuous_action", False))
+        and not bool(getattr(policy, "predict_cot", False))
+        and bool(getattr(model, "use_training_rtc", False))
+        and int(getattr(model, "max_inference_delay", -1)) == 8
+        and _g05_camera_profile_matches(policy, model)
+        and int(getattr(model_config, "cond_steps", -1)) == 1
+        and int(getattr(model_config, "num_obs_steps", -1)) == 1
+        and getattr(model_config, "position_ids_type", None) == "pi0fast"
+        and getattr(model_config, "ae_vlm_condition_mode", None)
+        == "cross_attn_only"
+        and int(getattr(vision_config, "temporal_freq", -1)) == 0
+        and getattr(vision_config, "spacetime_mode", None) == "factorized"
+        and getattr(vision_config, "token_drop_layer", None) is None
+        and not bool(getattr(vision_config, "batch_all_cameras", False))
+        and int(getattr(vision_config, "patch_size", -1)) == 16
+        and int(getattr(vision_config, "temporal_patch_size", -1)) == 2
+        and int(getattr(vision_config, "spatial_merge_size", -1)) == 2
+        and int(getattr(vision_config, "in_channels", -1)) == 3
+        and int(getattr(vision_config, "out_hidden_size", -1)) == 2048
+        and getattr(vision_config, "hidden_act", None) == "gelu_pytorch_tanh"
+        and int(getattr(fm_helper, "horizon_steps", -1)) == 32
+        and int(getattr(fm_helper, "action_dim", -1)) == 27
+        and int(getattr(fm_helper, "num_inference_steps", -1)) == 10
+        and getattr(fm_helper, "time_convention", None) == "pi_convention"
+        and not bool(getattr(fm_helper, "action_causal", True))
+    )
+
+
+_G05_RELEASE_CAMERA_NAMES = ("head_rgb", "left_wrist_rgb", "right_wrist_rgb")
+_G05_TWO_CAMERA_NAMES = ("head_rgb", "left_wrist_rgb")
+
+
+def _g05_release_image_specs(processor):
+    names = getattr(processor, "_rpu_g05_camera_names", _G05_RELEASE_CAMERA_NAMES)
+    if names not in (_G05_RELEASE_CAMERA_NAMES, _G05_TWO_CAMERA_NAMES):
+        raise ValueError("G0.5 camera profile metadata is invalid")
+    return _G05_RELEASE_IMAGE_SPECS[:len(names)]
+
+
+def _g05_camera_profile_matches(policy, model) -> bool:
+    """Bind the explicit cold camera selection to every live source owner."""
+    names = getattr(policy, "_rpu_g05_camera_names", None)
+    if names is None:
+        return int(getattr(policy, "num_input_images", -1)) == 3
+    if names not in (_G05_RELEASE_CAMERA_NAMES, _G05_TWO_CAMERA_NAMES):
+        return False
+    if getattr(model, "_rpu_g05_camera_names", None) != names:
+        return False
+    processor = getattr(policy, "_rpu_g05_camera_processor", None)
+    if processor is None or getattr(processor, "_rpu_g05_camera_names", None) != names:
+        return False
+    if int(getattr(policy, "num_input_images", -1)) != len(names):
+        return False
+    if int(getattr(processor, "num_output_cameras", -1)) != len(names):
+        return False
+    meta = tuple(getattr(processor, "shape_meta", {}).get("images", ()))
+    expected = tuple((key, raw, (3, 256, 256))
+                     for key, raw in _G05_RELEASE_IMAGE_SPECS[:len(names)])
+    actual = tuple((x.get("key"), tuple(x.get("raw_shape", ())), tuple(x.get("shape", ())))
+                   for x in meta)
+    if actual != expected:
+        return False
+    tokenizer = getattr(processor, "tokenizer", None)
+    if (int(getattr(tokenizer, "num_input_images", -1)) != len(names)
+            or tuple(getattr(tokenizer, "image_sizes", {})) != names
+            or any(tuple(size) != (256, 256)
+                   for size in tokenizer.image_sizes.values())):
+        return False
+    configs = (getattr(policy, "config", None), getattr(policy, "model_config", None),
+               getattr(model, "cfg", None), getattr(getattr(policy, "processor", None), "model_cfg", None))
+    return all(int(getattr(config, "num_input_images", -1)) == len(names)
+               for config in configs if config is not None)
+
+
+def configure_g05_camera_profile(policy, processor, *, camera_names=_G05_RELEASE_CAMERA_NAMES):
+    """Select original three cameras or head/left K1 before CPU or device inference.
+
+    The two-camera profile is a controlled experiment with fresh CPU references.
+    Load the original customer checkpoint on CPU; camera selection happens
+    before preprocessing, runtime installation and irreversible swizzle.
+    """
+    if not isinstance(camera_names, (tuple, list)):
+        raise TypeError("G0.5 camera_names must be an ordered sequence")
+    names = tuple(camera_names)
+    if names not in (_G05_RELEASE_CAMERA_NAMES, _G05_TWO_CAMERA_NAMES):
+        raise ValueError("G0.5 cameras must be original head/left/right or head/left")
+    if not _POLICY_INSTALL_LOCK.acquire(blocking=False):
+        raise RuntimeError("another G0.5 policy installation is in progress")
+    try:
+        model = getattr(policy, "model", None)
+        if model is None:
+            raise TypeError("expected original customer G05 policy.model")
+        if (getattr(policy, "_rpu_g05_policy_install_started", False)
+                or getattr(policy, "_rpu_g05_policy_ready", False)
+                or getattr(processor, "_rpu_g05_release_processor_ready", False)
+                or getattr(policy, "_execution_session", None) is not None
+                or getattr(model, "_cached_image_grid_thw", None) is not None
+                or any(getattr(child, "_rpu_qwen3_5", None) is not None
+                       or getattr(child, "_rpu_vision_handle", None) is not None
+                       for child in (getattr(model, "vlm", None),
+                                     getattr(model, "action_expert", None),
+                                     getattr(model, "vision_tower", None)))):
+            raise RuntimeError("G0.5 camera selection requires a fresh cold CPU checkpoint")
+        existing = getattr(policy, "_rpu_g05_camera_names", None)
+        if existing is not None:
+            if existing != names:
+                raise RuntimeError("G0.5 camera selection conflicts; reload the original checkpoint")
+            if getattr(policy, "_rpu_g05_camera_processor", None) is not processor or not _g05_camera_profile_matches(policy, model):
+                raise RuntimeError("G0.5 camera profile marker has incomplete source state")
+            return policy
+        if not _is_vla_rtc_fm_release(policy, model):
+            raise ValueError("G0.5 camera selection requires the original exact K1 three-camera release")
+        if getattr(policy, "training", True) or getattr(processor, "is_train", None) is not False:
+            raise ValueError("G0.5 camera selection requires eval policy and processor")
+        if any(parameter.device.type != "cpu" for parameter in policy.parameters()):
+            raise ValueError("G0.5 camera selection requires original CPU weights")
+        if ((type(processor).__module__, type(processor).__name__) !=
+                ("vla_rtc.processors.base_processor", "BaseProcessor")
+                or int(getattr(processor, "num_obs_steps", -1)) != 1
+                or int(getattr(processor, "num_output_cameras", -1)) != 3
+                or int(getattr(processor, "action_output_dim", -1)) != 27
+                or int(getattr(processor, "proprio_output_dim", -1)) != 27
+                or getattr(processor, "pixel_values_format", None) != "dict"):
+            raise ValueError("G0.5 camera selection requires the original K1/three-camera/27D BaseProcessor")
+        meta = tuple(getattr(processor, "shape_meta", {}).get("images", ()))
+        expected = tuple((key, raw, (3, 256, 256)) for key, raw in _G05_RELEASE_IMAGE_SPECS)
+        actual = tuple((x.get("key"), tuple(x.get("raw_shape", ())), tuple(x.get("shape", ())))
+                       for x in meta)
+        tokenizer = getattr(processor, "tokenizer", None)
+        if ((type(tokenizer).__module__, type(tokenizer).__name__) !=
+                ("vla_rtc.models.g05.bench_adapter", "G05BenchTokenizer")
+                or int(getattr(tokenizer, "num_input_images", -1)) != 3
+                or tuple(getattr(tokenizer, "image_sizes", {})) != _G05_RELEASE_CAMERA_NAMES
+                or any(tuple(x) != (256, 256) for x in tokenizer.image_sizes.values())
+                or getattr(tokenizer, "cot_mode", None) != "none"
+                or actual != expected):
+            raise ValueError("G0.5 original camera/tokenizer metadata drifted")
+        transforms = getattr(processor, "val_transforms", None)
+        if not isinstance(transforms, Mapping) or tuple(transforms) != _G05_RELEASE_CAMERA_NAMES:
+            raise ValueError("G0.5 original camera transforms drifted")
+        configs = []
+        for config in (getattr(policy, "config", None), getattr(policy, "model_config", None),
+                       getattr(model, "cfg", None), getattr(getattr(policy, "processor", None), "model_cfg", None)):
+            if config is not None and all(config is not x for x in configs):
+                if int(getattr(config, "num_input_images", -1)) != 3:
+                    raise ValueError("G0.5 original model camera metadata drifted")
+                configs.append(config)
+        if names == _G05_RELEASE_CAMERA_NAMES:
+            return policy  # Original default source/runtime contract is untouched.
+        new_meta = copy.deepcopy(processor.shape_meta)
+        new_meta["images"] = [copy.deepcopy(x) for x in meta[:2]]
+        snapshots = _snapshot_instance_attrs(policy, ("num_input_images", "_rpu_g05_camera_names", "_rpu_g05_camera_processor"))
+        snapshots += _snapshot_instance_attrs(model, ("_rpu_g05_camera_names",))
+        snapshots += _snapshot_instance_attrs(processor, ("shape_meta", "num_output_cameras", "train_transforms", "val_transforms", "_rpu_g05_camera_names"))
+        snapshots += _snapshot_instance_attrs(tokenizer, ("num_input_images", "image_sizes"))
+        config_before = [(config, config.num_input_images) for config in configs]
+        try:
+            for config in configs:
+                config.num_input_images = 2
+            policy.num_input_images = 2
+            processor.shape_meta = new_meta
+            processor.num_output_cameras = 2
+            for attr in ("train_transforms", "val_transforms"):
+                value = getattr(processor, attr, None)
+                if value is not None:
+                    setattr(processor, attr, {key: value[key] for key in names})
+            tokenizer.num_input_images = 2
+            tokenizer.image_sizes = {key: tokenizer.image_sizes[key] for key in names}
+            model._rpu_g05_camera_names = names
+            processor._rpu_g05_camera_names = names
+            policy._rpu_g05_camera_names = names
+            policy._rpu_g05_camera_processor = processor
+            if not _g05_camera_profile_matches(policy, model):
+                raise RuntimeError("G0.5 camera profile publication is incomplete")
+        except BaseException:
+            _restore_instance_attrs(snapshots)
+            for config, original_count in reversed(config_before):
+                config.num_input_images = original_count
+            raise
+        return policy
+    finally:
+        _POLICY_INSTALL_LOCK.release()
+
+
+def _get_lkn_batch_config() -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+    """Return the extension-load snapshot and the current LKN env values."""
+    try:
+        from rpu_backend import _cpp_ext
+
+        values = tuple(int(value) for value in _cpp_ext.get_lkn_batch_config())
+    except (AttributeError, ImportError, TypeError, ValueError):
+        return None
+    if len(values) != 6:
+        return None
+    return values[:3], values[3:]
+
+
+def _g05_packed_vision_capacity_enabled() -> bool:
+    """Require a stable large-Graph envelope loaded before the SDK pool."""
+    config = _get_lkn_batch_config()
+    if config is None:
+        return False
+    loaded, current = config
+    return loaded == current and all(
+        actual >= required
+        for actual, required in zip(loaded, (262_144, 32, 256))
     )
 
 
@@ -409,41 +662,9 @@ class _G05SharedImages(dict):
 
 
 def _check_g05_vlm_profile(config) -> None:
-    """Accept only the canonical G0.5 Qwen3.5-2B VLM."""
-    from rpu_backend.api.errors import UnsupportedModelError
+    from rpu_backend.adapters.qwen3_5._g05_cold import _check_g05_vlm_profile as check_profile
 
-    rope = getattr(config, "rope_parameters", None) or {}
-    profile = (
-        int(config.hidden_size),
-        int(config.intermediate_size),
-        int(config.num_hidden_layers),
-        int(config.num_attention_heads),
-        int(config.num_key_value_heads),
-        int(config.head_dim),
-        int(config.linear_num_value_heads),
-        int(config.linear_num_key_heads),
-        int(config.linear_value_head_dim),
-        int(config.linear_key_head_dim),
-        int(config.linear_conv_kernel_dim),
-        bool(config.attention_bias),
-        str(config.hidden_act),
-        str(config.input_type),
-        str(config.output_type),
-        getattr(config, "adaptive_mode", None),
-        bool(config.use_final_norm),
-        float(config.rms_norm_eps),
-        float(rope.get("rope_theta", 0.0)),
-        str(rope.get("rope_type", "")),
-        tuple(int(x) for x in rope.get("mrope_section", ())),
-        bool(rope.get("mrope_interleaved", False)),
-        float(rope.get("partial_rotary_factor", 0.0)),
-        tuple(config.layer_types),
-    )
-    if profile != _G05_VLM_PROFILE:
-        raise UnsupportedModelError(
-            "G0.5 RPU bring-up supports only the canonical Qwen3.5-2B VLM "
-            f"profile; got {profile}."
-        )
+    return check_profile(config)
 
 
 def _preflight_g05_vlm(model):
@@ -453,12 +674,12 @@ def _preflight_g05_vlm(model):
         raise TypeError("expected G05ModelQwen35 with model.vlm.layers and model.vlm.norm")
     if getattr(model, "training", True):
         raise NotImplementedError(
-            "G0.5 RPU bring-up supports inference only; call model.eval()"
+            "G0.5 device bring-up supports inference only; call model.eval()"
         )
     _check_g05_vlm_profile(vlm.config)
     if getattr(getattr(model, "cfg", None), "position_ids_type", None) != "pi0fast":
         raise NotImplementedError(
-            "G0.5 RPU q1 decode currently requires position_ids_type=pi0fast"
+            "G0.5 device q1 decode currently requires position_ids_type=pi0fast"
         )
     return vlm
 
@@ -474,14 +695,14 @@ def _check_causal_mask(mask, *, query_len: int, past_len: int) -> None:
     expected_shape = (1, 1, query_len, past_len + query_len)
     if tuple(mask.shape) != expected_shape:
         raise NotImplementedError(
-            f"G0.5 RPU expected causal mask shape {expected_shape}, got {tuple(mask.shape)}"
+            f"G0.5 device expected causal mask shape {expected_shape}, got {tuple(mask.shape)}"
         )
     q = torch.arange(query_len).view(query_len, 1)
     k = torch.arange(past_len + query_len).view(1, past_len + query_len)
     expected_zeros = (k <= past_len + q).view(expected_shape)
     if not torch.equal(mask.eq(0), expected_zeros):
         raise NotImplementedError(
-            "G0.5 RPU supports only the standard causal mask; BAR/block masks are not ported"
+            "G0.5 device supports only the standard causal mask; BAR/block masks are not ported"
         )
 
 
@@ -503,12 +724,16 @@ def _rpu_g05_build_causal_mask_and_position_ids(
         or attention_mask.device.type != "cpu"
         or input_ids.shape != attention_mask.shape
     ):
+        # The customer Qwen3.5 release predates ``is_action_block``.  Passing
+        # its default False value would make every guarded fallback fail before
+        # the original mask builder can run.
+        kwargs = {"kv_len": kv_len, "dtype": dtype}
+        if is_action_block:
+            kwargs["is_action_block"] = True
         return original(
             input_ids,
             attention_mask,
-            kv_len=kv_len,
-            dtype=dtype,
-            is_action_block=is_action_block,
+            **kwargs,
         )
 
     helper = self.mask_helper
@@ -566,7 +791,7 @@ def _rpu_g05_build_causal_mask_and_position_ids(
 
 
 def _rpu_g05_vlm_decode(self, hidden: torch.Tensor) -> torch.Tensor:
-    """Run the still-host-owned lm_head after the RPU text decoder."""
+    """Run the still-host-owned lm_head after the device text decoder."""
     weight = self.output_proj.weight
     hidden = hidden.to(device=weight.device, dtype=weight.dtype)
     with torch.autocast(weight.device.type, enabled=False):
@@ -582,11 +807,34 @@ def _rpu_g05_vision_forward(
     bsz: int = 1,
 ):
     """Adapt the Qwen3.5 vision result to G0.5's tuple contract."""
-    if int(num_frames) != 1 or int(bsz) != 1:
+    num_frames = int(num_frames)
+    camera_batch_count = int(bsz)
+    if num_frames not in (1, 6) or camera_batch_count not in (1, 3):
         raise NotImplementedError(
-            "G0.5 RPU vision supports only single-frame calls with bsz=1"
+            "G0.5 device vision supports only canonical B_camera=1/3, K=1/6 input"
         )
-    output = self._rpu_g05_vision_forward_impl(hidden_states, grid_thw)
+    packed_b3 = (
+        camera_batch_count == 3
+        and num_frames == 6
+        and _g05_packed_vision_capacity_enabled()
+    )
+    if packed_b3:
+        grid_cpu = grid_thw.detach().cpu()
+        if (
+            tuple(grid_cpu.shape) != (18, 3)
+            or hidden_states.shape[0] != 4608
+            or not torch.equal(grid_cpu, grid_cpu[0].expand_as(grid_cpu))
+            or int(grid_cpu[0].prod()) != 256
+        ):
+            raise ValueError(
+                "G0.5 packed vision requires B_camera=3,K=6,P=256 equal grids"
+            )
+    output = self._rpu_g05_vision_forward_impl(
+        hidden_states,
+        grid_thw,
+        _rpu_temporal_num_frames=num_frames,
+        _rpu_camera_batch_count=3 if packed_b3 else 1,
+    )
     plan = getattr(self, "_rpu_vision_last_a6_plan", None)
     if isinstance(plan, Mapping):
         receipt = dict(plan)
@@ -605,7 +853,7 @@ def _preflight_g05_vision(model):
     """Validate the complete canonical tower before FP16 cast or swizzle."""
     if getattr(model, "training", True):
         raise NotImplementedError(
-            "G0.5 RPU vision supports inference only; call model.eval()"
+            "G0.5 device vision supports inference only; call model.eval()"
         )
     vision = getattr(model, "vision_tower", None)
     if vision is None:
@@ -637,7 +885,7 @@ def _preflight_g05_vision(model):
         "gelu_pytorch_tanh",
     ):
         raise NotImplementedError(
-            "G0.5 RPU vision requires the canonical Qwen3.5 tower profile; "
+            "G0.5 device vision requires the canonical Qwen3.5 tower profile; "
             f"got {vision_profile}"
         )
     temporal_profile = (
@@ -647,9 +895,12 @@ def _preflight_g05_vision(model):
         getattr(cfg, "temporal_pe_pretrain_frames", None),
         bool(getattr(cfg, "batch_all_cameras", False)),
     )
-    if temporal_profile != (0, "factorized", 24, None, False):
+    if temporal_profile not in (
+        (0, "factorized", 24, None, False),
+        (4, "factorized", 24, None, False),
+    ):
         raise NotImplementedError(
-            f"G0.5 RPU vision requires a single-frame profile; got {temporal_profile}"
+            f"G0.5 device vision requires canonical temporal profile; got {temporal_profile}"
         )
     return vision, cfg, temporal_profile
 
@@ -663,6 +914,10 @@ def _g05_vision_runtime_ready(model) -> bool:
     vision = getattr(model, "vision_tower", None)
     if vision is None or not hasattr(vision, "__dict__"):
         return False
+    math_precision = getattr(vision, "_rpu_g05_math_precision", "base")
+    if (math_precision not in ("base", "high") or
+            getattr(vision, "_rpu_vision_math_precision", "base") != math_precision):
+        return False
     implementation = vars(vision).get("_rpu_g05_vision_forward_impl")
     if not callable(implementation):
         return False
@@ -672,6 +927,41 @@ def _g05_vision_runtime_ready(model) -> bool:
         )
         if vision_adapter is None:
             return False
+        if getattr(implementation, "_g05_k1_camera_group_wrapper", False):
+            # The cold camera selector retains the real shared bound method.
+            # Admit only its exact closure, owner and installed geometry; a
+            # marker on an arbitrary callable cannot make runtime state ready.
+            batch = getattr(implementation, "_g05_k1_camera_batch", None)
+            wrapper_code = next(code for code in
+                configure_g05_vision_camera_batch.__code__.co_consts
+                if isinstance(code, types.CodeType) and code.co_name == "forward")
+            if (type(batch) is not int or batch not in (2, 3)
+                    or getattr(implementation, "_g05_k1_camera_group_wrapper") is not True
+                    or getattr(implementation, "_g05_k1_b3_wrapper", None) is not (batch == 3)
+                    or getattr(implementation, "__code__", None) is not wrapper_code):
+                return False
+            closed = dict(zip(wrapper_code.co_freevars,
+                              (cell.cell_contents for cell in implementation.__closure__)))
+            original = getattr(implementation, "_g05_k1_original", None)
+            names = getattr(model, "_rpu_g05_camera_names", _G05_RELEASE_CAMERA_NAMES)
+            capabilities = getattr(vision, "_rpu_vision_k1_camera_group_available", ())
+            accumulation = getattr(vision, "_rpu_g05_linear_accumulation", None)
+            if (set(closed) != {"batch", "original", "vision"}
+                    or closed["batch"] != batch or closed["original"] is not original
+                    or closed["vision"] is not vision
+                    or getattr(original, "__self__", None) is not vision
+                    or names != _G05_RELEASE_CAMERA_NAMES[:batch]
+                    or int(getattr(getattr(model, "cfg", None), "num_input_images", -1)) != batch
+                    or getattr(vision, "_rpu_vision_w8a16", None) is not True
+                    or getattr(vision, "_rpu_g05_weight_dtype", None) != "w8a16"
+                    or accumulation not in ("acc16", "acc32")
+                    or getattr(vision, "_rpu_vision_linear_acc32", None) is not (accumulation == "acc32")
+                    or int(getattr(vision, "_rpu_vision_num_cores", 0)) != 8
+                    or len(capabilities) != 2 or capabilities[batch - 2] is not True
+                    or getattr(vision, "_rpu_vision_exact_chunk_size", None) not in (None, 256 * batch)
+                    or int(getattr(vision, "_rpu_vision_chunk_size_cap", 0)) not in (0, 256 * batch)):
+                return False
+            implementation = original
         runtime_complete = getattr(
             vision_adapter, "_qwen3_5_vision_runtime_complete", None
         )
@@ -681,16 +971,37 @@ def _g05_vision_runtime_ready(model) -> bool:
             return False
     except Exception:
         return False
-    if int(getattr(getattr(vision, "config", None), "temporal_freq", 0)) != 0:
-        return False
+    if int(getattr(getattr(vision, "config", None), "temporal_freq", 0)) == 4:
+        if getattr(vision, "_rpu_g05_temporal_pe", None) is None:
+            return False
     return _instance_method_is(vision, "forward", _rpu_g05_vision_forward)
 
 
-def patch_g05_vision_for_rpu(model, *, _execution_config=None):
-    """Patch the canonical G0.5 single-frame vision tower for RPU."""
+def patch_g05_vision_for_rpu(
+    model, *, _allow_certified_g05_k1: bool = False,
+    _execution_config=None, weight_dtype: str = "fp16",
+    linear_accumulation: str = "acc32",
+    math_precision: str = "base",
+):
+    """Patch the canonical G0.5 single-frame vision tower for device."""
+    weight_dtype = normalize_weight_dtype(weight_dtype)
+    if weight_dtype == "w8a16" and not _allow_certified_g05_k1:
+        raise ValueError("G0.5 W8A16 Vision requires the exact K1 policy installer")
+    linear_accumulation = validate_linear_accumulation(
+        linear_accumulation, weight_dtype=weight_dtype,
+        exact_k1=_allow_certified_g05_k1)
+    math_precision = validate_math_precision(math_precision, exact_k1=_allow_certified_g05_k1)
+    if math_precision == "high":
+        require_g05_high_math_native(vision=True)
+    install_execution = (linear_execution_config(
+        _execution_config, linear_accumulation, stage="vision")
+        if _allow_certified_g05_k1 else _execution_config)
     if getattr(model, "_rpu_g05_vision_ready", False):
         if _g05_vision_runtime_ready(model):
             vision = model.vision_tower
+            check_installed_weight_dtype(vision, weight_dtype)
+            check_installed_linear_accumulation(vision, linear_accumulation)
+            check_installed_math_precision(vision, math_precision)
             if (
                 _execution_config is not None
                 and getattr(vision, "_rpu_execution", None)
@@ -729,10 +1040,24 @@ def patch_g05_vision_for_rpu(model, *, _execution_config=None):
                 "G0.5 Vision installation was already attempted; reload the "
                 "checkpoint to avoid reusing partial wrapper state"
             )
-        vision, cfg, _ = _preflight_g05_vision(model)
-        if os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") != "1":
+        vision, cfg, temporal_profile = _preflight_g05_vision(model)
+        if _allow_certified_g05_k1 and temporal_profile != (
+            0,
+            "factorized",
+            24,
+            None,
+            False,
+        ):
             raise NotImplementedError(
-                "generic G0.5 RPU Vision is numeric-blocked; controlled "
+                "the private customer K1 Vision exception requires "
+                "temporal_freq=0 and the exact single-frame profile"
+            )
+        if (
+            not _allow_certified_g05_k1
+            and os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") != "1"
+        ):
+            raise NotImplementedError(
+                "generic G0.5 device Vision is numeric-blocked; controlled "
                 "evaluation requires QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED=1"
             )
         parameters = getattr(vision, "parameters", None)
@@ -740,7 +1065,7 @@ def patch_g05_vision_for_rpu(model, *, _execution_config=None):
             parameter.device.type != "cpu" for parameter in parameters()
         ):
             raise NotImplementedError(
-                "G0.5 RPU Vision patch requires a CPU-hosted checkpoint"
+                "G0.5 device Vision patch requires a CPU-hosted checkpoint"
             )
         vision_adapter = importlib.import_module(
             "rpu_backend.adapters.qwen3_5.vision"
@@ -769,6 +1094,8 @@ def patch_g05_vision_for_rpu(model, *, _execution_config=None):
                 (
                     "forward",
                     "_rpu_g05_vision_forward_impl",
+                    "_rpu_g05_temporal_pe",
+                    "_rpu_g05_math_precision",
                     "_rpu_execution",
                     "_rpu_execution_component_id",
                     "_rpu_execution_generation",
@@ -782,13 +1109,42 @@ def patch_g05_vision_for_rpu(model, *, _execution_config=None):
         _claim_live_instance(model)
         model._rpu_g05_vision_install_started = True
 
-        # Cast before the in-place multi-core FP16 swizzle (DWIDTH=2).
+        # The customer release loads this tower directly in FP32, while the
+        # in-place multi-core swizzle contract is FP16 (DWIDTH=2).
         vision.half()
         install_kwargs = {"vision_config": cfg}
-        if _execution_config is not None:
+        if _allow_certified_g05_k1:
+            install_kwargs["execution_config"] = install_execution
+        elif _execution_config is not None:
             install_kwargs["execution_config"] = _execution_config
+        if _allow_certified_g05_k1:
+            install_kwargs["_allow_certified_g05_k1"] = True
+        if weight_dtype == "w8a16":
+            install_kwargs["_g05_w8a16"] = True
+        if linear_accumulation == "acc16":
+            install_kwargs["_g05_acc16_experiment"] = True
+        if math_precision == "high":
+            install_kwargs["_g05_math_precision"] = math_precision
         handle = install_vision(vision, **install_kwargs)
         shared_installed = True
+        if temporal_profile[0] == 4:
+            temporal_module = importlib.import_module(type(vision).__module__)
+            sinusoidal_temporal_pe = getattr(
+                temporal_module, "_sinusoidal_temporal_pe", None
+            )
+            if not callable(sinusoidal_temporal_pe):
+                sinusoidal_temporal_pe = getattr(
+                    importlib.import_module("g05.models.g05.qwen35.vision"),
+                    "_sinusoidal_temporal_pe",
+                )
+            temporal_pe = sinusoidal_temporal_pe(
+                torch.arange(-5, 1, dtype=torch.float32),
+                int(cfg.hidden_size),
+            ).to(device="rpu", dtype=torch.float16).contiguous()
+            vision._rpu_g05_temporal_pe = temporal_pe
+            torch.ops.rpu.qwen3_5_vision_set_temporal(
+                handle, temporal_pe, 6, 256
+            )
         vision._rpu_g05_vision_forward_impl = vision.forward
         vision.forward = types.MethodType(_rpu_g05_vision_forward, vision)
         if _execution_config is not None:
@@ -796,6 +1152,9 @@ def patch_g05_vision_for_rpu(model, *, _execution_config=None):
         vision._rpu_execution_component_id = _G05_VISION_COMPONENT
         vision._rpu_execution_generation = 0
         vision._execution_generation = 0
+        vision._rpu_g05_weight_dtype = weight_dtype
+        vision._rpu_g05_linear_accumulation = linear_accumulation
+        vision._rpu_g05_math_precision = math_precision
         model._rpu_g05_vision_ready = True
         return model
     except BaseException as error:
@@ -815,10 +1174,10 @@ def patch_g05_vision_for_rpu(model, *, _execution_config=None):
         _VISION_PATCH_LOCK.release()
 
 
-def _pack_g05_vision(pixel_values, vision):
-    """Prepare batch-one single-frame cameras in their declared order."""
+def _pack_g05_vision(pixel_values, vision, *, compact: bool = False):
+    """Prepare canonical batch-1 K=1/K=6 cameras exactly like G0.5."""
     if not isinstance(pixel_values, dict) or not pixel_values:
-        raise TypeError("G0.5 RPU vision expects a non-empty camera dict")
+        raise TypeError("G0.5 device vision expects a non-empty camera dict")
 
     patch_size = int(vision.patch_size)
     temporal_patch_size = int(vision.config.temporal_patch_size)
@@ -826,9 +1185,9 @@ def _pack_g05_vision(pixel_values, vision):
     camera_info, grids, split_sizes = [], [], []
     num_frames = None
     for camera in pixel_values.values():
-        if camera.dim() != 5 or camera.shape[0] != 1 or camera.shape[1] != 1:
+        if camera.dim() != 5 or camera.shape[0] != 1 or camera.shape[1] not in (1, 6):
             raise NotImplementedError(
-                "G0.5 RPU direct vision fusion supports only [1,1,C,H,W]"
+                "G0.5 device direct vision fusion supports only [1,K,C,H,W], K=1 or 6"
             )
         _, camera_frames, channels, height, width = camera.shape
         if num_frames is None:
@@ -880,14 +1239,77 @@ def _pack_g05_vision(pixel_values, vision):
             else torch.cat(image_views, dim=0)
         )
 
+    # The production compact path is deliberately exact-profile-only. Keep the
+    # official Resize -> FP32 / 255 -> Normalize result untouched; cast those
+    # normalized CHW frames to the same final FP16 bytes as the packed path, but
+    # defer temporal expansion and pure layout to STEP0 on device.
+    compact_canonical = (
+        compact
+        and len(camera_info) == 3
+        and num_frames == 6
+        and patch_size == 16
+        and temporal_patch_size == 2
+        and merge_size == 2
+        and same_grid
+        and all(tuple(info[0].shape) == (6, 3, 256, 256) for info in camera_info)
+    )
+    if compact_canonical:
+        compact_images = merged_images
+        if compact_images.dtype != torch.float16:
+            compact_images = compact_images.to(torch.float16)
+        return (
+            compact_images.contiguous(),
+            torch.cat(grids, dim=0),
+            split_sizes,
+            num_frames,
+        )
+
     if same_grid:
         pack_groups = [(merged_images, camera_info[0][1], camera_info[0][2])]
     else:
         pack_groups = camera_info
 
+    k1_b3_spatial_pack = (
+        num_frames == 1
+        and len(camera_info) in (2,3)
+        and same_grid
+        and patch_size == 16
+        and temporal_patch_size == 2
+        and merge_size == 2
+        and (
+            (
+                getattr(getattr(vision, "_rpu_g05_vision_forward_impl", None),
+                        "_g05_k1_camera_group_wrapper", False)
+                and getattr(getattr(vision, "_rpu_g05_vision_forward_impl", None),
+                            "_g05_k1_camera_batch", None) == len(camera_info)
+            )
+            or (
+                len(camera_info) == 3
+                and getattr(getattr(vision, "_rpu_g05_vision_forward_impl", None),
+                            "_g05_k1_b3_wrapper", False)
+            )
+        )
+        and all(
+            tuple(info[0].shape) == (1, 3, 256, 256)
+            and info[0].device.type == "cpu"
+            and info[0].dtype == torch.float32
+            for info in camera_info
+        )
+    )
     patches = []
     for images, grid_h, grid_w in pack_groups:
-        # The RPU STEP0 consumes FP16. Casting before the two layout
+        if k1_b3_spatial_pack:
+            # Cast while packing the unexpanded spatial view. The release
+            # expands C,T before reinterpreting it as T,C, so final C,T order
+            # reads source channels floor((t * C + c) / T), not RGB repeats.
+            # Expanding after this smaller copy avoids a full temporal copy.
+            spatial = images.reshape(len(camera_info), 3, 8, 2, 16, 8, 2, 16).permute(
+                0, 2, 5, 3, 6, 1, 4, 7
+            ).to(dtype=torch.float16, memory_format=torch.contiguous_format)
+            channel_time = torch.tensor([0, 1, 0, 2, 1, 2], dtype=torch.long)
+            patches.append(spatial.index_select(5, channel_time).reshape(256 * len(camera_info), 1536))
+            continue
+        # The device STEP0 consumes FP16. Casting before the two layout
         # materializations preserves the final FP16 bytes and halves both copies.
         if images.dtype == torch.float32:
             images = images.to(torch.float16)
@@ -916,6 +1338,21 @@ def _pack_g05_vision(pixel_values, vision):
     return packed, grid_thw, split_sizes, num_frames
 
 
+def _g05_packed_camera_batch_count(
+    grid_thw: torch.Tensor, split_sizes: list[int], num_frames: int
+) -> int:
+    if (
+        not _g05_packed_vision_capacity_enabled()
+        or num_frames != 6
+        or split_sizes != [64, 64, 64]
+        or tuple(grid_thw.shape) != (18, 3)
+        or not torch.equal(grid_thw, grid_thw[0].expand_as(grid_thw))
+        or int(grid_thw[0].prod()) != 256
+    ):
+        return 1
+    return 3
+
+
 def _rpu_g05_forward_embed(
     self,
     input_ids: torch.LongTensor,
@@ -923,12 +1360,15 @@ def _rpu_g05_forward_embed(
     pixel_values,
     proprio=None,
 ):
-    """Build text/state embeds on RPU and let the merger fill image runs."""
+    """Build text/state embeds on device and let the merger fill image runs."""
     if input_ids.dim() != 2 or input_ids.shape[0] != 1:
-        raise NotImplementedError("G0.5 RPU direct fusion supports batch_size == 1")
+        raise NotImplementedError("G0.5 device direct fusion supports batch_size == 1")
     if not bool(attention_mask.ne(0).all().item()):
-        raise NotImplementedError("G0.5 RPU direct fusion does not support padding")
+        raise NotImplementedError("G0.5 device direct fusion does not support padding")
 
+    names = getattr(self, "_rpu_g05_camera_names", None)
+    if names is not None and (not isinstance(pixel_values, dict) or tuple(pixel_values) != names):
+        raise ValueError("G0.5 live camera input differs from its installed cold profile")
     token_index = _g05_token_index(self)
 
     image_tokens = input_ids.eq(int(self.image_token_index))
@@ -952,7 +1392,51 @@ def _rpu_g05_forward_embed(
         )
         self._rpu_g05_embedding_cache = cached
     # Vision mutates image rows in-place and callers may retain this tensor.
-    hidden = cached[1].clone()
+    cached_hidden = cached[1]
+    if (
+        type(cached_hidden) is torch.Tensor
+        and cached_hidden.device.type == "rpu"
+        and cached_hidden.dtype == torch.float16
+        and cached_hidden.layout == torch.strided
+        and (
+            (names == _G05_TWO_CAMERA_NAMES
+             and tuple(cached_hidden.shape) in (
+                  (1, 161, 2048), (1, 181, 2048), (1, 193, 2048),
+                  (1, 257, 2048), (1, 321, 2048), (1, 385, 2048)))
+            or (names in (None, _G05_RELEASE_CAMERA_NAMES)
+                and getattr(getattr(self, "cfg", None), "num_input_images", None) == 3
+                and isinstance(pixel_values, dict)
+                and tuple(pixel_values) == _G05_RELEASE_CAMERA_NAMES
+                and tuple(cached_hidden.shape) in (
+                     (1, 225, 2048), (1, 245, 2048), (1, 257, 2048),
+                     (1, 321, 2048), (1, 385, 2048), (1, 449, 2048)))
+        )
+        and all(tuple(camera.shape) == (1, 1, 3, 256, 256)
+                for camera in pixel_values.values())
+        and cached_hidden.is_contiguous()
+        and not cached_hidden.requires_grad
+        and not cached_hidden.is_conj()
+        and not cached_hidden.is_neg()
+        and cached_hidden.storage_offset() == 0
+        and cached_hidden.data_ptr() != 0
+        and cached_hidden.data_ptr() % 256 == 0
+        and cached_hidden.untyped_storage().nbytes()
+        >= cached_hidden.numel() * cached_hidden.element_size()
+        and not torch.rpu.get_ddr_flush()
+        and torch.rpu.get_ddr_flush_force()
+    ):
+        # Cache aliases may be CPU-dirty. Preserve the full source publication
+        # before the existing synchronous, fresh-output device copy.
+        torch.ops.rpu.qwen3vl_publish_inputs([cached_hidden])
+        ids = torch.empty(cached_hidden.shape[1], dtype=torch.int32,
+                          device=cached_hidden.device)
+        runs = torch.empty((0, 2), dtype=torch.int64, device="cpu")
+        hidden = torch.ops.rpu.assemble_inputs_embeds_parts(
+            cached_hidden.squeeze(0), ids, [], runs,
+            prefix_is_embeddings=True,
+        ).unsqueeze(0)
+    else:
+        hidden = cached_hidden.clone()
 
     state_token_id = getattr(self.proprio_embedder, "state_token_id", None)
     if state_token_id is not None:
@@ -965,7 +1449,7 @@ def _rpu_g05_forward_embed(
             as_tuple=True
         )[0].tolist()
         if positions and proprio is None:
-            raise ValueError("G0.5 RPU direct fusion requires proprio for state tokens")
+            raise ValueError("G0.5 device direct fusion requires proprio for state tokens")
         if positions:
             state = self._rpu_g05_proprio_mlp(
                 proprio.to(dtype=torch.float16)
@@ -974,16 +1458,28 @@ def _rpu_g05_forward_embed(
                 range(positions[0], positions[0] + len(positions))
             ):
                 raise NotImplementedError(
-                    "G0.5 RPU direct fusion requires one contiguous state-token run"
+                    "G0.5 device direct fusion requires one contiguous state-token run"
                 )
-            hidden[0].narrow(0, positions[0], len(positions)).copy_(
-                state.to(device="rpu", dtype=torch.float16).contiguous()
-            )
+            if state.device.type == "cpu":
+                state = state.to(dtype=torch.float16).contiguous()
+            else:
+                state = state.to(device="rpu", dtype=torch.float16).contiguous()
+            hidden[0].narrow(0, positions[0], len(positions)).copy_(state)
 
-    patches, grid_thw, split_sizes, _ = _pack_g05_vision(
-        pixel_values, self.vision_tower,
+    patches, grid_thw, split_sizes, num_frames = _pack_g05_vision(
+        pixel_values,
+        self.vision_tower,
+        compact=(
+            getattr(self.vision_tower, "_rpu_vision_step0", False)
+            and _g05_packed_vision_capacity_enabled()
+        ),
     )
-    self._cached_image_grid_thw = grid_thw.contiguous()
+    camera_batch_count = _g05_packed_camera_batch_count(
+        grid_thw, split_sizes, num_frames
+    )
+    self._cached_image_grid_thw = grid_thw[
+        num_frames - 1 :: num_frames
+    ].contiguous()
     from rpu_backend.adapters.qwen3_5.vision import _visual_run_starts
 
     starts = _visual_run_starts(
@@ -991,39 +1487,41 @@ def _rpu_g05_forward_embed(
     )
     if starts is None:
         raise NotImplementedError(
-            "G0.5 RPU direct fusion requires contiguous tokens for each camera"
+            "G0.5 device direct fusion requires contiguous tokens for each camera"
         )
     self.vision_tower._rpu_g05_vision_forward_impl(
         patches,
         grid_thw,
         _rpu_fusion_target=hidden,
         _rpu_fusion_run_starts=starts,
+        _rpu_temporal_num_frames=num_frames,
+        _rpu_camera_batch_count=camera_batch_count,
     )
     return hidden
 
 
 def _rpu_g05_build_prefix_action_kv(self, vlm_kv, split_index: int):
-    """Expose the stable RPU VLM prefix cache to the action expert."""
+    """Expose the stable device VLM prefix cache to the action expert."""
     mode = getattr(getattr(self, "cfg", None), "ae_vlm_condition_mode", None)
     if mode != "cross_attn_only":
         raise NotImplementedError(
-            "G0.5 RPU action inference requires "
+            "G0.5 device action inference requires "
             "ae_vlm_condition_mode=cross_attn_only"
         )
     if getattr(getattr(self, "fm_helper", None), "action_causal", True):
         raise NotImplementedError(
-            "G0.5 RPU action inference requires action_causal=false"
+            "G0.5 device action inference requires action_causal=false"
         )
     if not hasattr(vlm_kv, "num_items"):
-        raise TypeError("G0.5 RPU action prefix must be a SparseKVCache facade")
+        raise TypeError("G0.5 device action prefix must be a SparseKVCache facade")
     prefix_len = int(vlm_kv.num_items())
     if int(split_index) != prefix_len:
         raise NotImplementedError(
-            "G0.5 RPU action inference supports only the complete read-only "
+            "G0.5 device action inference supports only the complete read-only "
             f"VLM prefix; split_index={split_index}, cache_len={prefix_len}"
         )
     if getattr(vlm_kv, "_rpu_qwen3_5_cache", None) is None:
-        raise TypeError("G0.5 RPU action prefix is missing its physical VLM cache")
+        raise TypeError("G0.5 device action prefix is missing its physical VLM cache")
     generation = getattr(vlm_kv, "_rpu_qwen3_5_generation", None)
     current_generation = getattr(self.vlm, "_rpu_g05_cache_generation", None)
     current_cache = getattr(self.vlm, "_rpu_g05_cache", None)
@@ -1033,7 +1531,7 @@ def _rpu_g05_build_prefix_action_kv(self, vlm_kv, split_index: int):
         or vlm_kv._rpu_qwen3_5_cache is not current_cache
     ):
         raise RuntimeError(
-            "G0.5 RPU action prefix belongs to an older turn; interleaved "
+            "G0.5 device action prefix belongs to an older turn; interleaved "
             "InferenceState objects are not supported"
         )
     return types.SimpleNamespace(
@@ -1072,19 +1570,19 @@ def _rpu_g05_vlm_forward(
     del attn_implementation, mixture_name
     owner = self._rpu_g05_owner()
     if owner is None:
-        raise RuntimeError("G0.5 RPU model owner no longer exists")
+        raise RuntimeError("G0.5 device model owner no longer exists")
     if owner.training:
-        raise NotImplementedError("G0.5 RPU bring-up supports inference only")
+        raise NotImplementedError("G0.5 device bring-up supports inference only")
     if inputs_embeds.shape[0] != 1:
-        raise NotImplementedError("G0.5 RPU VLM currently supports batch_size == 1")
+        raise NotImplementedError("G0.5 device VLM currently supports batch_size == 1")
     if past_key_values is not None or kv_cache is None:
-        raise TypeError("G0.5 RPU VLM requires its SparseKVCache via kv_cache")
+        raise TypeError("G0.5 device VLM requires its SparseKVCache via kv_cache")
     if not return_kv_cache:
-        raise NotImplementedError("G0.5 RPU VLM requires return_kv_cache=True")
+        raise NotImplementedError("G0.5 device VLM requires return_kv_cache=True")
     if time_cond is not None or split_idx is not None:
-        raise NotImplementedError("G0.5 RPU VLM bring-up supports inference prefill/decode only")
+        raise NotImplementedError("G0.5 device VLM bring-up supports inference prefill/decode only")
     if padding_mask is not None and not bool(padding_mask.bool().all().item()):
-        raise NotImplementedError("G0.5 RPU VLM does not support padded tokens")
+        raise NotImplementedError("G0.5 device VLM does not support padded tokens")
 
     from rpu_backend.api.cache import RPUCache
     from rpu_backend.adapters.qwen3_5.text import (
@@ -1096,7 +1594,7 @@ def _rpu_g05_vlm_forward(
     new_turn = cache is None
     if cache is None:
         if kv_cache.num_items() != 0:
-            raise ValueError("G0.5 RPU cache must be installed before it contains tokens")
+            raise ValueError("G0.5 device cache must be installed before it contains tokens")
         cache = getattr(self, "_rpu_g05_cache", None)
         if cache is None:
             cache = _ensure_g05_text_cache(self)
@@ -1118,7 +1616,7 @@ def _rpu_g05_vlm_forward(
         kv_cache.num_items = types.MethodType(_g05_cache_num_items, kv_cache)
     elif kv_cache._rpu_qwen3_5_generation != self._rpu_g05_cache_generation:
         raise RuntimeError(
-            "G0.5 RPU cache belongs to an older turn; interleaved InferenceState "
+            "G0.5 device cache belongs to an older turn; interleaved InferenceState "
             "objects are not supported"
         )
 
@@ -1172,7 +1670,37 @@ def _rpu_g05_vlm_forward(
     # FusedModelBase owns a shape-keyed reusable output buffer. Return a fresh
     # caller-device tensor because G0.5 keeps last_hidden across later forwards.
     if caller_device.type == "rpu":
-        hidden = hidden.clone()
+        if (
+            type(hidden) is torch.Tensor
+            and hidden.device == caller_device
+            and hidden.dtype == torch.float16
+            and hidden.layout == torch.strided
+            and tuple(hidden.shape) in (
+                (1, 161, 2048), (1, 181, 2048), (1, 193, 2048),
+                (1, 225, 2048), (1, 245, 2048), (1, 257, 2048),
+                (1, 321, 2048), (1, 385, 2048), (1, 449, 2048),
+            )
+            and hidden.is_contiguous()
+            and not hidden.requires_grad
+            and not hidden.is_conj()
+            and not hidden.is_neg()
+            and hidden.storage_offset() == 0
+            and hidden.data_ptr() != 0
+            and hidden.data_ptr() % 256 == 0
+            and hidden.untyped_storage().nbytes() >= hidden.numel() * hidden.element_size()
+            and not torch.rpu.get_ddr_flush()
+            and torch.rpu.get_ddr_flush_force()
+        ):
+            # The reusable native output may have escaped through a CPU alias.
+            # Keep its full source boundary before the completed eager DMA copy.
+            torch.ops.rpu.qwen3vl_publish_inputs([hidden])
+            ids = torch.empty(hidden.shape[1], dtype=torch.int32, device=hidden.device)
+            runs = torch.empty((0, 2), dtype=torch.int64, device="cpu")
+            hidden = torch.ops.rpu.assemble_inputs_embeds_parts(
+                hidden.squeeze(0), ids, [], runs, prefix_is_embeddings=True,
+            ).unsqueeze(0)
+        else:
+            hidden = hidden.clone()
     else:
         hidden = hidden.to("cpu")
         if caller_device.type != "cpu":
@@ -1193,6 +1721,10 @@ def _g05_vlm_runtime_ready(model) -> bool:
         return False
     state = getattr(vlm, "_rpu_qwen3_5", None)
     if state is None or getattr(state, "handle", None) is None:
+        return False
+    math_precision = getattr(vlm, "_rpu_g05_math_precision", "base")
+    if (math_precision not in ("base", "high") or
+            getattr(state, "g05_math_precision", "base") != math_precision):
         return False
     from rpu_backend.adapters.qwen3_5.text import _qwen35_retirement_ready
 
@@ -1265,16 +1797,33 @@ def patch_g05_vlm_for_rpu(
     model,
     *,
     max_seq_len: int = 2048,
-    _execution_config=None,
+    _allow_certified_g05_k1: bool = False,
+    _execution_config=None, weight_dtype: str = "fp16",
+    linear_accumulation: str = "acc32",
+    math_precision: str = "base",
 ):
-    """Patch ``G05ModelQwen35.vlm`` for FP16 RPU prefill and q1 decode.
+    """Patch ``G05ModelQwen35.vlm`` for FP16 device prefill and q1 decode.
 
-    The caller keeps vision, embedding assembly, lm_head, and policy glue on
+    The caller keeps vision, embedding composition, lm_head, and policy glue on
     their original device. The mutation is irreversible; reload the checkpoint
     for a CPU/CUDA reference model.
     """
+    weight_dtype = normalize_weight_dtype(weight_dtype)
+    if weight_dtype == "w8a16" and not _allow_certified_g05_k1:
+        raise ValueError("G0.5 W8A16 Text requires the exact K1 policy installer")
+    linear_accumulation = validate_linear_accumulation(
+        linear_accumulation, weight_dtype=weight_dtype,
+        exact_k1=_allow_certified_g05_k1)
+    math_precision = validate_math_precision(math_precision, exact_k1=_allow_certified_g05_k1)
+    if math_precision == "high":
+        require_g05_high_math_native()
+    install_execution = linear_execution_config(
+        _execution_config, linear_accumulation, stage="prefill")
     if getattr(model, "_rpu_g05_vlm_ready", False):
         if _g05_vlm_runtime_ready(model):
+            check_installed_weight_dtype(model.vlm, weight_dtype)
+            check_installed_linear_accumulation(model.vlm, linear_accumulation)
+            check_installed_math_precision(model.vlm, math_precision)
             if (
                 _execution_config is not None
                 and getattr(model.vlm, "_rpu_execution", None)
@@ -1300,7 +1849,7 @@ def patch_g05_vlm_for_rpu(
         parameter.device.type != "cpu" for parameter in parameters()
     ):
         raise NotImplementedError(
-            "G0.5 RPU VLM patch requires a CPU-hosted checkpoint"
+            "G0.5 device VLM patch requires a CPU-hosted checkpoint"
         )
     from rpu_backend.adapters.qwen3_5.text import install_qwen3_5_text_for_rpu
 
@@ -1332,6 +1881,7 @@ def patch_g05_vlm_for_rpu(
                         "_rpu_g05_max_seq_len",
                         "_rpu_g05_owner",
                         "_rpu_g05_original_decode",
+                        "_rpu_g05_math_precision",
                         "_rpu_execution",
                         "_rpu_execution_component_id",
                         "_rpu_execution_generation",
@@ -1355,17 +1905,28 @@ def patch_g05_vlm_for_rpu(
 
         # RC-1/P1: dtype first, swizzle inside the shared installer second.
         # Restrict the cast to the fused backbone so a direct caller cannot
-        # enqueue eager casts on unrelated VLM modules already placed on RPU.
+        # enqueue eager casts on unrelated VLM modules already placed on device.
         vlm.layers.to(device="cpu", dtype=torch.float16)
         vlm.norm.to(device="cpu", dtype=torch.float16)
+        quant_kwargs = {}
+        if math_precision == "high":
+            quant_kwargs["_g05_math_precision"] = math_precision
+        if weight_dtype == "w8a16":
+            quantize_g05_text_weights(vlm)
+            quant_kwargs["_g05_w8a16"] = True
         handle = install_qwen3_5_text_for_rpu(
             vlm,
             vlm.config,
             max_seq_len,
-            execution_config=_execution_config,
+            execution_config=install_execution,
             _cpu_stage_weights=True,
+            **quant_kwargs,
         )
-        torch.ops.rpu.qwen3_5_set_linear_acc32(handle, True)
+        if _allow_certified_g05_k1:
+            torch.ops.rpu.qwen3_5_set_chunk_envelope(handle, 256, 256)
+            vlm._rpu_qwen3_5.prefill_capability_envelope = (256, 256)
+        torch.ops.rpu.qwen3_5_set_linear_acc32(
+            handle, linear_accumulation == "acc32")
         torch.ops.rpu.qwen3_5_set_fast_replay(handle, True)
         torch.ops.rpu.qwen3_5_set_retained_prefill_graph(handle, True)
         torch.ops.rpu.qwen3_5_enable_execution_reconfigure(handle)
@@ -1384,6 +1945,9 @@ def patch_g05_vlm_for_rpu(
         vlm._rpu_qwen3_5.prefill_rope_cache = None
 
         vlm._rpu_g05_max_seq_len = int(max_seq_len)
+        vlm._rpu_g05_weight_dtype = weight_dtype
+        vlm._rpu_g05_linear_accumulation = linear_accumulation
+        vlm._rpu_g05_math_precision = math_precision
         vlm._rpu_g05_owner = weakref.ref(model)
         if _execution_config is not None:
             vlm._rpu_execution = _execution_config
@@ -1552,19 +2116,19 @@ def patch_g05_data_processor_for_rpu(processor):
         "GalaxeaCoTProcessor",
     ):
         raise TypeError(
-            "G0.5 RPU host preprocessing requires GalaxeaCoTProcessor; "
+            "G0.5 device host preprocessing requires GalaxeaCoTProcessor; "
             f"got {processor_type}"
         )
     if getattr(processor, "is_train", None) is not False:
-        raise NotImplementedError("G0.5 RPU host preprocessing requires processor.eval()")
+        raise NotImplementedError("G0.5 device host preprocessing requires processor.eval()")
     if (
-        int(getattr(processor, "num_obs_steps", 0)) != 1
+        int(getattr(processor, "num_obs_steps", 0)) not in (1, 6)
         or int(getattr(processor, "num_output_cameras", 0))
         != 3 * int(processor.num_obs_steps)
         or int(getattr(processor, "action_horizon", 0)) != 32
     ):
         raise NotImplementedError(
-            "G0.5 RPU host preprocessing supports only three single-frame cameras, "
+            "G0.5 device host preprocessing supports only three cameras, K=1/K=6, "
             "and action_horizon=32"
         )
 
@@ -1577,7 +2141,7 @@ def patch_g05_data_processor_for_rpu(processor):
         or not isinstance(transforms, dict)
     ):
         raise NotImplementedError(
-            "G0.5 RPU host preprocessing requires three canonical image transforms"
+            "G0.5 device host preprocessing requires three canonical image transforms"
         )
     if not callable(getattr(processor, "process_images", None)):
         raise TypeError("G0.5 data processor is missing process_images()")
@@ -1595,7 +2159,7 @@ def patch_g05_data_processor_for_rpu(processor):
         )
         if actual_types != expected_types:
             raise NotImplementedError(
-                "G0.5 RPU host preprocessing requires "
+                "G0.5 device host preprocessing requires "
                 "Resize -> ToTensor -> Normalize for every camera"
             )
         resize, to_tensor, normalize = chain
@@ -1612,11 +2176,11 @@ def patch_g05_data_processor_for_rpu(processor):
             or not callable(getattr(to_tensor, "forward", None))
         ):
             raise NotImplementedError(
-                "G0.5 RPU host preprocessing requires canonical resize and normalization"
+                "G0.5 device host preprocessing requires canonical resize and normalization"
             )
         if transform_signature is not None and signature != transform_signature:
             raise NotImplementedError(
-                "G0.5 RPU host preprocessing requires identical camera resize transforms"
+                "G0.5 device host preprocessing requires identical camera resize transforms"
             )
         transform_signature = signature
 
@@ -1633,6 +2197,269 @@ def patch_g05_data_processor_for_rpu(processor):
     fast_transforms[2].inplace = True
     processor._rpu_g05_data_processor_ready = True
     return processor
+
+
+_G05_RELEASE_IMAGE_SPECS = (
+    ("head_rgb", (3, 360, 640)),
+    ("left_wrist_rgb", (3, 480, 640)),
+    ("right_wrist_rgb", (3, 480, 640)),
+)
+
+
+def _rpu_g05_release_image_transform(processor_ref, key, image):
+    """Return the precomputed adjacent view or the exact original fallback."""
+    processor = processor_ref()
+    if processor is None:
+        raise RuntimeError("G0.5 release processor no longer exists")
+    active = getattr(processor, "_rpu_g05_release_active_images", None)
+    entry = active.get(key) if isinstance(active, dict) else None
+    if entry is not None and image is entry[0]:
+        return entry[1]
+    for transform in processor._rpu_g05_release_original_transforms[key]:
+        image = transform(image)
+    return image
+
+
+def _g05_release_processor_runtime_ready(processor) -> bool:
+    if getattr(processor, "_rpu_g05_release_processor_ready", False) is not True:
+        return False
+    if not _instance_method_is(
+        processor, "preprocess", _rpu_g05_release_preprocess
+    ):
+        return False
+    if not callable(
+        vars(processor).get("_rpu_g05_release_original_preprocess")
+    ):
+        return False
+    try:
+        specs = _g05_release_image_specs(processor)
+    except (TypeError, ValueError):
+        return False
+    if int(getattr(processor, "num_output_cameras", -1)) != len(specs):
+        return False
+    transforms = vars(processor).get("_rpu_g05_release_original_transforms")
+    if not isinstance(transforms, dict):
+        return False
+    if tuple(transforms) != tuple(key for key, _shape in specs):
+        return False
+    for name in (
+        "_rpu_g05_release_resize_head",
+        "_rpu_g05_release_resize_wrist",
+        "_rpu_g05_release_to_tensor",
+        "_rpu_g05_release_normalize",
+        "_rpu_g05_release_active_images",
+    ):
+        if not hasattr(processor, name):
+            return False
+    published_transforms = getattr(processor, "val_transforms", None)
+    if not isinstance(published_transforms, dict):
+        return False
+    if tuple(published_transforms) != tuple(
+        key for key, _shape in specs
+    ):
+        return False
+    return all(
+        callable(getattr(processor, name))
+        for name in (
+            "_rpu_g05_release_resize_head",
+            "_rpu_g05_release_resize_wrist",
+            "_rpu_g05_release_to_tensor",
+            "_rpu_g05_release_normalize",
+        )
+    ) and all(
+        len(chain) == 1
+        and isinstance(chain[0], functools.partial)
+        and chain[0].func is _rpu_g05_release_image_transform
+        for chain in published_transforms.values()
+    )
+
+
+def _rpu_g05_release_preprocess(self, data):
+    """Batch exact K1 camera transforms while retaining upstream host logic."""
+    specs = _g05_release_image_specs(self)
+    images = data.get("images") if isinstance(data, dict) else None
+    keys = tuple(key for key, _shape in specs)
+    values = [images.get(key) for key in keys] if isinstance(images, dict) else []
+    canonical = (
+        self.is_train is False
+        and getattr(self, "_rpu_g05_release_active_images", None) is None
+        and isinstance(images, dict)
+        and tuple(images) == keys
+        and len(values) == len(specs)
+        and all(
+            isinstance(image, torch.Tensor)
+            and image.device.type == "cpu"
+            and image.dtype == torch.uint8
+            and image.dim() == 4
+            and tuple(image.shape[:2]) == (1, 3)
+            and image.is_contiguous()
+            for image in values
+        )
+        and all(tuple(image.shape) == tuple(values[1].shape) for image in values[1:])
+    )
+    if not canonical:
+        return self._rpu_g05_release_original_preprocess(data)
+
+    resized = torch.cat(
+        [self._rpu_g05_release_resize_head(values[0])] +
+        [self._rpu_g05_release_resize_wrist(image) for image in values[1:]],
+        dim=0,
+    )
+    if resized.dtype != torch.uint8 or tuple(resized.shape) != (len(specs), 3, 256, 256):
+        raise RuntimeError("G0.5 release camera resize contract drifted")
+    merged = _rpu_g05_to_tensor(self._rpu_g05_release_to_tensor, resized)
+    merged = self._rpu_g05_release_normalize(merged)
+    active = {
+        key: (image, merged.narrow(0, index, 1))
+        for index, (key, image) in enumerate(zip(keys, values))
+    }
+    self._rpu_g05_release_active_images = active
+    try:
+        return self._rpu_g05_release_original_preprocess(data)
+    finally:
+        self._rpu_g05_release_active_images = None
+
+
+def patch_g05_release_processor_for_rpu(processor):
+    """Patch the exact customer K1 BaseProcessor host image path."""
+    if getattr(processor, "_rpu_g05_release_processor_ready", False):
+        if _g05_release_processor_runtime_ready(processor):
+            return processor
+        raise RuntimeError(
+            "G0.5 release processor ready marker has incomplete state"
+        )
+    processor_type = (type(processor).__module__, type(processor).__name__)
+    if processor_type != (
+        "vla_rtc.processors.base_processor",
+        "BaseProcessor",
+    ):
+        raise TypeError(
+            "G0.5 customer host preprocessing requires vla_rtc BaseProcessor; "
+            f"got {processor_type}"
+        )
+    if getattr(processor, "is_train", None) is not False:
+        raise NotImplementedError(
+            "G0.5 customer host preprocessing requires processor.eval()"
+        )
+    specs = _g05_release_image_specs(processor)
+    if (
+        int(getattr(processor, "num_obs_steps", 0)) != 1
+        or int(getattr(processor, "num_output_cameras", 0)) != len(specs)
+        or int(getattr(processor, "action_output_dim", 0)) != 27
+        or int(getattr(processor, "proprio_output_dim", 0)) != 27
+        or getattr(processor, "pixel_values_format", None) != "dict"
+    ):
+        raise NotImplementedError(
+            "G0.5 customer host preprocessing requires exact K1/selected-camera/27D"
+        )
+    image_meta = tuple(getattr(processor, "shape_meta", {}).get("images", ()))
+    actual_specs = tuple(
+        (
+            meta.get("key"),
+            tuple(int(value) for value in meta.get("raw_shape", ())),
+            tuple(int(value) for value in meta.get("shape", ())),
+        )
+        for meta in image_meta
+    )
+    expected_specs = tuple(
+        (key, raw_shape, (3, 256, 256))
+        for key, raw_shape in specs
+    )
+    if actual_specs != expected_specs:
+        raise NotImplementedError(
+            f"G0.5 customer camera metadata drifted: {actual_specs}"
+        )
+    transforms = getattr(processor, "val_transforms", None)
+    if not isinstance(transforms, Mapping):
+        raise TypeError("G0.5 customer processor has no val_transforms")
+    original_transforms = {
+        key: tuple(transforms.get(key, ()))
+        for key, _shape in specs
+    }
+    expected_types = (
+        ("torchvision.transforms.transforms", "Resize"),
+        ("vla_rtc.transforms.image", "ToTensor"),
+        ("torchvision.transforms.transforms", "Normalize"),
+    )
+    resize_signature = None
+    for key, chain in original_transforms.items():
+        actual_types = tuple(
+            (type(transform).__module__, type(transform).__name__)
+            for transform in chain
+        )
+        if actual_types != expected_types:
+            raise NotImplementedError(
+                f"G0.5 customer transform chain drifted for {key}: {actual_types}"
+            )
+        resize, _to_tensor, normalize = chain
+        signature = (
+            tuple(int(value) for value in resize.size),
+            getattr(resize, "interpolation", None),
+            getattr(resize, "max_size", None),
+            getattr(resize, "antialias", None),
+        )
+        if (
+            signature[0] != (256, 256)
+            or tuple(float(value) for value in normalize.mean) != (0.5, 0.5, 0.5)
+            or tuple(float(value) for value in normalize.std) != (0.5, 0.5, 0.5)
+        ):
+            raise NotImplementedError(
+                "G0.5 customer resize/normalize contract drifted"
+            )
+        if resize_signature is not None and signature != resize_signature:
+            raise NotImplementedError(
+                "G0.5 customer cameras require identical resize parameters"
+            )
+        resize_signature = signature
+    if not callable(getattr(processor, "preprocess", None)):
+        raise TypeError("G0.5 customer processor is missing preprocess()")
+
+    fast_normalize = copy.deepcopy(original_transforms["head_rgb"][2])
+    fast_normalize.inplace = True
+    snapshots = _snapshot_instance_attrs(
+        processor,
+        (
+            "preprocess",
+            "val_transforms",
+            "_rpu_g05_release_original_preprocess",
+            "_rpu_g05_release_original_transforms",
+            "_rpu_g05_release_resize_head",
+            "_rpu_g05_release_resize_wrist",
+            "_rpu_g05_release_to_tensor",
+            "_rpu_g05_release_normalize",
+            "_rpu_g05_release_active_images",
+            "_rpu_g05_release_processor_ready",
+        ),
+    )
+    try:
+        processor._rpu_g05_release_original_preprocess = processor.preprocess
+        processor._rpu_g05_release_original_transforms = original_transforms
+        processor._rpu_g05_release_resize_head = original_transforms["head_rgb"][0]
+        processor._rpu_g05_release_resize_wrist = original_transforms[
+            "left_wrist_rgb"
+        ][0]
+        processor._rpu_g05_release_to_tensor = original_transforms["head_rgb"][1]
+        processor._rpu_g05_release_normalize = fast_normalize
+        processor._rpu_g05_release_active_images = None
+        processor_ref = weakref.ref(processor)
+        processor.val_transforms = {
+            key: [
+                functools.partial(
+                    _rpu_g05_release_image_transform,
+                    processor_ref,
+                    key,
+                )
+            ]
+            for key, _shape in specs
+        }
+        processor.preprocess = types.MethodType(
+            _rpu_g05_release_preprocess, processor
+        )
+        processor._rpu_g05_release_processor_ready = True
+        return processor
+    except BaseException:
+        _restore_instance_attrs(snapshots)
+        raise
 
 
 def _g05_dead_action_pipeline(processor):
@@ -1881,6 +2708,97 @@ def _g05_collate_one(value):
         return [value]
 
 
+def _g05_release_runner_runtime_ready(runner) -> bool:
+    if getattr(runner, "_rpu_g05_release_runner_ready", False) is not True:
+        return False
+    if not _instance_method_is(
+        runner, "_preprocess_batch", _rpu_g05_release_preprocess_batch
+    ):
+        return False
+    if not callable(
+        vars(runner).get("_rpu_g05_release_original_preprocess_batch")
+    ):
+        return False
+    if not callable(vars(runner).get("_rpu_g05_release_dict_apply")):
+        return False
+    ndarray_type = vars(runner).get("_rpu_g05_release_ndarray_type")
+    return bool(
+        isinstance(ndarray_type, type)
+        and _g05_release_processor_runtime_ready(getattr(runner, "processor", None))
+        and _g05_policy_runtime_ready(getattr(runner, "policy", None))
+    )
+
+
+def _rpu_g05_release_preprocess_batch(self, obs):
+    """Preserve adjacent K1 camera views through the batch-one collate."""
+    dict_apply = self._rpu_g05_release_dict_apply
+    ndarray_type = self._rpu_g05_release_ndarray_type
+    obs = dict_apply(
+        obs,
+        lambda value: (
+            torch.from_numpy(value.copy())
+            if isinstance(value, ndarray_type)
+            else value
+        ),
+    )
+    processed = self.processor.preprocess(obs)
+    if not isinstance(processed, dict) or "samples" not in processed:
+        raise TypeError("G0.5 release processor returned an invalid sample")
+    batch = {
+        key: _g05_collate_one(value)
+        for key, value in processed.items()
+        if key != "samples"
+    }
+    batch["samples"] = [processed["samples"]]
+    return dict_apply(
+        batch,
+        lambda value: (
+            value.to(self.device) if isinstance(value, torch.Tensor) else value
+        ),
+    )
+
+
+def patch_g05_release_runner_for_rpu(runner):
+    """Patch exact customer ReplayRunner batch-one host collation."""
+    if getattr(runner, "_rpu_g05_release_runner_ready", False):
+        if _g05_release_runner_runtime_ready(runner):
+            return runner
+        raise RuntimeError("G0.5 release runner ready marker has incomplete state")
+    runner_type = (type(runner).__module__, type(runner).__name__)
+    if runner_type != ("vla_rtc.replay", "ReplayRunner"):
+        raise TypeError(
+            "G0.5 customer runner optimization requires vla_rtc ReplayRunner; "
+            f"got {runner_type}"
+        )
+    if torch.device(getattr(runner, "device", "cpu")).type != "cpu":
+        raise NotImplementedError("G0.5 customer ReplayRunner must stay on CPU")
+    policy = getattr(runner, "policy", None)
+    if not _g05_policy_runtime_ready(policy):
+        raise RuntimeError("patch the exact G0.5 policy before its ReplayRunner")
+    original = getattr(runner, "_preprocess_batch", None)
+    original_function = getattr(original, "__func__", original)
+    runner_module = sys.modules.get(getattr(original_function, "__module__", None))
+    dict_apply = getattr(runner_module, "dict_apply", None)
+    numpy_module = getattr(runner_module, "np", None)
+    ndarray_type = getattr(numpy_module, "ndarray", None)
+    if not callable(original) or not callable(dict_apply) or not isinstance(
+        ndarray_type, type
+    ):
+        raise TypeError("G0.5 customer ReplayRunner preprocessing contract drifted")
+    processor = patch_g05_release_processor_for_rpu(
+        getattr(runner, "processor", None)
+    )
+    runner._rpu_g05_release_original_preprocess_batch = original
+    runner._rpu_g05_release_dict_apply = dict_apply
+    runner._rpu_g05_release_ndarray_type = ndarray_type
+    runner.processor = processor
+    runner._preprocess_batch = types.MethodType(
+        _rpu_g05_release_preprocess_batch, runner
+    )
+    runner._rpu_g05_release_runner_ready = True
+    return runner
+
+
 def _rpu_g05_collate(self, samples, padding_input_id):
     first = samples[0] if len(samples) == 1 else None
     if (
@@ -1923,11 +2841,11 @@ def patch_g05_inferencer_for_rpu(inferencer):
         "PolicyInferencer",
     ):
         raise TypeError(
-            "G0.5 RPU collation requires PolicyInferencer; "
+            "G0.5 device collation requires PolicyInferencer; "
             f"got {inferencer_type}"
         )
     if torch.device(inferencer.device).type != "cpu":
-        raise NotImplementedError("G0.5 RPU collation requires a CPU host inferencer")
+        raise NotImplementedError("G0.5 device collation requires a CPU host inferencer")
     registered = getattr(inferencer.processor, "processors", None)
     processors = tuple(registered.values()) if isinstance(registered, dict) else (
         inferencer.processor,
@@ -1943,7 +2861,7 @@ def patch_g05_inferencer_for_rpu(inferencer):
     if not callable(getattr(inferencer, "_prepare", None)) or not callable(
         getattr(inferencer, "infer_with_timing", None)
     ):
-        raise TypeError("G0.5 RPU inferencer is missing prepare/timing methods")
+        raise TypeError("G0.5 device inferencer is missing prepare/timing methods")
     inferencer._rpu_g05_original_prepare = inferencer._prepare
     inferencer._rpu_g05_original_infer_with_timing = inferencer.infer_with_timing
     inferencer._rpu_g05_action_prepare_cache = None
@@ -2378,10 +3296,13 @@ def _install_g05_execution_session(policy, resolved) -> None:
 
 @execution_serialized
 def _rpu_g05_predict_action(self, batch):
-    """Run the already-eval RPU policy without recursive mode walks."""
+    """Run the already-eval device policy without recursive mode walks."""
     if self.training or self.model.training:
-        raise NotImplementedError("G0.5 RPU policy supports inference only")
+        raise NotImplementedError("G0.5 device policy supports inference only")
     samples = batch["samples"]
+    normalize_samples = getattr(self, "_rpu_g05_ensure_sample_list", None)
+    if callable(normalize_samples):
+        samples = normalize_samples(samples)
     generated = self.forward_inference(
         samples=samples,
         pixel_values=batch["pixel_values"],
@@ -2393,6 +3314,24 @@ def _rpu_g05_predict_action(self, batch):
     )
     batch.update(generated)
     return batch
+
+
+def _rpu_g05_policy_forward(
+    self,
+    batch,
+    inference_mode=False,
+    return_dict=False,
+    is_vlm_batch=False,
+):
+    """Skip exact-release per-step recursive eval/train walks in production."""
+    if not inference_mode or return_dict or is_vlm_batch:
+        return self._rpu_g05_original_policy_forward(
+            batch,
+            inference_mode=inference_mode,
+            return_dict=return_dict,
+            is_vlm_batch=is_vlm_batch,
+        )
+    return _rpu_g05_predict_action(self, batch)
 
 
 def _g05_policy_runtime_ready(policy) -> bool:
@@ -2451,8 +3390,10 @@ def _g05_policy_runtime_ready(policy) -> bool:
         if getattr(child, "_execution_session", None) is None:
             return False
 
+    fm_only = getattr(policy, "_rpu_g05_fm_only_customer_release", False) is True
     vision_required = (
-        getattr(model, "_rpu_g05_vision_install_started", False) is True
+        fm_only
+        or getattr(model, "_rpu_g05_vision_install_started", False) is True
         or getattr(model, "_rpu_g05_vision_ready", False) is True
     )
     if vision_required:
@@ -2486,21 +3427,86 @@ def _g05_policy_runtime_ready(policy) -> bool:
         except (TypeError, ValueError):
             return False
 
+    if fm_only:
+        tower = model.vision_tower
+        if getattr(tower, "_rpu_vision_step0", False) is not True:
+            return False
+        if getattr(tower, "_rpu_vision_graph_disable", True) is not False:
+            return False
+        if not callable(vars(policy).get("_rpu_g05_original_policy_forward")):
+            return False
+        if not callable(vars(policy).get("_rpu_g05_ensure_sample_list")):
+            return False
+        if not _instance_method_is(policy, "forward", _rpu_g05_policy_forward):
+            return False
+        if getattr(policy, "discrete_action", None) is not False:
+            return False
+        if not bool(vars(policy).get("_rpu_g05_original_discrete_action", False)):
+            return False
+        accumulation = getattr(policy, "_rpu_g05_linear_accumulation", "acc32")
+        certified = getattr(model, "_rpu_g05_certified_k1_vision", False)
+        experimental = getattr(model, "_rpu_g05_acc16_experiment", False)
+        if getattr(policy, "_rpu_g05_camera_names", None) is not None and not _g05_camera_profile_matches(policy, model):
+            return False
+        two_cameras = getattr(policy, "_rpu_g05_camera_names", None) == _G05_TWO_CAMERA_NAMES
+        if accumulation == "acc32":
+            if certified is not (not two_cameras) or experimental is not False:
+                return False
+        elif accumulation == "acc16":
+            if not (certified is False and experimental is True
+                    and getattr(model, "_rpu_g05_linear_accumulation", None) == "acc16"
+                    and getattr(policy, "_rpu_g05_weight_dtype", None) in ("fp16", "w8a16")):
+                return False
+            for child in (tower, model.vlm, model.action_expert):
+                if getattr(child, "_rpu_g05_linear_accumulation", None) != "acc16":
+                    return False
+            if getattr(tower, "_rpu_vision_linear_acc32", None) is not False:
+                return False
+            if any(getattr(getattr(child, "_rpu_qwen3_5", None),
+                           "linear_acc32", None) is not False
+                   for child in (model.vlm, model.action_expert)):
+                return False
+        else:
+            return False
+    math_precision = getattr(policy, "_rpu_g05_math_precision", "base")
+    if math_precision not in ("base", "high"):
+        return False
+    if math_precision == "high" and getattr(model, "_rpu_g05_math_precision", None) != "high":
+        return False
+    if any(getattr(child, "_rpu_g05_math_precision", "base") != math_precision
+           for child in (getattr(model, "vlm", None), getattr(model, "action_expert", None),
+                         getattr(model, "vision_tower", None))):
+        return False
     return True
 
 
 @_transactional_g05_policy_install
 def patch_g05_policy_for_rpu(
-    policy, *, max_seq_len: int = 2048, rpu_execution=None
+    policy, *, max_seq_len: int = 2048, rpu_execution=None,
+    weight_dtype: str = "fp16", linear_accumulation: str = "acc32",
+    action_weight_dtype: str | None = None,
+    math_precision: str = "base",
 ):
     """Patch a canonical G0.5 policy for continuous action inference.
 
     Load the official policy on CPU and call ``eval()`` before this function.
-    The VLM text stack and action-expert decoder core move to RPU. Vision
-    requires the controlled Qwen3.5 numeric-blocked opt-in. Tokenization and
-    time conditioning stay on the host; the action I/O projections and FP16
-    Euler run inside the RPU action graph.
+    The VLM text stack and action-expert decoder core move to device. The exact
+    customer RTC/FM K1 profile also moves Vision to device by contract; other
+    profiles still require the controlled Qwen3.5 numeric-blocked opt-in.
+    tokenization and time conditioning stay on the host; the action I/O
+    projections and FP16 Euler run inside the device action graph.
+    The exact customer ``vla_rtc`` RTC/FM contract uses the same automatic
+    generated ring as every profile and defaults to the Vision ACC32 auto-tile
+    family; there is no collective or tiling route override.
+    ``weight_dtype='w8a16'`` is an explicit experiment for the exact K1
+    customer profile: per-channel INT8 large projections, FP16 activations,
+    and ACC32 by default. Exact K1 FP16 and W8A16 support explicit
+    ``linear_accumulation="acc16"``; opposite-accumulator specializations
+    fall back to genuine generated Linears. The optional Action NVFP4 override
+    keeps Vision/Text W8A16 and uses the same selected accumulator in all three
+    stages. These precision experiments do not certify robot/task quality.
     """
+    weight_dtype = normalize_weight_dtype(weight_dtype)
     if getattr(policy, "_rpu_g05_policy_ready", False):
         if _g05_policy_runtime_ready(policy):
             return policy
@@ -2520,21 +3526,58 @@ def patch_g05_policy_for_rpu(
     )
     if getattr(policy, "training", True):
         raise NotImplementedError(
-            "G0.5 RPU policy supports inference only; call policy.eval()"
+            "G0.5 device policy supports inference only; call policy.eval()"
         )
     continuous = bool(getattr(policy, "continuous_action", False))
     discrete = bool(getattr(policy, "discrete_action", False))
     model = getattr(policy, "model", None)
     if model is None:
         raise TypeError("expected G05PolicyQwen35 with policy.model")
-    if not continuous or discrete:
+    rtc_release_fm_only = _is_vla_rtc_fm_release(policy, model)
+    if weight_dtype == "w8a16" and not rtc_release_fm_only:
+        raise ValueError("G0.5 W8A16 is limited to the exact vla_rtc K1 policy")
+    linear_accumulation = validate_linear_accumulation(
+        linear_accumulation, weight_dtype=weight_dtype, exact_k1=rtc_release_fm_only)
+    math_precision = validate_math_precision(math_precision, exact_k1=rtc_release_fm_only)
+    if math_precision == "high":
+        require_g05_high_math_native()
+        require_g05_high_math_native(vision=True)
+    action_weight_dtype = normalize_action_weight_dtype(
+        action_weight_dtype, weight_dtype=weight_dtype)
+    if action_weight_dtype == "nvfp4a16":
+        if not rtc_release_fm_only:
+            raise ValueError("G0.5 Action NVFP4 requires exact K1 W8A16")
+        require_g05_action_nvfp4_native()
+    exact_policy_forward = None
+    ensure_sample_list = None
+    if rtc_release_fm_only:
+        exact_policy_forward = getattr(policy, "forward", None)
+        forward_function = getattr(
+            exact_policy_forward, "__func__", exact_policy_forward
+        )
+        module_names = (
+            type(policy).__module__,
+            getattr(forward_function, "__module__", None),
+        )
+        for module_name in dict.fromkeys(module_names):
+            policy_module = sys.modules.get(module_name)
+            candidate = getattr(policy_module, "_ensure_sample_list", None)
+            if callable(candidate):
+                ensure_sample_list = candidate
+                break
+        if not callable(exact_policy_forward) or not callable(ensure_sample_list):
+            raise TypeError(
+                "exact customer G0.5 policy is missing forward/sample normalization"
+            )
+    if not continuous or (discrete and not rtc_release_fm_only):
         raise NotImplementedError(
-            "G0.5 RPU bring-up supports only continuous_action=true with "
-            "discrete_action=false; discrete AR/CoT is not certified"
+            "G0.5 device bring-up supports only continuous_action=true with "
+            "discrete_action=false, except the exact vla_rtc RTC release where "
+            "the unused AR leg is disabled; discrete AR/CoT is not certified"
         )
     if bool(getattr(policy, "predict_cot", False)):
         raise NotImplementedError(
-            "G0.5 RPU bring-up requires predict_cot=false; AR/CoT is not certified"
+            "G0.5 device bring-up requires predict_cot=false; AR/CoT is not certified"
         )
     if max_seq_len <= 0 or (continuous and max_seq_len < 32):
         raise ValueError(
@@ -2545,7 +3588,7 @@ def patch_g05_policy_for_rpu(
         parameter.device.type != "cpu" for parameter in parameters()
     ):
         raise NotImplementedError(
-            "G0.5 RPU policy requires a CPU-hosted checkpoint before patching"
+            "G0.5 device policy requires a CPU-hosted checkpoint before patching"
         )
 
     if continuous:
@@ -2556,7 +3599,7 @@ def patch_g05_policy_for_rpu(
         horizon = getattr(fm_helper, "horizon_steps", None)
         if horizon != 32:
             raise NotImplementedError(
-                "G0.5 RPU action inference requires horizon_steps=32"
+                "G0.5 device action inference requires horizon_steps=32"
             )
         if (
             getattr(fm_helper, "action_dim", None) != 27
@@ -2568,42 +3611,54 @@ def patch_g05_policy_for_rpu(
             )
         ):
             raise NotImplementedError(
-                "G0.5 RPU action-step fusion requires action_dim=27, "
+                "G0.5 device action-step fusion requires action_dim=27, "
                 "num_inference_steps=10, and time_convention=pi_convention"
             )
         _check_g05_action_profile(expert.config)
         mode = getattr(getattr(model, "cfg", None), "ae_vlm_condition_mode", None)
         if mode != "cross_attn_only":
             raise NotImplementedError(
-                "G0.5 RPU action inference requires "
+                "G0.5 device action inference requires "
                 "ae_vlm_condition_mode=cross_attn_only"
             )
         if getattr(getattr(model, "fm_helper", None), "action_causal", True):
             raise NotImplementedError(
-                "G0.5 RPU action inference requires action_causal=false"
+                "G0.5 device action inference requires action_causal=false"
             )
         if getattr(expert, "training", True):
             raise NotImplementedError(
-                "G0.5 RPU action expert supports inference only; call expert.eval()"
+                "G0.5 device action expert supports inference only; call expert.eval()"
             )
     vlm = _preflight_g05_vlm(model)
-    vision_enabled = os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") == "1"
+    vision_enabled = (
+        rtc_release_fm_only
+        or os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") == "1"
+    )
     proprio_mlp = None
     if vision_enabled:
         if os.environ.get("RPU_VISION_MERGER", "1") == "0":
             raise NotImplementedError(
-                "G0.5 RPU direct vision fusion requires RPU_VISION_MERGER"
+                "G0.5 device direct vision fusion requires RPU_VISION_MERGER"
             )
+        if rtc_release_fm_only:
+            if os.environ.get("RPU_VISION_STEP0", "1") == "0":
+                raise NotImplementedError(
+                    "exact customer K1 Vision requires RPU_VISION_STEP0"
+                )
+            if os.environ.get("QWEN3_5_VISION_GRAPH_DISABLE", "0") != "0":
+                raise NotImplementedError(
+                    "exact customer K1 Vision requires GraphCache"
+                )
         source_mlp = getattr(getattr(model, "proprio_embedder", None), "mlp", None)
         if not isinstance(source_mlp, torch.nn.Module):
             raise TypeError(
-                "G0.5 RPU direct vision fusion requires model.proprio_embedder.mlp"
+                "G0.5 device direct vision fusion requires model.proprio_embedder.mlp"
             )
         if not callable(getattr(model, "_forward_embed", None)):
-            raise TypeError("G0.5 RPU direct vision fusion requires model._forward_embed")
+            raise TypeError("G0.5 device direct vision fusion requires model._forward_embed")
         embed_weight = getattr(getattr(vlm, "input_proj", None), "weight", None)
         if not isinstance(embed_weight, torch.Tensor) or embed_weight.ndim != 2:
-            raise TypeError("G0.5 RPU direct fusion requires vlm.input_proj.weight")
+            raise TypeError("G0.5 device direct fusion requires vlm.input_proj.weight")
         _preflight_g05_vision(model)
         # Build the private copy before any irreversible vision/text mutation.
         proprio_mlp = copy.deepcopy(source_mlp).half().eval().requires_grad_(False)
@@ -2620,14 +3675,31 @@ def patch_g05_policy_for_rpu(
     policy._rpu_g05_policy_install_started = True
     os.environ.setdefault("RPU_FASTREPLAY_SKIP_SYNC", "1")
     if vision_enabled:
+        vision_install_kwargs = {}
+        if linear_accumulation != "acc32":
+            vision_install_kwargs["linear_accumulation"] = linear_accumulation
+        if weight_dtype != "fp16":
+            vision_install_kwargs["weight_dtype"] = weight_dtype
+        if math_precision == "high":
+            vision_install_kwargs["math_precision"] = math_precision
         patch_g05_vision_for_rpu(
             model,
+            _allow_certified_g05_k1=rtc_release_fm_only,
             _execution_config=resolved_execution[1][_G05_VISION_COMPONENT],
+            **vision_install_kwargs,
         )
     vlm_install_kwargs = {
         "max_seq_len": max_seq_len,
         "_execution_config": resolved_execution[1][_G05_TEXT_COMPONENT],
     }
+    if rtc_release_fm_only:
+        vlm_install_kwargs["_allow_certified_g05_k1"] = True
+    if weight_dtype != "fp16":
+        vlm_install_kwargs["weight_dtype"] = weight_dtype
+    if linear_accumulation != "acc32":
+        vlm_install_kwargs["linear_accumulation"] = linear_accumulation
+    if math_precision == "high":
+        vlm_install_kwargs["math_precision"] = math_precision
     patch_g05_vlm_for_rpu(model, **vlm_install_kwargs)
     if getattr(model, "_rpu_g05_vision_ready", False):
         model._rpu_g05_embed_w_rpu = (
@@ -2639,10 +3711,22 @@ def patch_g05_policy_for_rpu(
             proprio_mlp,
         )
         model._forward_embed = types.MethodType(_rpu_g05_forward_embed, model)
+    action_install_kwargs = {}
+    if math_precision == "high":
+        action_install_kwargs.update(math_precision=math_precision, _g05_exact_k1=rtc_release_fm_only)
+    if linear_accumulation != "acc32":
+        action_install_kwargs.update(
+            linear_accumulation=linear_accumulation, _g05_acc16_experiment=True)
+    if weight_dtype != "fp16":
+        action_install_kwargs["weight_dtype"] = weight_dtype
+    if action_weight_dtype != weight_dtype:
+        action_install_kwargs["action_weight_dtype"] = action_weight_dtype
+        action_install_kwargs["_g05_exact_k1"] = rtc_release_fm_only
     patch_g05_action_expert_for_rpu(
         model.action_expert,
         max_seq_len=max_seq_len,
         _execution_config=resolved_execution[1][_G05_ACTION_COMPONENT],
+        **action_install_kwargs,
     )
     model._rpu_g05_original_inference_fm = model.inference_fm
     model.inference_fm = types.MethodType(_rpu_g05_inference_fm, model)
@@ -2696,17 +3780,93 @@ def patch_g05_policy_for_rpu(
             processor,
         )
     policy._rpu_g05_original_predict_action = predict_action
+    if rtc_release_fm_only:
+        if not getattr(model, "_rpu_g05_vision_ready", False):
+            raise AssertionError("exact customer K1 Vision did not install on device")
+        policy._rpu_g05_original_discrete_action = policy.discrete_action
+        policy._rpu_g05_original_policy_forward = exact_policy_forward
+        policy._rpu_g05_ensure_sample_list = ensure_sample_list
+        policy.discrete_action = False
+        policy._rpu_g05_fm_only_customer_release = True
+        model._rpu_g05_certified_k1_vision = (linear_accumulation == "acc32" and
+            getattr(policy, "_rpu_g05_camera_names", None) != _G05_TWO_CAMERA_NAMES)
+        model._rpu_g05_acc16_experiment = linear_accumulation == "acc16"
+        policy.forward = types.MethodType(_rpu_g05_policy_forward, policy)
     policy.predict_action = types.MethodType(_rpu_g05_predict_action, policy)
     _install_g05_execution_session(policy, resolved_execution)
+    policy._rpu_g05_action_weight_dtype = action_weight_dtype
+    policy._rpu_g05_weight_dtype = weight_dtype
+    policy._rpu_g05_linear_accumulation = linear_accumulation
+    policy._rpu_g05_math_precision = math_precision
+    model._rpu_g05_linear_accumulation = linear_accumulation
+    model._rpu_g05_math_precision = math_precision
     policy._rpu_g05_policy_ready = True
     return policy
 
 
+
+def configure_g05_vision_camera_batch(policy, batch):
+    """Select exact K1 camera grouping while the execution session is cold."""
+    if type(batch) is not int or batch not in (1, 2, 3):
+        raise ValueError("K1 camera batch must be 1, 2 or 3")
+    vision = getattr(getattr(policy, "model", None), "vision_tower", None)
+    current = getattr(vision, "_rpu_g05_vision_forward_impl", None)
+    grouped = getattr(current, "_g05_k1_camera_group_wrapper", False) or getattr(current, "_g05_k1_b3_wrapper", False)
+    if batch == 1:
+        if grouped:
+            policy._execution_session.require_cold()
+            vision._rpu_g05_vision_forward_impl = current._g05_k1_original
+        return
+    policy._execution_session.require_cold()
+    if not getattr(policy, "_rpu_g05_fm_only_customer_release", False):
+        raise ValueError("K1 camera grouping requires the exact G05 RTC/FM release")
+    names = getattr(policy, "_rpu_g05_camera_names", _G05_RELEASE_CAMERA_NAMES)
+    if batch != len(names):
+        raise ValueError("K1 camera group must match the selected source camera count")
+    if names == _G05_TWO_CAMERA_NAMES and not _g05_camera_profile_matches(policy,policy.model):
+        raise ValueError("K1 B2 requires the complete cold head/left camera profile")
+    capabilities = getattr(vision, "_rpu_vision_k1_camera_group_available", ())
+    available = (bool(capabilities[batch-2]) if capabilities else
+                 bool(batch == 3 and getattr(vision,"_rpu_vision_k1_b3_available",False)))
+    if not available:
+        raise ValueError("requested K1 camera group is unavailable in selected runtime/REF/mode")
+    if getattr(vision,"_rpu_vision_exact_chunk_size",None) not in (None,256*batch) or int(getattr(vision,"_rpu_vision_chunk_size_cap",0)) not in (0,256*batch):
+        raise ValueError("K1 camera group requires a complete camera-wide compute chunk")
+    original = current._g05_k1_original if grouped else current
+    if not callable(original):
+        raise ValueError("K1 camera grouping requires installed Vision")
+    if grouped and getattr(current,"_g05_k1_camera_batch",3) == batch:
+        return
+
+    def forward(*args, **kwargs):
+        if kwargs.get("_rpu_temporal_num_frames") != 1:
+            raise ValueError("the K1 camera group requires one frame per camera")
+        grid = args[1] if len(args)>1 else kwargs.get("grid_thw")
+        if not isinstance(grid,torch.Tensor) or tuple(grid.shape)!=(batch,3) or not bool(torch.all(grid.cpu()==torch.tensor([1,16,16],dtype=grid.dtype))):
+            raise ValueError("K1 camera group requires exact independent 256-patch camera grids")
+        kwargs["_rpu_camera_batch_count"] = batch
+        result = original(*args, **kwargs)
+        actual = vision._rpu_vision_last_a6_plan["selected"]["physical_metadata"]["camera_batch_count"]
+        if actual != batch:
+            raise AssertionError("requested K1 camera group descriptor drifted")
+        return result
+
+    forward._g05_k1_camera_group_wrapper = True
+    forward._g05_k1_camera_batch = batch
+    forward._g05_k1_b3_wrapper = batch == 3
+    forward._g05_k1_original = original
+    vision._rpu_g05_vision_forward_impl = forward
+
+
 __all__ = [
+    "configure_g05_camera_profile",
+    "configure_g05_vision_camera_batch",
     "patch_g05_action_expert_for_rpu",
     "patch_g05_data_processor_for_rpu",
     "patch_g05_inferencer_for_rpu",
     "patch_g05_policy_for_rpu",
+    "patch_g05_release_processor_for_rpu",
+    "patch_g05_release_runner_for_rpu",
     "patch_g05_vision_for_rpu",
     "patch_g05_vlm_for_rpu",
 ]

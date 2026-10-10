@@ -22,7 +22,7 @@ just the next function call.
   ownership. It removes staging, not the copy or lifetime contract.
 - Publish CPU writes at their producing upload/copy operation, and synchronize
   device output when a CPU reader accesses it. A device-only consumer or output
-  view does not need another cache flush. An RPU-to-RPU copy implemented with
+  view does not need another cache flush. An device-to-device copy implemented with
   host `memcpy` still has both CPU read and write boundaries. See the
   [cache controls](../../docs/runtime_config.md#memory-and-coherency-controls).
 - RhinoVLA's unrolled action path uploads its cold condition table once and
@@ -50,11 +50,10 @@ just the next function call.
 
 The native patch boundary accepts either one `[B,3,H,W]` tensor with `B=1..8`,
 or a list of up to eight `[1,3,H,W]` tensors with identical H/W. Inputs are
-contiguous FP16 RPU tensors. The whole request is checked before a physical
+contiguous FP16 device tensors. The whole request is checked before a physical
 prologue, SPM allocation, or DMA. The multi-core permute requires stride equal
 to kernel size and width divisible by kernel width; the position table must
-cover the resulting patch grid. Unsupported geometry fails before dispatch.
-[Native HYViT boundary](../../src/fused/rpu_hyvit2_vision_model.cpp)
+cover the resulting patch grid. Unsupported geometry fails before dispatch. [Native HYViT boundary](../../src/fused/rpu_hyvit2_vision_model.cpp)
 
 ## Failure signals
 

@@ -21,7 +21,7 @@ from numbers import Integral
 
 import torch
 
-from rpu_backend.api.cache import RPUCache
+from rpu_backend.api.cache import RPUCache, _zero_whole_rpu_tensors
 from rpu_backend.api._execution import QWEN3_5_OPTIONAL_PADDING_CAP, QWEN3_5_TOTAL_PADDING_CAP
 
 
@@ -38,11 +38,13 @@ def _positive_int(name: str, value) -> int:
 
 def qwen3_5_kv_replication(config, num_cores: int = 8) -> int:
     """One cold profile geometry for both cache allocation and native weights."""
-    from rpu_backend.adapters.qwen3_5.quant_scope import validate_legacy_text_profile
+    from rpu_backend.adapters.qwen3_5.quant_scope import (
+        validate_legacy_text_profile, validate_modern_27b_profile,
+    )
 
     tc = getattr(config, "text_config", config)
     nkv = _positive_int("num_key_value_heads", tc.num_key_value_heads)
-    if validate_legacy_text_profile(config):
+    if validate_legacy_text_profile(config) or validate_modern_27b_profile(config):
         # The controlled 27B route duplicates each original KV head for all
         # its queries. GQA=1 avoids the accumulated SDPA product=6 erratum at
         # C128. The native planner still checks its actual SPM/SDPA domain.
@@ -105,7 +107,8 @@ class Qwen3_5Cache(RPUCache):
         # virtual-8 layout used by the swizzled 7-D cache.
         super().__init__(num_layers, batch_size, physical_max_seq_len,
                          num_kv_heads, head_dim, attn_tp=attn_tp,
-                         device=device, dtype=dtype)
+                         device=device, dtype=dtype,
+                         _kv_layer_mask=tuple(t == "full_attention" for t in layer_types))
         self.max_seq_len = logical_max_seq_len
         empty = torch.empty(0, device=device, dtype=dtype)
 
@@ -129,27 +132,18 @@ class Qwen3_5Cache(RPUCache):
         # C++ forward takes `gdn_states` (== recurrent_states).
         self.gdn_states = self.recurrent_states
 
-        # DDR optimization: only full-attention layers use the 7-D KV cache; GDN
-        # (`linear_attention`) layers carry recurrent+conv state and NEVER touch KV.
-        # The fused C++ forward derefs (*ctx().k_caches)[layer_idx] ONLY inside
-        # build_full_attention, gated by layer_is_full_[layer_idx]
-        # (rpu_qwen3_5_model.cpp:197 → :354-355), so an empty tensor at a GDN index
-        # is never indexed. This mirrors the already-validated pattern where
-        # gdn_states/conv_states are `empty` at full-attn layers. base RPUCache
-        # allocated all 32 layers above; drop the ~75% (4B: 24/32) that are GDN.
-        # Cost: super().__init__ momentarily peaks at the full allocation before
-        # these are freed (fine on a large-DDR board; switch to lazy alloc only if
-        # that transient OOMs). reset() stays correct: empty.zero_() is a no-op.
-        for i, t in enumerate(layer_types):
-            if _is_gdn(t):
-                self.k_caches[i] = empty
-                self.v_caches[i] = empty
-
     def reset(self):
         """Reset to an empty conversation: KV cache + position (super) plus the
         per-GDN-layer recurrent + conv-window states. Zeroed IN PLACE so the DDR
         addresses the fused decode graph baked at BUILD stay valid — callers that
         reuse one cache across turns must reset rather than reallocate."""
+        self.position = self._seen_tokens = 0
+        if (getattr(self, "_reset_groups", None) is None
+                and len(self.k_caches) == len(self.v_caches)):
+            tensors = [tensor for pair in zip(self.k_caches, self.v_caches)
+                       for tensor in pair] + self.recurrent_states + self.conv_states
+            if _zero_whole_rpu_tensors(tensors):
+                return
         super().reset()
         for s in self.recurrent_states:
             s.zero_()
@@ -178,14 +172,18 @@ class Qwen3_5Cache(RPUCache):
     def from_config(cls, text_config, max_seq_len, device="rpu",
                     dtype=torch.float16, *, num_cores=8):
         from rpu_backend.adapters.qwen3_5.cores import validate_core_profile
-        topology = validate_core_profile(text_config, {"model": {"num_cores": num_cores}})
+        # Keep the top-level precision declaration for admission and KV layout;
+        # HF stores it outside text_config for ordinary multimodal checkpoints.
+        config = text_config
+        topology = validate_core_profile(config, {"model": {"num_cores": num_cores}})
+        text_config = getattr(config, "text_config", config)
         NUM_CORES = topology.attn_tp
         max_seq_len = _positive_int("max_seq_len", max_seq_len)
         nkv = _positive_int(
             "num_key_value_heads", text_config.num_key_value_heads
         )
         # Share the exact installed geometry with the text weight path.
-        kv_rep = qwen3_5_kv_replication(text_config, NUM_CORES)
+        kv_rep = qwen3_5_kv_replication(config, NUM_CORES)
         nkv_eff = nkv * kv_rep
         attn_tp = NUM_CORES             # full-attn now runs on all 8 cores (replicated KV)
         nvh = _positive_int(
@@ -244,6 +242,5 @@ class Qwen3_5Cache(RPUCache):
             raise ValueError("Qwen3.5 model config no longer matches its installed core layout")
         if expected.num_cores != 8 and installed is None:
             raise ValueError("reduced Qwen3.5 cache requires a completely installed model")
-        config = getattr(model.config, "text_config", model.config)
-        return cls.from_config(config, max_seq_len=max_seq_len, device=device, dtype=dtype,
+        return cls.from_config(model.config, max_seq_len=max_seq_len, device=device, dtype=dtype,
                                num_cores=expected.num_cores)

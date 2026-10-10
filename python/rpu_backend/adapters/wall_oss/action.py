@@ -1,10 +1,10 @@
-"""Wall-OSS-0.5 action expert (expert-1) flow-matching denoise → RPU (P2).
+"""Wall-OSS-0.5 action expert (expert-1) flow-matching denoise → device (P2).
 
 Rev 5 architecture (verified): the action expert is a PLAIN 1024-dim Qwen2.5
 decoder (`use_adarms=FALSE`). The stock Wall-OSS checkpoint uses causal action
-attention. P2 reuses the SAME
+attention; RTC-trained checkpoints may use a bidirectional action block. P2 reuses the SAME
 decoder core as P1 (expert-0), wrapped by the fused Wall-OSS action op for the
-preprocessor and Euler update. Expert-1 remains hidden 1024
+preprocessor, Euler update, and optional RTC hard pin. Expert-1 remains hidden 1024
 (q_proj 1024→2048, o_proj 2048→1024) on the existing attn_tp=2 + optional-QKV-bias path.
 
 Flow (mirrors `modeling_qwen2_5_vl_act.py::predict` diffusion mode + the pi05 shared-prefix
@@ -34,6 +34,8 @@ import torch.nn.functional as F
 
 import rpu_backend
 from rpu_backend.runtime import rpu_env_bool
+from rpu_backend.adapters.wall_oss._sorting import sorting_config_from_env
+from rpu_backend.runtime.masks import versioned_cpu_mask
 from rpu_backend.runtime.decoder import plan_bounded_prefill_execution
 from rpu_backend.runtime.execution_planner import (
     GRAPH_COMPOSITE_CHILD,
@@ -55,6 +57,131 @@ from rpu_backend.runtime.rope_partial import build_chunked_mrope_cos_sin
 
 _FMB_GRAPH_COMPOSITE_CHILD = GRAPH_MODES.index(GRAPH_COMPOSITE_CHILD) + 1
 
+_ACTION_RESIDENT_LAYERS = (1, 2, 3, 4)
+_ACTION_WEIGHT_BYTES_PER_LAYER = 0x180000
+_ACTION_WEIGHT_BYTES_PER_CORE = (
+    len(_ACTION_RESIDENT_LAYERS) * _ACTION_WEIGHT_BYTES_PER_LAYER
+)
+_ACTION_WEIGHT_LAYOUT = (
+    ("q", 0x000000, (2048, 1024), 1),
+    ("k", 0x040000, (1024, 1024), 1),
+    ("v", 0x060000, (1024, 1024), 1),
+    ("o", 0x080000, (1024, 2048), 0),
+    ("gate", 0x0C0000, (2048, 1024), 1),
+    ("up", 0x100000, (2048, 1024), 1),
+    ("down", 0x140000, (1024, 2048), 0),
+)
+
+
+def _compact_w8_weight_per_core(
+    weight: torch.Tensor, partition: int
+) -> torch.Tensor:
+    """Pack one raw CPU int8 [N,K] weight as compact [core][512B tiles]."""
+    if (
+        weight.device.type != "cpu"
+        or weight.dtype != torch.int8
+        or weight.dim() != 2
+        or not weight.is_contiguous()
+    ):
+        raise ValueError("resident weight source must be contiguous CPU int8 [N,K]")
+    if partition not in (0, 1):
+        raise ValueError(f"partition must be 0 (row) or 1 (col), got {partition}")
+    n, k = weight.shape
+    if (partition == 1 and n % _MLP_CORES) or (
+        partition == 0 and k % _MLP_CORES
+    ):
+        raise ValueError("resident weight partition is not divisible by 8 cores")
+
+    shards = []
+    for core in range(_MLP_CORES):
+        if partition == 1:
+            local = weight[
+                core * (n // _MLP_CORES):(core + 1) * (n // _MLP_CORES), :
+            ]
+        else:
+            local = weight[
+                :, core * (k // _MLP_CORES):(core + 1) * (k // _MLP_CORES)
+            ]
+        local_n, local_k = local.shape
+        if local_n % 16 or local_k % 32:
+            raise ValueError(
+                "resident weight shard requires local N%16==0 and K%32==0"
+            )
+        shards.append(
+            local.view(local_n // 16, 16, local_k // 32, 32)
+            .permute(0, 2, 1, 3)
+            .contiguous()
+            .view(-1)
+        )
+    return torch.stack(shards)
+
+
+def _pack_action_resident_weight_bundle(*weights: torch.Tensor) -> torch.Tensor:
+    """Pack one layer's Q/K/V/O/Gate/Up/Down into a core-major byte bundle."""
+    if len(weights) != len(_ACTION_WEIGHT_LAYOUT):
+        raise ValueError(
+            f"expected {len(_ACTION_WEIGHT_LAYOUT)} resident weights, got {len(weights)}"
+        )
+    bundle = torch.empty(
+        (_MLP_CORES, _ACTION_WEIGHT_BYTES_PER_LAYER), dtype=torch.int8
+    )
+    for weight, (name, offset, shape, partition) in zip(
+        weights, _ACTION_WEIGHT_LAYOUT
+    ):
+        if tuple(weight.shape) != shape:
+            raise ValueError(
+                f"resident {name} weight must be {shape}, got {tuple(weight.shape)}"
+            )
+        packed = _compact_w8_weight_per_core(weight, partition)
+        end = offset + packed.size(1)
+        if end > _ACTION_WEIGHT_BYTES_PER_LAYER:
+            raise ValueError(f"resident {name} weight exceeds the per-core bundle")
+        bundle[:, offset:end].copy_(packed)
+    return bundle
+
+
+def _action_fp16_transfer(sorting, w8a16=False, w4a16=False, nvfp4a16=False):
+    return not (w8a16 or w4a16 or nvfp4a16) and bool(sorting.fp16_mask & 4)
+
+
+def _pack_action_fp16_resident_weight_bundle(*weights: torch.Tensor) -> torch.Tensor:
+    """Two FP16 layers use the same 6 MiB/core arena as four W8 layers."""
+    if len(weights) != len(_ACTION_WEIGHT_LAYOUT):
+        raise ValueError("expected seven FP16 resident weights")
+    bundle = torch.empty(
+        (_MLP_CORES, 2 * _ACTION_WEIGHT_BYTES_PER_LAYER), dtype=torch.int8
+    )
+    for weight, (name, offset, shape, partition) in zip(weights, _ACTION_WEIGHT_LAYOUT):
+        if weight.device.type != "cpu" or tuple(weight.shape) != shape:
+            raise ValueError(f"invalid FP16 resident {name} source")
+        weight = weight.half().contiguous()
+        n, k = shape
+        shards = []
+        for core in range(_MLP_CORES):
+            if partition:
+                local = weight[
+                    core * n // _MLP_CORES:(core + 1) * n // _MLP_CORES, :
+                ]
+            else:
+                local = weight[
+                    :, core * k // _MLP_CORES:(core + 1) * k // _MLP_CORES
+                ]
+            local = local.contiguous()
+            local_n, local_k = local.shape
+            packed = (
+                local.reshape(local_n // 16, 16, local_k // 16, 16)
+                .permute(0, 2, 1, 3)
+                .contiguous()
+            )
+            shards.append(packed.view(torch.int8).reshape(-1))
+        packed = torch.stack(shards)
+        begin = 2 * offset
+        end = begin + packed.size(1)
+        if end > bundle.size(1):
+            raise ValueError(f"FP16 resident {name} exceeds bundle")
+        bundle[:, begin:end].copy_(packed)
+    return bundle
+
 
 def _sinusoidal_pos_emb(t: torch.Tensor, dim: int) -> torch.Tensor:
     """action_head.SinusoidalPosEmb.forward (dim = action_hidden_size). t: [bs] fp32 → [bs, dim]."""
@@ -68,6 +195,55 @@ def _sinusoidal_pos_emb(t: torch.Tensor, dim: int) -> torch.Tensor:
 def _dof_mask_is_row_constant(dof_mask: torch.Tensor) -> bool:
     first_row = dof_mask[0, :1].expand_as(dof_mask[0])
     return bool(torch.equal(dof_mask[0], first_row))
+
+
+def _masked_dof_velocity_inputs(
+    noise: torch.Tensor,
+    dof_mask: torch.Tensor,
+    padding_action: torch.Tensor | None,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Return the customer reference's masked-DOF velocity blend inputs.
+
+    The reference keeps inactive dimensions on a constant trajectory from the
+    initial noise to normalized physical zero:
+    ``v = model_v * dof_mask + (padding_action - noise) * (1 - dof_mask)``.
+    Returning ``None`` for an all-active mask preserves the original op stream.
+    """
+    if not isinstance(dof_mask, torch.Tensor):
+        raise TypeError(
+            f"dof_mask must be a torch.Tensor, got {type(dof_mask).__name__}"
+        )
+    if tuple(dof_mask.shape) != tuple(noise.shape):
+        raise ValueError(
+            f"dof_mask must match noise shape {tuple(noise.shape)}, got "
+            f"{tuple(dof_mask.shape)}"
+        )
+    mask = dof_mask.detach().to(dtype=torch.float32, device="cpu").contiguous()
+    if not bool(torch.logical_or(mask == 0, mask == 1).all()):
+        raise ValueError("dof_mask must contain only 0 or 1")
+    if bool((mask == 1).all()):
+        return None, None
+    if padding_action is None:
+        raise ValueError(
+            "padding_action is required when dof_mask contains inactive dimensions"
+        )
+    if not isinstance(padding_action, torch.Tensor):
+        raise TypeError(
+            "padding_action must be a torch.Tensor when dof_mask contains "
+            "inactive dimensions"
+        )
+    if tuple(padding_action.shape) != tuple(noise.shape):
+        raise ValueError(
+            f"padding_action must match noise shape {tuple(noise.shape)}, got "
+            f"{tuple(padding_action.shape)}"
+        )
+    padding = padding_action.detach().to(
+        dtype=torch.float32, device="cpu").contiguous()
+    initial = noise.detach().to(dtype=torch.float32, device="cpu")
+    if not bool(torch.isfinite(padding).all()):
+        raise ValueError("padding_action must contain only finite values")
+    override = (padding - initial) * (1.0 - mask)
+    return mask, override.contiguous()
 
 
 def _action_horizon(noise: torch.Tensor, action_dim: int) -> int:
@@ -124,7 +300,8 @@ def _destroy_action_handle(h, fused):
 
 
 def _configure_action_handle(
-    *, fused, set_weights, weight_args, chunk_size_override=0
+    *, fused, set_weights, weight_args, chunk_size_override=0,
+    kv_owner_fanout=False, sorting=None, linear_acc32=False,
 ):
     """Create/configure an action handle, destroying it on failure."""
     from rpu_backend.api._execution import _require_execution_process_safe
@@ -135,11 +312,32 @@ def _configure_action_handle(
     )
     handle = create()
     try:
+        if linear_acc32:
+            set_acc32 = (
+                torch.ops.rpu.wall_oss_action_step_set_linear_acc32
+                if fused else torch.ops.rpu.causal_decoder_set_linear_acc32
+            )
+            set_acc32(handle, True)
+        if sorting is not None:
+            set_routes = (
+                torch.ops.rpu.wall_oss_action_step_set_wall_sorting_routes
+                if fused else torch.ops.rpu.causal_decoder_set_wall_sorting_routes
+            )
+            set_routes(handle, *sorting.decoder_args())
         set_weights(handle, *weight_args)
+        if kv_owner_fanout:
+            if not fused:
+                raise ValueError("K/V owner fanout requires fused=True")
+            torch.ops.rpu.wall_oss_action_step_set_kv_owner_fanout(
+                handle, True
+            )
         if not fused:
-            # The unfused CausalDecoderModel shares the text expert's geometry
-            # and rectangular-mask envelope. The fused action handle owns a
-            # separate component contract.
+            # MR-A: certified chunk envelope (docs/runtime_config.md
+            # row #11). ONLY the unfused path is a CausalDecoderModel — the fused
+            # path is wall_oss_action_step, a different C++ class that does not
+            # participate in the envelope regime. Values are the text expert's
+            # (llm.py): same geometry family, same 2D-rect-mask layout, and the
+            # same green evidence (the four cells at .gitlab-ci.yml:2058-2059).
             from rpu_backend.adapters.wall_oss.llm import (
                 _CHUNK_ENVELOPE_MAX_KV,
                 _PREFILL_CHUNK_SIZE_CAP_SAFE,
@@ -159,7 +357,7 @@ def _configure_action_handle(
 
 
 class WallOssAction:
-    """Expert-1 action denoiser on RPU (P2).
+    """Expert-1 action denoiser on device (P2).
 
     Construct via :func:`build_wall_oss_action`. Call :meth:`predict` with CPU `input_ids`
     `[1, P]` (text prefix), a fixed `noise` `[1, H, action_dim]` and `dof_mask` `[1, H, action_dim]`;
@@ -174,7 +372,9 @@ class WallOssAction:
                  fused=False, fused_extra=None, partial_mrope=None,
                  w2_rpu=None, w3_rpu=None, owns_llm=False,
                  execution_chunk_size="auto",
-                 causal_action_attention_mask=True, flow_time_scale=1.0):
+                 causal_action_attention_mask=True, flow_time_scale=1.0,
+                 rtc_max_delay=0, rtc_rope_gap=10,
+                 kv_owner_fanout=False):
         self._gc_retirement_enabled = False
         partial_mrope = (
             _partial_mrope_enabled()
@@ -187,6 +387,7 @@ class WallOssAction:
         self._rope_theta = rope_theta
         self._mrope_section = mrope_section
         self._partial_mrope = partial_mrope
+        self._kv_owner_fanout = bool(kv_owner_fanout)
         self._handle = handle          # expert-1 decoder handle (causal_decoder OR wall_oss)
         self._graph_cache = graph_cache
         self.hidden_size = hidden_size  # 1024
@@ -197,6 +398,9 @@ class WallOssAction:
         self._causal_action_attention_mask = bool(
             causal_action_attention_mask)
         self._flow_time_scale = float(flow_time_scale)
+        self._rtc_max_delay = int(rtc_max_delay)
+        self._rtc_rope_gap = int(rtc_rope_gap)
+        self._masked_dof_velocity = self._rtc_max_delay > 0
         self._action_fp32_tail = rpu_env_bool(
             "RPU_WALL_OSS_ACTION_FP32_TAIL"
         )
@@ -206,6 +410,7 @@ class WallOssAction:
         # Memoized x-independent denoise bias inputs (frame-invariant for a fixed
         # dof_mask). RPU_WALL_OSS_HOST_CACHE=0 disables (bit-exact A/B / escape hatch).
         self._bias_cache = None
+        self._rtc_bias_cache = None
         self._host_cache = rpu_env_bool("RPU_WALL_OSS_HOST_CACHE", default=True)
         # Memoized denoise-seam glue (prefill-graph → denoise-graph), both f(real_len)
         # for a fixed camera: action chunked cos/sin (keyed on next_pos) and the
@@ -229,10 +434,6 @@ class WallOssAction:
             self._w2_t = fused_extra["w2_t"]
             self._action_dim_pad = fused_extra["action_dim_pad"]
             self._k_comb_pad = fused_extra["k_comb_pad"]
-        # action_preprocessor weights. w1 (in=2*action_dim=52) and proj_back (out=26)
-        # stay CPU fp32 — their dims aren't 16-aligned, so rpu_linear's partition search
-        # rejects them (CPU fallback). w2 (2048->1024) / w3 (1024->1024) run on RPU fp16
-        # (column-swizzled, eight-core), leaving their output on RPU for the decoder.
         self._w1, self._w2, self._w3, self._proj_back = w1, w2, w3, proj_back
         if not fused:  # 8-core swizzled w2/w3 only feed the CPU-host _action_embed path
             self._w2_rpu = (
@@ -266,6 +467,10 @@ class WallOssAction:
         """Allow the action GraphCache to BUILD declared execution profiles."""
         return self._graph_cache.begin_warmup()
 
+    def _velocity_blend_inputs(self, noise, dof_mask, padding_action):
+        if not self._masked_dof_velocity:
+            return None, None
+        return _masked_dof_velocity_inputs(noise, dof_mask, padding_action)
 
     def freeze_graph_cache(self):
         """Enter lookup-only READY mode after all action profiles are BUILT."""
@@ -283,7 +488,7 @@ class WallOssAction:
         device by tests/model/wall_oss/test_wall_oss_denoise_real_prefix_replay.py.
         """
         return rpu_backend.graph.GraphSignature(
-            op_id=op_id,
+            op_id=(f"{op_id}_kv_owner" if self._kv_owner_fanout else op_id),
             shapes=[H, self.hidden_size],
             dyn_dims=[
                 self.num_layers,
@@ -315,6 +520,8 @@ class WallOssAction:
         num_steps: int = 1,
         b_step_is_bias: bool = False,
         have_te: bool = False,
+        rtc_delay: int = 0,
+        velocity_blend: bool = False,
     ):
         requested = getattr(self, "_execution_chunk_size", "auto")
         plan_box = {}
@@ -337,7 +544,7 @@ class WallOssAction:
                     int(mask_kv_len),
                     int(requested) if requested != "auto" else 0,
                     bool(loop_mode), int(num_steps), bool(b_step_is_bias),
-                    bool(have_te),
+                    bool(have_te), int(rtc_delay), bool(velocity_blend),
                 ) if self._fused else
                 torch.ops.rpu.causal_decoder_resolve_prefill_stage_domain(
                     self._handle, int(length), int(prefix_len),
@@ -356,7 +563,7 @@ class WallOssAction:
                 ("prefix_history_ddr_required", 1),
                 ("prefix_len", int(prefix_len)),
             ),
-            plan_signature=(bool(self._fused), bool(is_causal), int(mask_kv_len), bool(loop_mode), int(num_steps), bool(b_step_is_bias), bool(have_te)),
+            plan_signature=(bool(self._fused), bool(is_causal), int(mask_kv_len), bool(loop_mode), int(num_steps), bool(b_step_is_bias), bool(have_te), int(rtc_delay), bool(velocity_blend)),
             graph_cache=self._graph_cache,
         )
         return int(chunk_size), plan_box["result"]
@@ -398,17 +605,20 @@ class WallOssAction:
         self._rpu_last_execution_plan = receipt
 
     def _bake_partial_mrope_tables(self, position_ids: torch.Tensor):
-        """Host-bake Qwen2.5-VL chunked cos/sin [H, hd/2] → RPU fp16."""
+        """Host-bake Qwen2.5-VL chunked cos/sin [H, hd/2] → device fp16."""
         c, s = build_chunked_mrope_cos_sin(
             position_ids.to(torch.int64), head_dim=self._head_dim,
             rope_theta=self._rope_theta, mrope_section=self._mrope_section)
-        return c.to("rpu").contiguous(), s.to("rpu").contiguous()
+        # Native keepalive reuse checks identity plus version. Keep these
+        # adapter-owned immutable tables versioned under an inference caller.
+        with torch.inference_mode(False):
+            return c.to("rpu").contiguous(), s.to("rpu").contiguous()
 
     def _partial_mrope_tables(self, position_ids: torch.Tensor, cache_key=None):
         """Memoized Qwen2.5-VL chunked cos/sin for the action positions.
 
         Action positions are ``arange(next_pos, next_pos + H)`` on all three
-        axes, so the table is a function of the real prefix length. Stable RPU
+        axes, so the table is a function of the real prefix length. Stable device
         tensors are cached by ``next_pos`` and validated with ``torch.equal``.
         """
         key = (
@@ -429,7 +639,7 @@ class WallOssAction:
 
     def _action_position_ids_rpu(self, position_ids: torch.Tensor,
                                  cache_key=None) -> torch.Tensor:
-        """Return stable RPU int32 action positions, keyed by semantic next_pos."""
+        """Return stable device int32 action positions, keyed by semantic next_pos."""
         key = (
             cache_key
             if self._host_cache and cache_key is not None
@@ -439,7 +649,8 @@ class WallOssAction:
         cached = self._action_pos_cache.get(key) if self._host_cache else None
         if cached is not None and torch.equal(cached[0], position_ids):
             return cached[1]
-        pos = position_ids.to(dtype=torch.int32, device="rpu").contiguous()
+        with torch.inference_mode(False):
+            pos = position_ids.to(dtype=torch.int32, device="rpu").contiguous()
         if self._host_cache:
             self._action_pos_cache[key] = (position_ids.clone(), pos)
         else:
@@ -448,15 +659,15 @@ class WallOssAction:
 
     def _action_embed(self, t: float, x: torch.Tensor, dof_mask: torch.Tensor) -> torch.Tensor:
         """`ActionProcessor.step` (use_adarms=False). x/dof_mask:[1,H,action_dim] CPU fp32
-        → [1,H,1024] **RPU fp16** (w2/w3 on RPU; ready to feed the decoder directly)."""
+        → [1,H,1024] **device fp16** (w2/w3 on device; ready to feed the decoder directly)."""
         H = x.size(1)
         na = torch.cat([x, dof_mask], dim=-1)                      # CPU [1,H,2*action_dim]
         ae = na @ self._w1.T                                       # CPU [1,H,1024]
         te = _sinusoidal_pos_emb(torch.tensor([t]), self.action_hidden)  # CPU [1,1024]
         te = te.unsqueeze(1).repeat(1, H, 1)                       # CPU [1,H,1024]
-        ce_in = _to_rpu_half(torch.cat([ae, te], dim=-1))         # RPU fp16 [1,H,2048]
+        ce_in = _to_rpu_half(torch.cat([ae, te], dim=-1))         # device fp16 [1,H,2048]
         ce = F.linear(ce_in, self._w2_rpu)                        # rpu_linear (col) [1,H,1024]
-        return F.linear(F.silu(ce), self._w3_rpu)                # RPU fp16 [1,H,1024]
+        return F.linear(F.silu(ce), self._w3_rpu)                # device fp16 [1,H,1024]
 
     @torch.no_grad()
     def predict(self, input_ids: torch.Tensor, noise: torch.Tensor,
@@ -495,6 +706,10 @@ class WallOssAction:
                 "Wall-OSS prefill cache position does not match input length: "
                 f"cache={cache.position}, input={P}"
             )
+
+        # Prefix K/V and Action results live in DDR; persistent weights survive
+        # this standalone Action boundary (resident weights reload in the graph).
+        torch.ops.rpu.spm_alloc_reset_temporary()
 
         # mRoPE position_ids for the action chunk: absolute positions [P, P+H), 3 axes equal
         # (text-only context → no vision grid). Built once (stable keepalive across steps).
@@ -537,19 +752,10 @@ class WallOssAction:
                     -1, 0, False,
                     0, planned_stage_descriptor,
                 )
-            v = raw.float().cpu().reshape(1, H, self.hidden_size) @ self._proj_back.T  # [1,H,26]
+            v = raw.to(device="cpu", dtype=torch.float32).reshape(1, H, self.hidden_size) @ self._proj_back.T  # [1,H,26]
             x = x + dt * v
             vs.append(v.clone()); xs.append(x.clone())
 
-        resolved = int(
-            torch.ops.rpu.causal_decoder_get_resolved_chunk_size(
-                self._handle)
-        )
-        if resolved != planned_chunk_size:
-            raise RuntimeError(
-                "Wall-OSS action dry/forward chunk disagreement: "
-                f"planned={planned_chunk_size}, forward={resolved}"
-            )
         self._record_action_plan(
             a6_plan, horizon=H, prefix_len=P,
             chunk_size=planned_chunk_size,
@@ -561,30 +767,41 @@ class WallOssAction:
 
     @staticmethod
     def _build_action_mask(P: int, H: int, real_P: int | None = None, *,
-                           causal: bool = True) -> torch.Tensor:
+                           causal: bool = True,
+                           rtc_delay: int = 0) -> torch.Tensor:
         """[H, P+H] fp16 additive mask: action row i attends cols [0, real_P) (REAL prefix)
         + the configured action block, -inf elsewhere. CPU tensor — the op's sdpa_prepare_mask
-        copies it to a stable RPU DDR slot (no manual flush, like the P3b window mask).
+        copies it to a stable device DDR slot (no manual flush, like the P3b window mask).
         Constant across denoise steps (P, H fixed) → baked once at graph BUILD.
 
         `real_P` < P only under the v16 KV-insert pad-to-16 path: the cache prefix occupies
         P (16-aligned) slots but the last (P-real_P) are masked padding (action must NOT
-        attend to them)."""
+        attend to them). For RTC's bidirectional action block, committed queries
+        ``[:rtc_delay]`` cannot attend denoising suffix keys ``[rtc_delay:]``;
+        every other action-action direction is allowed."""
         real_P = P if real_P is None else int(real_P)
         # Vectorized build (was a Python H-row loop = 1 full + 2·H fill_ ops; the loop's
         # ~2·H+1 aten::fill_ showed up as a host bubble in the torch profile). Bit-identical:
         # every action row attends the real prefix [0, real_P). The action block
-        # [P, P+H) uses the checkpoint action-attention convention.
+        # [P, P+H) is either causal or bidirectional with the RTC prefix→suffix cut.
         m = torch.full((H, P + H), float("-inf"), dtype=torch.float16)
         m[:, :real_P] = 0.0                                            # real prefix, all rows
         if causal:
             allowed = torch.tril(torch.ones(H, H, dtype=torch.bool))
         else:
             allowed = torch.ones(H, H, dtype=torch.bool)
+        if rtc_delay:
+            if causal:
+                raise ValueError("RTC action attention requires a bidirectional baseline")
+            if not 0 < rtc_delay <= H:
+                raise ValueError(
+                    f"rtc_delay must be in [1, {H}], got {rtc_delay}")
+            allowed[:rtc_delay, rtc_delay:] = False
         m[:, P : P + H].masked_fill_(allowed, 0.0)
         return m
 
-    def _action_mask_cached(self, P: int, H: int, real_P: int | None = None) -> torch.Tensor:
+    def _action_mask_cached(self, P: int, H: int, real_P: int | None = None,
+                            rtc_delay: int = 0) -> torch.Tensor:
         """Memoized `_build_action_mask`, keyed on (P, H, real_P) — all f(real_len) for a
         fixed horizon → recurring prefix lengths reuse one mask. The mask is read-only
         downstream (the op copies it to a stable DDR slot), so sharing across frames is
@@ -592,11 +809,12 @@ class WallOssAction:
         therefore invalidates the C++ (pointer, seq_q, seq_k) upload memo while the same
         execution-profile graph safely REPLAYs. RPU_WALL_OSS_HOST_CACHE=0 disables."""
         causal = bool(getattr(self, "_causal_action_attention_mask", True))
-        key = (P, H, P if real_P is None else int(real_P), causal)
+        key = (P, H, P if real_P is None else int(real_P), causal,
+               int(rtc_delay))
         if self._host_cache and key in self._action_mask_cache:
             return self._action_mask_cache[key]
-        m = self._build_action_mask(
-            P, H, real_P, causal=causal)
+        m = versioned_cpu_mask(self._build_action_mask(
+            P, H, real_P, causal=causal, rtc_delay=rtc_delay))
         if self._host_cache:
             self._action_mask_cache[key] = m
         else:
@@ -609,16 +827,49 @@ class WallOssAction:
         scale = float(getattr(self, "_flow_time_scale", 1.0))
         return times if scale == 1.0 else times * scale
 
+    def _rtc_inputs(self, position_ids: torch.Tensor,
+                    prefix_actions: torch.Tensor | None,
+                    rtc_delay: int, horizon: int):
+        """Validate an RTC prefix and apply the one-time suffix RoPE gap."""
+        delay = int(rtc_delay)
+        if delay == 0:
+            if prefix_actions is not None:
+                raise ValueError("prefix_actions requires rtc_delay > 0")
+            return position_ids, None, None
+        max_delay = int(getattr(self, "_rtc_max_delay", 0))
+        if max_delay <= 0:
+            raise ValueError("this Wall-OSS action model was not built for RTC")
+        if not 1 <= delay <= min(horizon, max_delay):
+            raise ValueError(
+                f"rtc_delay must be in [1, {min(horizon, max_delay)}], got {delay}")
+        if not isinstance(prefix_actions, torch.Tensor):
+            raise TypeError("prefix_actions must be a torch.Tensor for RTC")
+        if (prefix_actions.dim() != 3 or prefix_actions.size(0) != 1
+                or prefix_actions.size(2) != self.action_dim
+                or prefix_actions.size(1) < delay):
+            raise ValueError(
+                "prefix_actions must be [1, L, action_dim] with "
+                f"L >= rtc_delay and action_dim={self.action_dim}, got "
+                f"{tuple(prefix_actions.shape)}")
+        if prefix_actions.device.type != "cpu":
+            raise ValueError("prefix_actions must be a CPU tensor")
+        if not bool(torch.isfinite(prefix_actions).all()):
+            raise ValueError("prefix_actions must contain only finite values")
+
+        pos = position_ids.clone()
+        gap = int(getattr(self, "_rtc_rope_gap", 10))
+        if delay < horizon:
+            pos[delay:] += gap
+        first = int(position_ids.reshape(-1)[0].item())
+        cache_key = ("rtc", first, horizon, delay, gap)
+        return pos, prefix_actions[:, :delay].contiguous(), cache_key
 
     def _precompute_b_step(self, dof_mask: torch.Tensor, times: torch.Tensor,
                            num_steps: int) -> torch.Tensor:
         """x-independent per-step bias of the folded preprocessor (Task 2):
         B_step[s] = (dof @ w1[:,AD:].T) @ w2[:,:AH].T + (te_s @ w2[:,AH:].T).
-        Returns fp16 RPU [num_steps, AH] when dof is row-constant (→ C++ GEMM-bias path)
+        Returns fp16 device [num_steps, AH] when dof is row-constant (→ C++ GEMM-bias path)
         else [num_steps, H, AH] (→ C++ same-shape add path)."""
-        # base depends only on dof (const across steps). When dof is row-constant (the C++
-        # GEMM-bias path), all H rows of base are identical -> compute ONE row (M=1) instead
-        # of M=H, then share that row across the action horizon.
         row_constant = _dof_mask_is_row_constant(dof_mask)
         dof_b = dof_mask[:, :1] if row_constant else dof_mask    # [1,1,AD] or [1,H,AD]
         ae_dof = dof_b @ self._w1_dof.T                 # [1,*,AH]
@@ -640,7 +891,7 @@ class WallOssAction:
         te_all [num_steps, AH] = sinusoidal(times[:num_steps]).
         The op computes base = ae_dof·w2_a.T and ct = te·w2_t.T in SPM and adds them, so BOTH
         host preprocessor GEMMs (the [1,AH]@[AH,AH] base + the 10× te@w2_t) are dropped.
-        Both returned fp16 on RPU."""
+        Both returned fp16 on device."""
         ae_dof = (dof_mask[:, :1] @ self._w1_dof.T)[0, 0]  # [AH]  (one row; row-constant)
         te_all = torch.cat([
             _sinusoidal_pos_emb(torch.tensor([times[i].item()]), self.action_hidden)
@@ -650,15 +901,7 @@ class WallOssAction:
 
     def _denoise_bias_inputs(self, dof_mask: torch.Tensor, times: torch.Tensor,
                              num_steps: int):
-        """Memoized x-independent denoise bias inputs `(row_constant, b_all, te_all)`.
-        These depend only on `(dof_mask, num_steps)` — the dof_mask is the embodiment's
-        active-dim mask and `times = linspace(0, 1, num_steps+1)` is fixed, so they are
-        constant across a rollout. Caching reuses te_all and the ae_dof/base result
-        and holds stable RPU tensors (reused across frames →
-        also stabilizes the denoise op's input DDR addresses for replay). `b_all` is the
-        row-constant ae_dof when row_constant else the full [steps,H,AH] B_step; `te_all`
-        is the [steps,AH] table when row_constant else None — matching the two call sites.
-        Validated by `torch.equal` on dof_mask so a dof/step change can't serve stale."""
+        """Inference runtime helpers and execution contracts."""
         c = self._bias_cache
         if self._host_cache and c is not None and c[0] == num_steps and torch.equal(c[1], dof_mask):
             return c[2], c[3], c[4]
@@ -672,12 +915,38 @@ class WallOssAction:
             self._bias_cache = (num_steps, dof_mask.clone(), row_constant, b_all, te_all)
         return row_constant, b_all, te_all
 
+    def _rtc_bias_inputs(self, dof_mask: torch.Tensor, times: torch.Tensor,
+                         num_steps: int, rtc_delay: int) -> torch.Tensor:
+        """Full ``[N,H,hidden]`` bias with τ=1 on committed RTC rows."""
+        c = getattr(self, "_rtc_bias_cache", None)
+        if (self._host_cache and c is not None and c[0] == num_steps
+                and c[1] == rtc_delay and torch.equal(c[2], dof_mask)):
+            return c[3]
+
+        base = (dof_mask @ self._w1_dof.T) @ self._w2_a.T
+        rows = []
+        H = int(dof_mask.size(1))
+        for i in range(num_steps):
+            tau = torch.full((H,), float(times[i].item()), dtype=torch.float32)
+            tau[:rtc_delay] = 1.0
+            te = _sinusoidal_pos_emb(tau, self.action_hidden).unsqueeze(0)
+            rows.append(base + te @ self._w2_t.T)
+        b_all = torch.cat(rows, dim=0).to(
+            dtype=torch.float16, device="rpu").contiguous()
+        if self._host_cache:
+            self._rtc_bias_cache = (
+                num_steps, rtc_delay, dof_mask.clone(), b_all)
+        return b_all
 
     @torch.no_grad()
     def _denoise_with_mask_loop(self, prefix_len: int, noise: torch.Tensor,
                                 dof_mask: torch.Tensor, position_ids: torch.Tensor,
                                 num_steps: int = 10, real_prefix_len: int | None = None,
-                                debug: bool = False) -> dict:
+                                debug: bool = False,
+                                rtc_prefix_actions: torch.Tensor | None = None,
+                                rtc_delay: int = 0,
+                                padding_action: torch.Tensor | None = None,
+                                use_rtc: bool = False) -> dict:
         """Phase-2 in-graph unroll: ONE graph capture runs all `num_steps` Euler iterations
         (1 BUILD + 1 REPLAY). x persists in SPM across iterations; bias read at baked
         per-step offsets; final x = x_traj[-1]. Same return dict as `_denoise_with_mask_fused`."""
@@ -690,23 +959,36 @@ class WallOssAction:
                 f"unroll denoise: prefix K/V must be at position {P}, "
                 f"cache at {cache.position}"
             )
+        if not isinstance(use_rtc, bool):
+            raise TypeError(f"use_rtc must be bool, got {use_rtc!r}")
+        rtc_request = bool(use_rtc or rtc_delay)
+        if rtc_request and int(getattr(self, "_rtc_max_delay", 0)) <= 0:
+            raise ValueError("this Wall-OSS action model was not built for RTC")
         _validate_action_positions(position_ids, H)
-        pos = self._action_position_ids_rpu(position_ids)
+        position_ids, rtc_prefix, rtc_cache_key = self._rtc_inputs(
+            position_ids, rtc_prefix_actions, rtc_delay, H)
+        # DDR inputs cross this boundary; retain persistent weights and let the
+        # Action graph reload any temporary resident weights.
+        torch.ops.rpu.spm_alloc_reset_temporary()
+        pos = self._action_position_ids_rpu(position_ids, rtc_cache_key)
         if tuple(pos.shape) != (H, 3):
             raise RuntimeError(
-                f"RPU position_ids must be [H, 3], got {tuple(pos.shape)}"
+                f"device position_ids must be [H, 3], got {tuple(pos.shape)}"
             )
         cos_il, sin_il = self._partial_mrope_tables(
-            position_ids)
+            position_ids, rtc_cache_key)
         attn_mask = self._action_mask_cached(
-            P, H, real_prefix_len)
+            P, H, real_prefix_len, rtc_delay=rtc_delay)
         times = self._flow_times(num_steps)
         dt = (times[1] - times[0]).item()
-        # Bias inputs mirror the step op: row-constant -> ae_dof[hidden] + te_all[steps,hidden]
-        # (on-device base+ct); else the full host-precomputed [steps,H,hidden] B_step.
-        # Memoized on (dof_mask, num_steps), which are stable within a rollout.
-        row_constant, b_all, te_all = self._denoise_bias_inputs(
-            dof_mask, times, num_steps)
+        if rtc_delay:
+            row_constant = False
+            b_all = self._rtc_bias_inputs(
+                dof_mask, times, num_steps, rtc_delay)
+            te_all = None
+        else:
+            row_constant, b_all, te_all = self._denoise_bias_inputs(
+                dof_mask, times, num_steps)
         kp = self._k_comb_pad
         if kp != self._action_dim_pad:
             raise RuntimeError(
@@ -714,17 +996,31 @@ class WallOssAction:
                 f"action_dim_pad({self._action_dim_pad})"
             )
         x0_cpu = noise
+        if rtc_delay:
+            x0_cpu = noise.clone()
+            x0_cpu[:, :rtc_delay] = rtc_prefix
+        velocity_mask, velocity_override = self._velocity_blend_inputs(
+            x0_cpu, dof_mask, padding_action)
         planned_chunk_size, a6_plan = self._plan_action_chunk(
             H, P, is_causal=False, mask_kv_len=P + H,
             loop_mode=True, num_steps=num_steps,
             b_step_is_bias=row_constant, have_te=te_all is not None,
+            rtc_delay=rtc_delay, velocity_blend=velocity_mask is not None,
         )
         planned_stage_descriptor = (
             a6_plan.selected.stage_tuple.physical_descriptor
         )
         if not planned_stage_descriptor:
             raise RuntimeError("Wall-OSS action A6 winner has no native descriptor")
-        # x0 lives on the RPU as [1,H,kp] fp16; the op keeps x in SPM across all steps.
+        velocity_mask_rpu = velocity_override_rpu = None
+        if velocity_mask is not None:
+            velocity_mask_rpu = F.pad(
+                velocity_mask, (0, kp - self.action_dim)).to(
+                    dtype=torch.float16, device="rpu").contiguous()
+            velocity_override_rpu = F.pad(
+                velocity_override, (0, kp - self.action_dim)).to(
+                    dtype=torch.float16, device="rpu").contiguous()
+        # x0 lives on the device as [1,H,kp] fp16; the op keeps x in SPM across all steps.
         x0 = F.pad(x0_cpu, (0, kp - self.action_dim)).to(
             dtype=torch.float16, device="rpu").contiguous()                  # [1,H,kp]
         x_traj = torch.empty((num_steps, H, kp), dtype=torch.float16, device="rpu")
@@ -733,35 +1029,42 @@ class WallOssAction:
         # num_steps + mode (have_te==b_step_mode==row_constant) discriminate
         # baked execution. real_prefix_len is dynamic mask CONTENT, not graph identity:
         # CausalDecoderModel::dynamic_config refreshes its stable mask slot before REPLAY.
-        sig = self._denoise_graph_signature(
-            "wall_oss_action_denoise_loop", H, P, num_steps,
-            int(row_constant),
-            resolved_chunk_size=planned_chunk_size,
-            plan_key_words=a6_plan.graph_key_words(),
-        )
+        if rtc_request:
+            sig = self._denoise_graph_signature(
+                "wall_oss_action_rtc_denoise_loop_v2", H, P, num_steps,
+                int(row_constant), rtc_delay, self._rtc_rope_gap,
+                int(velocity_mask is not None),
+                resolved_chunk_size=planned_chunk_size,
+                plan_key_words=a6_plan.graph_key_words(),
+            )
+        elif velocity_mask is not None:
+            sig = self._denoise_graph_signature(
+                "wall_oss_action_denoise_loop_v2", H, P, num_steps,
+                int(row_constant), 1,
+                resolved_chunk_size=planned_chunk_size,
+                plan_key_words=a6_plan.graph_key_words(),
+            )
+        else:
+            sig = self._denoise_graph_signature(
+                "wall_oss_action_denoise_loop", H, P, num_steps,
+                int(row_constant),
+                resolved_chunk_size=planned_chunk_size,
+                plan_key_words=a6_plan.graph_key_words(),
+            )
         with self._graph_cache.capture(sig):
             torch.ops.rpu.wall_oss_action_denoise_loop_forward(
                 self._handle, x0, cache.k_caches, cache.v_caches,
                 b_all, te_all, attn_mask, pos, x_traj, v_traj, dt, P,
-                num_steps, cos_il, sin_il,
+                num_steps, cos_il, sin_il, x0 if rtc_delay else None,
+                rtc_delay, velocity_mask_rpu, velocity_override_rpu,
                 planned_stage_descriptor)
-        resolved = int(
-            torch.ops.rpu.wall_oss_action_get_resolved_chunk_size(
-                self._handle)
-        )
-        if resolved != planned_chunk_size:
-            raise RuntimeError(
-                "Wall-OSS action dry/forward chunk disagreement: "
-                f"planned={planned_chunk_size}, forward={resolved}"
-            )
         self._record_action_plan(
             a6_plan, horizon=H, prefix_len=P,
             chunk_size=planned_chunk_size,
         )
-        # Read trajectory ONLY after the capture exits (mutable SPM->DDR DMAs; op syncs).
-        # Production (debug=False) reads back ONLY the final step (the action). The full
-        # [num_steps,H,*] xs/vs trajectories are read back only for diagnostics.
-        x = x_traj[-1:][:, :, :self.action_dim].float().cpu()               # [1,H,action_dim]
+        # Read one padded step before cropping to keep the readback contiguous.
+        x = x_traj[-1:].to(device="cpu", dtype=torch.float32)
+        x = x[:, :, :self.action_dim].contiguous()  # [1,H,action_dim] CPU
         if debug:
             xs = torch.cat([
                 x0_cpu.clone(),
@@ -779,17 +1082,40 @@ class WallOssAction:
     def _denoise_with_mask_fused(self, prefix_len: int, noise: torch.Tensor,
                                  dof_mask: torch.Tensor, position_ids: torch.Tensor,
                                  num_steps: int = 10, real_prefix_len: int | None = None,
-                                 debug: bool = False) -> dict:
+                                 debug: bool = False,
+                                 rtc_prefix_actions: torch.Tensor | None = None,
+                                 rtc_delay: int = 0,
+                                 padding_action: torch.Tensor | None = None,
+                                 use_rtc: bool = False) -> dict:
         """Fused denoise: on-device preprocessor + decoder + proj_back per step (1 BUILD +
         N-1 REPLAY). x never leaves the device between the preprocessor and proj_back."""
         fp32_tail = self._action_fp32_tail
+        if not isinstance(use_rtc, bool):
+            raise TypeError(f"use_rtc must be bool, got {use_rtc!r}")
+        rtc_request = bool(use_rtc or rtc_delay)
+        if rtc_request:
+            if fp32_tail:
+                raise RuntimeError(
+                    "Wall-OSS RTC does not support RPU_WALL_OSS_ACTION_FP32_TAIL")
+            if not self._denoise_unroll:
+                raise RuntimeError(
+                    "Wall-OSS RTC requires the fused denoise unroll")
+            return self._denoise_with_mask_loop(
+                prefix_len, noise, dof_mask, position_ids,
+                num_steps=num_steps, real_prefix_len=real_prefix_len,
+                debug=debug, rtc_prefix_actions=rtc_prefix_actions,
+                rtc_delay=rtc_delay, padding_action=padding_action,
+                use_rtc=True)
+        if rtc_prefix_actions is not None:
+            raise ValueError("rtc_prefix_actions requires rtc_delay > 0")
         # Phase-2: the in-graph unroll (1 BUILD + 1 REPLAY) is the DEFAULT fused-denoise path;
         # set RPU_WALL_OSS_DENOISE_UNROLL=0 to fall back to the per-step loop (1 BUILD + 9 REPLAY).
         # The FP32-tail diagnostic must run stepwise because x_t is accumulated on the host.
         if not fp32_tail and self._denoise_unroll:
             return self._denoise_with_mask_loop(
                 prefix_len, noise, dof_mask, position_ids, num_steps=num_steps,
-                real_prefix_len=real_prefix_len, debug=debug)
+                real_prefix_len=real_prefix_len, debug=debug,
+                padding_action=padding_action)
         H = _action_horizon(noise, self.action_dim)
         P = int(prefix_len)
         cache = self.llm.cache
@@ -799,10 +1125,12 @@ class WallOssAction:
                 f"cache at {cache.position}"
             )
         _validate_action_positions(position_ids, H)
+        # Prefix K/V and outputs are DDR; only the temporary arena is released.
+        torch.ops.rpu.spm_alloc_reset_temporary()
         pos = self._action_position_ids_rpu(position_ids)
         if tuple(pos.shape) != (H, 3):
             raise RuntimeError(
-                f"RPU position_ids must be [H, 3], got {tuple(pos.shape)}"
+                f"device position_ids must be [H, 3], got {tuple(pos.shape)}"
             )
         cos_il, sin_il = self._partial_mrope_tables(position_ids)
         attn_mask = self._action_mask_cached(P, H, real_prefix_len)  # CPU fp16 [H, P+H], memoized
@@ -813,6 +1141,13 @@ class WallOssAction:
         # host te@w2_t GEMM). Non-row-constant falls back to the host-precomputed full B_step.
         # Memoized on (dof_mask, num_steps) — constant across a rollout.
         row_constant, _bias, te_all = self._denoise_bias_inputs(dof_mask, times, num_steps)
+        velocity_mask, velocity_override = self._velocity_blend_inputs(
+            noise, dof_mask, padding_action)
+        if velocity_mask is not None and not fp32_tail:
+            raise RuntimeError(
+                "masked-DOF velocity override requires "
+                "RPU_WALL_OSS_DENOISE_UNROLL=1"
+            )
         planned_chunk_size, a6_plan = self._plan_action_chunk(
             H, P, is_causal=False, mask_kv_len=P + H,
             loop_mode=False, num_steps=1,
@@ -838,7 +1173,7 @@ class WallOssAction:
                 f"in-graph Euler needs k_comb_pad({kp})=="
                 f"action_dim_pad({self._action_dim_pad})"
             )
-        # x lives on the RPU as [1,H,kp] fp16 across all steps; the op's post-hook does the
+        # x lives on the device as [1,H,kp] fp16 across all steps; the op's post-hook does the
         # Euler add x += dt·v in SPM (no host round-trip, no PASSTHROUGH eltwise launch). The
         # op reads x_a and writes x_b = x_a + dt·v; we swap so x_a always holds the latest x.
         # Cols [action_dim:kp] stay 0 (noise zero-padded; v_t cols [action_dim:] are 0).
@@ -875,9 +1210,11 @@ class WallOssAction:
                         "FP32 action tail lost its host Euler accumulator"
                     )
                 v_fp32 = (
-                    raw.float().cpu().reshape(1, H, self.hidden_size)
+                    raw.to(device="cpu", dtype=torch.float32).reshape(1, H, self.hidden_size)
                     @ self._proj_back.T
                 )
+                if velocity_mask is not None:
+                    v_fp32 = velocity_override + v_fp32 * velocity_mask
                 x_fp32 = x_fp32 + dt * v_fp32
                 x_a = F.pad(x_fp32, (0, kp - self.action_dim)).to(
                     dtype=torch.float16, device="rpu").contiguous()
@@ -889,15 +1226,6 @@ class WallOssAction:
                 if debug:
                     vs_rpu.append(v_t_buf[:, :, :self.action_dim].clone())
                     xs_rpu.append(x_a[:, :, :self.action_dim].clone())
-        resolved = int(
-            torch.ops.rpu.wall_oss_action_get_resolved_chunk_size(
-                self._handle)
-        )
-        if resolved != planned_chunk_size:
-            raise RuntimeError(
-                "Wall-OSS action dry/forward chunk disagreement: "
-                f"planned={planned_chunk_size}, forward={resolved}"
-            )
         self._record_action_plan(
             a6_plan, horizon=H, prefix_len=P,
             chunk_size=planned_chunk_size,
@@ -910,7 +1238,7 @@ class WallOssAction:
             else:
                 xs = vs = None
         else:
-            x = x_a[:, :, :self.action_dim].float().cpu()                # [1,H,action_dim]
+            x = x_a[:, :, :self.action_dim].to(device="cpu", dtype=torch.float32)  # [1,H,action_dim]
             if debug:
                 xs = torch.cat(
                     [noise.clone()] + [t.float().cpu() for t in xs_rpu], 0)
@@ -926,7 +1254,11 @@ class WallOssAction:
     def denoise_with_mask(self, prefix_len: int, noise: torch.Tensor,
                           dof_mask: torch.Tensor, position_ids: torch.Tensor,
                           num_steps: int = 10, real_prefix_len: int | None = None,
-                          debug: bool = False) -> dict:
+                          debug: bool = False,
+                          rtc_prefix_actions: torch.Tensor | None = None,
+                          rtc_delay: int = 0,
+                          padding_action: torch.Tensor | None = None,
+                          use_rtc: bool = False) -> dict:
         """10-step Euler denoise over a prefix of ARBITRARY length (P4 E2E).
 
         Unlike :meth:`predict`, this does NOT prefill — the caller (WallOssVLA) has
@@ -939,6 +1271,8 @@ class WallOssAction:
             prefix_len: P, the shared prefix (vision+text) length already in the cache.
             noise: [1, H, action_dim] fixed Euler init.
             dof_mask: [1, H, action_dim].
+            padding_action: normalized physical-zero action [1, H, action_dim].
+                Required when any dof_mask entry is zero.
             position_ids: [H, 3] int32 mRoPE positions for the action chunk (continuing
                 after the prefix).
         """
@@ -951,7 +1285,11 @@ class WallOssAction:
         if self._fused:
             return self._denoise_with_mask_fused(
                 prefix_len, noise, dof_mask, position_ids, num_steps=num_steps,
-                real_prefix_len=real_prefix_len, debug=debug)
+                real_prefix_len=real_prefix_len, debug=debug,
+                rtc_prefix_actions=rtc_prefix_actions, rtc_delay=rtc_delay,
+                padding_action=padding_action, use_rtc=use_rtc)
+        if use_rtc or rtc_delay or rtc_prefix_actions is not None:
+            raise RuntimeError("Wall-OSS RTC requires the fused action denoiser")
         cache = self.llm.cache
         if cache.position != P:
             raise RuntimeError(
@@ -960,10 +1298,12 @@ class WallOssAction:
             )
 
         _validate_action_positions(position_ids, H)
+        # Prefix K/V and outputs are DDR; only the temporary arena is released.
+        torch.ops.rpu.spm_alloc_reset_temporary()
         pos = self._action_position_ids_rpu(position_ids)
         if tuple(pos.shape) != (H, 3):
             raise RuntimeError(
-                f"RPU position_ids must be [H, 3], got {tuple(pos.shape)}"
+                f"device position_ids must be [H, 3], got {tuple(pos.shape)}"
             )
         attn_mask = self._action_mask_cached(P, H, real_prefix_len)  # CPU fp16 [H, P+H], memoized
         planned_chunk_size, a6_plan = self._plan_action_chunk(
@@ -982,6 +1322,8 @@ class WallOssAction:
         )
         times = self._flow_times(num_steps)
         dt = (times[1] - times[0]).item()
+        velocity_mask, velocity_override = self._velocity_blend_inputs(
+            noise, dof_mask, padding_action)
         x = noise.clone()
         xs, vs = [x.clone()], []
         for i in range(num_steps):
@@ -1000,19 +1342,12 @@ class WallOssAction:
                     -1, 0, False,
                     0, planned_stage_descriptor,
                 )
-            v = raw.float().cpu().reshape(1, H, self.hidden_size) @ self._proj_back.T  # [1,H,26]
+            v = raw.to(device="cpu", dtype=torch.float32).reshape(1, H, self.hidden_size) @ self._proj_back.T  # [1,H,26]
+            if velocity_mask is not None:
+                v = velocity_override + v * velocity_mask
             x = x + dt * v
             vs.append(v.clone()); xs.append(x.clone())
 
-        resolved = int(
-            torch.ops.rpu.causal_decoder_get_resolved_chunk_size(
-                self._handle)
-        )
-        if resolved != planned_chunk_size:
-            raise RuntimeError(
-                "Wall-OSS action dry/forward chunk disagreement: "
-                f"planned={planned_chunk_size}, forward={resolved}"
-            )
         self._record_action_plan(
             a6_plan, horizon=H, prefix_len=P,
             chunk_size=planned_chunk_size,
@@ -1026,8 +1361,11 @@ class WallOssAction:
 def _load_expert1_decoder(st, cfg, num_layers, max_seq_len, *, w8a16: bool = False,
                           w4a16: bool = False, nvfp4a16: bool = False,
                           fused_action: dict | None = None,
-                          action_chunk_size: int = 0):
-    """Load expert-1 (action) decoder weights and install the RPU decoder handle.
+                          action_chunk_size: int = 0,
+                          weight_residency: bool = False,
+                          kv_owner_fanout: bool = False,
+                          sorting=None, linear_acc32: bool = False):
+    """Load expert-1 (action) decoder weights and install the device decoder handle.
 
     Same split/swizzle@attn_tp=2 + QKV-bias path as P1's `build_wall_oss_llm`, but at the
     action-expert dims (hidden 1024, intermediate 2048). q_proj 1024→2048, o_proj 2048→1024.
@@ -1036,6 +1374,9 @@ def _load_expert1_decoder(st, cfg, num_layers, max_seq_len, *, w8a16: bool = Fal
     w_comb/proj_back and action_dim/k_comb_pad/chunk_size), routes to the fused WallOssActionStepModel op
     (decoder + on-device preprocessor + proj_back) instead of the plain causal_decoder.
     """
+    sorting = sorting_config_from_env() if sorting is None else sorting
+    if linear_acc32 and (weight_residency or kv_owner_fanout):
+        raise ValueError("Wall-OSS Action ACC32 does not support weight residency or K/V owner fanout")
     NQ = cfg["num_attention_heads"]
     NKV = cfg["num_key_value_heads"]
     HD = cfg.get("head_dim") or (cfg["hidden_size"] // NQ)
@@ -1047,6 +1388,25 @@ def _load_expert1_decoder(st, cfg, num_layers, max_seq_len, *, w8a16: bool = Fal
     ATTN_TP = _eff_attn_tp(NKV)     # 2 (default) or 8 via RPU_WALL_OSS_ATTN_TP8
     REP = ATTN_TP // NKV            # KV-head replication factor (1 or 4)
     NKV_EFF = NKV * REP             # effective KV heads the C++ decoder sees (== ATTN_TP)
+    fp16_transfer = _action_fp16_transfer(sorting, w8a16, w4a16, nvfp4a16)
+    if weight_residency and not (
+        fused_action is not None and (w8a16 or fp16_transfer)
+        and ATTN_TP == _MLP_CORES
+    ):
+        raise ValueError(
+            "RPU_WALL_OSS_ACTION_WEIGHT_RESIDENCY=1 requires fused W8A16 or opted-in FP16 "
+            "Action with RPU_WALL_OSS_ATTN_TP8=1"
+        )
+    if kv_owner_fanout and not (
+        fused_action is not None and (w8a16 or fp16_transfer)
+        and ATTN_TP == _MLP_CORES and
+        NKV == 2 and REP == 4
+    ):
+        raise ValueError(
+            "RPU_WALL_OSS_ACTION_KV_OWNER_FANOUT=1 requires fused W8A16 or opted-in FP16 "
+            "Action with two real KV heads repeated 4x by "
+            "RPU_WALL_OSS_ATTN_TP8=1"
+        )
     def gf(key):
         return st.get_tensor(key).float()
 
@@ -1061,6 +1421,8 @@ def _load_expert1_decoder(st, cfg, num_layers, max_seq_len, *, w8a16: bool = Fal
     q_ts_list, k_ts_list, v_ts_list, o_ts_list = [], [], [], []
     gate_ts_list, up_ts_list, down_ts_list = [], [], []
     in_norm_list, post_norm_list = [], []
+    resident_layer_bundles = []
+    resident_layers = (1, 2) if fp16_transfer else _ACTION_RESIDENT_LAYERS
 
     for L in range(num_layers):
         p = f"model.layers.{L}"
@@ -1124,6 +1486,13 @@ def _load_expert1_decoder(st, cfg, num_layers, max_seq_len, *, w8a16: bool = Fal
         gate_w = gu[:INTER].contiguous()
         up_w = gu[INTER:2 * INTER].contiguous()
         down_w = gr(f"{p}.moe.experts.1.down_proj.weight")      # [1024, INTER]
+        if weight_residency and L in resident_layers:
+            resident_layer_bundles.append(
+                (_pack_action_fp16_resident_weight_bundle if fp16_transfer
+                 else _pack_action_resident_weight_bundle)(
+                    qw, kw, vw, ow, gate_w, up_w, down_w
+                )
+            )
         if w8a16 or w4a16:
             gu_s = _chan_first_scale(gr(f"{p}.moe.experts.1.gate_up_proj.weight_scale"))
             gate_s = gu_s[:INTER].contiguous()
@@ -1203,7 +1572,32 @@ def _load_expert1_decoder(st, cfg, num_layers, max_seq_len, *, w8a16: bool = Fal
             fused=True,
             set_weights=torch.ops.rpu.wall_oss_action_step_set_weights,
             weight_args=weight_args,
+            kv_owner_fanout=kv_owner_fanout, sorting=sorting,
+            linear_acc32=linear_acc32,
         )
+        if weight_residency:
+            resident_bundle_cpu = resident_bundle_rpu = None
+            try:
+                if len(resident_layer_bundles) != len(resident_layers):
+                    raise RuntimeError("failed to pack all Action resident weights")
+                # Bit-carrier only: dtype-view preserves the int8 bytes while using
+                # the canonical fp16 DDR-scatter owner contract in C++.
+                resident_bundle_cpu = torch.cat(resident_layer_bundles, dim=1)
+                resident_bundle_rpu = resident_bundle_cpu.view(torch.float16).to(
+                    device="rpu"
+                ).contiguous()
+                torch.ops.rpu.wall_oss_action_step_set_weight_residency(
+                    handle, resident_bundle_rpu
+                )
+            except BaseException as error:
+                from rpu_backend.adapters.wall_oss._retirement import _cleanup_build_failure
+                _cleanup_build_failure(
+                    error,
+                    (handle, weight_args, resident_layer_bundles,
+                     resident_bundle_cpu, resident_bundle_rpu),
+                    lambda: _destroy_action_handle(handle, fused=True),
+                )
+                raise
         return handle, H, INTER
 
     set_weights = (
@@ -1245,8 +1639,9 @@ def _load_expert1_decoder(st, cfg, num_layers, max_seq_len, *, w8a16: bool = Fal
     else:
         args.extend([q_b_list, k_b_list, v_b_list])
     handle = _configure_action_handle(
-        fused=False, set_weights=set_weights, weight_args=args,
+        fused=False, set_weights=set_weights, weight_args=args, sorting=sorting,
         chunk_size_override=action_chunk_size,
+        linear_acc32=linear_acc32,
     )
     return handle, H, INTER
 
@@ -1298,8 +1693,9 @@ def build_wall_oss_action(
     fp16_ckpt_dir: str | None = None,
     fused: bool = False,
     execution_config=None,
-
-
+    graph_runtime_policy=None,
+    rtc_max_delay: int = 0,
+    rtc_rope_gap: int = 10,
     flow_time_scale: float = 1.0,
 ) -> WallOssAction:
     """Build the expert-0 prefill (P1) + expert-1 action denoiser sharing one RPUCache.
@@ -1318,8 +1714,24 @@ def build_wall_oss_action(
             (on-device preprocessor + proj_back; folded by linearity). Gated upstream by
             RPU_WALL_OSS_FUSED_DENOISE.
     """
+    if graph_runtime_policy is not None:
+        from rpu_backend.graph import GraphRuntimePolicy
+        if not isinstance(graph_runtime_policy, GraphRuntimePolicy):
+            raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
     from rpu_backend.api._execution import _require_execution_process_safe
     _require_execution_process_safe()
+    from rpu_backend.api._execution import normalize_rpu_execution
+    action_execution = normalize_rpu_execution(
+        {"action": ({} if execution_config is None else
+                    execution_config.get("action", {}))},
+        entry_point="build_wall_oss_action",
+        supported={"action": ("chunk_size", "linear_acc32")},
+    ).get("action", {})
+    linear_acc32 = action_execution.get("linear_acc32", False)
+    if linear_acc32 and not fused:
+        raise ValueError("Wall-OSS action.linear_acc32=True requires fused=True")
+    if linear_acc32 and rtc_max_delay:
+        raise ValueError("Wall-OSS RTC does not support linear_acc32=True")
     precision_modes = {
         "w8a16": w8a16,
         "w4a16": w4a16,
@@ -1340,15 +1752,26 @@ def build_wall_oss_action(
             "pick one of w8a16 / w4a16 / nvfp4a16, got "
             f"{selected_modes}"
         )
-    from rpu_backend.api._execution import normalize_rpu_execution
-    action_execution = normalize_rpu_execution(
-        {
-            "action": ({} if execution_config is None else
-                       execution_config.get("action", {}))
-        },
-        entry_point="build_wall_oss_action",
-        supported={"action": ("chunk_size",)},
-    ).get("action", {})
+    sorting = sorting_config_from_env()
+    weight_residency = rpu_env_bool(
+        "RPU_WALL_OSS_ACTION_WEIGHT_RESIDENCY", default=False
+    )
+    kv_owner_fanout = rpu_env_bool(
+        "RPU_WALL_OSS_ACTION_KV_OWNER_FANOUT", default=False
+    )
+    if linear_acc32 and (weight_residency or kv_owner_fanout):
+        raise ValueError("Wall-OSS Action ACC32 does not support weight residency or K/V owner fanout")
+    fp16_transfer = _action_fp16_transfer(sorting, w8a16, w4a16, nvfp4a16)
+    if weight_residency and not (fused and (w8a16 or fp16_transfer)):
+        raise ValueError(
+            "RPU_WALL_OSS_ACTION_WEIGHT_RESIDENCY=1 requires fused=True "
+            "and W8A16 or opted-in FP16 weights"
+        )
+    if kv_owner_fanout and not (fused and (w8a16 or fp16_transfer)):
+        raise ValueError(
+            "RPU_WALL_OSS_ACTION_KV_OWNER_FANOUT=1 requires fused=True "
+            "and W8A16 or opted-in FP16 weights"
+        )
     requested_action_chunk = action_execution.get("chunk_size", "auto")
     action_chunk_size = (
         0 if requested_action_chunk == "auto" else int(requested_action_chunk)
@@ -1362,13 +1785,21 @@ def build_wall_oss_action(
     cfg = json.load(open(f"{ckpt_dir}/config.json"))
     causal_action_attention_mask = bool(
         cfg.get("causal_action_attention_mask", True))
+    if rtc_max_delay:
+        if not fused:
+            raise ValueError("Wall-OSS RTC requires fused=True")
+        if causal_action_attention_mask:
+            raise ValueError(
+                "Wall-OSS RTC requires causal_action_attention_mask=false")
     owns_llm = llm is None
     if owns_llm:
         llm = build_wall_oss_llm(ckpt_dir, expert=0, max_seq_len=max_seq_len,
                                  w8a16=w8a16, w4a16=w4a16,
                                  nvfp4a16=nvfp4a16,
                                  fp16_ckpt_dir=fp16_ckpt_dir,
-                                 execution_config=execution_config)
+                                 execution_config=execution_config,
+                                 **({"graph_runtime_policy": graph_runtime_policy}
+                                    if graph_runtime_policy is not None else {}))
     try:
         num_layers = cfg["num_hidden_layers"]
         if llm.num_layers != num_layers:
@@ -1397,7 +1828,9 @@ def build_wall_oss_action(
             if fused else (None, None)
         )
         partial_mrope = _partial_mrope_enabled()
-        graph_cache = rpu_backend.graph.GraphCache()
+        graph_cache = rpu_backend.graph.GraphCache(
+            **({"runtime_policy": graph_runtime_policy}
+               if graph_runtime_policy is not None else {}))
         w2_rpu = w3_rpu = None
         if not fused:
             w2_rpu = _to_rpu_half(
@@ -1416,6 +1849,9 @@ def build_wall_oss_action(
                 w8a16=w8a16, w4a16=w4a16, nvfp4a16=nvfp4a16,
                 fused_action=fused_action,
                 action_chunk_size=action_chunk_size,
+                weight_residency=weight_residency,
+                kv_owner_fanout=kv_owner_fanout, sorting=sorting,
+                linear_acc32=linear_acc32,
             )
             model = WallOssAction.__new__(WallOssAction)
             model._handle, model._graph_cache, model._closed = handle, graph_cache, False
@@ -1440,6 +1876,9 @@ def build_wall_oss_action(
                 execution_chunk_size=requested_action_chunk,
                 causal_action_attention_mask=causal_action_attention_mask,
                 flow_time_scale=flow_time_scale,
+                rtc_max_delay=rtc_max_delay,
+                rtc_rope_gap=rtc_rope_gap,
+                kv_owner_fanout=kv_owner_fanout,
             )
             model._precision_mode = (
                 1 if w8a16 else 2 if w4a16 else 3 if nvfp4a16 else 0

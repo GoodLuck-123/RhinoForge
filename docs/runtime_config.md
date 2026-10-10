@@ -7,9 +7,7 @@ model-profile and diagnostic controls. Set the complete environment before
 importing `rpu_backend`; changing a profile in a live process is unsupported
 unless a row explicitly says that it is read per call.
 
-This page documents every environment reader currently retained under
-`python/rpu_backend` and `src`, plus the Launch capacity inputs. Listing a
-variable does not make an experimental combination supported.
+This page lists controls from `python/rpu_backend`, `src` and Launch.
 
 ## How to read the tables
 
@@ -41,95 +39,11 @@ Use `0`/`1` in deployment manifests even when a wider parser is documented.
 Facade defaults below are applied only by that named public facade; the raw
 source default applies to direct adapter use.
 
-## Precedence and reproducible profiles
+## Configuration and execution
 
-When using `examples/run_model.py`, each allowlisted value in `[runner.env]`
-overwrites the inherited value of the same name before importing `torch` or
-`rpu_backend`. Variables omitted from the table retain their shell value. A
-model facade then uses `setdefault` for any profile-owned defaults, so the
-effective process environment still wins; direct adapter use receives the raw
-source defaults documented below.
+Use `examples/run.py --config PATH`. [Model examples](../examples/README.md) describes the model directories, formats and required inputs. General models use `[example]/[input]/[run]`; specialized policies use the model table shown in their templates. `example.opt_in` binds permitted controls before Torch import and rejects inherited conflicts. `[cpu].threads` applies before the first Torch import; thread aliases must agree.
 
-Deployment-owned paths and credentials do not belong in TOML. In particular,
-set `RPU_KERNEL_LIB_PATH` in the verified deployment environment, and pass
-cold per-handle planning through the loader's explicit `rpu_execution`
-argument. The model preflight remains authoritative and may reject an ambient
-environment or execution setting outside the exact profile.
-
-For a reproducible run, record the TOML hash and the effective values of every
-explicitly set runtime variable. Use a fresh process when changing an IMPORT,
-NATIVE, MODEL, or BUILD setting; do not infer that mutating `os.environ` after
-construction reconfigured an existing handle or Graph.
-
-## TOML parameter catalog
-
-The [configuration index](../examples/configs/README.md) is the complete list of
-current template paths. Each model uses one directory layout. Qwen3 is under
-`qwen3/text`; Qwen3-VL separates `text`, `vision` and `vl`; Qwen3.5 separates
-`text`, `vl` and its distinct legacy checkpoint format. LingBot exposes only
-`v2`, RhinoVLA separates `v1`/`v3`, Wall-OSS uses `base`, and Pi0.5 uses
-`2cam`/`3cam` with eight cores. Model names are not duplicated as loose TOML files.
-
-### Model and policy configurations
-
-| Table | Fields | Meaning |
-|---|---|---|
-| `[example]` | `profile_id`, `target`, `registry_alias`, `dtype`, optional `architecture` | Selects the exact catalog identity. The checkpoint loader checks actual metadata before inference. |
-| `[example.opt_in]` | Exact profile-owned environment values | Applied before backend import; inherited conflicts fail. Values must match the selected catalog profile. |
-| `[input]` | `checkpoint`, plus model-specific prompt/images/tensors and generation or policy options | An explicit checkpoint overrides the alias. Requests and files remain caller-owned; consult the model README. |
-| `[run]` | `warmup`, `runs`, `seed`, `torch_num_threads`, `inference_mode`, `output_dir` | Controls repeated inference and host settings; loading and graph preparation occur before measured samples. |
-| `[run]` | `profile`, `timing_mode`, `summary_statistic`, `warmup_decode_steps` where supported | Torch tracing is a separate diagnostic invocation. Generation timing fields have model-specific restrictions. |
-| `[rpu_execution.model]` | `num_cores` | Cold compute budget, admitted by the selected model/profile. Pi example templates use eight cores. |
-| `[rpu_execution.<stage>]` | `chunk_size`, supported booleans; prefill padding fields where admitted | Cold per-handle planning. Actual constructors validate each stage, field and shape. |
-| `[rpu_execution.components.<component>.<stage>]` | Supported per-component controls | Composite model overrides; accepted component IDs and fields are checked before installation. |
-
-`example.profile_id` refers to [profiles.json](../examples/configs/profiles.json),
-which contains only identities used by current templates. It binds precision,
-component and opt-in constraints, not model quality or performance certification.
-Qwen generation uses `input.decode_steps` for calls after the first prefill
-output token, and `input.prefill_tokens` for an explicit constructed input length.
-These are not interchangeable with `max_new_tokens` in a caller-owned older file.
-
-Pi0.5 uses `[pi05].precision` instead of `[example]`. Its `[input]` contains
-`checkpoint`, `batch`, `cameras`, `text_tokens`, and `num_steps`; the runner binds
-the corresponding public optimized policy profile and validates its paired
-prefill geometry. See [Pi configurations](../examples/configs/pi05/README.md).
-
-RhinoVLA's `input.runtime_factory`, `factory_config`, and `request` name a trusted
-caller implementation, a JSON factory configuration, and a tensor-only request.
-The selected version's factory defines its model-specific fields; RhinoForge
-binds the checkpoint, step count and cold execution configuration. See
-[RhinoVLA configurations](../examples/configs/rhinovla/README.md).
-The v3 W8 examples additionally bind the boolean `input.expert_w8a16` and
-`input.full_w8a16` fields to the expert constructor. Factory JSON must agree
-exactly; the runner checks the bound expert's installed integer weights and
-scales before inference. These fields describe the action expert's scope,
-not the precision of the entire policy. The separate experimental full-pipeline
-templates add an explicit environment selection and full installed-owner check;
-they are not default recommendations or numerical certifications.
-
-### Independent integration templates and caller-owned files
-
-G0.5, GR00T, NavDP and SigLIP retain their own `[runner]/[model]/[request]`
-integration templates. Existing caller-owned files in this format remain
-accepted, without shipping a second copy of the same model configuration.
-
-| Table | Fields | Meaning |
-|---|---|---|
-| `[runner]` | `target` | Selects the direct integration entry. |
-| `[runner.env]` | Non-diagnostic variables documented on this page, excluding runtime asset paths and credentials | Applied before importing PyTorch or RhinoForge. Omitted names remain inherited. |
-| `[runner.torch_profile]` | `enabled`, `output`, `record_shapes`, `profile_memory`, `with_stack` | Command-wide Torch trace settings. |
-| `[model]`, `[request]`, `[generation]` | Fields accepted by the selected direct example | Model locations and caller-owned inputs. |
-| `[runtime]` | Trusted RhinoVLA factory-defined fields in caller-owned older files | Passed through the public factory contract. |
-
-Do not mix `[input]/[run]` into a `[runner/model/request]` file; it is rejected.
-`--check-config` checks structure and cold constraints without loading Torch or
-accessing a board. It does not inspect local weights or certify an input request.
-
-`padding_rows` is `"auto"` or a non-negative integer. An exact value and
-`padding_budget` cannot both be active. Chunk sizes are `"auto"` or positive
-multiples of 16, further narrowed by each loader's actual profile. Full cold
-planning semantics are documented under [non-environment runtime controls](#non-environment-runtime-controls).
+Select main and expansion assets with `RPU_KERNEL_LIB_PATH` and `RPU_KERNEL_LIB_PATH_EXPANSION`. Keep asset paths and credentials in the deployment environment. `rpu_execution` configures cold model and component settings; close the current model and start a new process when changing them.
 
 ## Host execution settings
 
@@ -139,7 +53,7 @@ Explicit counts, including zero and one for cold diagnostics, are honored
 without hidden calls. `warmup_wall_ms_runs` records every warmup call separately
 from `wall_ms_runs`. When `warmup >= 2`, `warmup_decode_steps` must be omitted or
 equal `input.decode_steps`; shortened decode warmup is rejected before model
-loading. Only explicit `warmup=0` or `1` permits a shortened cold diagnostic. See [performance measurement](performance.md).
+loading. Only explicit `warmup=0` or `1` permits a shortened cold diagnostic.
 
 The shared examples runner prepares every model under `no_grad()` with
 `inference_mode(False)`. Persistent weights and mutable Graph inputs therefore
@@ -150,8 +64,8 @@ refresh its derived data or compare owned content instead of assuming that an
 unchanged tensor object has unchanged values.
 
 These settings belong to the application process and its installed CPU runtime,
-not to the RPU planner. The canonical `[pi05]` examples bind the allocator values
-below before importing Torch, through either `run_model.py` or `pi05.py`.
+not to the device planner. The canonical `[pi05]` examples bind the allocator values
+below before importing Torch, through `run.py`.
 `run.torch_num_threads` defaults to eight. Library inference does not change
 these process settings. Use a fresh process when changing them; older direct
 example formats do not apply `[runner.env]` on behalf of the common runner.
@@ -181,7 +95,8 @@ weight installation; close the model and load a new instance to change them.
 
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |
 |---|---|---|---|
-| `RPU_KERNEL_LIB_PATH` | Combined operator asset beside the extension; existing file path with an adjacent `.kernels` manifest | First asset access / **IMPORT** | Process-wide asset selection. A missing, incompatible, or untrusted asset or manifest prevents safe execution. |
+| `RPU_KERNEL_LIB_PATH` | Path to `rhinoOpLib_current.ref` and its adjacent `.kernels` | First asset use / **IMPORT** | Select the main asset matching this source. |
+| `RPU_KERNEL_LIB_PATH_EXPANSION` | Expansion path; defaults to `rhinoExpansionOpLib_current.ref` beside main | First asset use / **IMPORT** | Select the matching expansion asset and adjacent `.kernels`. |
 | `RPU_MODEL_CACHE` | `~/.cache/rhinoforge/models`; directory path | Package bootstrap for HF defaults / **IMPORT**, alias resolution / **CALL** | Root for RhinoForge model aliases. An explicit value also supplies HF cache defaults; a post-import change affects later aliases but does not reliably reconfigure already imported HF components. |
 | `RPU_LOG_LEVEL` | `3`; decimal integer `0..5`; invalid values warn and fall back to `3` | Native-extension load / **IMPORT** | Process logging: `0` silent through `5` trace. High levels add output and may expose paths or request metadata. |
 | `RPU_WARMUP` | `0`; integer, invalid becomes `0`, negative clamps to `0` | Adapter construction / **MODEL** | Warmup forward count for adapters that support it. Adds startup work and can consume diagnostic budgets. |
@@ -224,9 +139,9 @@ the path, relax numerical gates, or expand the supported-model matrix.
 
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |
 |---|---|---|---|
-| `QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED` | `0`; **E1** | Qwen3.5/G0.5 Vision preflight / **MODEL** | Enables controlled evaluation of numeric-blocked Qwen3.5 Vision 2B/4B and generic G0.5 Vision. It does not certify image output. |
-| `QWEN3_VL_32B_ALLOW_GRAPH_BLOCKED` | `0`; **E1** | Preflight / **MODEL** | Legacy-named gate for the exact Source-only Qwen3-VL 32B W8A16 candidate. It requires a matching reserved-buffer runtime and unchanged exact LKN defaults; it does not certify numeric, task, performance, or release-runtime gates. |
-| `RPU_LINGBOT2_ALLOW_UNVALIDATED` | `0`; **E1** | Preflight / **MODEL** | LingBot-VLA-V2 controlled profiles; output is not robot certified. |
+| `QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED` | `0`; **E1** | Qwen3.5/G0.5 Vision preflight / **MODEL** | Enables controlled evaluation of numeric-blocked Qwen3.5 Vision 2B/4B and generic G0.5 Vision.  |
+| `QWEN3_VL_32B_ALLOW_GRAPH_BLOCKED` | `0`; **E1** | Preflight / **MODEL** | Legacy-named gate for the exact Source-only Qwen3-VL 32B W8A16 candidate. It requires a matching reserved-buffer runtime and unchanged exact LKN defaults. |
+| `RPU_LINGBOT2_ALLOW_UNVALIDATED` | `0`; **E1** | Preflight / **MODEL** | LingBot-VLA-V2 controlled profiles. |
 | `RPU_INTERNVLA_N1_ALLOW_NUMERIC_BLOCKED` | `0`; **E1** | Preflight / **MODEL** | InternVLA-N1 legacy controlled evaluation. |
 | `RPU_S2_SDPA_BF16` | Unset/empty/`0` only; literal `1` and all other values are rejected | Preflight / **MODEL** | InternVLA policy tripwire for an unavailable asset; leave off. |
 
@@ -277,8 +192,8 @@ has admitted Qwen3.5 Vision. They do not expand its Source-only status.
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |
 |---|---|---|---|
 | `QWEN3_5_VISION_CHUNK` | Auto; decimal integer, empty/non-positive means auto | First native vision plan / **NATIVE** | Caps Qwen3.5 Vision chunking. Positive overrides must remain in the admitted shape and memory envelope. |
-| `RPU_VISION_MERGER` | **PB(true)** | Qwen3.5 Vision setup / **MODEL** | Enables the RPU merger path. `0` selects a fallback and changes performance/numerics. |
-| `RPU_VISION_STEP0` | **PB(true)** | Qwen3.5 Vision setup / **MODEL** | Enables the RPU first-stage path. `0` selects a fallback and changes performance/numerics. |
+| `RPU_VISION_MERGER` | **PB(true)** | Qwen3.5 Vision setup / **MODEL** | Enables the device merger path. `0` selects a fallback and changes performance/numerics. |
+| `RPU_VISION_STEP0` | **PB(true)** | Qwen3.5 Vision setup / **MODEL** | Enables the device first-stage path. `0` selects a fallback and changes performance/numerics. |
 
 <a id="gr00t-profile"></a>
 ## GR00T profile
@@ -350,7 +265,7 @@ asset manifest through its Python API; no environment path replaces it.
 
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |
 |---|---|---|---|
-| `RPU_INTERNVLA_DINO_FINAL_NORM_RPU` | **PB(true)** | DINO tower construction / **MODEL** | Runs the final normalization on RPU. `0` changes the host/device boundary and timing. |
+| `RPU_INTERNVLA_DINO_FINAL_NORM_RPU` | **PB(true)** | DINO tower construction / **MODEL** | Runs the final normalization on device. `0` changes the host/device boundary and timing. |
 | `RPU_INTERNVLA_DINO_NORM_FOLD` | **PB(false)** | DINO tower construction / **MODEL** | Folds input normalization into patch weights. It changes installed weights and must be rebuilt. |
 | `RPU_INTERNVLA_HOST_CACHE` | **PB(true)** | Backbone construction / **MODEL** | Enables host memoization and stable owners. Disabling increases repeated host work. |
 | `RPU_NAVDP_DENOISE_UNROLL` | Off; stripped `1`/`true`/`True` enables, other values disable | NavDP action call / **CALL**; rebuild Graph | Captures the fixed denoise loop. It changes Graph topology and step execution. |
@@ -367,6 +282,10 @@ use a fresh process for another profile.
 
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |
 |---|---|---|---|
+| `RPU_LINGBOT2_RUNTIME_GRAPH` | `0`; current examples `1`; literal `0/1` | Construction / **MODEL** | Retains Vision/Prefill/Action Graphs and native denoising. Rejects exact-Z2, W4 and debug routing combinations. |
+| `RPU_LINGBOT2_SPARSE_EXPERTS` | `0`; current examples `1`; literal `0/1` | Construction / **MODEL** | Uses compact Top4 FP16/W8 experts. Rejects dense grouped storage, W4, exact-Z2 and debug routing/chunk overrides. |
+| `RPU_LINGBOT2_ROUTED_GEMM` | `0`; literal `0/1` | Construction / **MODEL** | Alternative dense grouped-expert route; requires grouped storage and rejects sparse storage. |
+| `RPU_LINGBOT2_PREFILL_KV_PAIR` / `RPU_LINGBOT2_PREFILL_QK_NORM_ROPE` | **PB(false)** | Construction / **MODEL** | Experimental Prefill fusion; requires runtime Graph and matching native capability. Current examples leave both off. |
 | `RPU_LINGBOT2_ADARMS_DIRECT_SCHEDULE` | Raw/facade `0`; `1`/`true`/`True`/`on` | Expert construction / **MODEL** | Uses a direct indexed AdaRMS schedule. It conflicts with denoise unroll and requires expert replay. |
 | `RPU_LINGBOT2_BASE_W8A16` | Raw `0`; **E1**; W8/W4 facades `1` | Weight conversion / **MODEL** | Quantizes shared/base expert projections. It is part of the complete precision profile, not an independent toggle. |
 | `RPU_LINGBOT2_DENOISE_UNROLL` | Raw `0`; facade `1`; facade normalizes only exact `1` to on | Policy construction / **MODEL** | Records the fixed ten-step denoise Graph and uses FP16 Euler state. `0` restores the host loop and changes numerics. |
@@ -416,7 +335,7 @@ model construction and first capture.
 These variables are consumed by Qwen3-VL Vision and by VLA facades that embed
 that tower. Facades may set exact defaults before model construction.
 
-The exact ordinary dense FP16 Qwen3-VL-2B, 4B, and 8B profiles use RPU patch
+The exact ordinary dense FP16 Qwen3-VL-2B, 4B, and 8B profiles use device patch
 and merger GEMMs by default; merger LayerNorm stays on CPU in FP32.
 Set `RPU_QWEN3VL_VISION_HOST_FP32_PATCH=1` before installation to retain
 CPU FP32 patch projection and CPU FP32 mergers. This choice is snapshotted
@@ -428,7 +347,7 @@ at installation; later environment changes require a fresh model.
 | `RPU_QWEN3VL_VISION_BATCH_CAP` | `3`; decimal integer clamped to at least `1` | Vision forward / **CALL**; rebuild Graph | Maximum compatible images per packed group. Larger values can exceed the profile memory envelope. |
 | `RPU_QWEN3VL_VISION_FUSED_MERGER` | Raw off; **B01(false)** | Vision construction / **MODEL** | Folds the merger into the Vision Graph. Only literal `0`/`1` keeps Python and native readers consistent. |
 | `RPU_QWEN3VL_VISION_HOST_FP32_PATCH` | **PB(false)** | Vision installation / **MODEL**; set before `to_rpu()`, fresh model to change | Snapshots the CPU FP32 patch profile. For exact ordinary dense FP16 VL2/VL4/VL8 it also retains CPU FP32 mergers. It changes numerics and transfer cost. |
-| `RPU_QWEN3VL_VISION_PATCH_EMBED_DEVICE` | `0`; **E1** | Vision construction / **MODEL** | Moves patch embedding to RPU. It changes installed weights, numerics, and graph topology. |
+| `RPU_QWEN3VL_VISION_PATCH_EMBED_DEVICE` | `0`; **E1** | Vision construction / **MODEL** | Moves patch embedding to device. It changes installed weights, numerics, and graph topology. |
 | `RPU_QWEN3VL_VISION_ROPE_SPM` | Off; native value beginning with `1`, `t`, or `T` enables | First native vision use / **NATIVE** | Keeps vision position tables in SPM. It changes persistent memory use and requires a rebuilt vision handle. |
 
 ## RhinoVLA profile
@@ -452,10 +371,9 @@ itself is not an end-to-end contract.
 | `RPU_RHINOVLA_VISION_BATCH_VIEWS` | **PB(false)** | Vision forward / **CALL**; rebuild Graph | Packs equal-size views and is required for some batched merger profiles. Mixed geometry falls back or fails. |
 | `RPU_RHINOVLA_VISION_CPU_MERGER_NORM_FP16` | **PB(false)** | Vision installation / **MODEL** | Uses FP16 for the CPU merger-normalization fallback. It directly changes numerical results. |
 | `RPU_RHINOVLA_VISION_PREP_CACHE` | **PB(false)** | Vision installation / **MODEL** | Memoizes stable preprocessing artifacts. It retains host memory and requires correct cache keys. |
-| `RPU_RHINOVLA_VISION_RPU_MERGER_NORM` | **PB(false)** | Vision installation / **MODEL** | Runs merger normalization on RPU. It changes the boundary and numerical profile. |
-| `RPU_RHINOVLA_VISION_RPU_MERGER_OUTPUT_RPU` | **PB(false)** | Vision installation / **MODEL** | Keeps merger output on RPU. Consumers must accept device-resident output and stable ownership. |
+| `RPU_RHINOVLA_VISION_RPU_MERGER_NORM` | **PB(false)** | Vision installation / **MODEL** | Runs merger normalization on device. It changes the boundary and numerical profile. |
+| `RPU_RHINOVLA_VISION_RPU_MERGER_OUTPUT_RPU` | **PB(false)** | Vision installation / **MODEL** | Keeps merger output on device. Consumers must accept device-resident output and stable ownership. |
 | `RPU_RHINOVLA_VISION_SKIP_RAW_SNAPSHOTS` | **PB(false)** | Vision installation / **MODEL** | `1` suppresses raw debug snapshots. Leaving it off adds memory/synchronization and may retain sensitive model inputs/intermediates. |
-
 
 ### Expert-only W8 construction
 
@@ -511,7 +429,7 @@ validation evidence.
 | `RPU_WALL_OSS_BATCH_MAX_SEQ` | `768`; decimal integer | Vision grouping / **CALL**; rebuild Graph | Caps packed vision sequence length. Too large can exceed memory; the selected public profile may further constrain it. |
 | `RPU_WALL_OSS_BATCH_VISION` | Raw **PB(true)**; Source-only facade `0` | Vision forward / **CALL**; rebuild Graph | Direct builders may pack equal-grid images up to the cap. The public facade fixes per-image preflight and rejects enabling this selector. |
 | `RPU_WALL_OSS_DENOISE_UNROLL` | **PB(true)** | Action construction and calls / **MODEL** | Uses the fused denoise loop. `0` selects the host loop and changes topology and timing. |
-| `RPU_WALL_OSS_DEVICE_PATCH_EMBED` | **PB(true)** | Vision construction / **MODEL** | Runs folded patch embedding on RPU. `0` uses CPU projection and changes boundary/performance. |
+| `RPU_WALL_OSS_DEVICE_PATCH_EMBED` | **PB(true)** | Vision construction / **MODEL** | Runs folded patch embedding on device. `0` uses CPU projection and changes boundary/performance. |
 | `RPU_WALL_OSS_EXPERT0_DOWN_INT4` | **PB(true)** | Quantized LLM weight installation / **MODEL** | Uses the admitted compact expert-0 down projection. Some W4 profiles force it off; mismatches fail validation. |
 | `RPU_WALL_OSS_FAST_IMGPROC` | **PB(true)** | Policy construction / **MODEL** | Uses the direct image-preprocessing path after a first-call parity check. `0` forces the HF processor. |
 | `RPU_WALL_OSS_FAST_PROCESSOR` | **PB(true)** | Policy construction / **MODEL** | Bypasses the combined processor wrapper after a first-call parity check. `0` keeps the wrapper. |
@@ -522,7 +440,7 @@ validation evidence.
 | `RPU_WALL_OSS_HOST_CACHE` | **PB(true)** | Component construction / **MODEL** | Enables host layout/prompt memoization and stable owners. `0` increases repeated host work. |
 | `RPU_WALL_OSS_KVINSERT_PAD16` | **PB(true)** | LLM construction / **MODEL** | Pads/masks prefill KV rows. It changes execution length, cache layout, and Graph signatures. |
 | `RPU_WALL_OSS_MULTISUITE_PROLOGUE` | **PB(false)** | Prompt construction / **CALL** | Selects the multisuite prompt schema; mutually exclusive with generic/short modes. Changes tokens. |
-| `RPU_WALL_OSS_ONDEVICE_EMBED` | **PB(true)** | Policy construction / **MODEL** | Builds token/vision embeddings on RPU. `0` uses the CPU fallback and disables the fused construction path. |
+| `RPU_WALL_OSS_ONDEVICE_EMBED` | **PB(true)** | Policy construction / **MODEL** | Builds token/vision embeddings on device. `0` uses the CPU fallback and disables the fused construction path. |
 | `RPU_WALL_OSS_PARTIAL_MROPE` | **PB(true)**; facade sets `1` | LLM construction / **MODEL** | Uses the required Wall-OSS multimodal position-table path. Explicit `0` is rejected for admitted Wall-OSS input. |
 | `RPU_WALL_OSS_PE_NORM_FOLD` | **PB(true)** | Policy construction / **MODEL** | Folds image normalization into patch weights when fast preprocessing is active. Rebuild installed weights to change it. |
 | `RPU_WALL_OSS_SHORT_PROMPT` | **PB(false)** | Prompt construction / **CALL** | Selects the short prompt schema; mutually exclusive with other prologue modes. Changes tokens. |
@@ -561,7 +479,7 @@ sharing it.
 | `RPU_SIGLIP_ISOLATE_PATCH_EMBED` | Off; non-empty except `0`/`false`/`False` | First segment planning / **NATIVE** | Isolates Pi0.5 patch-embedding segments to diagnose graph-finalization failures. Changes graph segmentation. |
 | `RPU_WALL_OSS_INSTRUMENT` | **PB(false)** | Wall-OSS forward stages / **CALL** | Prints host stage timings. Instrumentation overhead makes the same run unsuitable for clean latency reporting. |
 | `RPU_WALL_OSS_PROLOGUE_FILLER` | Empty; arbitrary string | Prompt construction / **CALL** | Appends diagnostic content to the prompt. It changes tokens and makes output unsuitable for correctness claims. |
-| `RPU_WALL_OSS_VISION_DEVICE_MERGED` | **PB(false)** | Vision construction / **MODEL** | Keeps the eager merged result on RPU as a diagnostic alternative to the normal fused route. Changes ownership/topology. |
+| `RPU_WALL_OSS_VISION_DEVICE_MERGED` | **PB(false)** | Vision construction / **MODEL** | Keeps the eager merged result on device as a diagnostic alternative to the normal fused route. Changes ownership/topology. |
 | `WALL_OSS_PROFILE_PREFIX` | Unset; decimal integer target length | Each prediction / **CALL**; forbidden with prepared production Graphs | Truncates trailing text for a profiling shape after preserving image tokens. Resulting actions are meaningless. |
 
 ## Non-environment runtime controls
@@ -586,20 +504,37 @@ weight loading.
 | `padding_budget` | Non-negative integer | Maximum optional padding considered by the stage planner. It cannot accompany an exact integer `padding_rows`. |
 
 All three stage mappings are cold even when a field influences only one Graph:
-pass them to the loader/factory before RPU weight installation and first Graph
+pass them to the loader/factory before device weight installation and first Graph
 BUILD. The adapter may narrow a request to its exact capability envelope and
 will expose the resolved execution plan where its public policy API documents
 one.
 
+### Graph snapshot policy
+
+`GraphRuntimePolicy.batch_snapshot_mode` is a cold per-instance setting: `"auto"` uses snapshot replay when the SDK and operator assets support it; `"off"` keeps ordinary prepared Graph replay. Both retain capture, replay and the model's fast-replay setting.
+
+```python
+from dataclasses import replace
+from rpu_backend.graph import GraphCache, GraphRuntimePolicy
+
+policy = GraphRuntimePolicy.from_environment(batch_snapshot_mode="auto")
+cache = GraphCache(runtime_policy=policy)
+control_policy = replace(policy, batch_snapshot_mode="off")
+```
+
+Pass `graph_runtime_policy=policy` before weight installation to `Pi05Policy.from_pretrained`, `WallOssPolicy.from_pretrained` or `build_lingbot_vla_v2`. Wall component builders accept the same argument. Pi retains its execution core count and requires at least five Graph arenas; mirrored components reuse the first owner's cold policy. A supplied policy is complete and frozen; use `replace` when changing only snapshot mode.
+
+AUTO checks Launch capabilities and the loaded asset's hash and program identity. Unknown assets, unsupported SDKs or rejected configuration fall back to ordinary replay. Model-specific environment flags cannot override these checks. Graph statistics expose `batch_snapshot_mode`, `batch_snapshot_available`, `batch_snapshot_effective_contracts` and `batch_snapshot_fallback_reason`; fallback reasons include `policy_off`, `sdk_symbols_unavailable`, `sdk_capability_unavailable`, `untrusted_program:<name>` and `sdk_configuration_rejected`.
+
 ### Memory and coherency controls
 
 - `torch.rpu.set_caching_allocator(bool)` selects the process tensor allocator
-  (default direct/off). The first explicit selection or non-empty RPU tensor
+  (default direct/off). The first explicit selection or non-empty device tensor
   allocation freezes the choice; repeating the same value is idempotent and a
   conflicting value raises. Use a fresh process to choose another mode.
   `torch.rpu.empty_cache()` releases cached, unused blocks; it cannot release
   live tensors or Graph-owned storage. Adapters that retain many tensors select
-  the common caching policy before their first RPU allocation.
+  the common caching policy before their first device allocation.
 - `torch.rpu.memory_stats()` and `torch.rpu.get_memory_stats()` return
   address-free allocator counters. `caching_allocator_policy_frozen` reports
   whether selection is already immutable. When `caching_allocator_enabled` is true,
@@ -610,20 +545,24 @@ one.
   `reset_peak_memory_stats()` resets peak counters, while
   `reset_accumulated_memory_stats()` resets accumulated allocation/free
   counters. Resetting counters does not free memory.
-- `torch.rpu.set_ddr_flush(bool)` controls internal RPU-to-RPU flush points
+- `torch.rpu.set_ddr_flush(bool)` controls internal device-to-device flush points
   (default off). RhinoVLA preserves this process setting instead of enabling
   redundant flushes across its vision, text, and action components.
-- `torch.rpu.set_ddr_flush_force(bool)` controls CPU/RPU boundary coherency
+- `torch.rpu.set_ddr_flush_force(bool)` controls CPU/device boundary coherency
   (default on). Keep it enabled for normal inference; disabling it is unsafe
   outside an isolated microbenchmark. The matching `get_*` functions report
   current process state.
 
 Cache maintenance belongs at actual CPU data accesses: publish a CPU write
 once before device consumption, and synchronize device output before a CPU
-read. RPU tensor views, static table bindings, and device-only handoffs do not
+read. device tensor views, static table bindings, and device-only handoffs do not
 need another flush. Uploads and `.cpu()` copies perform the boundary operation.
-An RPU-to-RPU `copy_` implemented with host `memcpy` still needs both read and
+An device-to-device `copy_` implemented with host `memcpy` still needs both read and
 write boundary synchronization; the tensor device labels alone are insufficient.
+
+Official Qwen3.5-27B W8/W4 selects shared caching allocation after acquiring model ownership and reserves four Graph arenas before weight upload. Original weights stay on CPU until each finalized layout is uploaded. Allocator conflicts release the owner before weight mutation. Text prefill uses a bounded one-shot Graph; decode retains its own Graph. W8 admits 4/6/8 cores and W4 group32 admits 8; see [27B configurations](../examples/configs/qwen3_5/README.md).
+
+Synchronization covers the actual tensor byte range, including view offsets. Reused uploads still check current content and ownership; in-place input changes refresh the upload. A stable storage address does not imply unchanged contents.
 
 ### Profiling mechanisms
 

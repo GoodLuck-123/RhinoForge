@@ -49,7 +49,7 @@ def _validate_dense_vision_profile(config):
         "depth", "num_heads", "hidden_size", "intermediate_size", "out_hidden_size"))
     allowed = {(12, 12, 768, 3072, 1024),
                (24, 16, 1024, 4096, 2048), (24, 16, 1024, 4096, 2560),
-               (27, 16, 1152, 4304, 4096)}
+               (27, 16, 1152, 4304, 4096), (27, 16, 1152, 4304, 5120)}
     valid = (all(isinstance(x, Integral) and not isinstance(x, bool) for x in geometry)
              and geometry in allowed
              and getattr(config, "hidden_act", None) == "gelu_pytorch_tanh"
@@ -60,7 +60,7 @@ def _validate_dense_vision_profile(config):
              and not any(getattr(config, name, None) for name in (
                  "quant_config", "quantization_config")))
     if not valid:
-        raise ValueError("Vision requires an exact dense FP16 Qwen3.5 0.8B/2B/4B/9B tower")
+        raise ValueError("Vision requires an exact dense FP16 Qwen3.5 0.8B/2B/4B/9B/27B tower")
 
 
 def validate_core_profile(config, execution=None):
@@ -71,6 +71,13 @@ def validate_core_profile(config, execution=None):
     Legacy eight-core profiles retain their existing independent admission.
     """
     topology = core_topology(execution)
+    from .quant_scope import validate_modern_27b_profile, resolve_quant_specs, is_full_from_layer_types, W4A16_PGRP
+    if validate_modern_27b_profile(config):
+        tc = getattr(config, "text_config", config)
+        spec = next(iter(resolve_quant_specs(is_full_from_layer_types(tc.layer_types), config.quant_config).values()))
+        if spec.method == W4A16_PGRP and topology.num_cores != 8:
+            raise ValueError("official Qwen3.5-27B W4 group32 requires num_cores=8")
+        return topology
     if topology.num_cores == 8:
         return topology
     from rpu_backend.adapters.qwen3_5.quant_scope import validate_legacy_text_profile
@@ -167,6 +174,12 @@ def _validate_dense_text_profile(config, *, uniform_quant=False):
 
 def validate_text_weight_geometry(inner, config, topology):
     """Validate raw reduced-profile shapes before irreversible swizzling."""
+    from .quant_scope import validate_modern_27b_profile
+    if validate_modern_27b_profile(config):
+        from .weights import validate_modern_27b_cold_weights
+        _validate_dense_text_weights(inner, config)
+        validate_modern_27b_cold_weights(inner, config, cold_cpu=True)
+        return
     if topology.num_cores == 8:
         return
     _validate_dense_text_weights(inner, config)
@@ -214,13 +227,18 @@ def validate_text_mlp_padding_storage(inner, config, topology, *, cold_cpu=False
     """Check every padded raw leaf before claiming or transforming the model.
 
     The outer loader checks CPU floating weights before its explicit half cast;
-    the text installer checks FP16 raw weights, which may already live on RPU.
+    the text installer checks FP16 raw weights, which may already live on device.
     The installer pads CPU copies, leaving logical checkpoint metadata intact.
     """
     from rpu_backend.runtime.topology import decoder_mlp_intermediate_size
     import torch
 
     from rpu_backend.adapters.qwen3_5.quant_scope import validate_legacy_text_profile
+    from .quant_scope import validate_modern_27b_profile
+    if validate_modern_27b_profile(config):
+        from .weights import validate_modern_27b_cold_weights
+        validate_modern_27b_cold_weights(inner, config, cold_cpu=True)
+        return
     if topology.num_cores != 8 and validate_legacy_text_profile(config):
         from rpu_backend.adapters.qwen3_5.weights import validate_legacy_cold_weights
 
@@ -336,6 +354,10 @@ def validate_dense_9b_vision_profile(config):
 def validate_dense_9b_vision_weights(visual, config):
     """Inspect raw CPU geometry before lazy Vision can mutate any weights."""
     validate_dense_9b_vision_profile(config)
+    _validate_dense_large_vision_weight_shapes(visual, config)
+
+
+def _validate_dense_large_vision_weight_shapes(visual, config):
 
     def shape(owner, name, expected):
         value = getattr(owner, name, None)
@@ -359,7 +381,8 @@ def validate_dense_9b_vision_weights(visual, config):
     shape(visual.pos_embed, "weight", (2304, 1152))
     shape(visual.merger.norm, "weight", (1152,))
     shape(visual.merger.norm, "bias", (1152,))
-    for owner, out_size in ((visual.merger.linear_fc1, 4608), (visual.merger.linear_fc2, 4096)):
+    for owner, out_size in ((visual.merger.linear_fc1, 4608),
+                            (visual.merger.linear_fc2, config.out_hidden_size)):
         shape(owner, "weight", (out_size, 4608))
         shape(owner, "bias", (out_size,))
 
@@ -380,6 +403,16 @@ def validate_cold_weight_dtype(model, *, fp16=False):
     import torch
 
     config = getattr(model, "config", None)
+    from .quant_scope import validate_modern_27b_profile
+    if validate_modern_27b_profile(config):
+        from .weights import validate_modern_27b_cold_weights
+        validate_modern_27b_cold_weights(model.model.language_model, config, cold_cpu=True)
+        for owner in (model.model.visual, model.get_output_embeddings()):
+            for name, parameter in owner.named_parameters(remove_duplicate=False):
+                if (parameter.device.type != "cpu" or parameter.dtype != torch.float16
+                        or not parameter.is_contiguous()):
+                    raise ValueError(f"Qwen3.5-27B cold companion {name} requires contiguous CPU FP16")
+        return
     specs = (_dense_9b_vl_w8_specs(config)
              if is_dense_9b_vl_candidate(config) else None)
     quantized = set()
@@ -395,3 +428,43 @@ def validate_cold_weight_dtype(model, *, fp16=False):
         if parameter.device.type != "cpu" or parameter.dtype not in allowed:
             raise ValueError(f"Qwen3.5 9B cold weight {name} must be CPU "
                              + ("FP16" if fp16 or specs is not None else "floating point"))
+
+
+def is_dense_large_vl_candidate(config):
+    """Select resource validation only; never grant model admission."""
+    return (getattr(getattr(config, "text_config", None), "hidden_size", None) in (4096, 5120)
+            and getattr(config, "vision_config", None) is not None)
+
+
+def validate_dense_large_vl_profile(config):
+    from .quant_scope import validate_modern_27b_profile
+    if is_dense_large_vl_candidate(config) and validate_modern_27b_profile(config):
+        return
+    validate_dense_9b_vl_profile(config)
+
+
+def validate_dense_large_vision_profile(config):
+    if getattr(config, "out_hidden_size", None) == 4096:
+        return validate_dense_9b_vision_profile(config)
+    _validate_dense_vision_profile(config)
+    if config.hidden_size != 1152 or config.out_hidden_size not in (4096, 5120):
+        raise ValueError("the four-arena Vision owner requires exact dense Qwen3.5 9B/27B")
+
+
+def validate_dense_large_vision_weights(visual, config):
+    if getattr(config, "out_hidden_size", None) == 4096:
+        return validate_dense_9b_vision_weights(visual, config)
+    validate_dense_large_vision_profile(config)
+    _validate_dense_large_vision_weight_shapes(visual, config)
+
+
+def validate_dense_large_vl_weights(model):
+    from .quant_scope import validate_modern_27b_profile
+    if not validate_modern_27b_profile(model.config):
+        return validate_dense_9b_vl_weights(model)
+    validate_dense_large_vl_profile(model.config)
+    _validate_dense_text_weights(model.model.language_model, model.config)
+    if tuple(model.get_output_embeddings().weight.shape) != (248320, 5120):
+        raise ValueError("Qwen3.5-27B LM-head weight shape disagrees with config")
+    validate_dense_large_vision_weights(model.model.visual, model.config.vision_config)
+    validate_cold_weight_dtype(model)

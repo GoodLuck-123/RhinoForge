@@ -6,7 +6,7 @@ RhinoForge 不分发模型 checkpoint。请从模型 owner 或授权资产渠道
 条款，并在使用前核对公开 repository 和 revision。
 
 原始 checkpoint 和本地转换产物都应保留来源记录。运行时准入取决于对应配置和 API
-要求的 checkpoint 格式、精度与输入范围。仅有来源身份不能证明模型受支持，参见
+要求的 checkpoint 格式、精度与输入范围，参见
 [示例](model_support.zh.md)。
 
 ## 模型来源与精度
@@ -28,14 +28,17 @@ RhinoForge 不分发模型 checkpoint。请从模型 owner 或授权资产渠道
 
 公开 Wall-OSS 底座来源为
 [`x-square-robot/wall-oss-0.5`](https://huggingface.co/x-square-robot/wall-oss-0.5)。
-按 [Wall-OSS 示例](../examples/README.md#公开-wall-oss-与-rhinovla)使用其 processor、normalizer
-和动作定义。G0.5 的[配置](../examples/configs/g05/base/fp16.toml)记录了来源、
+按 [Wall-OSS 示例](../examples/configs/README.md)使用其 processor、normalizer
+和动作定义。G0.5 的[配置](../examples/configs/g05/2cam/fp16.toml)记录了来源、
 revision、subfolder 和实现。请查阅模型 owner 的访问与许可条款及
 [第三方声明](../THIRD_PARTY_NOTICES.md)；RhinoForge 的源码许可证不授予这些权重的使用权。
 
 保留完整 checkpoint，包括配置、tokenizer 和 processor 文件。Pi0.5 的 SigLIP
 权重属于 policy checkpoint。本地转换权重必须符合所选配置要求的格式，不继承原始
 checkpoint 的任务质量结论。
+
+Qwen3 语音使用独立 checkpoint 检查和 TTS 源码哈希。固定 ASR/TTS 下载与源码
+准备见[语音指南](qwen3_audio.zh.md)，TTS 权重须包含 `speech_tokenizer/` 目录。
 
 ## 下载方式
 
@@ -94,10 +97,10 @@ source model 与 converter version 以便复现。
 模型资产不能替代外部运行时前置项：
 
 - 匹配的 sanitized Release Rhino Launch 包，包含头文件和动态库；
-- 由 `RPU_KERNEL_LIB_PATH` 选择的匹配合并算子资产，以及相邻的 `.kernels` 清单；
+- 由 `RPU_KERNEL_LIB_PATH` 选择的匹配主算子资产与扩展算子资产，以及相邻的 `.kernels` 清单；
 - 匹配的板卡 SDK/runtime，按平台安装说明配置。
 
 这些组件均不存放在仓库、source archive 或 Python 包中。请向运行时提供方获取与源码
-版本匹配的资产，并核对其提供的校验值。仅有包版本号不能证明兼容性；构建和运行时应
+版本匹配的资产，并核对其提供的校验值。构建和运行时应
 使用一致的 Launch 路径。所需能力、路径配置和算子清单检查见
 [外部运行时资产](runtime_assets.zh.md)。

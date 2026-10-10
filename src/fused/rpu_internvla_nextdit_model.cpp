@@ -171,7 +171,7 @@ public:
                         && weight.device().type() == at::kPrivateUse1
                         && weight.is_contiguous(),
                         "fused Q/K/cross-Q weight[", i,
-                        "] must be contiguous fp16 RPU [3H,H]");
+                        "] must be contiguous fp16 device [3H,H]");
             fused_qkq_weights_.push_back(weight);
         }
         use_fused_qkq_ = true;
@@ -188,19 +188,19 @@ public:
                     && weight.scalar_type() == at::kHalf
                     && weight.device().type() == at::kPrivateUse1
                     && weight.is_contiguous(),
-                    "step-prepare weight must be contiguous fp16 RPU [(4L+1)H,H]");
+                    "step-prepare weight must be contiguous fp16 device [(4L+1)H,H]");
         TORCH_CHECK(bias.dim() == 1 && bias.numel() == out_features
                     && bias.scalar_type() == at::kHalf
                     && bias.device().type() == at::kPrivateUse1
                     && bias.is_contiguous(),
-                    "step-prepare bias must be contiguous fp16 RPU [(4L+1)H]");
+                    "step-prepare bias must be contiguous fp16 device [(4L+1)H]");
         TORCH_CHECK(fold_norm_weight.dim() == 3
                     && fold_norm_weight.sizes()
                         == at::IntArrayRef({4, num_layers(), h})
                     && fold_norm_weight.scalar_type() == at::kHalf
                     && fold_norm_weight.device().type() == at::kPrivateUse1
                     && fold_norm_weight.is_contiguous(),
-                    "step-prepare fold weights must be contiguous fp16 RPU [4,L,H]");
+                    "step-prepare fold weights must be contiguous fp16 device [4,L,H]");
         step_prepare_w_ = weight;
         step_prepare_b_ = bias;
         step_fold_norm_w_ = fold_norm_weight;
@@ -248,7 +248,7 @@ public:
                             && xs[i].device().type() == at::kPrivateUse1
                             && xs[i].scalar_type() == at::kHalf
                             && xs[i].is_contiguous(),
-                            name, "[", i, "] must be contiguous fp16 RPU rank ", rank);
+                            name, "[", i, "] must be contiguous fp16 device rank ", rank);
             }
         };
         check(self_k_w, "self_k_w", 2); check(self_v_w, "self_v_w", 2);
@@ -271,7 +271,7 @@ public:
                         && tensor.device().type() == at::kPrivateUse1
                         && tensor.scalar_type() == at::kHalf
                         && tensor.is_contiguous(),
-                        name, " must be contiguous fp16 RPU with ", numel,
+                        name, " must be contiguous fp16 device with ", numel,
                         " elements and rank ", rank);
         };
         check_final(final_out_w, "final_out_w", 2, hidden_size * hidden_size);
@@ -341,7 +341,7 @@ public:
         TORCH_CHECK(x.dim() == 3 && x.size(0) == 1 && x.size(2) == h
                     && x.scalar_type() == at::kHalf && x.is_contiguous()
                     && x.device().type() == at::kPrivateUse1,
-                    "x must be [1,T,H] contiguous fp16 RPU");
+                    "x must be [1,T,H] contiguous fp16 device");
         const int64_t seq = x.size(1);
         const int64_t denoise_steps = denoise_unroll
             ? static_cast<int64_t>(euler_steps.size()) : 1;
@@ -350,9 +350,9 @@ public:
         TORCH_CHECK(!denoise_unroll || (denoise_steps > 0 && denoise_steps <= 10),
                     "denoise unroll steps must be in [1,10], got ", denoise_steps);
         TORCH_CHECK(!prepare_modulation_on_rpu || denoise_unroll,
-                    "RPU step preparation requires denoise unroll");
+                    "device step preparation requires denoise unroll");
         TORCH_CHECK(!prepare_modulation_on_rpu || have_step_prepare_weights_,
-                    "RPU step preparation requested before installing its weights");
+                    "device step preparation requested before installing its weights");
         const bool modulation_shape_ok = prepare_modulation_on_rpu
             ? modulation.sizes() == at::IntArrayRef({denoise_steps, h})
             : (denoise_unroll
@@ -363,7 +363,7 @@ public:
                     && modulation.device().type() == at::kPrivateUse1
                     && modulation.is_contiguous(),
                     "modulation must be [layers,4,H], [steps,layers,4,H], or "
-                    "activated [steps,H] for RPU preparation; contiguous fp16 RPU");
+                    "activated [steps,H] for device preparation; contiguous fp16 device");
         const bool final_scale_shape_ok = prepare_modulation_on_rpu || (denoise_unroll
             ? final_scale.sizes() == at::IntArrayRef({denoise_steps, h})
             : final_scale.sizes() == at::IntArrayRef({h}));
@@ -372,12 +372,12 @@ public:
                     && final_scale.device().type() == at::kPrivateUse1
                     && final_scale.is_contiguous(),
                     "final_scale must be [H], or [steps,H] for unroll, "
-                    "contiguous fp16 RPU");
+                    "contiguous fp16 device");
         TORCH_CHECK(raw_actions.dim() == 3,
                     "raw_actions must be rank-3 [B,32,16]");
         const int64_t action_batch = use_action_encoder ? raw_actions.size(0) : 1;
         TORCH_CHECK(action_batch > 0 && action_batch <= NEXTDIT_MAX_ACTION_BATCH,
-                    "RPU action graph batch must be in [1,4], got ", action_batch);
+                    "device action graph batch must be in [1,4], got ", action_batch);
         const bool packed_action_batch = use_action_encoder && action_batch > 1
             && seq == action_batch * NEXTDIT_ACTION_SEQ;
         TORCH_CHECK(seq == NEXTDIT_ACTION_SEQ || packed_action_batch,
@@ -389,7 +389,7 @@ public:
                     && raw_actions.scalar_type() == at::kHalf
                     && raw_actions.device().type() == at::kPrivateUse1
                     && raw_actions.is_contiguous(),
-                    "raw_actions must be [B,T,16] contiguous fp16 RPU");
+                    "raw_actions must be [B,T,16] contiguous fp16 device");
         TORCH_CHECK(static_cast<int64_t>(self_k_caches.size()) == nl
                     && static_cast<int64_t>(self_v_caches.size()) == nl
                     && static_cast<int64_t>(cross_k_caches.size()) == nl
@@ -448,7 +448,7 @@ public:
                     && cross_context.scalar_type() == at::kHalf
                     && cross_context.device().type() == at::kPrivateUse1
                     && cross_context.is_contiguous(),
-                    "cross_context must be [1,S,H] contiguous fp16 RPU");
+                    "cross_context must be [1,S,H] contiguous fp16 device");
         const int64_t cross_seq = cross_context.size(1);
         TORCH_CHECK(cross_seq > 0 && cross_seq <= NEXTDIT_MAX_CROSS_SEQ,
                     "cross sequence must be in [1,320], got ", cross_seq);
@@ -562,7 +562,7 @@ public:
             "in [0,10]");
         TORCH_CHECK(
             !prepare_modulation_on_rpu || denoise_steps > 0,
-            "internvla_nextdit_resolve_stage_domain: RPU modulation prepare "
+            "internvla_nextdit_resolve_stage_domain: device modulation prepare "
             "requires denoise unroll");
         TORCH_CHECK(
             action_batch == 1 || use_action_encoder,
@@ -1546,7 +1546,7 @@ protected:
         }
 
         // Cross attention: Q is dynamic/exact-normalized. On a condition-cache
-        // miss, project the shared caption to K/V on RPU and retain the caches.
+        // miss, project the shared caption to K/V on device and retain the caches.
         if (!use_fused_qkq_) {
             project_qk_exact(lw.cross_q_w,
                              layer_addr(layer_idx, 0, "cross_qn_w"),
@@ -1696,7 +1696,7 @@ protected:
             full_elems, ValuOpType::ADD, c10::Half(1.0), NEXTDIT_DEVICE_CORES);
 
         // Correctness-slice probe: one full hidden snapshot per block.  The
-        // Python runtime owns a stable RPU buffer and clones it to CPU before
+        // Python runtime owns a stable device buffer and clones it to CPU before
         // the next replay, so this does not violate the stable-DDR rule.
         if (collect_layer_outputs_) {
             rpu_launch_spm_copy_ddr_dma(
@@ -1830,7 +1830,7 @@ private:
         const int64_t out_features = (4 * nl + 1) * h;
         const int64_t local_out = out_features / NEXTDIT_DEVICE_CORES;
         TORCH_CHECK(steps > 0 && steps <= 10,
-                    "RPU step preparation requires 1..10 steps");
+                    "device step preparation requires 1..10 steps");
         TORCH_CHECK(out_features % NEXTDIT_DEVICE_CORES == 0,
                     "step-prepare output must divide eight cores");
 

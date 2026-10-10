@@ -223,7 +223,7 @@ class LlamaAdapter:
                 or getattr(self.model, "_rpu_swizzle_started", False)
             ):
                 raise RPUBackendError(
-                    f"model.to({target!r}) rejected: weights have been swizzled for RPU "
+                    f"model.to({target!r}) rejected: weights have been swizzled for device "
                     "(irreversible). Reload via `RPUModelForCausalLM.from_pretrained(...)` "
                     "if you need a CPU copy."
                 )
@@ -233,7 +233,7 @@ class LlamaAdapter:
         model.to = rpu_aware_to
 
     def to_rpu(self) -> nn.Module:
-        """Swizzle weights, claim single-handle gate, move to RPU,
+        """Swizzle weights, claim single-handle gate, move to device,
         install all-layers-once patch + validator.
 
         R2-HIGH-3 (round-2): the lock-contention branch RAISES RPUBackendError
@@ -336,7 +336,7 @@ register_adapter("LlamaForCausalLM", LlamaAdapter)
 
 
 def patch_llama_for_causal_lm(model) -> int:
-    """Adapter-facing entry — patches a LlamaModel for RPU all-layers-once execution.
+    """Adapter-facing entry — patches a LlamaModel for device all-layers-once execution.
 
     D-02 + D-06: this is the public adapter API. Body is a 1-line delegation to
     `runtime.decoder._install_causal_decoder_forward(model, arch='llama')` — the

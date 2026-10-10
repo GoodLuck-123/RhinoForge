@@ -13,7 +13,7 @@ Line-for-line mirror of the official
     align-flag parsing                            (:775-870)
 
 ⚠️ IMPORT CONTRACT: pure torch, NO module-level `import rpu_backend`, no relative imports —
-   so the CPU test suite can exec this file standalone on an RPU-less host. Same rule as
+   so the CPU test suite can exec this file standalone on an device-less host. Same rule as
    convert.py; `test_prefix_module_is_cpu_safe` stands guard.
 
 Prefix token layout produced for the AUTHORITATIVE YAML (kuavo_v2_depth):

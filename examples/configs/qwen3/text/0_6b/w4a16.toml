@@ -1,5 +1,6 @@
-# Public configuration; provide your own checkpoint and input assets.
-
+# Quantize the official FP16 asset once during cold installation.
+# Decoder seven projections: symmetric INT4/G32; head/embed/norm: FP16.
+# Exact Qwen3-0.6B, TP8/B1; no per-channel W4 or other size is implied.
 [example]
 profile_id = "qwen3-0.6b.w4a16-g32.text"
 registry_alias = "qwen3-0.6b"
@@ -21,8 +22,6 @@ runs = 5
 hwperf = false
 profile = false
 seed = 0
-
-[rpu_execution]
 
 [rpu_execution.model]
 num_cores = 8

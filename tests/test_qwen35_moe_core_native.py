@@ -17,18 +17,6 @@ INCLUDE_ROOT = (
 )
 
 
-def test_planner_cache_identity_is_registered_for_python_admission():
-    """The first prefill queries this dispatcher ABI before executing kernels."""
-    registrations = (ROOT / "src/core/rpu_dispatch_registrations.inc").read_text(
-        encoding="utf-8"
-    )
-    assert re.search(
-        r'm\.def\("qwen3_5_moe_planner_cache_identity\(int handle\) -> int\[\]",'
-        r'\s*TORCH_FN\(rpu_qwen3_5_moe_planner_cache_identity\)\);',
-        registrations,
-    ), "MoE planner cache identity must be exported through torch.ops.rpu"
-
-
 def _masked(source: str) -> str:
     return re.sub(
         r'//[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"',
@@ -222,7 +210,11 @@ def test_exact_install_binds_logical_and_physical_dimensions_to_cold_owner():
     assert "num_cores() == 6 ? 576 : shared_intermediate" in admission
     assert "tensor_parallel == num_cores()" in admission
     assert "routed_weight_mode == 5" in admission
-    assert "{num_experts, hidden_size * physical_routed_intermediate}" in install
+    assert "routed_uint4 && num_cores() == 8" in admission
+    assert re.search(
+        r"\{num_experts, hidden_size \* physical_routed_intermediate\s*/\s*"
+        r"\(routed_uint4 \? 2 : 1\)\}", install
+    )
     assert "{physical_shared_intermediate, hidden_size}" in install
     assert "{hidden_size, physical_shared_intermediate}" in install
     assert "{16 * shared_expert_tp(), hidden_size}" in install

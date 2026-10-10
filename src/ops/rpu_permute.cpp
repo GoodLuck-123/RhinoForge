@@ -1,4 +1,4 @@
-// rpu_permute.cpp - Permute kernel implementation for RPU
+// rpu_permute.cpp - Permute kernel implementation for device
 #include "rhino_launch_buffer.h"
 #include "rhino_launch_program.h"
 #include "rhino_launch_queue.h"
@@ -22,7 +22,7 @@ void rpu_launch_permute_kernel(const at::Tensor &input,
                                const std::vector<int64_t> &dims) {
 
     TORCH_CHECK(input.device().type() == c10::DeviceType::PrivateUse1,
-                "input not on RPU");
+                "input not on device");
 
     // Ensure output has same dtype as input
     if (output.scalar_type() != input.scalar_type()) {
@@ -427,7 +427,7 @@ void rpu_launch_permute_kernel(const at::Tensor &input,
         // wq->set_warp_num(4);  // (dead eager path; method removed from RpuQueue API)
         wq->enqueu_kernel(*kernel, {(uint16_t)grid_dim_x, (uint16_t)grid_dim_y, (uint16_t)grid_dim_z}, {0});
 
-        // Flush output, 确保 CPU 能读到 RPU 写入的最新数据
+        // Flush output, 确保 CPU 能读到 device 写入的最新数据
         // rpu_ddr_flush(out_ptr);
 
         // ==================== SPM 版本 (注释保留) ====================
@@ -662,7 +662,7 @@ void rpu_launch_permute_kernel(const at::Tensor &input,
         // wq->set_warp_num(4);  // (dead eager path; method removed from RpuQueue API)
         wq->enqueu_kernel(*kernel, {(uint16_t)grid_dim_x, (uint16_t)grid_dim_y, (uint16_t)grid_dim_z}, {0});
 
-        // Flush output, 确保 CPU 能读到 RPU 写入的最新数据
+        // Flush output, 确保 CPU 能读到 device 写入的最新数据
         // rpu_ddr_flush(out_ptr);
 
         // ==================== SPM 版本 (注释保留) ====================
@@ -874,7 +874,7 @@ at::Tensor rpu_permute3d_spm_test(const at::Tensor& input, c10::IntArrayRef perm
     TORCH_CHECK(input.dim() == 3, "permute3d_spm_test: 3D input only");
     TORCH_CHECK(input.scalar_type() == at::kHalf, "permute3d_spm_test: fp16 only");
     TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                "permute3d_spm_test: input must be on RPU");
+                "permute3d_spm_test: input must be on device");
     TORCH_CHECK(perm.size() == 3, "permute3d_spm_test: perm must have 3 elements");
     if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
     auto in_c = input.contiguous();
@@ -910,7 +910,7 @@ at::Tensor rpu_permute4d_0213_spm_test(const at::Tensor& input) {
     TORCH_CHECK(input.scalar_type() == at::kHalf,
                 "permute4d_0213_spm_test: fp16 only");
     TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                "permute4d_0213_spm_test: input must be on RPU");
+                "permute4d_0213_spm_test: input must be on device");
     if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
     auto in_c = input.contiguous();
     const int64_t q = in_c.size(0), b = in_c.size(1);

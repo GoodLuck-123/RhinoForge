@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <exception>
 #include <filesystem>
 #include <iomanip>
@@ -787,7 +788,7 @@ void RpuKernelGraph::sync_point() {
         return;
     }
 
-    // 如果 nodes_ 为空（例如 embedding CPU fallback 发生在第一个 RPU kernel 之前），
+    // 如果 nodes_ 为空（例如 embedding CPU fallback 发生在第一个 device kernel 之前），
     // flush 是 no-op，也不需要标记 non-replayable。
     if (nodes_.empty()) {
         return;
@@ -798,7 +799,7 @@ void RpuKernelGraph::sync_point() {
     // 标记为 non-replayable，因为 sync_point 打断了连续 batch 的前提。
     //
     // §12.7 flush：这里同样做 pre + post 双 flush。原因与 end() 一致：
-    // sync_point 之前本轮可能已有 CPU 产物需要先对 RPU 可见，sync_point 之后
+    // sync_point 之前本轮可能已有 CPU 产物需要先对 device 可见，sync_point 之后
     // CPU fallback 又要立刻读取 prefix kernel 的写回结果。tensor_refs 交给最终
     // end() 底部扫尾。
     flush_boundary_ptrs();
@@ -1189,7 +1190,8 @@ static SegmentResourceBudget segment_resource_budget(
     if (lingbot2_exact_graph_owns_sdk_budget(
             graph_label, sdk_budget,
             runtime_policy.lingbot2_multiview_spm_z2) ||
-        (runtime_policy.qwen35_legacy_27b_sdk_budget &&
+        ((runtime_policy.qwen35_legacy_27b_sdk_budget ||
+          runtime_policy.qwen35_dense_27b_sdk_budget) &&
          graph_label == "rpu_qwen3_5")) {
         return sdk_budget;
     }
@@ -1568,6 +1570,45 @@ namespace {
 constexpr size_t kExtraPreparedQueueBudget = 0;
 std::atomic<size_t> g_extra_prepared_queues{0};
 
+struct BatchSnapshotBridge {
+    using Capture = uint32_t (*)(::rhino_lkn::Queue_t*,
+        std::shared_ptr<const ::rhino_lkn::detail::BatchSnapshot>*) noexcept;
+    using Restore = uint32_t (*)(::rhino_lkn::Queue_t*,
+        const std::shared_ptr<const ::rhino_lkn::detail::BatchSnapshot>*,
+        const ::rhino_lkn::detail::BatchSnapshotDmaBinding*, size_t) noexcept;
+    using Configure = uint32_t (*)(::rhino_lkn::Queue_t*,
+        const ::rhino_lkn::BatchSnapshotOptionsV1*) noexcept;
+    using Capabilities = uint64_t (*)() noexcept;
+    Capture capture = nullptr;
+    Restore restore = nullptr;
+    Configure configure = nullptr;
+    Capabilities capabilities = nullptr;
+    bool symbols_available() const noexcept {
+        return capture && restore && configure && capabilities;
+    }
+    uint64_t capability_bits() const noexcept {
+        return capabilities ? capabilities() : 0;
+    }
+    explicit operator bool() const noexcept {
+        return symbols_available() &&
+            (capability_bits() & ::rhino_lkn::kRuntimeCapabilityBatchSnapshotV1);
+    }
+};
+
+const BatchSnapshotBridge& batch_snapshot_bridge() {
+    // Every extension symbol is optional; older SDKs retain ordinary preparation.
+    static const BatchSnapshotBridge bridge{
+        reinterpret_cast<BatchSnapshotBridge::Capture>(
+            dlsym(RTLD_DEFAULT, "RhinoLaunchCaptureBatchSnapshotV1")),
+        reinterpret_cast<BatchSnapshotBridge::Restore>(
+            dlsym(RTLD_DEFAULT, "RhinoLaunchRestoreBatchSnapshotV1")),
+        reinterpret_cast<BatchSnapshotBridge::Configure>(
+            dlsym(RTLD_DEFAULT, "RhinoLaunchConfigureBatchSnapshotV1")),
+        reinterpret_cast<BatchSnapshotBridge::Capabilities>(
+            dlsym(RTLD_DEFAULT, "rhino_launch_runtime_capabilities"))};
+    return bridge;
+}
+
 bool try_acquire_extra_prepared_queue() {
     size_t used = g_extra_prepared_queues.load(std::memory_order_relaxed);
     while (used < kExtraPreparedQueueBudget) {
@@ -1610,10 +1651,110 @@ uint64_t checked_dma_live_address(
 
 }  // namespace
 
+bool RpuKernelGraph::batch_snapshot_enabled() const {
+    return batch_snapshot_available_ &&
+        runtime_policy_.batch_snapshot_mode == GraphBatchSnapshotMode::Auto;
+}
+
+void RpuKernelGraph::bind_batch_snapshot_admission() {
+    if (batch_snapshot_admission_bound_) return;
+    batch_snapshot_admission_bound_ = true;
+    batch_snapshot_available_ = false;
+    batch_snapshot_contracts_ = 0;
+    if (runtime_policy_.batch_snapshot_mode == GraphBatchSnapshotMode::Off) {
+        batch_snapshot_fallback_reason_ = "policy_off";
+        return;
+    }
+    const auto& bridge = batch_snapshot_bridge();
+    if (!bridge.symbols_available()) {
+        batch_snapshot_fallback_reason_ = "sdk_symbols_unavailable";
+        return;
+    }
+    if (!bridge) {
+        batch_snapshot_fallback_reason_ = "sdk_capability_unavailable";
+        return;
+    }
+    uint32_t contracts = ::rhino_lkn::kBatchSnapshotInstructionArenaReadOnly |
+        ::rhino_lkn::kBatchSnapshotPositionIndependentPrograms;
+    size_t programs = 0;
+    for (const auto& node : nodes_) {
+        if (node.kind != GraphNodeKind::Kernel) continue;
+        const auto& kernel = node.as_kernel();
+        const std::string name = !kernel.kernel_name.empty()
+            ? kernel.kernel_name
+            : kernel.kernel_id.has_value()
+                ? KERNEL_ID_NAMES[static_cast<size_t>(*kernel.kernel_id)]
+                : std::string{};
+        // This package factory verifies actual immutable full-REF bytes and
+        // reviewed per-program metadata. No label, user boolean or SDK bit
+        // can grant instruction read-only/PIC authority to unknown programs.
+        contracts &= KernelCache::instance().graph_snapshot_program_contracts(name);
+        ++programs;
+        if (!(contracts & ::rhino_lkn::kBatchSnapshotInstructionArenaReadOnly)) {
+            batch_snapshot_fallback_reason_ = "untrusted_program:" + name;
+            return;
+        }
+    }
+    if (programs == 0) {
+        batch_snapshot_fallback_reason_ = "no_programs";
+        return;
+    }
+    batch_snapshot_contracts_ = contracts;
+    batch_snapshot_available_ = true;
+    batch_snapshot_fallback_reason_.clear();
+}
+
+void RpuKernelGraph::invalidate_batch_snapshots() noexcept {
+    for (auto& segment : segments_) segment.batch_snapshot.reset();
+}
+
+void RpuKernelGraph::capture_segment_batch_snapshot(
+        Segment& seg, PreparedQueueSlot& slot, bool hw_perf_enabled) noexcept {
+    // The caller has completed a real synchronous submit. Never recapture on
+    // a hot restore: captured tokens must continue to describe this image.
+    if (hw_perf_enabled || !batch_snapshot_enabled() ||
+        !slot.queue || !slot.kernel_register_tokens_valid ||
+        !seg.fixed_dma_table) return;
+    try {
+        RECORD_FUNCTION("rpu_graph::snapshot_capture", {});
+        auto candidate = std::make_shared<Segment::PreparedBatchSnapshot>();
+        candidate->fixed_dma_table = seg.fixed_dma_table;
+        candidate->kernel_register_tokens = slot.kernel_register_tokens;
+        candidate->core_ids = seg.core_ids;
+        candidate->graph_lifetime_id = graph_lifetime_id_;
+        candidate->build_generation = build_generation_;
+        candidate->start_idx = seg.start_idx;
+        candidate->end_idx = seg.end_idx;
+        candidate->broadcast_mode = seg.queue_state.broadcast_mode;
+        candidate->flush_icache = seg.queue_state.flush_icache;
+        for (size_t i = seg.start_idx; i < seg.end_idx; ++i) {
+            if (nodes_[i].kind != GraphNodeKind::Dma) continue;
+            const auto& dma = nodes_[i].as_dma();
+            candidate->dmas.push_back({i, dma.variant, dma.bytes, dma.channel});
+        }
+        if (batch_snapshot_bridge().capture(slot.queue.get(),
+                                            &candidate->image) == 0 &&
+            candidate->image) {
+            seg.batch_snapshot = std::move(candidate);
+        } else {
+            seg.batch_snapshot.reset();
+        }
+    } catch (...) {
+        // Host snapshot admission is optional and cannot fail a completed run.
+        seg.batch_snapshot.reset();
+    }
+}
+
 void RpuKernelGraph::release_prepared_queues() noexcept {
+    invalidate_batch_snapshots();
+    batch_snapshot_admission_bound_ = false;
+    batch_snapshot_available_ = false;
+    batch_snapshot_contracts_ = 0;
+    batch_snapshot_fallback_reason_ = "not_prepared";
     for (auto& slot : private_queue_slots_) {
         slot.queue.reset();
         slot.core_num = 0;
+        slot.batch_snapshot_configured = false;
         slot.built_segment_idx = -1;
         slot.hw_perf_enabled_at_build = false;
         slot.fixed_dma_table.reset();
@@ -1667,8 +1808,10 @@ size_t RpuKernelGraph::prepared_queue_slot_index(
         // 本分支：queue 按最大域构造，每个 kernel 的 core_ids 在
         // prepare_segment_queue 中独立传给 SDK。重建只丢失 kd_buf reuse
         // 收益，不影响正确性。
+        invalidate_batch_snapshots();
         slot.queue = std::make_unique<::rhino_lkn::Queue_t>(num_cores);
         slot.core_num = want;
+        slot.batch_snapshot_configured = false;
         slot.built_segment_idx = -1;
         slot.hw_perf_enabled_at_build = false;
         slot.fixed_dma_table.reset();
@@ -1676,6 +1819,18 @@ size_t RpuKernelGraph::prepared_queue_slot_index(
         slot.kernel_register_tokens.clear();
         slot.pending_kernel_register_tokens.clear();
         slot.kernel_register_tokens_valid = false;
+    }
+    bind_batch_snapshot_admission();
+    if (batch_snapshot_available_ && !slot.batch_snapshot_configured) {
+        ::rhino_lkn::BatchSnapshotOptionsV1 options;
+        options.mode = ::rhino_lkn::kBatchSnapshotAuto;
+        options.contracts = batch_snapshot_contracts_;
+        if (batch_snapshot_bridge().configure(slot.queue.get(), &options) == 0) {
+            slot.batch_snapshot_configured = true;
+        } else {
+            batch_snapshot_available_ = false;
+            batch_snapshot_fallback_reason_ = "sdk_configuration_rejected";
+        }
     }
     return slot.queue.get();
 }
@@ -1687,6 +1842,8 @@ uint32_t RpuKernelGraph::prepare_segment_queue(
         RpuDmaSubmissionLease& submission_lease,
         bool retain_replay_state) {
     RECORD_FUNCTION("rpu_graph::prepare_segment_queue", {});
+    at::RecordFunction preflight(at::RecordScope::FUNCTION);
+    if (preflight.isActive()) preflight.before("rpu_graph::prepare_dma_requests");
     // Validate the whole segment before appending SDK work. This also covers
     // fallback rebuilds and a compute-first segment with later DMA engines.
     for (size_t i = seg.start_idx; i < seg.end_idx; ++i) {
@@ -1783,6 +1940,9 @@ uint32_t RpuKernelGraph::prepare_segment_queue(
         }
     }
 
+    preflight.end();
+    at::RecordFunction resolve(at::RecordScope::FUNCTION);
+    if (resolve.isActive()) resolve.before("rpu_graph::prepare_dma_resolve");
     std::vector<RpuDmaEndpoint> endpoints(endpoint_requests.size());
     auto resolved_endpoint_lease = rpu_resolve_device_dma_endpoints(
         endpoint_requests.data(), endpoint_requests.size(), endpoints.data());
@@ -1790,7 +1950,10 @@ uint32_t RpuKernelGraph::prepare_segment_queue(
         dma_resolutions[i].src_endpoint = endpoints[i * 2];
         dma_resolutions[i].dst_endpoint = endpoints[i * 2 + 1];
     }
+    resolve.end();
 
+    at::RecordFunction append(at::RecordScope::FUNCTION);
+    if (append.isActive()) append.before("rpu_graph::prepare_append_nodes");
     std::vector<Segment::PreparedMutableDmaSlot> prepared_mutable_dmas;
     std::shared_ptr<Segment::PreparedFixedDmaTable> prepared_fixed_table;
     // These sidecars are consumed only by a later REPLAY. One-shot submission
@@ -1914,14 +2077,20 @@ uint32_t RpuKernelGraph::prepare_segment_queue(
     }
     TORCH_CHECK(next_dma_resolution == dma_resolutions.size(),
                 "prepare_segment_queue: DMA resolution count drift");
+    append.end();
     if (retain_replay_state) {
+        RECORD_FUNCTION("rpu_graph::prepare_coalesce_witnesses", {});
         coalesce_fixed_dma_allocation_witnesses(prepared_fixed_table->witnesses);
     }
     // Every caller checks this status; only optional retained slots can retry
     // through the fallback queue after releasing their arena budget.  Publish
     // the new ownership witnesses only for a complete prepared batch.
-    const uint32_t rc = wq.build_batch();
+    const uint32_t rc = [&] {
+        RECORD_FUNCTION("rpu_graph::prepare_sdk_build", {});
+        return wq.build_batch();
+    }();
     if (rc == 0) {
+        RECORD_FUNCTION("rpu_graph::prepare_publish", {});
         for (const auto& resolved : dma_resolutions) {
             auto& dma = nodes_[resolved.node_idx].as_dma();
             dma.src_endpoint = resolved.src_endpoint;
@@ -2081,7 +2250,8 @@ uint32_t RpuKernelGraph::prepare_segment_queue(
     size_t slot_idx = prepared_queue_slot_index(
         segment_idx, segment_fixed_dmas_match || already_retained);
     PreparedQueueSlot* slot = &private_queue_slots_[slot_idx];
-    const auto discard_slot_batch = [](PreparedQueueSlot& target) noexcept {
+    const auto discard_slot_batch = [&](PreparedQueueSlot& target) noexcept {
+        invalidate_batch_snapshots();
         target.queue.reset();
         target.core_num = 0;
         target.built_segment_idx = -1;
@@ -2131,6 +2301,133 @@ uint32_t RpuKernelGraph::prepare_segment_queue(
         ++last_stats_.prepared_segment_hit_total;
         ++last_stats_.hw_batch_submit_total;
         return slot->queue.get();
+    }
+
+    if (hw_perf_enabled) seg.batch_snapshot.reset();
+    if (!hw_perf_enabled && batch_snapshot_enabled() &&
+        segment_fixed_dmas_match && seg.batch_snapshot && slot->queue &&
+        slot->core_num == static_cast<uint8_t>(seg.core_ids.size())) {
+        const auto& captured = *seg.batch_snapshot;
+        const bool identity_matches =
+            captured.fixed_dma_table == seg.fixed_dma_table &&
+            captured.graph_lifetime_id == graph_lifetime_id_ &&
+            captured.build_generation == build_generation_ &&
+            captured.start_idx == seg.start_idx &&
+            captured.end_idx == seg.end_idx &&
+            captured.core_ids == seg.core_ids &&
+            captured.broadcast_mode == seg.queue_state.broadcast_mode &&
+            captured.flush_icache == seg.queue_state.flush_icache;
+        if (identity_matches) {
+            at::RecordFunction restore_profile(at::RecordScope::FUNCTION);
+            if (restore_profile.isActive()) restore_profile.before("rpu_graph::snapshot_restore");
+            try {
+                // Preserve current fixed-side ABA authority; an old snapshot
+                // must not restore historical mutable sidecar witnesses.
+                [[maybe_unused]] auto mutable_fixed_preflight =
+                    validate_mutable_fixed_sidecars_for_rebuild();
+                std::vector<RpuDeviceDmaEndpointRequest> requests;
+                requests.reserve(captured.dmas.size() * 2);
+                size_t dma_index = 0;
+                size_t mutable_index = 0;
+                for (size_t i = seg.start_idx; i < seg.end_idx; ++i) {
+                    const auto& node = nodes_[i];
+                    if (node.kind == GraphNodeKind::Kernel ||
+                        node.kind == GraphNodeKind::Barrier) continue;
+                    if (node.kind == GraphNodeKind::Branch) {
+                        TORCH_CHECK(node.as_branch().is_physical_manifest_metadata(),
+                                    "snapshot restore: non-metadata Branch");
+                        continue;
+                    }
+                    TORCH_CHECK(node.kind == GraphNodeKind::Dma &&
+                                    dma_index < captured.dmas.size(),
+                                "snapshot restore: DMA mapping drift");
+                    const auto& dma = node.as_dma();
+                    const auto& mapping = captured.dmas[dma_index++];
+                    TORCH_CHECK(mapping.node_idx == i &&
+                                    mapping.variant == dma.variant &&
+                                    mapping.bytes == dma.bytes &&
+                                    mapping.channel == dma.channel,
+                                "snapshot restore: DMA topology drift at node ", i);
+                    validate_graph_dma_channel(dma.channel, seg.core_ids.size(),
+                                               "snapshot restore");
+                    validate_semantic_dma_owner_for_execution(
+                        dma, i, "snapshot restore");
+                    uint64_t src = dma.src_addr;
+                    uint64_t dst = dma.dst_addr;
+                    if (dma.variant != DmaNodeData::Variant::Fixed) {
+                        TORCH_CHECK(mutable_index < seg.mutable_dmas.size(),
+                                    "snapshot restore: mutable mapping missing");
+                        const auto& binding = seg.mutable_dmas[mutable_index];
+                        TORCH_CHECK(binding.node_idx == i &&
+                                        binding.dma_id == mutable_index &&
+                                        (dma.semantic_endpoint_id == 0 ||
+                                         (binding.live_base == dma.live_base &&
+                                          binding.live_offset == dma.live_offset)),
+                                    "snapshot restore: mutable mapping drift");
+                        ++mutable_index;
+                        TORCH_CHECK(dma.live_base != nullptr,
+                                    "snapshot restore: live_base missing");
+                        const uint64_t live = checked_dma_live_address(
+                            *dma.live_base, dma.live_offset, i, "snapshot restore");
+                        if (dma.variant == DmaNodeData::Variant::MutableSrc) src = live;
+                        else if (dma.variant == DmaNodeData::Variant::MutableDst) dst = live;
+                        else TORCH_CHECK(false, "snapshot restore: invalid DMA variant");
+                    }
+                    requests.push_back({src, dma.bytes, "snapshot restore/src"});
+                    requests.push_back({dst, dma.bytes, "snapshot restore/dst"});
+                }
+                TORCH_CHECK(dma_index == captured.dmas.size() &&
+                                mutable_index == seg.mutable_dmas.size(),
+                            "snapshot restore: DMA mapping count drift");
+                // Both results stay in this original restore scope through
+                // synchronous submission/finish. Never retain resolved owners
+                // or a submission lease in the captured/prepared state.
+                auto owned_endpoints = rpu_resolve_device_dma_endpoints_owned(
+                    requests.data(), requests.size());
+                TORCH_CHECK(owned_endpoints.endpoints().size() == requests.size(),
+                            "snapshot restore: resolved endpoint count drift");
+                const auto* endpoints = owned_endpoints.endpoints().data();
+                std::vector<::rhino_lkn::detail::BatchSnapshotDmaBinding> bindings;
+                bindings.reserve(captured.dmas.size());
+                for (size_t i = 0; i < captured.dmas.size(); ++i) {
+                    bindings.push_back({endpoints[i * 2].owner, endpoints[i * 2].offset,
+                        endpoints[i * 2 + 1].owner, endpoints[i * 2 + 1].offset,
+                        captured.dmas[i].bytes, captured.dmas[i].channel,
+                        captured.dmas[i].variant != DmaNodeData::Variant::Fixed});
+                }
+                const uint32_t restore_rc = batch_snapshot_bridge().restore(
+                    slot->queue.get(), &captured.image, bindings.data(), bindings.size());
+                restore_profile.end();  // Host restore/preflight only, no submission wait.
+                if (restore_rc == 0) {
+                    // Restored bytes contain capture-time GP values and DMA
+                    // packets. Never inherit the outgoing queue's skip caches.
+                    slot->kernel_register_tokens = captured.kernel_register_tokens;
+                    slot->pending_kernel_register_tokens.clear();
+                    slot->kernel_register_tokens_valid = true;
+                    slot->invalidate_mutable_dma_packets();
+                    slot->fixed_dma_table = seg.fixed_dma_table;
+                    slot->built_segment_idx = seg_idx;
+                    slot->hw_perf_enabled_at_build = false;
+                    uint32_t rc;
+                    {
+                        RECORD_FUNCTION("rpu_graph::segment_launch_sync_only", {});
+                        rc = launch_segment_sync_only(seg, *slot);
+                    }
+                    TORCH_CHECK(rc == 0, "snapshot restored submit: SDK rc=", rc);
+                    ++last_stats_.prepared_segment_hit_total;
+                    ++last_stats_.hw_batch_submit_total;
+                    return slot->queue.get();
+                }
+                // SDK V1 guarantees a nonzero restore leaves the old batch
+                // untouched. Fall back to ordinary prepare on this same Queue.
+                seg.batch_snapshot.reset();
+            } catch (...) {
+                discard_slot_batch(*slot);
+                throw;
+            }
+        } else {
+            seg.batch_snapshot.reset();
+        }
     }
 
     // Keep the old fixed-side identities and any deliberately moved endpoints
@@ -2208,11 +2505,14 @@ uint32_t RpuKernelGraph::prepare_segment_queue(
                 "65536] / kd_buf|instr_buf overflow); segment idx=", seg_idx,
                 " nodes=", (seg.end_idx - seg.start_idx));
     uint32_t rc_fallback;
-    {
+    try {
         // Keep host command preparation separate from submission/device wait
         // in CPU profiles; both are included in segment_launch above.
         RECORD_FUNCTION("rpu_graph::segment_submit_wait", {});
         rc_fallback = wq->enqueu_batch(/*wait_finish=*/true);
+    } catch (...) {
+        discard_slot_batch(*slot);
+        throw;
     }
     if (rc_fallback != 0) {
         discard_slot_batch(*slot);
@@ -2227,6 +2527,7 @@ uint32_t RpuKernelGraph::prepare_segment_queue(
     slot->kernel_register_tokens.swap(
         slot->pending_kernel_register_tokens);
     slot->kernel_register_tokens_valid = pending_kernel_tokens_valid;
+    capture_segment_batch_snapshot(seg, *slot, hw_perf_enabled);
     ++last_stats_.prepared_segment_miss_total;
     return wq;
 }
@@ -2442,7 +2743,7 @@ uint32_t RpuKernelGraph::launch_segment_sync_only(
         const uint32_t rc_sync = wq.sync_mutable_params();
         if (rc_sync != 0) return rc_sync;
     }
-    // Launch batch arenas are uncached CPU/device mappings.  Publish both the
+    // Launch batch arenas are uncached CPU or device mappings.  Publish both the
     // mutable-DMA packet writes and any kernel-argument copies before the
     // submission doorbell.  This is intentionally shape/model independent.
     __sync_synchronize();
@@ -2487,7 +2788,7 @@ static void mirror_per_segment_replay_count(
 // =============================================================================
 // Memcpy: ::memcpy(dst, src, bytes)
 // Memset: ::memset(dst, value, bytes)
-// 末尾统一 __sync_synchronize()，确保 host 写入对后续 RPU kernel 可见。
+// 末尾统一 __sync_synchronize()，确保 host 写入对后续 device kernel 可见。
 // 三条 execute_graph_* 路径（recording / replaying / oneshot）共享此 helper。
 
 namespace {
@@ -2658,7 +2959,7 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
                     "should not reach REPLAYING executor (scope must have been "
                     "marked non-replayable). op=",
                     hc.op_handle->operator_name().name);
-        // (1) pre-flush: 让 host 看到 RPU 之前写入的 DDR
+        // (1) pre-flush: 让 host 看到 device 之前写入的 DDR
         flush_boundary_ptrs();
         // (2) 重建 stack: live_tensor_args 提供本轮 tensor,args_template
         //     提供非 tensor scalar 槽
@@ -2682,7 +2983,7 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
         //     Tier1 (.out variant) → alias=true:避免对 zero-copy CPU return
         //     view 做 .to(rpu),否则 storage allocator=nullptr 会触发 heap
         //     corruption (topk.values / sort.values SIGABRT 根因)。原 .out
-        //     RPU tensor 被替回 stack,后续 (4) 仍把数据 copy 到 stable buffer。
+        //     device tensor 被替回 stack,后续 (4) 仍把数据 copy 到 stable buffer。
         //     Tier2 (functional,无 out args) → alias=false:CPU op 内部自己
         //     alloc fresh CPU tensor,.to(rpu) 安全;后续 (4) 同样 copy。
         //     Tier3 → alias=false:不缓存,本轮按需用。
@@ -2691,7 +2992,7 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
         run_cpu_fallback_zerocopy(*hc.op_handle, &stack,
                                    /*alias_output_args=*/alias_for_replay);
         // (4) Tier1 + Tier2: copy fresh return → graph-owned stable output_pool[r],
-        //     替换 stack slot,登记 post-CPU boundary flush。下游 RPU op 永远
+        //     替换 stack slot,登记 post-CPU boundary flush。下游 device op 永远
         //     看到 hc.output_pool_dev_addrs[r] 这个稳定 dev_addr。
         if (hc.tier == HostCallbackTier::Tier1 ||
             hc.tier == HostCallbackTier::Tier2) {
@@ -2714,11 +3015,11 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
                             "HostCallback executor: output_pool[", r,
                             "] not defined (RECORDING 期 adopt_returns 应已分配); op=",
                             hc.op_handle->operator_name().name);
-                // copy CPU/RPU fresh tensor → stable RPU buffer
+                // copy CPU or device fresh tensor → stable device buffer
                 stable.copy_(fresh_out);
                 // 替换 stack slot,下游(若有)直接读 stable
                 ret = stable;
-                // 登记 post-CPU boundary flush:host 写入对后续 RPU 可见
+                // 登记 post-CPU boundary flush:host 写入对后续 device 可见
                 record_boundary_flush(stable.data_ptr());
                 // sanity check:stable 地址应当与 RECORDING 期录的一致
                 if (r < hc.output_pool_dev_addrs.size()) {
@@ -2733,7 +3034,7 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
                 }
             }
         }
-        // (5) post-flush: host 写入对后续 RPU kernel 可见
+        // (5) post-flush: host 写入对后续 device kernel 可见
         flush_boundary_ptrs();
         // 注:不清 live_tensor_args —— REPLAYING 期 op stream 重 dispatch
         // 时 capture_host_callback_replay_args 会覆写;RECORDING-collapse
@@ -2761,7 +3062,7 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
         auto& t = const_cast<GraphNode&>(node).as_tier3_oneshot();
         TORCH_CHECK(t.op_handle.has_value(),
                     "RpuKernelGraph::execute_data_node: Tier3Oneshot op_handle empty");
-        // (1) pre-flush:让 host 看到 RPU 之前写入的 DDR
+        // (1) pre-flush:让 host 看到 device 之前写入的 DDR
         flush_boundary_ptrs();
         // (2) 重建 stack:live_tensor_args 提供本轮 tensor,args_template 提供
         //     非 tensor scalar 槽(同 HostCallback 重建逻辑)
@@ -2786,7 +3087,7 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
         run_cpu_fallback_zerocopy(*t.op_handle, &stack,
                                    /*alias_output_args=*/false);
         // (4) m2-4 — 把 fresh return 数据 copy 到 transient buffer(地址稳定,
-        //     内容刷新)。下游 RPU kernel 在 RECORDING 期 set_regs 写的是 transient
+        //     内容刷新)。下游 device kernel 在 RECORDING 期 set_regs 写的是 transient
         //     buffer dev_addr,oneshot 跑下游时读到的就是本步刚 copy 进去的
         //     RNG 真值。
         //     不再覆写 t.last_output_dev_addrs — 那是 RECORDING adopt_returns
@@ -3318,6 +3619,7 @@ void RpuKernelGraph::execute_graph_for_recording() {
         slot.kernel_register_tokens.swap(
             slot.pending_kernel_register_tokens);
         slot.kernel_register_tokens_valid = pending_kernel_tokens_valid;
+        capture_segment_batch_snapshot(seg, slot, hw_perf_cfg.enabled);
 
         // HW perf trace — dump BUILD-time Chrome JSON per segment, gated by
         // the process-global budget (max_dumps decremented atomically).

@@ -22,6 +22,7 @@
 #include <ATen/record_function.h>
 #include <c10/util/Half.h>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <tuple>
 #include <utility>
@@ -126,7 +127,7 @@ namespace {
 // These two camera profiles share the same M50 Action math and storage ABI.
 // Keep the real prefix in every descriptor; never pad P544 into P800.
 bool pi05_action_prefix_admitted(int64_t prefix) {
-    return prefix == 544 || prefix == 576 || prefix == 608 || prefix == 640 || prefix == 800 || prefix == 832 || prefix == 864 || prefix == 896;
+    return prefix == 544 || prefix == 576 || prefix == 608 || prefix == 640 || prefix == 672 || prefix == 800 || prefix == 832 || prefix == 864 || prefix == 896 || prefix == 928;
 }
 
 // Bounded schedule extension. Per-body kernels are unchanged; the
@@ -475,7 +476,7 @@ void check_pi05_scale_lists(
                                   const char* name,
                                   int64_t i) {
         TORCH_CHECK(w.device().type() == at::kPrivateUse1 && w.is_contiguous(),
-                    ctx, ": ", name, "[", i, "] must be contiguous RPU tensor");
+                    ctx, ": ", name, "[", i, "] must be contiguous device tensor");
         TORCH_CHECK(w.scalar_type() == at::kHalf || w.scalar_type() == at::kChar
                     || w.scalar_type() == at::kByte,
                     ctx, ": ", name, "[", i, "] must be fp16 / int8 / packed-uint8, got ",
@@ -488,7 +489,7 @@ void check_pi05_scale_lists(
                         && scale.device().type() == at::kPrivateUse1
                         && scale.is_contiguous(),
                         ctx, ": ", name, "_scale[", i,
-                        "] must be a contiguous fp16 RPU tensor");
+                        "] must be a contiguous fp16 device tensor");
             if (w.scalar_type() == at::kChar) {
                 TORCH_CHECK(scale.scalar_type() == at::kHalf && scale.dim() == 1 && scale.numel() == w.size(0),
                             ctx, ": W8A16 ", name, "_scale[", i,
@@ -1005,7 +1006,8 @@ bool Pi05DenoiseStepModel::use_pi05_nvfp4_geglu_m50(int64_t rows) const {
     return !linear_acc32_ && pi05_nvfp4_geglu_m50_opt_in_ && nvfp4_.enabled() &&
         num_cores() == 8 && attn_tp() == 8 && mlp_tp() == 8 && rows == 50 &&
         planned_num_steps_ == 10 &&
-        (planned_prefix_len_ == 544 || planned_prefix_len_ == 800) &&
+        (planned_prefix_len_ == 544 || planned_prefix_len_ == 672 ||
+         planned_prefix_len_ == 800 || planned_prefix_len_ == 928) &&
         pi05_nvfp4_weight_profile_admitted() && use_pi05_xor3_gated_mlp(rows) &&
         KernelCache::instance().has_loaded(
             KernelId::PI05_DENOISE_GATE_UP_GEGLU_NVFP4_ACC16_M320N64K128);
@@ -1519,7 +1521,7 @@ void Pi05DenoiseStepModel::set_adarms_table(const at::Tensor& table) {
                     && table.scalar_type() == at::kHalf
                     && table.device().type() == at::kPrivateUse1
                     && table.is_contiguous(),
-                "Pi0.5 AdaRMS table must be contiguous RPU fp16 [steps,2L+1,3H]");
+                "Pi0.5 AdaRMS table must be contiguous device fp16 [steps,2L+1,3H]");
     adarms_table_ = table.clone();
     rpu_ddr_flush_force(adarms_table_.data_ptr<c10::Half>());
     adarms_table_src_base_ = ::rhino_lkn::RpuGetDevAddr(adarms_table_.data_ptr());
@@ -1845,7 +1847,7 @@ void Pi05DenoiseStepModel::set_weights(
                     && weight.device().type() == at::kPrivateUse1
                     && weight.is_contiguous(),
                     "Pi05DenoiseStepModel::set_weights: ", name,
-                    " weight must be contiguous RPU [3 * hidden_size, "
+                    " weight must be contiguous device [3 * hidden_size, "
                     "hidden_size]");
         const auto expected_weight_dtype =
             has_dense_scale ? at::kChar : at::kHalf;
@@ -1859,7 +1861,7 @@ void Pi05DenoiseStepModel::set_weights(
                     && bias.device().type() == at::kPrivateUse1
                     && bias.is_contiguous(),
                     "Pi05DenoiseStepModel::set_weights: ", name,
-                    " bias must be contiguous fp16 RPU [3 * hidden_size]");
+                    " bias must be contiguous fp16 device [3 * hidden_size]");
         if (has_dense_scale) {
             TORCH_CHECK(scale.defined() && scale.dim() == 1
                         && scale.numel() == 3 * hidden_size
@@ -1867,7 +1869,7 @@ void Pi05DenoiseStepModel::set_weights(
                         && scale.device().type() == at::kPrivateUse1
                         && scale.is_contiguous(),
                         "Pi05DenoiseStepModel::set_weights: ", name,
-                        " scale must be contiguous fp16 RPU [3 * hidden_size]");
+                        " scale must be contiguous fp16 device [3 * hidden_size]");
         }
     };
     for (int64_t i = 0; i < num_layers; ++i) {
@@ -1903,7 +1905,7 @@ void Pi05DenoiseStepModel::set_weights(
             TORCH_CHECK(tensor->defined() && tensor->scalar_type() == at::kHalf &&
                             tensor->device().type() == at::kPrivateUse1 &&
                             tensor->is_contiguous(),
-                        "Pi0.5 action projections must remain contiguous FP16 RPU");
+                        "Pi0.5 action projections must remain contiguous FP16 device");
         TORCH_CHECK(action_in_proj_w.sizes() == at::IntArrayRef({1024, 32}) &&
                         action_out_proj_w.sizes() == at::IntArrayRef({32, 1024}) &&
                         action_in_proj_b.sizes() == at::IntArrayRef({1024}) &&
@@ -2055,7 +2057,7 @@ void Pi05DenoiseStepModel::set_weights(
         rpu_ddr_flush_force(sin_.data_ptr<c10::Half>());
     }
 
-    // Spec §3.3 / §C5: stable RPU staging tensor allocated ONCE — data_ptr
+    // Spec §3.3 / §C5: stable device staging tensor allocated ONCE — data_ptr
     // valid across step + sample_actions. Passed as hidden_states to satisfy
     // FMB shape contract; layer 0 reads it via FMB's hidden_in_src_base_.
     auto opts = at::TensorOptions().dtype(at::kHalf).device(at::kPrivateUse1);
@@ -2138,7 +2140,7 @@ void Pi05DenoiseStepModel::step_forward(
                 && x_t_rpu.is_contiguous(),
                 "Pi05DenoiseStepModel::step_forward: x_t_rpu shape "
                 "[1,", chunk_size_, ",", max_action_dim_,
-                "] fp16 contig RPU required");
+                "] fp16 contig device required");
     TORCH_CHECK(v_t_buf.sizes() == x_t_rpu.sizes()
                 && v_t_buf.scalar_type() == at::kHalf
                 && v_t_buf.device().type() == at::kPrivateUse1
@@ -2150,7 +2152,7 @@ void Pi05DenoiseStepModel::step_forward(
                 && cond_step.size(0) == hidden_size()
                 && cond_step.is_contiguous(),
                 "Pi05DenoiseStepModel::step_forward: cond_step must be 1D [",
-                hidden_size(), "] fp16 contig RPU");
+                hidden_size(), "] fp16 contig device");
     TORCH_CHECK(prefix_len >= 0,
                 "Pi05DenoiseStepModel::step_forward: prefix_len must be >= 0");
 
@@ -2310,10 +2312,16 @@ void Pi05DenoiseStepModel::denoise_loop_forward(
                 "Pi05DenoiseStepModel::denoise_loop_forward called before set_weights");
     const int64_t cs  = chunk_size_;
     const int64_t mad = max_action_dim_;
+    // The private Python loop supplies CPU x0; public device inputs retain
+    // their caller-owned publication below, including raw CPU alias writes.
+    const bool cpu_x0 = x0_rpu.device().is_cpu();
     TORCH_CHECK(x0_rpu.dim() == 3 && x0_rpu.size(0) == 1 && x0_rpu.size(1) == cs
         && x0_rpu.size(2) == mad && x0_rpu.scalar_type() == at::kHalf
-        && x0_rpu.is_contiguous() && x0_rpu.device().type() == at::kPrivateUse1,
-        "denoise_loop_forward: x0_rpu must be [1,", cs, ",", mad, "] fp16 contig rpu");
+        && x0_rpu.is_contiguous()
+        && (x0_rpu.device().type() == at::kPrivateUse1 ||
+            (cpu_x0 && !x0_rpu.requires_grad() && !x0_rpu.is_neg() && !x0_rpu.is_conj())),
+        "denoise_loop_forward: x0_rpu must be [1,", cs, ",", mad,
+        "] fp16 contig rpu or plain inference CPU input");
     TORCH_CHECK(cond_all.dim() == 2 && cond_all.size(0) == num_steps
         && cond_all.size(1) == hidden_size() && cond_all.scalar_type() == at::kHalf
         && cond_all.is_contiguous() && cond_all.device().type() == at::kPrivateUse1,
@@ -2388,16 +2396,116 @@ void Pi05DenoiseStepModel::denoise_loop_forward(
     // SDPA mask cache (shared helper; same block step_forward uses).
     prepare_sdpa_mask_cached(attention_mask_4d, prefix_len);
 
+    // A CPU x0 is copied in full on every call into a fresh private owner.
+    // No public alias or pointer/version stamp can skip these current bytes.
+    if (cpu_x0) {
+        at::Tensor private_x0 = at::empty(
+            x0_rpu.sizes(), at::TensorOptions().dtype(at::kHalf).device(x_out.device()));
+        std::memcpy(private_x0.data_ptr(), x0_rpu.const_data_ptr(), x0_rpu.nbytes());
+        x0_rpu = std::move(private_x0);
+    }
+
     // Keepalives across the synchronous forward + flush caller's DDR-dirty lines.
     x0_ref_ = x0_rpu; cond_all_ref_ = cond_all; x_out_ref_ = x_out;
-    rpu_ddr_flush_force(x0_rpu.data_ptr<c10::Half>());
-    rpu_ddr_flush_force(cond_all.data_ptr<c10::Half>());
-    rpu_ddr_flush_force(x_out.data_ptr<c10::Half>());
+    // Only the fresh CPU-copy path may batch these two logical ranges. The
+    // installed loop table removes the intervening cond_all publication.
+    bool private_pair_published = false;
+    if (cpu_x0 && loop_mode_ && adarms_table_.defined() && g_rpu_ddr_flush_force_enabled) {
+        void* ranges[2] = {x0_rpu.data_ptr(), x_out.data_ptr()};
+        size_t sizes[2] = {x0_rpu.nbytes(), x_out.nbytes()};
+        const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
+        bool bounded = true;
+        for (int i = 0; i < 2 && bounded; ++i) {
+            auto* owner = ::rhino_lkn::RpuGetHostddr(ranges[i]);
+            const uintptr_t base = owner
+                ? reinterpret_cast<uintptr_t>(owner->get_cpu_ptr()) : 0;
+            const size_t owner_bytes = owner ? owner->get_memory_size() : 0;
+            const uintptr_t address = reinterpret_cast<uintptr_t>(ranges[i]);
+            const size_t bytes = sizes[i];
+            bounded = base != 0 && bytes != 0 && owner_bytes != 0
+                && address >= base && owner_bytes <= limit - base
+                && bytes <= limit - address && address + bytes <= limit - 63;
+            if (bounded) {
+                const uintptr_t offset = address - base;
+                bounded = offset <= owner_bytes && bytes <= owner_bytes - offset
+                    && (address & ~uintptr_t(63)) >= base
+                    && ((address + bytes + 63) & ~uintptr_t(63)) <= base + owner_bytes;
+            }
+        }
+        if (bounded) {
+            ::rhino_lkn::RpuDdrFlushBatch(ranges, sizes, 2);
+#if defined(__aarch64__)
+            asm volatile("dsb sy" ::: "memory");
+#endif
+            private_pair_published = true;
+        }
+    }
+    // The no-table loop consumes the complete public cond_all logical range.
+    // Publish current bytes on every call, including raw CPU alias writes;
+    // only the private CPU-copy x0 path may combine these adjacent boundaries.
+    if (cpu_x0 && loop_mode_ && !adarms_table_.defined() &&
+        !cond_all.requires_grad() && !cond_all.is_neg() && !cond_all.is_conj() &&
+        !x_out.requires_grad() && !x_out.is_neg() && !x_out.is_conj() &&
+        g_rpu_ddr_flush_force_enabled) {
+        void* ranges[3] = {x0_rpu.data_ptr(), cond_all.data_ptr(), x_out.data_ptr()};
+        size_t sizes[3] = {x0_rpu.nbytes(), cond_all.nbytes(), x_out.nbytes()};
+        uintptr_t starts[3] = {}, ends[3] = {};
+        const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
+        bool bounded = true;
+        for (int i = 0; i < 3 && bounded; ++i) {
+            auto* owner = ::rhino_lkn::RpuGetHostddr(ranges[i]);
+            const uintptr_t base = owner
+                ? reinterpret_cast<uintptr_t>(owner->get_cpu_ptr()) : 0;
+            const size_t owner_bytes = owner ? owner->get_memory_size() : 0;
+            const uintptr_t address = reinterpret_cast<uintptr_t>(ranges[i]);
+            const size_t bytes = sizes[i];
+            bounded = base != 0 && bytes != 0 && owner_bytes != 0
+                && address >= base && owner_bytes <= limit - base
+                && bytes <= limit - address && address + bytes <= limit - 63;
+            if (bounded) {
+                const uintptr_t offset = address - base;
+                starts[i] = address & ~uintptr_t(63);
+                ends[i] = (address + bytes + 63) & ~uintptr_t(63);
+                bounded = offset <= owner_bytes && bytes <= owner_bytes - offset
+                    && starts[i] >= base && ends[i] <= base + owner_bytes;
+                for (int j = 0; j < i && bounded; ++j) {
+                    bounded = ends[i] <= starts[j] || ends[j] <= starts[i];
+                }
+            }
+        }
+        if (bounded) {
+            ::rhino_lkn::RpuDdrFlushBatch(ranges, sizes, 3);
+#if defined(__aarch64__)
+            asm volatile("dsb sy" ::: "memory");
+#endif
+            private_pair_published = true;
+        }
+    }
+    if (!private_pair_published) {
+        rpu_ddr_flush_force_sized(x0_rpu.data_ptr<c10::Half>(), x0_rpu.nbytes());
+        // Match the cond DMA consumer: an installed loop table replaces cond_all.
+        if (!loop_mode_ || !adarms_table_.defined()) {
+            rpu_ddr_flush_force(cond_all.data_ptr<c10::Half>());
+        }
+        rpu_ddr_flush_force_sized(x_out.data_ptr<c10::Half>(), x_out.nbytes());
+    }
     x0_src_base_       = ::rhino_lkn::RpuGetDevAddr(x0_rpu.data_ptr());
     cond_all_src_base_ = ::rhino_lkn::RpuGetDevAddr(cond_all.data_ptr());
     x_out_dst_base_    = ::rhino_lkn::RpuGetDevAddr(x_out.data_ptr());
     // The loop-mode pre/post hooks read x0_src_base_ / cond_all_src_base_ (with
     // per-body offsets) and x_out_dst_base_ directly — no single-step base bridge.
+    if (cpu_x0) {
+#if defined(__aarch64__)
+        if (!private_pair_published) {
+            asm volatile("dsb sy" ::: "memory");
+        }
+#endif
+        // end() may execute after the caller returns; retain this fresh DMA
+        // source even if a later call replaces the model's x0_ref_.
+        if (RpuKernelGraph::has_active()) {
+            RpuKernelGraph::active().keep_alive(x0_ref_);
+        }
+    }
 
     // ONE forward — run_all_layers loops body_iterations(=num_steps_) internally;
     // the pre/post hooks fire per iteration with ctx().body_iter advancing.

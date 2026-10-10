@@ -5,8 +5,7 @@
 发行包名为 `rhinoforge`，Python package 仍是 `rpu_backend`。导入后把 PyTorch
 `PrivateUse1` 设备注册为 `rpu`，并创建 `torch.rpu` namespace。
 
-支持按配置判定。Class、adapter、registry alias 或 native schema 可导入并不代表模型
-受到支持；选择入口前查[示例](model_support.zh.md)。
+支持范围由 checkpoint、配置和执行入口共同决定，见[示例](model_support.zh.md)。
 
 ## 顶层 package
 
@@ -66,7 +65,7 @@ architecture，只接受 `torch.float16`；量化 checkpoint 自带受检查 met
 - `padding_rows`：`"auto"` 或非负准确行数；
 - `padding_budget`：非负整数，与精确 `padding_rows` 互斥。
 
-Adapter 可以按配置进一步缩窄。Execution setting 是冷配置：RPU 安装后改变它，需要
+Adapter 可以按配置进一步缩窄。Execution setting 是冷配置：设备安装后改变它，需要
 创建新模型。
 
 通用 CausalLM、image-text loader 和 `Pi05Policy.from_pretrained` 只支持 built-in model
@@ -121,6 +120,10 @@ model = RPUModelForConditionalGeneration.from_pretrained(
 [示例](model_support.zh.md)之外的配置。Qwen3.5 text/vision 与 Gemma4 使用各自
 adapter。
 
+### Qwen3.5 27B
+
+官方 27B 提供 4/6/8 核 W8 Text/VL 和 8 核 W4 group32。root6 的 MLP 使用 6 核，attention/GDN/head/Vision 使用 4 核。启用既有量化 opt-in；图像输入另需 Vision opt-in。安装使用缓存分配器、四个冷 Graph arena、CPU 权重最终布局上传及物理 KV24；prefill 为有界单次 Graph，decode 保留独立 Graph。暂不提供 FP16 运行入口。详见[配置与权重](../examples/configs/qwen3_5/README.md)。
+
 ## Policy API
 
 `rpu_backend.api` 导出：
@@ -148,9 +151,9 @@ adapter。
 `input.noise` 指定 `torch.save` 保存的张量文件，优化示例要求形状为 `[1, 50, 32]`。
 
 Pi0.5 `prepare_graphs()` 返回 Graph 就绪状态与重放诊断。shape、dtype、
-finite 和 Graph 不变量仍需通过检查；MSE、最大绝对误差与逐行分布不设通用验收门限。
+finite 和 Graph 不变量须通过检查。
 `replay_parity.numerical_status` 为 `DIAGNOSTIC`，`task_quality` 为
-`NOT_EVALUATED`；`READY` 不表示动作或闭环任务质量已通过验证。
+`NOT_EVALUATED`。
 
 对于发布绑定的 Pi0.5 组件 profile，传入 `profile="pi0.5-base"` 或
 `profile="pi0.5-libero-v044"`，并同时传入首个预处理后的 `admission_batch`。
@@ -158,8 +161,7 @@ Loader 会在加载权重前校验精确公开 payload 和请求范围，后续 
 同一 profile 校验。
 
 `WallOssActionOutput`、`Lingbot2ActionOutput`、`HyEmbodiedActionOutput` 是对应
-结构化结果。带物理单位的 action 字段只表示已应用配置 normalization，不认证机器人
-安全或坐标系。
+结构化结果。带物理单位的 action 字段应用配置的 normalization。
 
 `WallOssPolicy.from_checkpoint(...)` 绑定 checkpoint、相机顺序、归一化与精度，
 `.to("rpu")` 安装 runtime。调用 `infer(...)` 时，图像顺序必须与 `camera_names`
@@ -181,9 +183,11 @@ facade 拒绝静默 mismatch。
 noise、state embedding/state 和末端执行器 pose 必须为有限值；非法值会在 policy
 执行前被拒绝。
 
-除精确 Supported/Limited profile 外，v1.0.0 的所有公开模型或 policy profile 均为
-Source-only。只使用 release 指定的 constructor、input schema 和 precision，不能从
-method 存在推断相邻配置。
+按各 profile 的说明选择 constructor、input schema 和 precision。
+
+### LingBot v2 runtime Graph
+
+当前 FP16/W8A16 入口使用 `rpu_backend.adapters.lingbot_vla_v2.runtime.build_lingbot_vla_v2(..., graph_runtime_policy=...)` 和 `get_action`。[输入指南](../examples/configs/lingbot/v2/README.md)说明两/三相机、训练 YAML、语言存储和归一化 `[1,50,55]` 输出。旧 `Lingbot2Policy.from_checkpoint` facade 接受 `rpu_execution`，保留独立 exact-Z2 配置。
 
 ## Error hierarchy
 
@@ -203,6 +207,8 @@ RPUBackendError
 使用标准 `TypeError`、`ValueError`。
 
 ## Graph API
+
+`GraphRuntimePolicy` 接受冷配置 `batch_snapshot_mode="auto"` 或 `"off"`。`GraphCache` 及 Pi0.5、Wall-OSS、LingBot v2 构建器在安装权重前接收策略。AUTO 按 SDK/资产能力启用快照或回退普通重放；OFF 保留 Graph 执行。见[快照策略](runtime_config.zh.md#graph-快照策略)。
 
 公开 namespace 为 `rpu_backend.graph`：
 
@@ -312,12 +318,56 @@ Swizzle 原地改变 parameter storage，必须只运行一次。Fused subsystem
 或 Graph register/resource payload。
 
 `set_caching_allocator(bool)` 是进程级冷态 tensor storage 选择。第一次显式调用，
-或尚未选择时第一次分配非空 RPU tensor，都会把策略冻结到进程结束。同值重复调用
-是幂等的；请求相反值会报错，必须使用新进程。应在任何 RPU tensor 物化前调用。
+或尚未选择时第一次分配非空 设备 tensor，都会把策略冻结到进程结束。同值重复调用
+是幂等的；请求相反值会报错，必须使用新进程。应在任何 设备 tensor 物化前调用。
 `empty_cache()` 只释放未使用的 cached block，不能释放 live tensor 或 Graph-owned
 storage。`memory_stats()` 通过 `caching_allocator_enabled` 返回所选模式，并通过
 `caching_allocator_policy_frozen` 返回策略是否已经冻结。
 
-CPU/RPU boundary flush 默认打开，正常推理不要关闭。Chunk size 属于 per-handle
+CPU/设备 boundary flush 默认打开，正常推理不要关闭。Chunk size 属于 per-handle
 `rpu_execution`，不是进程全局 `torch.rpu` setter。内部 `torch.ops.rpu.*` 是 adapter
 使用的 host wrapper interface；未在本页或 model example 中记录的函数视为实现细节。
+
+<a id="bounded-speech-apis"></a>
+## 语音 API
+
+```python
+from rpu_backend.api import Qwen3ASRModel, Qwen3TTSModel
+```
+
+| API | 输入与返回值 |
+|---|---|
+| `Qwen3ASRModel.from_pretrained(checkpoint, dtype=torch.float16)` | 本地固定 Qwen3-ASR-0.6B checkpoint |
+| `model.transcribe(audio, sample_rate=16000, max_new_tokens=64)` | 一维 CPU 有限浮点波形，单声道 16 kHz、0.5–8 秒；生成上限 1–64。返回 `ASRTranscription(text, raw_text, token_ids)` |
+| `Qwen3TTSModel.from_pretrained(checkpoint, source=prepared_package, dtype=torch.float16)` | 本地固定 Qwen3-TTS-12Hz-0.6B-Base checkpoint 和准备后的 `qwen_tts/` 源码目录 |
+| `model.synthesize(text, reference_audio=local_file, language="Chinese", max_new_tokens=64)` | 文本 1–128 字符且最多 32 tokenizer token；语言 `Chinese` / `English`；参考音频为有限单声道 24 kHz、0.5–20 秒；生成上限 2–64。返回独立 float32 单声道波形及采样率 24000 |
+
+ASR 使用 greedy，不提供 context、时间戳或流式接口。TTS 使用非流式 greedy，
+只依赖参考 speaker embedding。Talker prompt 加生成上限须在 128 个位置内；
+达到上限可能截断句子。下载、源码准备、CPU/设备精度边界及命令见
+[语音指南](qwen3_audio.zh.md)。
+
+两类 API 均支持 `with`、幂等 `close()` 和 `execution_stats()`。请求、统计及关闭
+串行调用，一个进程只保留一个存活设备模型/策略。加载器在转换前检查资产，并在
+设备分配前选择 caching allocator；TTS 还声明 owner 专属五个 arena。
+进程已冻结为不兼容 allocator 或 arena 计划时，启动新进程。
+
+ASR 需要重编译的 native 提供 `siglip_set_audio_mode`、`siglip_set_audio_projection`
+和 `assemble_inputs_embeds`。TTS codec 显式调用 `causal_decoder_set_tts_codec_mode`；
+缺少 setter 时前段保留 CPU 路径，其他执行错误直接报告。codec 输入限于 1–63 帧。
+
+`execution_stats()` 返回调用及缓存状态：
+
+- ASR 为当前音频 token 长度保留一张音频图，为当前 prompt 长度保留最多一对
+  prefill/decode 图。`audio_graph_size`、`audio_graph_replays`、
+  `audio_graph_invariant_ok` 描述音频缓存；`graph_size`、`graph_replays`、
+  `graph_invariant_ok` 描述文本缓存。替换缓存签名后重放计数重新累计；
+  `audio_linear_calls` 统计逻辑投影调用。
+- TTS 返回 `codec_frontend.device`、`fallback_reason`、输出头调用计数以及各组件
+  的 calls、tokens 和 Graph 状态。Talker 在 prompt 长度变化时替换 prefill 图并保留
+  decode；Predictor 保留一张 decode 图；codec 在帧数变化时替换自己的图。
+
+每个新序列重置逻辑 KV 位置并保留私有存储。TTS 按解码后的音频内容只缓存最新
+speaker embedding，每次请求仍读取和校验参考文件。输出存储独立于重放；释放时
+先清 Graph，再释放 native handle 和权重。CPU 线程数由调用方控制；两种 CLI 均提供
+`--threads`，默认 4。

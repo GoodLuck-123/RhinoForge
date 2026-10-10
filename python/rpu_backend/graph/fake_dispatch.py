@@ -16,7 +16,7 @@ A2' — rpu::* 自定义 op 的 Python dispatch fake shim。
   shim → 返回 fake output,不进真实 PrivateUse1 kernel。
 
 不变量:
-  - 真 RPU tensor 的 keyset **没有** Python key(只有 PrivateUse1 等 backend
+  - 真 device tensor 的 keyset **没有** Python key(只有 PrivateUse1 等 backend
     keys)。所以真实部署路径不受影响。
   - 一旦 shim 误中真 tensor(任何 wrapper 把 Python key 加进去),立刻 fail
     loud,不静默错算。
@@ -39,7 +39,7 @@ def _has_fake(x):
 
 def _require_fake(*args):
     """A2' 不变量:Python dispatch shim 只在 FakeTensor 路径上被调。一旦真
-    tensor 进来就抛错,避免 silent 错误绕过真实 RPU 实现。"""
+    tensor 进来就抛错,避免 silent 错误绕过真实 device 实现。"""
     if not any(_has_fake(a) for a in args):
         raise RuntimeError(
             "rpu Python dispatch fake shim hit non-Fake inputs; "
@@ -50,6 +50,14 @@ def _require_fake(*args):
 _SIGLIP_PATCH_SIZE = 14
 _SIGLIP_PATCH_HIDDEN_SIZE = 1152
 _SIGLIP_PROJECTOR_DIM = 2048
+
+
+@torch.library.impl("rpu::assemble_inputs_embeds_parts", "Python")
+def _meta_assemble_inputs_embeds_parts(vocab, ids, merged_parts, runs, prefix_is_embeddings=False):
+    _require_fake(vocab, ids, merged_parts, runs)
+    if prefix_is_embeddings and vocab.shape[0] != ids.shape[0]:
+        raise RuntimeError("assemble_inputs_embeds_parts: preassembled prefix rows must equal the ids length")
+    return torch.empty((ids.shape[0], vocab.shape[1]), dtype=vocab.dtype, device=vocab.device)
 
 
 @torch.library.impl("rpu::linear_w4a16", "Python")
@@ -228,6 +236,12 @@ def _meta_qwen3vl_gather_embedding_from_rpu_unflushed_(
     destination, vocabulary, token_ids, skip_token_id=-1,
 ):
     _require_fake(destination)
+    return None
+
+
+@torch.library.impl("rpu::qwen3vl_publish_inputs", "Python")
+def _meta_qwen3vl_publish_inputs(tensors):
+    _require_fake(tensors)
     return None
 
 
@@ -411,6 +425,11 @@ def _fake_hyvla_merger_fused(*args):
 
 @torch.library.impl("rpu::hyvla_vlm_step_forward", "Python")
 def _fake_hyvla_vlm_step_forward(*args):
+    return _reject_hyvla_fake(*args)
+
+
+@torch.library.impl("rpu::hyvla_vlm_prefill_kv_only", "Python")
+def _fake_hyvla_vlm_prefill_kv_only(*args):
     return _reject_hyvla_fake(*args)
 
 

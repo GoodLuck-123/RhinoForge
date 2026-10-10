@@ -18,7 +18,7 @@
 // Build-time and runtime Torch libraries must use a compatible ABI.
 //
 // 历史:port-v5 在 P7.1 前 custom_cpu_fallback 没经过 graph state 分流,RECORDING 期
-// CPU fallback 直接 host eager 跑 → 下游 RPU op 看到 stale DDR + scope 隐式 stale,graph
+// CPU fallback 直接 host eager 跑 → 下游 device op 看到 stale DDR + scope 隐式 stale,graph
 // capture 报废(对 PaliGemma2 / Pi05 这种 multi-modal pipeline 完全没法 graph-wrap)。
 // 本 hook 让 CPU fallback 进 HostCallback 节点,跨 RECORDING/REPLAYING 数据流一致,
 // replayable=true 保留。
@@ -62,7 +62,7 @@ void dispatch_graph_aware_cpu_fallback(const c10::OperatorHandle& op,
         if (tier == HostCallbackTier::Tier1 ||
             tier == HostCallbackTier::Tier2) {
             // Tier1 (.out variant): alias=true,CPU op 通过 zero-copy view 写穿到
-            // 原 RPU .out= input tensor 的 storage,return slot 替换回原 tensor,
+            // 原 device .out= input tensor 的 storage,return slot 替换回原 tensor,
             // 不走 .to(rpu) 避免 heap corruption。adopt_returns 把数据 copy 到
             // graph-owned stable buffer 保持跨 replay dev_addr 稳定。
             // Tier2 (functional): alias=false,CPU op 自己 alloc fresh CPU tensor,

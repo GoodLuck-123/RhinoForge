@@ -8,13 +8,13 @@ Public surface:
 
 Scope (P4 install + forward):
   - Install path: config preflight → patch_embed Conv2d→Linear CPU fp16
-    fold + ViT-B 12→16 head zero-pad + linear swizzle → move to RPU →
-    install RPU keepalives (CLS+reg / γ_attn / γ_mlp stacks) → install
+    fold + ViT-B 12→16 head zero-pad + linear swizzle → move to device →
+    install device keepalives (CLS+reg / γ_attn / γ_mlp stacks) → install
     fused C++ vision handle (set_weights / set_rope / KV cache) → set
     hardware attrs → replace forward.
   - Forward dispatch: `_rpu_dinov3_forward`:
       1. patch_embed via CPU fp16 folded Linear (Conv2d k=16 s=16 → Linear).
-      2. CLS + 4 register tokens prepend from RPU keepalive.
+      2. CLS + 4 register tokens prepend from device keepalive.
       3. Per-forward `build_position_idx(num_h, num_w) → [num_patches, 2]
          int16` copied into the C++ position-idx keepalive's first rows.
       4. `torch.ops.rpu.dinov3_vision_forward` runs the all-layers-once
@@ -23,7 +23,7 @@ Scope (P4 install + forward):
          offset) → bidirectional SDPA → O Linear (row-partition) +
          γ_attn elementwise mul on per-core partial + AllReduce-sum-residual
          → LN2 → up_proj + GELU → down_proj + γ_mlp mul + AllReduce-residual.
-      5. Final LayerNorm (`model.norm`, aten op on RPU) + CLS slice as
+      5. Final LayerNorm (`model.norm`, aten op on device) + CLS slice as
          `pooler_output`.
 
 References:
@@ -87,7 +87,7 @@ _LOG = logging.getLogger(__name__)
 #   (hidden_size, num_attention_heads, num_hidden_layers, patch_size,
 #    image_size, num_register_tokens)
 # ViT-7B/16 (4096/32/40 + head_dim 128) is OUT-OF-ENVELOPE per
-# CLAUDE.md hardware constraints.
+# docs/pitfalls.md hardware constraints.
 _SUPPORTED_PROFILES: frozenset[tuple[int, int, int, int, int, int]] = frozenset({
     # ViT-B/16  (86 M)  — head_dim 64 — recommended first port (P0)
     ( 768, 12, 12, 16, 224, 4),
@@ -168,7 +168,7 @@ def _check_profile(config: Any) -> None:
             f"DINOv3Adapter: profile {profile} not supported. "
             f"Supported: {sorted(_SUPPORTED_PROFILES)} "
             "(ViT-B at 224×224 with 4 register tokens; ViT-S/L are "
-            "numerical-blocked and ViT-7B is out-of-envelope per CLAUDE.md)."
+            "numerical-blocked and ViT-7B is out-of-envelope; see docs/model_support.md)."
         )
 
 
@@ -187,7 +187,7 @@ def _check_profile(config: Any) -> None:
 # touches bias — verified P1.5 (2026-05-21).
 #
 # Patch embed (Conv2d k=16 s=16) is folded to a Linear `[hidden, 3·16·16]`
-# kept on CPU fp16. Mirrors qwen3_vl/vision.py:407 — RPU `aten::linear`
+# kept on CPU fp16. Mirrors qwen3_vl/vision.py:407 — device `aten::linear`
 # expects a pre-swizzled weight, but the folded patch weight is plain
 # row-major; running it on CPU avoids the swizzle dance for one one-off
 # Linear (~ms-scale per forward).
@@ -306,12 +306,12 @@ def _convert_dinov3_weights_for_rpu(model: nn.Module) -> None:
 
 
 # =============================================================================
-# Section 2b — Post-move RPU keepalive buffers: CLS+reg tokens + LayerScale γ
+# Section 2b — Post-move device keepalive buffers: CLS+reg tokens + LayerScale γ
 # =============================================================================
 #
 # Called AFTER `model.to('rpu')` so the source tensors (cls_token,
-# register_tokens, layer_scale*.lambda1) are already RPU fp16 and we can
-# copy into freshly-allocated RPU keepalives without device-bouncing.
+# register_tokens, layer_scale*.lambda1) are already device fp16 and we can
+# copy into freshly-allocated device keepalives without device-bouncing.
 #
 # Why keep γ as runtime mul (not fold into o_proj / down_proj):
 #     P1.3 dumped real γ from facebook/dinov3-vitb16-pretrain-lvd1689m and
@@ -323,7 +323,7 @@ def _convert_dinov3_weights_for_rpu(model: nn.Module) -> None:
 
 
 def _install_dinov3_rpu_keepalives(model: nn.Module) -> None:
-    """Install RPU fp16 keepalive buffers required by the P4 forward.
+    """Install device fp16 keepalive buffers required by the P4 forward.
 
       - `_rpu_dinov3_cls_reg`   shape `[1+num_register, hidden]`
       - `_rpu_dinov3_gamma_attn` shape `[num_layers, hidden]`
@@ -463,7 +463,7 @@ def _apply_runtime_attrs(model: nn.Module) -> None:
 #   5. Retire a prior handle only after the replacement is ready.
 #
 # `_rpu_dinov3_forward` replaces the model's `forward` with a CPU patch_embed
-# + RPU CLS+reg prepend + handle.forward + final-LN + CLS-slice dispatch.
+# + device CLS+reg prepend + handle.forward + final-LN + CLS-slice dispatch.
 
 
 _DINOV3_HANDLE_INSTALL_ATTRS = frozenset({
@@ -556,6 +556,30 @@ def install_dinov3_vision_for_rpu(
             raise
 
 
+def _dinov3_shared_position_cpu_view_matches(keepalive, cpu_view) -> bool:
+    """Admit only an exact plain CPU view of the retained native DDR owner."""
+    if (not torch.is_tensor(keepalive) or keepalive.device.type != "rpu"
+            or type(cpu_view) is not torch.Tensor or cpu_view.device.type != "cpu"
+            or keepalive.layout != torch.strided or cpu_view.layout != torch.strided
+            or keepalive.dtype != torch.int16 or cpu_view.dtype != torch.int16
+            or keepalive.dim() != 2 or keepalive.size(0) <= 0 or keepalive.size(1) != 2
+            or cpu_view.shape != keepalive.shape or cpu_view.stride() != keepalive.stride()
+            or not keepalive.is_contiguous() or not cpu_view.is_contiguous()
+            or keepalive.storage_offset() != 0 or cpu_view.storage_offset() != 0
+            or keepalive.is_conj() or keepalive.is_neg()
+            or cpu_view.is_conj() or cpu_view.is_neg()):
+        return False
+    owner_storage = keepalive.untyped_storage()
+    cpu_storage = cpu_view.untyped_storage()
+    size = keepalive.numel() * keepalive.element_size()
+    pointer = keepalive.data_ptr()
+    return (pointer > 0 and pointer % 64 == 0 and size % 64 == 0
+            and pointer + size <= (1 << 64)
+            and owner_storage.data_ptr() == cpu_storage.data_ptr() == pointer
+            and cpu_view.data_ptr() == pointer
+            and owner_storage.nbytes() == cpu_storage.nbytes() == size)
+
+
 def _make_dummy_dinov3_kv_caches(
     num_layers: int, max_seq_len: int, num_heads: int, head_dim: int,
 ) -> RPUCache:
@@ -582,13 +606,13 @@ def _install_dinov3_vision_for_rpu_impl(
     max_seq_len: int | None = None,
     _install_state: dict[str, Any],
 ) -> int:
-    """Install the RPU C++ vision handle on a swizzled-and-moved DINOv3 model.
+    """Install the device C++ vision handle on a swizzled-and-moved DINOv3 model.
 
     Preconditions (all enforced by the adapter `to_rpu()` sequence):
       - `_convert_dinov3_weights_for_rpu` has run (patch_embed folded to CPU
         fp16, attention heads padded to multiple of NUM_CORES, all Linear
         weights swizzled).
-      - `model.to('rpu')` has moved all params + tensors to fp16 RPU.
+      - `model.to('rpu')` has moved all params + tensors to fp16 device.
       - `_install_dinov3_rpu_keepalives` has stashed `_rpu_dinov3_cls_reg`,
         `_rpu_dinov3_gamma_attn`, `_rpu_dinov3_gamma_mlp`.
 
@@ -690,7 +714,13 @@ def _install_dinov3_vision_for_rpu_impl(
     if configured_chunk:
         torch.ops.rpu.dinov3_vision_set_chunk_size(handle, configured_chunk)
     keepalive = torch.ops.rpu.dinov3_vision_position_idx_keepalive(handle)
-    resource.keepalive = (resource.keepalive, keepalive)
+    position_cpu_view = None
+    if not torch.rpu.get_ddr_flush() and torch.rpu.get_ddr_flush_force():
+        # Existing .cpu() may acquire once here; no conversion occurs per forward.
+        candidate = keepalive.cpu()
+        if _dinov3_shared_position_cpu_view_matches(keepalive, candidate):
+            position_cpu_view = candidate
+    resource.keepalive = (resource.keepalive, keepalive, position_cpu_view)
 
     _clear_dinov3_handle_install(vision_model)
     vision_model._rpu_dinov3_handle = handle
@@ -744,8 +774,9 @@ def _validate_dinov3_input_bounds(
 
 
 @execution_serialized
-def _rpu_dinov3_forward(self, pixel_values: torch.Tensor, **_kwargs: Any):
-    """RPU-dispatching forward for DINOv3ViTModel.
+def _rpu_dinov3_forward(self, pixel_values: torch.Tensor, *,
+                       _rpu_cpu_post_layer_norm: bool = False, **_kwargs: Any):
+    """device-dispatching forward for DINOv3ViTModel.
 
     Pipeline:
       1. Move pixel_values to CPU fp16 (patch_embed runs CPU).
@@ -755,8 +786,8 @@ def _rpu_dinov3_forward(self, pixel_values: torch.Tensor, **_kwargs: Any):
          the C++ keepalive's first `num_patches` rows.
       5. Reset KV cache to position=0 (bidir vision is single-chunk).
       6. `torch.ops.rpu.dinov3_vision_forward(handle, input, k, v, num_tokens)`
-         returns `[1, num_tokens, hidden]` fp16 RPU (pre final-LN).
-      7. Apply `model.norm` (final LayerNorm, still an aten op on RPU).
+         returns `[1, num_tokens, hidden]` fp16 device (pre final-LN).
+      7. Apply `model.norm` (final LayerNorm, still an aten op on device).
       8. CLS slice as `pooler_output`.
 
     Returns `transformers.modeling_outputs.BaseModelOutputWithPooling` to mirror
@@ -840,10 +871,11 @@ def _rpu_dinov3_forward(self, pixel_values: torch.Tensor, **_kwargs: Any):
         self._rpu_dinov3_patch_embed_b,
     )  # [B, num_patches, hidden] CPU fp16
 
-    # Step 3: prepend CLS + register tokens (RPU keepalive expanded to batch=1).
-    patch_tokens = patch_tokens_cpu.to(device="rpu").contiguous()
+    # Step 3: mixed-device cat acquires the live CLS/register keepalive and
+    # publishes the complete fresh sequence. CPU patch rows need no separate
+    # device upload before that publication.
     cls_reg = self._rpu_dinov3_cls_reg.unsqueeze(0)        # [1, R+1, hidden]
-    sequence = torch.cat([cls_reg, patch_tokens], dim=1)   # [1, num_tokens, hidden]
+    sequence = torch.cat([cls_reg, patch_tokens_cpu], dim=1)  # [1, num_tokens, hidden]
     sequence = sequence.contiguous()
 
     # Step 4: position_idx → keepalive. CPU build is cheap; the C++ side
@@ -851,6 +883,13 @@ def _rpu_dinov3_forward(self, pixel_values: torch.Tensor, **_kwargs: Any):
     # fresh values regardless of caching-allocator buffering.
     pos_idx = build_position_idx(num_patches_h, num_patches_w)
     keepalive = self._rpu_dinov3_position_idx_keepalive
+    resource = self._rpu_dinov3_retirement_state
+    position_views = resource.keepalive
+    if (not torch.rpu.get_ddr_flush() and torch.rpu.get_ddr_flush_force()
+            and resource.handle == handle and resource.failed is None
+            and len(position_views) == 3 and position_views[1] is keepalive
+            and _dinov3_shared_position_cpu_view_matches(keepalive, position_views[2])):
+        keepalive = position_views[2]
     keepalive[:num_patches].copy_(pos_idx)
 
     # Step 5: per-layer KV cache reset (vision SDPA always reads from pos=0).
@@ -903,11 +942,11 @@ def _rpu_dinov3_forward(self, pixel_values: torch.Tensor, **_kwargs: Any):
     }}
 
     # Step 7: reset SPM temporary slots, matching qwen3_vl/vision.py:604 —
-    # any subsequent RPU op needs fresh temp workspace.
+    # any subsequent device op needs fresh temp workspace.
     torch.ops.rpu.spm_alloc_reset_temporary()
 
     # Step 8: final LayerNorm + CLS slice on CPU.
-    # Running an eager LN on the RPU device immediately after the fused
+    # Running an eager LN on the device device immediately after the fused
     # encoder collides with the DDR caching allocator (the prior BATCH_CTX
     # has filled the high-mem reserve — "allocate: insufficient free memory,
     # requested=308736 available=0"). qwen3_vl avoids this by running its
@@ -921,15 +960,18 @@ def _rpu_dinov3_forward(self, pixel_values: torch.Tensor, **_kwargs: Any):
         bias=self.norm.bias.detach().cpu(),
         eps=self.config.layer_norm_eps,
     )
-    pooler_output_cpu = last_hidden_cpu[:, 0, :].contiguous()
-
-    # Move back to RPU to match HF's device contract (callers expect RPU
-    # tensors when the model lives on RPU). Pitfall P4: callers may
+    # Move back to device to match HF's device contract (callers expect device
+    # tensors when the model lives on device). Pitfall P4: callers may
     # accumulate these tensors across multiple forwards — `at::empty`-style
     # per-forward allocation is required; `.to(device)` on a CPU tensor
-    # produces a fresh RPU tensor (not a slice of a graph buffer).
-    last_hidden = last_hidden_cpu.to(device="rpu")
-    pooler_output = pooler_output_cpu.to(device="rpu")
+    # produces a fresh device tensor (not a slice of a graph buffer).
+    # The public CPU example can retain this fresh LayerNorm result directly.
+    # Keep the default standalone device allocation and CLS view contract unchanged.
+    last_hidden = (last_hidden_cpu if _rpu_cpu_post_layer_norm
+                   else last_hidden_cpu.to(device="rpu"))
+    # The admitted B1 CLS slice is contiguous and retains this forward's fresh
+    # hidden owner, so returning it requires no second upload.
+    pooler_output = last_hidden[:, 0, :].contiguous()
 
     result = BaseModelOutputWithPooling(
         last_hidden_state=last_hidden,
@@ -952,7 +994,7 @@ def build_dinov3_rope_tables(
     device: str | torch.device = "rpu",
     dtype: torch.dtype = torch.float16,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build cos / sin tables (`[max_hw, head_dim/4]` each) for the RPU
+    """Build cos / sin tables (`[max_hw, head_dim/4]` each) for the device
     `rope_2d_ddr` kernel using DINOv3's frequency convention.
 
     DINOv3 frequency math (from HF DINOv3ViTRopePositionEmbedding):
@@ -1070,16 +1112,15 @@ _SWIZZLE_LOCK = threading.Lock()
 class DINOv3Adapter:
     """Per-instance adapter for DINOv3ViTModel.
 
-    Lifecycle (D-01 two-step + RPU shortcut):
+    Lifecycle (D-01 two-step + device shortcut):
       1. `__init__(model)` — preflight, install `.to('rpu')` interceptor.
-      2. `to_rpu()` — irreversible swizzle + move to RPU + apply hw attrs.
+      2. `to_rpu()` — irreversible swizzle + move to device + apply hw attrs.
          Returns the same model object.
 
     Forward dispatch is wired in P4 to `torch.ops.rpu.dinov3_vision_forward`.
     Calling `model(pixel_values)` after `to_rpu()` runs the fused-graph
     pipeline and returns `BaseModelOutputWithPooling(last_hidden_state,
-    pooler_output)`. Numeric correctness (cos ≥ 0.999 vs CPU fp32) is verified
-    in P4.5 with real DINOv3-B weights.
+    pooler_output)`.
     """
 
     @classmethod
@@ -1178,7 +1219,7 @@ class DINOv3Adapter:
             ):
                 raise RPUBackendError(
                     f"model.to({target!r}) rejected: weights have been "
-                    "swizzled for RPU and cannot be moved back safely. "
+                    "swizzled for device and cannot be moved back safely. "
                     "Reload via from_pretrained() if you need a CPU copy."
                 )
             return original_to(*args, **kwargs)
@@ -1281,8 +1322,8 @@ class DINOv3Adapter:
           A. Pre-move: fold patch_embed Conv2d to CPU fp16 Linear, zero-pad
              attention heads up to a multiple of NUM_CORES (no-op for ViT-L),
              swizzle every leaf Linear.
-          B. Move model to RPU device.
-          C. Install RPU fp16 keepalives (CLS+reg stacked, γ_attn / γ_mlp
+          B. Move model to device device.
+          C. Install device fp16 keepalives (CLS+reg stacked, γ_attn / γ_mlp
              per-layer stacks).
           C.5. Transactionally install the fused C++ vision handle:
                set_weights / set_rope / position_idx_keepalive / dummy KV cache.
@@ -1324,13 +1365,13 @@ class DINOv3Adapter:
             # Linear swizzle + patch_embed Conv2d→Linear CPU fp16 fold.
             _convert_dinov3_weights_for_rpu(self.model)
 
-            # ---------- Step B: move to RPU --------------------------------
+            # ---------- Step B: move to device --------------------------------
             # Use the original .to to bypass our own interceptor.
             type(self.model).to(self.model, "rpu")
 
-            # ---------- Step C: install RPU keepalives ---------------------
+            # ---------- Step C: install device keepalives ---------------------
             # CLS+reg stacked buffer + per-layer γ stacks. Source params are
-            # already on RPU after Step B.
+            # already on device after Step B.
             _install_dinov3_rpu_keepalives(self.model)
 
             # ---------- Step C.5: install fused C++ vision handle ----------
