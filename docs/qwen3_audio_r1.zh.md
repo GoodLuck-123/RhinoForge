@@ -124,16 +124,10 @@ TensorRT。Thor TTS 使用 BF16 和采样，输出 28 步、2.16 秒；与 R1 �
 - TTS codec 1/31/63 帧及整模型 Graph 共存、换输入、独立波形、关闭重载通过。
   codec FP16 前段相对原 FP32 波形的固定样本相对 L2 为 0.4851%，不声称逐位等价。
 
-保留原始 JSON 作为可追溯测量证据：
-[ASR](evidence/qwen3_asr_graph_tail_r1/summary.json)、
-[TTS 完整请求](evidence/qwen3_audio_rpu_coverage_r1/summary.json)、
-[codec](evidence/qwen3_tts_rpu_coverage_r1/summary.json)、
-[Thor TensorRT](evidence/qwen3_audio_thor_tensorrt/summary.json)。
-
 ## 当前版本回归结果
 
 2026-10-10 在 R1 独立目录构建 Release native，持设备锁串行验证，现有部署未替换。
-[本次回归记录](evidence/qwen3_audio_isolation_regression_r1/summary.json)包含二进制身份和结果：
+回归结果如下：
 
 - 主机定向测试 161 项通过；native 编译和加载通过。
 - ASR：中文、同长英文、0.5/8 秒边界及返回原输入，5 次请求的 token 均与原记录一致；
@@ -142,7 +136,7 @@ TensorRT。Thor TTS 使用 BF16 和采样，输出 28 步、2.16 秒；与 R1 �
   59,520 个波形采样与先前 FLOAT WAV 逐样本一致。Talker/Predictor/codec 的
   Graph 数分别为 2/1/1，codec 确认在 RPU，无 CPU fallback。
 - codec：1/31/63 帧、换内容、旧输出持有、确定性重放和关闭重载通过；缓存大小为 1。
-  相对匹配 FP16 参考的数值差异记录在 JSON，不用任意误差阈值认证质量。
+  相对匹配 FP16 参考的数值差异仅作观测，不用任意误差阈值认证质量。
 - 公共 decoder：未开启 codec 模式的固定 GQA 算子用例，KV_FIRST 与 SEQUENTIAL
   各运行 3 次（1 BUILD + 2 REPLAY），输出与更改前备份 native 逐元素一致；
   错误几何开启 codec 模式被拒绝。此项是共享路径回归，不是其他完整模型的认证。
@@ -184,10 +178,7 @@ ASR Python API 接受 CPU 浮点数组；CLI 只读 PCM16 WAV。TTS CLI 不覆�
 
 使用 [`benchmark_qwen3_audio.py`](../examples/benchmark_qwen3_audio.py)，准备本地 JSON
 清单：ASR 行含 `id/language/audio/text`，TTS 行含 `id/language/text/reference_audio`。
-`language` 为 `Chinese` 或 `English`，清单为 1–20 条唯一 ID。参考清单与来源：
-[ASR 清单](evidence/qwen3_audio_benchmark_r1/asr-manifest.json)、
-[TTS 清单](evidence/qwen3_audio_benchmark_r1/tts-manifest.json)、
-[数据来源](evidence/qwen3_audio_benchmark_r1/dataset-provenance.json)。文件路径需改为本地值。
+`language` 为 `Chinese` 或 `English`，清单为 1–20 条唯一 ID。音频路径需指向本地文件。
 
 ```bash
 python examples/benchmark_qwen3_audio.py --task asr --threads 4 \
