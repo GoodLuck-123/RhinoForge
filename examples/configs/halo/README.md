@@ -1,19 +1,20 @@
 # HALO Action Expert 配置
+
 [配置索引](../CONFIGURATIONS.md) · [使用](#使用)
 
-入口：`examples/run.py --config <file>`；本页只整理已有接口。
+入口：`examples/run.py --config <file>`。登记范围为 FP16 Action Expert 单步，设备测试状态见[示例索引](../../README.zh.md)。
 
 <a id="weights"></a>
 <a id="weight-sources"></a>
-## 官方来源与原始存储精度
+## 权重来源
 
-| 资产 | 官方下载 / 源码 | 原始存储精度与可复现边界 |
-|---|---|---|
-| 官方预训练 EMA | [qshou-coder/halo_pt_weight](https://huggingface.co/qshou-coder/halo_pt_weight)；[HALO 官方源码](https://github.com/qshou-coder/HALO) | `2bd3a209c6c1536afa43da6540c817196dde96e0` 的 `ema.safetensors` 文件头中 1624 个张量均 **BF16** |
-| 官方无 EM-CoT 微调 EMA | [qshou-coder/halo_ft_weight](https://huggingface.co/qshou-coder/halo_ft_weight) | `d7a149753d76247d44ee5e73ca010ee43686cfe1` 的 `no_cot/ema.safetensors` 文件头中 1615 个张量均 **BF16**；官方说明这是无 EM-CoT 版本 |
-| 本仓库已登记动作专家 EMA | `halo_action_expert` → `$RPU_MODEL_CACHE/HALO/pytorch_weights_current` | 交付文件为 `<checkpoint>/ema.safetensors`；历史加载器记为 BF16，需按提供方清单确认与公开 EMA 的对应关系；还需原交付来源清单与配对单步 fixture |
+| 资产 | 来源与存储精度 |
+|---|---|
+| 官方预训练 EMA | [qshou-coder/halo_pt_weight](https://huggingface.co/qshou-coder/halo_pt_weight)，revision `2bd3a209c6c1536afa43da6540c817196dde96e0`；`ema.safetensors` 的 1624 个张量均为 BF16 |
+| 官方无 EM-CoT 微调 EMA | [qshou-coder/halo_ft_weight](https://huggingface.co/qshou-coder/halo_ft_weight)，revision `d7a149753d76247d44ee5e73ca010ee43686cfe1`；`no_cot/ema.safetensors` 的 1615 个张量均为 BF16 |
+| 已登记动作专家 EMA | `halo_action_expert` → `$RPU_MODEL_CACHE/HALO/action_expert.safetensors`；原交付 CoT EMA，BF16，需提供来源清单和配对单步 fixture |
 
-下列命令只下载已公开的官方文件，**不能据此运行本页已登记动作专家，不能将它们改名覆盖登记 EMA**。本轮只核对公开元数据与文件头，不加载或测试延期的 HALO 模型。
+官方源码见 [HALO](https://github.com/qshou-coder/HALO)。登记 EMA 与上述公开权重的对应关系尚未核实；公开下载文件应单独存放：
 
 ```bash
 hf download qshou-coder/halo_pt_weight ema.safetensors --revision 2bd3a209c6c1536afa43da6540c817196dde96e0 --local-dir /path/to/official-halo-pretrain
@@ -21,49 +22,48 @@ hf download qshou-coder/halo_ft_weight no_cot/ema.safetensors --revision d7a1497
 ```
 
 <a id="weight-recipes"></a>
-## 模块精度与配方
-
-| 配置 | 模块实际 W/A 精度 | 输入父权重 → 转换方式与命令 |
-|---|---|---|
-| `action_expert/fp16.toml` | **仅动作专家单步**的已安装投影为 W16/A16；仅包含此组件 | 原交付 EMA + 匹配单步 fixture → 加载时转换到 FP16；[无需量化](#quantization)，没有 W8/W4/NVFP4 配方或离线量化 CLI。原资产齐备后的[既有运行方式](#使用)保留，模型测试仍延期 |
-
-实际 FP16 上传见 [adapters/halo/weights.py](../../../python/rpu_backend/adapters/halo/weights.py)，由加载器调用。运行使用原配对资产。
-
 <a id="quantization"></a>
-## 下载与运行
+## 配置与精度
 
-**无需量化转换。** 本目录只有 `action_expert/fp16.toml`，读取已有 EMA 浮点资产，没有 W8/W4/NVFP4 转换脚本或量化输出目录。HALO 模型加载、测试仍延期；EMA 与公开权重的亲缘未核实，见下方来源说明。
-
-## 选择配置
-
-| 配置 | 范围 / 精度 | 既有登记 |
+| 配置 | 组件 / 精度 | 登记范围 |
 |---|---|---|
-| [action_expert/fp16.toml](action_expert/fp16.toml) | HALO单个Action Expert step，FP16 | SUPPORTED_LIMITED，精确单步profile |
+| [action_expert/fp16.toml](action_expert/fp16.toml) | Action Expert 单步，投影 W16/A16 | `SUPPORTED_LIMITED` |
 
-这是单组件一步，不是HALO全模型或多步策略。HALO的继续优化/测试按既有决定延期，测试延期。
+加载器将原 EMA 转为 FP16；无需离线量化，没有 W8/W4/NVFP4 配方。实现见 [weights.py](../../../python/rpu_backend/adapters/halo/weights.py)。
 
 ## 使用
 
-准备 `halo_action_expert` registry资产及对应CPU tensor fixture，填 `input.fixture`：
+将匹配的 EMA 文件或符号链接放在 `$RPU_MODEL_CACHE/HALO/action_expert.safetensors`。未设置 `RPU_MODEL_CACHE` 时，缓存根目录为 `~/.cache/rhinoforge/models`。该别名指向文件，加载器不追加子目录。
+
+复制模板，将 `input.fixture` 改为配对输入文件：
 
 ```bash
 python examples/run.py --config /path/to/halo.toml --check-config
 python examples/run.py --config /path/to/halo.toml
 ```
 
-运行例子按原资产/单步合同准备，不将任意观测当作这个fixture。
+`--check-config` 检查 TOML；运行入口在加载权重前检查 checkpoint 文件和 fixture 结构。
 
-## 可修改参数
+## 输入与参数
 
-| 字段 | 默认 / 条件 |
+fixture 为可用 `torch.load(..., weights_only=True)` 读取的 CPU 张量字典，可直接包含以下字段，也可放在 `kwargs` 中：
+
+| 字段 | 结构 |
 |---|---|
-| `input.fixture` | 同profile的单步CPU tensor文件 |
-| `rpu_execution.components.action_expert.action.chunk_size` | auto；原单步准入 |
-| `cpu.threads` | 可选正整数；省略继承环境 |
+| `x_t` / `timestep` | 浮点 `[16,14]` / `[16]`；数值有限，timestep 各行相同 |
+| `packed_action_position_ids` / `packed_text_ids` | 整数 `[16]` / `[2]` |
+| `packed_position_ids` | 整数 `[18]`，所有位置相同 |
+| `packed_text_indexes` / `packed_action_token_indexes` | `[0,17]` / `[1,...,16]` |
+| `key_values_lens` | `[4706]` |
+| `past_key_values` | `key_cache` 和 `value_cache` 各 28 层，每层浮点 `[4706,2,128]`；层容器可为整数键字典、序列或堆叠张量 |
+
+索引必须非负。保留原权重与 fixture 的配对关系，输出为单步动作张量。
+
+| 可修改字段 | 默认 / 条件 |
+|---|---|
+| `input.fixture` | 配对的单步 CPU 张量文件 |
+| `rpu_execution.components.action_expert.action.chunk_size` | `auto`，遵循单步准入 |
+| `cpu.threads` | 可选正整数，省略时继承环境 |
 | `run.warmup/runs/seed` | 2 / 3 / 0 |
 
-## 输入与限制
-
-保留原组件范围、权重与fixture语义，不扩展为全HALO推理、量化配置或机器人验收。公共入口只计实际调用并保存结果，不运行CPU质量参考。
-
-运行环境与结果说明见[示例指南](../../README.zh.md)，运行库准备见[算子库规则](../../../docs/runtime_assets.md)。
+完整模型、多步策略和 CPU 质量参考不在此入口范围内。环境准备见[示例指南](../../README.zh.md)和[运行资产](../../../docs/runtime_assets.md)。

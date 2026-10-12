@@ -27,7 +27,10 @@
 
 **本族现有模板无需离线量化，也没有W8/W4转换步骤。** 按[权重来源](#weights)下载完整原浮点权重到 `$RPU_MODEL_CACHE/gemma-4-e4b-it`；在仓库根目录、已安装项目依赖的 Python 环境中运行。
 
+Gemma4 使用独立环境，安装 `transformers==5.5.4`。
+
 ```bash
+python -m pip install 'transformers==5.5.4'
 export RPU_MODEL_CACHE=/absolute/path/to/model_cache  # 替换为真实缓存根目录
 hf download google/gemma-4-E4B-it --local-dir "$RPU_MODEL_CACHE/gemma-4-e4b-it"
 python examples/run.py --config examples/configs/gemma4/e4b/fp16.toml

@@ -295,35 +295,44 @@ def test_qwen35_vision_reuses_hybrid_cache_and_public_multimodal_forward(
 
 
 def test_halo_single_step_keeps_captured_prefix_and_planner(monkeypatch, tmp_path):
+    import torch
     from examples.common import preparation
     from examples.runners.halo import runner
     value = config("halo")
-    checkpoint = tmp_path / "halo_robotwin/finetune_ckpt/cot_aug_try3/0100000/ema.safetensors"
+    checkpoint = tmp_path / "HALO/action_expert.safetensors"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.touch()
-    monkeypatch.setattr(runner, "_checkpoint", lambda _: tmp_path)
-    position = Mock()
-    position.unique.return_value.numel.return_value = 1
-    position.flatten.return_value = [11]
-    fixture = {"packed_position_ids": position,
-               "packed_text_indexes": Mock(tolist=lambda: [0, 17]),
-               "packed_action_token_indexes": Mock(tolist=lambda: list(range(1, 17))),
-               "key_values_lens": [4706],
-               "past_key_values": {"key_cache": {0: "k"}, "value_cache": {0: "v"}},
-               "x_t": "x", "timestep": "t", "packed_action_position_ids": "ap", "packed_text_ids": "ids"}
-    monkeypatch.setattr(runner, "_load_mapping", lambda *_: {"kwargs": fixture})
+    monkeypatch.setattr(runner, "_checkpoint", lambda _: checkpoint)
+    key, val = torch.zeros(3, 2, 128), torch.ones(3, 2, 128)
+    fixture = {"packed_position_ids": torch.full((18,), 11),
+               "packed_text_indexes": torch.tensor([0, 17]),
+               "packed_action_token_indexes": torch.arange(1, 17),
+               "key_values_lens": torch.tensor([3]),
+               "past_key_values": {"key_cache": {0: key}, "value_cache": {0: val}},
+               "x_t": torch.zeros(16, 14), "timestep": torch.ones(16),
+               "packed_action_position_ids": torch.arange(16), "packed_text_ids": torch.tensor([1, 2])}
+    value["input"]["fixture"] = str(tmp_path / "step.pt")
+    torch.save({"kwargs": fixture}, value["input"]["fixture"])
     policy = Mock()
     builder = Mock(return_value=policy)
     module(monkeypatch, "rpu_backend.adapters.halo",
-           HaloConfig=lambda: SimpleNamespace(text_rows=[0, 17], action_rows=range(1, 17), prefix_len=4706, num_layers=1),
+           HaloConfig=lambda: SimpleNamespace(text_rows=[0, 17], action_rows=range(1, 17),
+                                             prefix_len=3, num_layers=1, action_dim=14,
+                                             chunk_size=18, num_kv_heads=2, head_dim=128),
            build_halo_action_expert=builder)
 
     infer, owner = preparation.prepare(value)
     infer()
 
     assert owner is policy
-    policy.insert_prefix.assert_called_once_with(["k"], ["v"])
-    policy.step.assert_called_once_with("x", "t", "ap", "ids")
+    policy.insert_prefix.assert_called_once()
+    assert torch.equal(policy.insert_prefix.call_args.args[0][0], key)
+    assert torch.equal(policy.insert_prefix.call_args.args[1][0], val)
+    policy.step.assert_called_once()
+    for actual, name in zip(policy.step.call_args.args,
+                            ("x_t", "timestep", "packed_action_position_ids", "packed_text_ids")):
+        assert torch.equal(actual, fixture[name])
+    assert builder.call_args.args == (checkpoint,)
     assert builder.call_args.kwargs["rpu_execution"] is value["rpu_execution"]
 
 

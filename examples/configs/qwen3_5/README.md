@@ -9,6 +9,8 @@
 
 官方原父的 **BF16 主体 + 少量 FP32 参数**已通过官方 config 与 HF safetensors 元数据核对（2026-10-10），不是纯 FP16 包；`mamba_ssm_dtype=float32` 也不是整个 checkpoint 的存储精度。下列目录相对于 `$RPU_MODEL_CACHE`，必须包括完整 config、tokenizer、processor 和全部权重分片。
 
+VL 还需 `preprocessor_config.json` 和 `video_preprocessor_config.json`，与权重从同一 revision 下载。量化目录也需保留这两个文件；缺失时从对应浮点父的固定 revision 补齐。
+
 | 权重 / 用途 | 磁盘存储精度 | 发布者与下载来源 | 下载到的目录 |
 |---|---|---|---|
 | Dense 0.8B：浮点父 | BF16 + 少量 FP32 | Qwen 官方 [Qwen/Qwen3.5-0.8B](https://huggingface.co/Qwen/Qwen3.5-0.8B) · [精度元数据](https://huggingface.co/api/models/Qwen/Qwen3.5-0.8B) | `qwen3_5-0.8b` |
