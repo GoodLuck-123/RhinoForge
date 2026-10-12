@@ -27,9 +27,9 @@ hf download InternRobotics/InternVLA-N1-w-NavDP --revision 6d48df24da45e8b31fdce
 
 | 配置 | 模块实际 W/A 精度 | 输入父权重 → 转换方式与命令 |
 |---|---|---|
-| `navdp/fp16.toml`（唯一配方） | System2 decoder 的 Q/K/V/O、Gate/Up/Down 为 **W8/A16**，逐输出通道 INT8 + FP16 scale；decoder norm 为 FP16。System2 Vision、RGBD 的 设备 投影和 NavDP 为 W16/A16；CPU embedding/latent 拼接与 goal glue 保持 FP32 浮点，不量化 | 官方 BF16 父权重 → [配对资产](#quantization)，包含 `s2_w8a16/`、`s2_vit/`、`s2_frontend.safetensors`、`navdp_head.safetensors` 与配对 fixture/manifest；随后加载运行 |
+| `navdp/w8a16_system2.toml`（唯一配方） | System2 decoder 的 Q/K/V/O、Gate/Up/Down 为 **W8/A16**，逐输出通道 INT8 + FP16 scale；decoder norm 为 FP16。System2 Vision、RGBD 的 设备投影和 NavDP 为 W16/A16；CPU embedding/latent 拼接与 goal glue 保持 FP32 浮点，不量化 | 官方 BF16 父权重 → [配对资产](#quantization)，包含 `s2_w8a16/`、`s2_vit/`、`s2_frontend.safetensors`、`navdp_head.safetensors` 与配对 fixture/manifest；随后加载运行 |
 
-模板名 `fp16` 对应 Vision/RGBD/NavDP；System2 decoder 使用 W8。
+文件名 `w8a16_system2` 标明 System2 decoder 的量化范围，其余设备组件保持 FP16。
 
 <a id="quantization"></a>
 ## 准备配对资产并运行
@@ -38,18 +38,24 @@ hf download InternRobotics/InternVLA-N1-w-NavDP --revision 6d48df24da45e8b31fdce
 
 ```bash
 export RPU_MODEL_CACHE=/path/to/model-cache
-cp examples/configs/internvla/navdp/fp16.toml /tmp/internvla.toml
+cp examples/configs/internvla/navdp/w8a16_system2.toml /tmp/internvla.toml
 # 填 input.fixture、input.asset_manifest 和 run.output_dir。
 vi /tmp/internvla.toml
 python examples/run.py --config /tmp/internvla.toml --check-config
 python examples/run.py --config /tmp/internvla.toml
 ```
 
+## 执行方式
+
+1. System2 Vision 编码图片；CPU 拼接词 embedding、图像特征和 latent query。
+2. System2 decoder 输出 latent，CPU goal glue 生成导航目标。
+3. RGBD 编码器处理 RGB 与深度输入，NavDP 使用目标、RGBD 特征和初始噪声生成动作。
+
 ## 选择配置
 
 | 配置 | 范围 / 精度 | 登记状态 |
 |---|---|---|
-| [navdp/fp16.toml](navdp/fp16.toml) | Vision/RGBD/NavDP FP16；System2 decoder固定W8A16 | CONTROLLED_EVALUATION，受控配对 |
+| [navdp/w8a16_system2.toml](navdp/w8a16_system2.toml) | Vision/RGBD/NavDP FP16；System2 decoder固定W8A16 | CONTROLLED_EVALUATION，受控配对 |
 
 仅支持配对frontend、NavDP权重及完整fixture/asset manifest的受控输入。
 
@@ -66,7 +72,7 @@ asset manifest用于核对权重与fixture身份，必须与本次bundle配对�
 
 模板为 System2 prefill 显式启用最多 64 行自动补齐，仅用于物理执行对齐；逻辑输入、位置和输出长度保持不变。
 
-采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认3次正式运行。
+模板默认预热 2 次、正式运行 3 次；CPU 线程省略时继承环境。
 
 ## 可修改参数
 

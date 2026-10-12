@@ -27,7 +27,7 @@ def metadata():
 
 
 def test_public_configs_select_mlp_only_asset_and_real_prefix(monkeypatch, tmp_path):
-    configs = [common.load_config(CONFIGS / f'w4_mlp_only_g32_p{p}_d4096.toml') for p in (64, 4096)]
+    configs = [common.load_config(CONFIGS / f'w4a16_mlp_rtn_g32_p{p}_d4096.toml') for p in (64, 4096)]
     alias = 'qwen3_5-2b-w4-mlp-only-g32'
     spec = importlib.util.spec_from_file_location('registry_mlp_only', ROOT / 'python/rpu_backend/model_registry.py')
     registry = importlib.util.module_from_spec(spec)
@@ -36,7 +36,7 @@ def test_public_configs_select_mlp_only_asset_and_real_prefix(monkeypatch, tmp_p
     assert registry.model_path(alias) == tmp_path / 'qwen3_5-2b-w4a16-g32-mlp-only'
     assert registry.model_path('qwen3_5-2b-w4a16') == tmp_path / 'qwen3_5_quant_ckpts/qwen3_5-2b-w4a16'
     (tmp_path / 'config.json').write_text(json.dumps(metadata()))
-    base = common.load_config(CONFIGS / 'w4_mlp_only_g32.toml')
+    base = common.load_config(CONFIGS / 'w4a16_mlp_rtn_g32.toml')
     common.validate_checkpoint_profile(base, str(tmp_path))
     assert base['example']['registry_alias'] == alias
     assert base['input']['prompt'] and base['input']['decode_steps'] == 4
@@ -55,7 +55,7 @@ def test_public_configs_select_mlp_only_asset_and_real_prefix(monkeypatch, tmp_p
 
 @pytest.mark.parametrize('change', ['uniform', 'g128', 'first_layer_fp16', 'wrong_size', 'wrong_architecture', 'wrong_profile'])
 def test_mlp_only_profile_rejects_wrong_scope_before_weight_load(tmp_path, change):
-    config = common.load_config(CONFIGS / 'w4_mlp_only_g32_p64_d4096.toml')
+    config = common.load_config(CONFIGS / 'w4a16_mlp_rtn_g32_p64_d4096.toml')
     value = metadata()
     quant = value['quant_config']
     if change == 'uniform':

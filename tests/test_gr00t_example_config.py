@@ -15,8 +15,7 @@ CFG = importlib.import_module("examples.runners.gr00t.config")
 
 
 def config(precision="fp16", size=224, text=32):
-    suffix = "" if size == 224 else "_256"
-    path = ROOT / f"examples/configs/gr00t/n1_7_droid/{precision}{suffix}.toml"
+    path = ROOT / f"examples/configs/gr00t/n1_7_droid/{size}/{precision}.toml"
     result = tomllib.loads(path.read_text())
     result["input"]["text_tokens"] = text
     return result
@@ -141,7 +140,7 @@ def test_public_runner_sets_optimizations_before_backend_import(monkeypatch):
 def test_model_specific_ref_selector_is_rejected_before_backend_import(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(ROOT / "examples"))
     from examples.common.config import load_config, ConfigError
-    source = ROOT / "examples/configs/gr00t/n1_7_droid/fp16.toml"
+    source = ROOT / "examples/configs/gr00t/n1_7_droid/224/fp16.toml"
     legacy = tmp_path / "legacy.toml"
     legacy.write_text(source.read_text().replace("[example]", '[example]\nexpansion_ref = "/old/gr00t.ref"'))
     with pytest.raises(ConfigError, match="expansion_ref is retired"):

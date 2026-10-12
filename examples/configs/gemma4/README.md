@@ -1,76 +1,80 @@
 # Gemma4 配置
-[配置索引](../CONFIGURATIONS.md) · [使用](#使用)
 
-入口：`python examples/run.py --config <file>`；选择下表模板。
+[配置索引](../CONFIGURATIONS.md) · [准备与运行](#使用)
 
-<a id="weights"></a>
-<a id="weight-sources"></a>
-## 权重来源与存储类型
+本目录提供 Gemma4 E4B Instruct 的文本生成配置，采用 CPU 与设备混合执行。输入为文本，当前入口范围为文本 MVP。
 
-| 权重 / 用途 | 磁盘存储精度 | 发布者与下载来源 | 下载到的目录（相对于 `$RPU_MODEL_CACHE`） |
-|---|---|---|---|
-| 官方 Gemma4 E4B Instruct，当前模板的标准输入 | **BF16**，已核对官方 HF safetensors 元数据 | [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it) · [精度元数据](https://huggingface.co/api/models/google/gemma-4-E4B-it) | `gemma-4-e4b-it` |
-
-使用 Google 官方完整多模态 checkpoint，但本目录只开放文本 MVP；不把官方模型支持的音频/图像能力当作此 runner 的支持。HF 仓库名为大写 `E4B`，本地登记目录为小写 `e4b`；按官方页面要求取得访问权限。
+## 配置说明
 
 <a id="weight-recipes"></a>
-## 模块精度与配方
+<a id="配置与权重对应关系"></a>
 
-| config | 运行时模块权重 / 激活 | 输入来源 | 获取方式、源码与完整命令 |
-|---|---|---|---|
-| [e4b/fp16.toml](e4b/fp16.toml) | 设备 decoder/PLE 权重与主路径激活 FP16；CPU embedding/PLE/head 保留源权重，计算时转 FP32；head 输出 FP32 | 上表原始 BF16 完整 checkpoint | **不涉及低比特量化**；[examples/runners/gemma4/runner.py](../../runners/gemma4/runner.py) 先以 BF16 加载；[python/rpu_backend/adapters/gemma4/__init__.py](../../../python/rpu_backend/adapters/gemma4/__init__.py) 安装 设备 FP16 和 CPU 浮点分支；[下载并运行](#quantization) |
-
-仅提供浮点配置，加载时转换 dtype。
-
-<a id="quantization"></a>
-## 下载与运行
-
-**本族现有模板无需离线量化，也没有W8/W4转换步骤。** 按[权重来源](#weights)下载完整原浮点权重到 `$RPU_MODEL_CACHE/gemma-4-e4b-it`；在仓库根目录、已安装项目依赖的 Python 环境中运行。
-
-Gemma4 使用独立环境，安装 `transformers==5.5.4`。
-
-```bash
-python -m pip install 'transformers==5.5.4'
-export RPU_MODEL_CACHE=/absolute/path/to/model_cache  # 替换为真实缓存根目录
-hf download google/gemma-4-E4B-it --local-dir "$RPU_MODEL_CACHE/gemma-4-e4b-it"
-python examples/run.py --config examples/configs/gemma4/e4b/fp16.toml
-```
-
-模板的 `example.registry_alias` 自动读取上述缓存目录。加载入口为 [examples/runners/gemma4/runner.py](../../runners/gemma4/runner.py)；dtype 转换由加载器完成，无需另存量化目录。
-
-## 选择配置
-
-| 配置 | 模型 / 精度 | 登记状态 |
+| 配置 | 计算范围 | 权重获取 |
 |---|---|---|
-| [e4b/fp16.toml](e4b/fp16.toml) | Gemma4 E4B；设备 FP16 decoder + CPU embedding/PLE/head | SUPPORTED_LIMITED，text MVP |
+| [e4b/fp16.toml](e4b/fp16.toml) | E4B Instruct 文本生成，设备 FP16 decoder + CPU 浮点前后处理 | [官方 BF16 权重](#weights)，加载时按模块转换 |
 
-文本MVP采用CPU/设备混合路径；输出head在CPU以FP32计算，完整请求计时包含这些CPU工作。没有量化模板，未支持图像/多模态或任意长上下文。
+<a id="fp16-基准做了什么"></a>
 
-## 使用
+### 精度与执行
 
-在 `RPU_MODEL_CACHE/gemma-4-e4b-it` 准备原始HF checkpoint（registry别名 `gemma4-e4b`），复制模板修改prompt/输出目录：
+| 阶段 | 精度与执行方式 |
+|---|---|
+| 输入 embedding 与 PLE 侧输入 | 源权重保留在 CPU；按前向逻辑转换为 FP32 参与计算，再生成 decoder 所需的 FP16 输入。PLE 是模型逐层使用的附加 embedding |
+| Decoder | decoder 与图内 PLE 投影使用设备FP16；使用 KV cache 和保留的 Graph 重放 |
+| 输出 head | CPU 使用共享 embedding 权重计算 FP32 logits，并应用 softcap |
+
+因此，`fp16` 描述设备decoder 的精度，完整请求还包含 CPU embedding、PLE 和输出 head 的工作。加载与执行见 [runner](../../runners/gemma4/runner.py) 和 [Gemma4 adapter](../../../python/rpu_backend/adapters/gemma4/__init__.py)。
+
+## 准备与运行
+
+<a id="weight-sources"></a>
+<a id="weights"></a>
+<a id="quantization"></a>
+<a id="权重准备"></a>
+
+### 获取权重
+
+`example.registry_alias="gemma4-e4b"` 固定读取 `$RPU_MODEL_CACHE/gemma-4-e4b-it`。HF 仓库名中的 `E4B` 大写，本地目录名中的 `e4b` 小写；下载完整 config 和 tokenizer。
+
+源权重为 [google/gemma-4-E4B-it](https://huggingface.co/google/gemma-4-E4B-it)，官方 safetensors 存储为 BF16。先取得模型访问权限，再在仓库根目录执行：
 
 ```bash
-python examples/run.py --config examples/configs/gemma4/e4b/fp16.toml --check-config
-python examples/run.py --config /path/to/my_gemma4.toml
+export RPU_MODEL_CACHE=/path/to/model-cache
+hf download google/gemma-4-E4B-it \
+  --local-dir "$RPU_MODEL_CACHE/gemma-4-e4b-it"
 ```
 
-公共 runner 保存实际生成输出。
+转换在内存中完成，不产生单独的 FP16 目录。
 
-采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认3次正式运行。
+<a id="使用"></a>
 
-## 可修改参数
+### 输入与运行
 
-| 字段 | 默认 / 条件 |
-|---|---|
-| `input.prompt` | `Explain what a compiler does.`；真实文本分词 |
-| `input.decode_steps` | 4；保持既有模型准入范围 |
-| `rpu_execution.prefill.chunk_size` | auto；显式请求仍由native检查 |
-| `cpu.threads` | 可选正整数；省略继承环境 |
-| `run.warmup/runs/seed` | 2 / 3 / 0 |
+在已安装项目依赖的 设备环境中，复制模板并修改文本和输出目录：
 
-## 输入与限制
+```bash
+cp examples/configs/gemma4/e4b/fp16.toml /tmp/gemma4_fp16.toml
+# 修改 input.prompt，并在 [run] 中添加 output_dir。
+vi /tmp/gemma4_fp16.toml
+python examples/run.py --config /tmp/gemma4_fp16.toml --check-config
+python examples/run.py --config /tmp/gemma4_fp16.toml
+```
 
-原始checkpoint为BF16；入口将decoder安装为设备 FP16，CPU部分保留该混合路径，不要求预先生成一份FP16权重。修改冷配置需新进程。
+<a id="输入与执行参数"></a>
 
-运行环境与结果说明见[示例指南](../../README.zh.md)，运行库准备见[算子库规则](../../../docs/runtime_assets.md)。
+### 常用参数
+
+| 字段 | 模板值 | 省略时 | 范围与关联 |
+|---|---|---|---|
+| `input.prompt` | `Explain what a compiler does.` | 未提供 `prompt_token_ids` 时必填 | 用 checkpoint tokenizer 分词 |
+| `input.decode_steps` | 4 | 4 | 非负整数；prefill 先产生一个 token，再执行最多指定次数的 decode |
+| `input.stop_on_eos` | 未配置 | `true` | 遇 EOS 提前结束 |
+| `rpu_execution.prefill.chunk_size` | `"auto"` | `"auto"` | 选择 prefill 分块，显式值由执行规划器检查 |
+
+模板的 `run.warmup/runs/seed` 为 2 / 3 / 0，`cpu.threads` 未配置。通用字段的默认值、输出目录、计时与诊断选项见[公共参数说明](../PARAMETERS.md)。
+
+模型加载时根据输入长度准备 KV cache，最小容量为 512。更改模型或启动时执行设置后，用新进程运行。
+
+## 输出
+
+输出生成 token 与运行摘要，产物保存在 `run.output_dir`。

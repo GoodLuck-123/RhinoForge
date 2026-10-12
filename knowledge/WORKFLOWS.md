@@ -50,7 +50,9 @@ match; otherwise give explicit migration steps. Update defaults, documentation
 and tests together. Keep aliases in the command-line path resolver, without
 duplicate TOML files; existing caller files take precedence. New examples and
 file-copy commands use canonical paths. See the [v1.2.0 upgrade guide](../docs/upgrading_1_2.md).
-Model TOML files belong in their family directories.
+Record canonical renames in [config_names.json](../examples/configs/config_names.json)
+and keep older aliases pointing directly to existing templates. Model TOML files
+belong in their family directories.
 Keep persistent model construction outside inference mode; apply the selected mode to inference only. Warm a new Graph with BUILD and REPLAY. With `warmup >= 2`, omit `warmup_decode_steps` or match `input.decode_steps`; fixed-length runs use `stop_on_eos=false`.
 The [LingBot v2 runner](../examples/configs/lingbot/v2/README.md) permits `warmup=0` after its A/B/A and READY preparation; retain an independent first output and compare subsequent replays against it.
 The [archived exact-Z2 entry](../examples/configs/lingbot/legacy/exact_z2/README.md) requires explicit `input.training_config` and `input.qwen3vl_base`; pass both to the policy before graph preparation.

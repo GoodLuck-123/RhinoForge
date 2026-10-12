@@ -66,7 +66,7 @@ def test_registered_template_resolves_bounded_backbone_padding():
         BACKBONE_COMPONENT, resolve_internvla_execution,
     )
 
-    path = Path(__file__).resolve().parents[1] / "examples/configs/internvla/navdp/fp16.toml"
+    path = Path(__file__).resolve().parents[1] / "examples/configs/internvla/navdp/w8a16_system2.toml"
     config = load_config(path)
     _, children = resolve_internvla_execution(
         config["rpu_execution"], entry_point="registered example"

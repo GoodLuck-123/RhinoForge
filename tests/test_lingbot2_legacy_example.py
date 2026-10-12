@@ -17,7 +17,7 @@ from examples.runners.lingbot2 import runner
 
 
 def template():
-    return load_config(ROOT / "examples/configs/lingbot/legacy/exact_z2/6b_w8a16.toml")
+    return load_config(ROOT / "examples/configs/lingbot/legacy/exact_z2/6b/w8a16.toml")
 
 
 @pytest.mark.parametrize("key", ["qwen3vl_base", "training_config"])

@@ -205,8 +205,8 @@ def test_rhinovla_ignored_or_mismatched_quantization_closes_factory_owner(helper
     assert calls == ["close"]
 
 
-@pytest.mark.parametrize("filename,full", [("fp16.toml", None), ("expert_w8a16.toml", False),
-                                          ("full_expert_w8a16.toml", True)])
+@pytest.mark.parametrize("filename,full", [("fp16.toml", None), ("w8a16_action.toml", False),
+                                          ("w8a16_action_adarms.toml", True)])
 def test_rhinovla_v3_templates_keep_cold_optimizations_without_widening_precision(monkeypatch, filename, full):
     root = Path(__file__).resolve().parents[1]
     monkeypatch.syspath_prepend(str(root / "examples"))

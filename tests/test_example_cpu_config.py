@@ -143,7 +143,7 @@ def test_aliases_preserve_defaults_and_reject_conflicts_without_mutation():
 @pytest.mark.parametrize("relative", [
         "qwen3/text/0_6b/fp16.toml", "pi05/3cam/fp16.toml",
         "wall_oss/sorting/fp16.toml", "wall_oss/base/3cam/224/fp16.toml", "hy_vla/3cam/fp16.toml",
-        "g05/2cam/fp16.toml", "g05/3cam/w8a16_nvfp4.toml",
+        "g05/2cam/fp16.toml", "g05/3cam/w8a16_action_nvfp4.toml",
 ])
 def test_public_cpu_config_checks_without_torch_backend_or_assets(tmp_path, relative):
     source = (ROOT / "examples/configs" / relative).read_text()

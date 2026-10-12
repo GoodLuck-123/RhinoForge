@@ -10,6 +10,10 @@ from unittest.mock import Mock
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+CONFIG_FILENAMES = {
+    "w4a16": "w4a16_text_rtn_g32",
+    "w4a16_lm_head": "w4a16_text_head_rtn_g32",
+}
 SHAPES = {
     "0.6": (1024, 3072, 28, 16), "1.7": (2048, 6144, 28, 16),
     "4": (2560, 9728, 36, 32), "8": (4096, 12288, 36, 32),
@@ -36,7 +40,7 @@ def common(monkeypatch):
 @pytest.mark.parametrize("head", [False, True])
 def test_dense_w4_profiles_bind_exact_recipe_geometry_and_cold_defaults(common, size, head):
     recipe = "w4a16_lm_head" if head else "w4a16"
-    path = ROOT / f"examples/configs/qwen3/text/{size.replace('.', '_')}b/{recipe}.toml"
+    path = ROOT / f"examples/configs/qwen3/text/{size.replace('.', '_')}b/{CONFIG_FILENAMES[recipe]}.toml"
     config = common.load_config(path)
     profile = common.planner_profiles()[config["example"]["profile_id"]]
     limits = profile["input_envelope"]["limits"]
@@ -71,7 +75,7 @@ def test_dense_32b_w8_uses_existing_converted_asset_without_inheriting_support(c
     monkeypatch.setenv("RPU_MODEL_CACHE", str(tmp_path))
     assert registry.model_path("qwen3-32b") == tmp_path / "Qwen3-32B"
     assert registry.model_path("qwen3-32b-w8a16-lmhead-int8") == tmp_path / "Qwen3-32B-w8a16"
-    config = common.load_config(ROOT / "examples/configs/qwen3/text/32b/w8a16.toml")
+    config = common.load_config(ROOT / "examples/configs/qwen3/text/32b/w8a16_text_head.toml")
     profile = common.planner_profiles()[config["example"]["profile_id"]]
     limits = profile["input_envelope"]["limits"]
     assert limits["checkpoint_format"] == "qwen3_32b_w8a16"
@@ -87,7 +91,7 @@ def test_dense_32b_w8_uses_existing_converted_asset_without_inheriting_support(c
 @pytest.mark.parametrize("recipe", ["w4a16", "w4a16_lm_head"])
 def test_wrong_dense_size_is_rejected_before_tokenizer_or_model(common, monkeypatch, recipe):
     runner = load_module("dense_wrong_size_runner", "examples/runners/qwen3/runner.py", monkeypatch)
-    config = common.load_config(ROOT / f"examples/configs/qwen3/text/4b/{recipe}.toml")
+    config = common.load_config(ROOT / f"examples/configs/qwen3/text/4b/{CONFIG_FILENAMES[recipe]}.toml")
     limits = dict(common.planner_profiles()[config["example"]["profile_id"]]["input_envelope"]["limits"])
     limits["num_hidden_layers"] = 37
     tokenizer, model_loader = Mock(), Mock()
@@ -112,7 +116,7 @@ def test_dense_32b_w8_metadata_rejects_wrong_head_before_tokenizer_or_weights(co
     # Import the actual predicate before replacing just the runner's model API.
     from rpu_backend.quant.qwen3_profiles import is_qwen3_32b_w8a16_config
 
-    config = common.load_config(ROOT / "examples/configs/qwen3/text/32b/w8a16.toml")
+    config = common.load_config(ROOT / "examples/configs/qwen3/text/32b/w8a16_text_head.toml")
     source = Qwen3Config(
         architectures=["Qwen3ForCausalLM"], hidden_size=5120, intermediate_size=25600,
         num_hidden_layers=64, num_attention_heads=64, num_key_value_heads=8,

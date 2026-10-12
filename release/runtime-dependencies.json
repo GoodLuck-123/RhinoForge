@@ -7,8 +7,8 @@
   "artifacts": {
     "rhino_ops_main": {
       "path": "rhinoOpLib_current.ref",
-      "sha256": "5ec4c06d02e934486002eb54563c6de1d5b12a6c7e45321bcbb6670b75eff9a8",
-      "commit": "05035ba5fca6498da86560f725bccf8d46f5e66e"
+      "sha256": "306bd54a56bcf4106ca029adceabebb7446592c333805daf67528b77bcb46417",
+      "commit": "63ff35f902e3f34d7bac00afc04970b3115cd50b"
     },
     "rhino_ops_expansion": {
       "path": "rhinoExpansionOpLib_current.ref",

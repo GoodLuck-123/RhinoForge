@@ -8,11 +8,11 @@ Select a TOML from [model examples](../examples/README.md). Runners live in `exa
 
 ```sh
 python examples/run.py --config examples/configs/qwen3/text/0_6b/fp16.toml --check-config
-python examples/run.py --config examples/configs/qwen3_vl/vl/4b/w8a16.toml
+python examples/run.py --config examples/configs/qwen3_vl/vl/4b/w8a16_text_head_vision.toml
 python examples/run.py --config examples/configs/pi05/2cam/w8a16_action_nvfp4.toml
 ```
 
-Replace placeholder paths and supply the checkpoint and inputs required by the model guide. Relative paths resolve from the command's working directory. `--check-config` validates configuration without loading weights or accessing a device. Quantized checkpoints require the loader's metadata; see [quantization](quantization.md).
+Replace placeholder paths and supply the checkpoint and inputs required by the model guide. Relative `input.prompt_file` and `input.prepared_input_safetensors` paths resolve from the configuration file's directory. Other asset paths follow the model guide. `--check-config` validates configuration without loading weights or accessing a device. Quantized checkpoints require the loader's metadata; see [quantization](quantization.md).
 
 Preprocessed-input examples accept CPU tensor mappings produced by the checkpoint's processor. Follow the selected model's shape and component requirements.
 

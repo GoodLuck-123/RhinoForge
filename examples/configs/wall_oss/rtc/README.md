@@ -1,89 +1,91 @@
-# Wall-OSS 受控 RTC 配置
-[上级选型](../README.md) · [使用](#使用)
+# Wall-OSS RTC 配置
 
-<a id="weights"></a>
-<a id="weight-sources"></a>
-## 权重来源
+本组运行客户 WRC `wrc_sf_v728_0_15000`，使用三张 336×336 图片、动作长度 20 和六步去噪。RTC（Real-Time Chunking）通过已有动作前缀与推理延迟衔接相邻动作块。登记状态为 `CONTROLLED_EVALUATION`。
 
-官方文件的存储 dtype 与本仓库运行时的 FP16/W8 等选项分开列示；`FP16` 配置不表示官方发布文件就是 FP16。
+<a id="选择配置"></a>
 
-| 身份 | 名称与发布者 / 下载渠道 | 文件存储精度 | 本地目录与配置绑定 |
-|---|---|---|---|
-| 官方公开发布（另一资产） | X Square Robot：[wall-oss-0.5](https://huggingface.co/x-square-robot/wall-oss-0.5/tree/b7dc23a82dbf70a65859c9fdd596703234597028)；[官方源码](https://github.com/X-Square-Robot/wall-x) | BF16 + FP32（官方 safetensors 元数据） | `wall-oss-0.5`；完整模型、processor/tokenizer、normalizer |
-| 当前客户 WRC 父 | 原交付方：`wrc_sf_v728_0_15000`，未核实官方公开下载；不可由公开 base 替代 | 原始 dtype 由交付清单指定 | RTC：`input.checkpoint` / `input.fp16_checkpoint`；sorting：`input.fp16_checkpoint` |
-| 公开量化 / 本仓库转换 | 使用本仓库转换配方；下列 CLI 从本组原始父转换 | W8：2D linear INT8，浮点保留项 FP16 | `wrc_v728_w8a16` → `input.checkpoint`；原父 → `input.fp16_checkpoint` |
+<a id="配置与权重对应"></a>
 
 <a id="weight-recipes"></a>
-## 模块精度与配方
 
-W/A 与 ACC 定义见[精度记法](../../WEIGHTS.md#precision-notation)。 RTC 的 BF16 溢出边界不改变其余线性 A16 路径。
+## 配置说明
 
-| 配方与模板 | 加载后 Vision / Language | 加载后 Action / IO 与保留浮点部分 | 所需源权重、转换方式与完整命令 |
-|---|---|---|---|
-| RTC FP16：[fp16.toml](fp16.toml) | Vision / Language 主投影 W16A16；保留既有混合浮点边界 | Action 主投影 W16A16；浮点保留项见下文 | 客户 WRC 原父；直接加载；[完整命令](#run-fp16) |
-| RTC W8：[w8a16.toml](w8a16.toml) | Vision / Language 主投影 W8A16，但 Vision block17 Down 与 Language layer2 Down 保留原父 FP16，使用既有 ACC32→BF16 输出边界，其余相关激活 A16 | Action decoder W8A16；浮点保留项见下文 | 客户 WRC 原父 + 配对离线 W8；[完整命令](#run-rtc-w8)，[python/rpu_backend/quant/convert_wall_oss_w8a16.py](../../../../python/rpu_backend/quant/convert_wall_oss_w8a16.py) |
+| 配置 | 比较起点 | 权重获取 |
+|---|---|---|
+| [fp16.toml](fp16.toml) | FP16 基准 | [原始 WRC 交付](#run-fp16) |
+| [w8a16.toml](w8a16.toml) | FP16 主投影改 W8，保留固定浮点边界 | [原始 WRC + 配对 W8](#run-rtc-w8) |
 
-**各配方的浮点保留项：** patch/merger、norm/bias、embedding、动作预处理/输出回投保持浮点：设备路径 FP16，host 预处理/归一化 FP32；不使用 W8 文件中 action_preprocessor 的 INT8 副本。离线 W8 转换器会量化除 `embed_tokens` 外的全部浮点 2D `.weight`；运行器只取所需 INT8 投影，其余胶水权重仍从配对原父加载。
+<a id="fp16-基准与-w8-增量"></a>
+
+`fp16.toml` 使用 `example.dtype="fp16"`，Vision、Language 和 Action 主投影为 FP16。输入前缀范围为 `[599,640]`，准备 P640、每段 C320 的预填充图；六步去噪和 Graph replay 沿用 RTC 执行路径。模板中的 `RPU_WALL_OSS_RTC_ALLOW_NUMERIC_BLOCKED="1"` 显式选择这组受控配置。
+
+切换 W8 时，`example.dtype` 改为 `"w8a16"`，`profile_id/registry_alias` 同步选择 W8，`input.checkpoint` 改为量化目录并新增 `input.fp16_checkpoint`。Vision block、Language 和 Action decoder 的 Q/K/V/O/Gate/Up/Down 改为逐输出通道 INT8 权重、FP16 scale 和 FP16 激活。
+
+RTC 保留两个固定浮点边界：Vision block17 Down 和 Language layer2 Down 读取原始 FP16 权重，并以 ACC32 累加、BF16 输出；其余相关激活保持 A16。patch/merger、embedding、norm/bias、动作预处理和输出回投保持浮点，设备部分 FP16、CPU 归一化 FP32。W8 文件中额外量化的动作预处理副本不用于这条路径。
+
+这组配置的累加边界由 RTC 实现固定，base 的分阶段 ACC 参数属于另一入口。权重安装发生在加载时，推理阶段复用已安装权重和准备好的图。实现见 [runner](../../../runners/wall_oss/runner.py)、[适配器](../../../../python/rpu_backend/adapters/wall_oss/__init__.py)和 [W8 转换器](../../../../python/rpu_backend/quant/convert_wall_oss_w8a16.py)。
+
+<a id="准备权重并运行"></a>
 
 <a id="quantization"></a>
-## 下载与转换
 
-以下命令在仓库根目录执行。先把 `/path/to/...` 换成实际路径；`vi` 这一步编辑刚复制的 TOML，保存后再执行下一行。每个代码块是一个独立精度方案，只执行所需方案；已有同身份量化目录时跳过对应转换行。
+<a id="weight-sources"></a>
+
+<a id="weights"></a>
+
+## 准备与运行
 
 <a id="run-fp16"></a>
-### FP16：原始浮点父权重直接运行
+
+### 获取原始 WRC
+
+原始权重、normalizer、processor、源码和输入从同一 WRC 交付获取。公开 [Wall-OSS 0.5](../base/README.md#weights) 是不同资产；本组转换的 `--src` 始终使用 WRC 原始目录。W8 目录由本仓库转换器生成，FP16 目录继续提供浮点模块和预处理权重。
+
+将交付原始目录记为 `WRC_SRC`。FP16 的 `input.checkpoint` 直接填写该目录。
 
 ```bash
-cp examples/configs/wall_oss/rtc/fp16.toml /tmp/wall_rtc_fp16.toml
-# input.checkpoint = 原交付 WRC 目录；input.images/instruction/proprioception = 配对输入。
-# 保留受控 opt-in / prefix 范围；在 [run] 添加本次 output_dir。
-vi /tmp/wall_rtc_fp16.toml
-python examples/run.py --config /tmp/wall_rtc_fp16.toml
+WRC_SRC=/absolute/path/model-cache/wrc_sf_v728_0_15000
 ```
 
 <a id="run-rtc-w8"></a>
-### 客户 WRC RTC W8A16
+
+### 转换 W8
 
 ```bash
-SRC=/path/to/model-cache/wrc_sf_v728_0_15000  # 客户 WRC 原始目录，不能换成公开 base
-DST=/path/to/model-cache/wrc_v728_w8a16  # 新 W8 输出
-python python/rpu_backend/quant/convert_wall_oss_w8a16.py --src "$SRC" --dst "$DST"
-cp examples/configs/wall_oss/rtc/w8a16.toml /tmp/wall_rtc_w8.toml
-# input.checkpoint = DST 实际路径；input.fp16_checkpoint = SRC 实际路径。
-# input.images/instruction/proprioception = 配对三图、指令与状态。
-# 在 [run] 添加 output_dir；保留原受控 opt-in 和 prefix 范围。
-vi /tmp/wall_rtc_w8.toml
-python examples/run.py --config /tmp/wall_rtc_w8.toml
+WRC_W8=/absolute/path/model-cache/wrc_v728_w8a16
+python python/rpu_backend/quant/convert_wall_oss_w8a16.py \
+  --src "$WRC_SRC" --dst "$WRC_W8"
 ```
 
-**FP16 无需量化。** 源/量化目录保持兄弟关系，以便 `source` 元数据解析。公开 base 与客户 WRC 不能混用；group0 与 group32 使用不同 scale 配方。转换计算使用 CPU，命令需在匹配的后端宿主环境中执行。
+W8 模板的 `input.checkpoint` 填 `WRC_W8` 实际路径，`input.fp16_checkpoint` 填 `WRC_SRC` 实际路径；保留两个配对目录。
 
-**实现位置**：[python/rpu_backend/quant/convert_wall_oss_w8a16.py](../../../../python/rpu_backend/quant/convert_wall_oss_w8a16.py)；[convert_wall_oss.py](../../../../python/rpu_backend/quant/convert_wall_oss.py)。W8/W4 CLI 分别调用各模块的 `convert_checkpoint()`。W4 默认 G32，两个 decoder expert 的投影均为 INT4；用 `--group-size 0` 选择逐通道 scale。
+<a id="使用"></a>
 
-## 选择配置
-
-| 配置 | 资产 / 精度 | 状态 |
-|---|---|---|
-| [fp16.toml](fp16.toml)，推荐配置 | 受控WRC v728 FP16 | CONTROLLED_EVALUATION |
-| [w8a16.toml](w8a16.toml) | 配对WRC v728 W8，原固定混合累加边界 | CONTROLLED_EVALUATION |
-
-两份配置均为三图、动作长度20、6步去噪，使用固定累加边界。W8需要配对的FP16 checkpoint提供CPU胶水权重。
-
-## 使用
-
-复制配置，填写checkpoint、三张RGB图片、指令、27维状态与输出目录。图片顺序为 `face_view`、`left_wrist_view`、`right_wrist_view`；推荐三张336×336图片：
+### 绑定输入并运行
 
 ```bash
-python examples/run.py --config /path/to/wall_rtc.toml --check-config
-python examples/run.py --config /path/to/wall_rtc.toml
+WRC_CONFIG=examples/configs/wall_oss/rtc/w8a16.toml
+cp "$WRC_CONFIG" /tmp/wall_rtc.toml
+# 按上一节填写 checkpoint；FP16 改选 fp16.toml，只填原始 checkpoint。
+# input.images/instruction/proprioception = 配对输入；run.output_dir = 结果目录。
+vi /tmp/wall_rtc.toml
+python examples/run.py --config /tmp/wall_rtc.toml
 ```
 
-采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认3次正式运行。
+<a id="输入与执行参数"></a>
 
-## 可修改参数与限制
+### 输入与常调参数
 
-- 每路图片经processor处理后必须恰为576个patch，三图共1728个patch；336×336对应grid `[1,24,24]`。其他宽高须确认处理后的grid，不能只按图片总面积判断。
-- `input.prefix_length_range=[599,640]` 是图片token展开后的实际前缀长度范围，含两端；该范围只准备P640/C320图。默认指令 `Move the object to the target.` 配合上述三图得到622；更换指令或状态后须仍处于范围内。
-- 默认 `input.inference_delay=0`。更改图片几何、前缀范围或执行配置后使用新进程，运行仍受板卡锁保护。
+填写三张图片、指令与 26 维 `proprioception`。相机顺序为 `face_view`、`left_wrist_view`、`right_wrist_view`。每路图片经 processor 后为 576 个 patch，三图共 1728 个；336×336 对应 grid `[1,24,24]`。
 
-`--check-config`只检查配置结构，不读取权重或板卡。算子库使用main/DDR两个REF，见 [算子库规则](../../../../docs/runtime_assets.md)。
+| 字段 | 模板值 | 可选范围 | 修改时的关联 |
+|---|---|---|---|
+| `input.images` | 三个占位路径 | 三张实际图片 | 处理后满足每图 576 patch |
+| `input.instruction` | `Move the object to the target.` | 非空文本 | 与图片、状态共同决定实际前缀 |
+| `input.prefix_length_range` | `[599,640]` | 本组固定范围 | 约束图像 token 展开后的长度；模板输入实际为 622 |
+| `input.inference_delay` | 0 | 0–10 的整数 | 非零时同时提供 `rtc_prefix_actions` |
+| `input.rtc_prefix_actions` | 省略 | 有限浮点 `[L,26]` 或 `[1,L,26]` | 使用物理动作空间，delay≤L≤20；delay=0 时省略 |
+| `run.warmup/runs/seed` | 2 / 3 / 0 | 预热≥0、采样≥1、seed≥0 | 按所需运行次数调整 |
+| `cpu.threads` | 模板未指定 | 正整数 | 省略时继承运行环境 |
+
+公共字段见[参数说明](../../PARAMETERS.md)，运行库见[算子库说明](../../../../docs/runtime_assets.md)。更换冷配置后使用新进程。

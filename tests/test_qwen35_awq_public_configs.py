@@ -15,7 +15,7 @@ FIXTURES = ROOT / "tests/fixtures/qwen35_quanttrio_awq"
 
 def config(size, prefill=64):
     return common.load_config(
-        ROOT / f"examples/configs/qwen3_5/text/{size}b/quanttrio_awq_g128_p{prefill}_d4096.toml")
+        ROOT / f"examples/configs/qwen3_5/text/{size}b/w4a16_mlp_awq_g128_p{prefill}_d4096.toml")
 
 
 @pytest.mark.parametrize("size", [2, 4, 9])
@@ -33,7 +33,7 @@ def test_public_awq_configs_bind_original_asset_without_mutation(size, tmp_path,
     original = (FIXTURES / f"{size}b.json").read_bytes()
     (checkpoint / "config.json").write_bytes(original)
     base = common.load_config(
-        ROOT / f"examples/configs/qwen3_5/text/{size}b/quanttrio_awq_g128.toml")
+        ROOT / f"examples/configs/qwen3_5/text/{size}b/w4a16_mlp_awq_g128.toml")
     common.validate_checkpoint_profile(base, str(checkpoint))
     assert base["example"]["registry_alias"] == alias
     assert base["input"]["prompt"] and base["input"]["decode_steps"] == 4

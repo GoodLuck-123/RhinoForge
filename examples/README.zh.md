@@ -1,6 +1,6 @@
 # 模型示例
 
-[English](README.md) · [配置索引](configs/CONFIGURATIONS.md) · [转换命令](configs/WEIGHTS.md#quantization) · [权重来源](configs/WEIGHTS.md) · [支持矩阵](../docs/model_support.zh.md)
+[English](README.md) · [配置索引](configs/CONFIGURATIONS.md) · [通用参数](configs/PARAMETERS.md) · [命名规则](configs/NAMING.md) · [转换命令](configs/WEIGHTS.md#quantization) · [权重来源](configs/WEIGHTS.md) · [支持矩阵](../docs/model_support.zh.md)
 
 选择模型和推荐 TOML，按模型指南准备权重与输入。所有公开配置统一使用 [`run.py`](run.py)，必须传入 `--config`。
 
@@ -13,7 +13,7 @@
 | [DINOv3](configs/dinov3/README.md) | [ViT-B FP16](configs/dinov3/vit_b/fp16.toml) |
 | [G0.5](configs/g05/README.md) | [3cam FP16](configs/g05/3cam/fp16.toml) |
 | [Gemma4](configs/gemma4/README.md) | [E4B FP16](configs/gemma4/e4b/fp16.toml) |
-| [GR00T](configs/gr00t/README.md) | [224 FP16](configs/gr00t/n1_7_droid/fp16.toml) |
+| [GR00T](configs/gr00t/README.md) | [224 FP16](configs/gr00t/n1_7_droid/224/fp16.toml) |
 | [HyVLA](configs/hy_vla/README.md) | [3cam FP16](configs/hy_vla/3cam/fp16.toml) |
 | [HY Embodied UMI](configs/hy_embodied/README.md) | [UMI FP16](configs/hy_embodied/umi/fp16.toml) |
 | [Llama](configs/llama/README.md) | [3.2-1B FP16](configs/llama/3_2_1b/fp16.toml) |
@@ -26,9 +26,9 @@
 | [Wall-OSS base](configs/wall_oss/README.md) | [3cam 224 FP16](configs/wall_oss/base/3cam/224/fp16.toml) |
 | [Wall-OSS RTC](configs/wall_oss/rtc/README.md) | [FP16](configs/wall_oss/rtc/fp16.toml) |
 | [Wall-OSS sorting](configs/wall_oss/sorting/README.md) | [W8A16](configs/wall_oss/sorting/w8a16.toml) |
-| [InternVLA](configs/internvla/README.md) | [NavDP FP16](configs/internvla/navdp/fp16.toml) |
+| [InternVLA](configs/internvla/README.md) | [NavDP System2 W8](configs/internvla/navdp/w8a16_system2.toml) |
 | [LingBot v2](configs/lingbot/v2/README.md) | [3cam T3 W8A16](configs/lingbot/v2/3cam_t3/w8a16.toml) |
-| [LingBot v1](configs/lingbot/README.md) | [4B mixed](configs/lingbot/v1/4b_mixed.toml) |
+| [LingBot v1](configs/lingbot/README.md) | [4B CPU Vision / FP16](configs/lingbot/v1/4b/fp16_cpu_vision.toml) |
 | [HALO](configs/halo/README.md) | [FP16 Expert](configs/halo/action_expert/fp16.toml) |
 
 Qwen3.5 35B MoE 仅支持已登记的受控配置。
@@ -47,6 +47,7 @@ python examples/run.py --config /tmp/g05.toml
 `--check-config` 无需 Torch/设备，只检查配置；`--help` 显示统一命令的选项。ACC、文本长度、CPU 线程和采样次数在同一 TOML 中修改，合法值见模型指南。
 
 <a id="logging-and-output"></a>
+<a id="日志与输出"></a>
 ## 日志与运行摘要
 
 在 `[run]` 同级加入以下配置；省略时使用相同默认值：

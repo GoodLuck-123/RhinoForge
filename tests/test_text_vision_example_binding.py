@@ -106,7 +106,7 @@ def test_qwen35_moe_text_example_uses_exact_public_core_profile(
     monkeypatch.setattr(generation, "_generate", generate)
     execution = load(monkeypatch, "example_moe_text_execution", "python/rpu_backend/api/_execution.py")
     suffix = {4: "_tp4", 6: "_tp6", 8: ""}[cores]
-    config = common.load_config(ROOT / f"examples/configs/qwen3_5/text/35b_a3b/mixed_e4m3{suffix}.toml")
+    config = common.load_config(ROOT / f"examples/configs/qwen3_5/text/35b_a3b/fp8_e4m3_experts_attn_gdn{suffix}.toml")
     config["input"]["decode_steps"] = decode_steps
     request = config["rpu_execution"]
     model = SimpleNamespace(config=SimpleNamespace(
@@ -229,7 +229,7 @@ def test_qwen3vl_32b_example_reuses_public_quantized_loader_binding(monkeypatch)
     monkeypatch.setattr(common, "validate_checkpoint_profile", metadata_check)
     runner = load(monkeypatch, "example_32b_binding", "examples/common/preparation.py")
     registry = load(monkeypatch, "example_32b_registry", "python/rpu_backend/model_registry.py")
-    config = common.load_config(ROOT / "examples/configs/qwen3_vl/vl/32b/w8a16_legacy.toml")
+    config = common.load_config(ROOT / "examples/configs/qwen3_vl/vl/32b/w8a16_text.toml")
     checkpoint = str(registry.model_path(config["example"]["registry_alias"]))
     ids = Mock()
     processor = SimpleNamespace(apply_chat_template=Mock(return_value={"input_ids": ids}),

@@ -29,16 +29,16 @@
 GR00T、NavDP、独立 SigLIP 旧调用需按下文迁移后显式传入配置。
 完整默认值与别名见 [legacy.py](../examples/common/legacy.py)。
 
-以下重复文件已删除。运行命令的 `--config` 和迁移命令的 `--template` 仍可使用仓库内的旧路径，自动转到标准配置；复制或编辑文件时使用标准路径。已有自定义文件按原内容读取。表内路径均相对于 `examples/configs/`。
+配置名现在写明量化模块、转换方法和分组大小，见[命名规则](../examples/configs/NAMING.md)及[改名表](../examples/configs/config_names.json)。运行命令的 `--config` 和迁移命令的 `--template` 仍可使用仓库内的旧路径，包括下表已删除的重复文件。复制或编辑文件时使用标准路径；已有自定义文件按原内容读取。表内路径均相对于 `examples/configs/`。
 
 | 旧路径 | 标准路径 |
 |---|---|
 | `wall_oss/base/fp16.toml` | `wall_oss/legacy/fp16.toml` |
 | `wall_oss/base/w8a16.toml` | `wall_oss/legacy/w8a16.toml` |
-| `wall_oss/base/w4a16.toml` | `wall_oss/legacy/w4a16.toml` |
-| `wall_oss/base/w4a16_pgrp.toml` | `wall_oss/legacy/w4a16_pgrp.toml` |
-| `lingbot/v2/6b_w8a16.toml` | `lingbot/legacy/exact_z2/6b_w8a16.toml` |
-| `rhinovla/v3/w8a16.toml` | `rhinovla/v3/expert_w8a16.toml` |
+| `wall_oss/base/w4a16.toml` | `wall_oss/legacy/w4a16_channel.toml` |
+| `wall_oss/base/w4a16_pgrp.toml` | `wall_oss/legacy/w4a16_g32.toml` |
+| `lingbot/v2/6b_w8a16.toml` | `lingbot/legacy/exact_z2/6b/w8a16.toml` |
+| `rhinovla/v3/w8a16.toml` | `rhinovla/v3/w8a16_action.toml` |
 
 `rhinovla/v1/fp16.toml` 保留调用方提供 factory、checkpoint 与请求的原有含义。
 [official_fp16.toml](../examples/configs/rhinovla/v1/official_fp16.toml) 使用
@@ -70,12 +70,12 @@ GR00T、NavDP、独立 SigLIP 旧调用需按下文迁移后显式传入配置�
 ```bash
 # GR00T：提供当前 checkpoint 对应的三图 observation。
 python examples/migrate_config.py --source /path/to/old-gr00t.toml \
-  --template examples/configs/gr00t/n1_7_droid/fp16.toml --output /path/to/new-gr00t.toml \
+  --template examples/configs/gr00t/n1_7_droid/224/fp16.toml --output /path/to/new-gr00t.toml \
   --input observation=/path/to/three-camera-observation.pt
 
 # NavDP：提供完整链路 fixture 与资产清单。
 python examples/migrate_config.py --source /path/to/old-navdp.toml \
-  --template examples/configs/internvla/navdp/fp16.toml --output /path/to/new-navdp.toml \
+  --template examples/configs/internvla/navdp/w8a16_system2.toml --output /path/to/new-navdp.toml \
   --input fixture=/path/to/fullchain-fixture.pt --input asset_manifest=/path/to/assets.json
 
 # SigLIP → Pi0.5：明确切换到完整策略并提供配套 batch 和 checkpoint。
@@ -90,7 +90,7 @@ python examples/migrate_config.py --source /path/to/old-lingbot.toml \
 
 # MoE：提供真实文本及其目标 token 序列的 SHA256。
 python examples/migrate_config.py --source /path/to/old-moe.toml \
-  --template examples/configs/qwen3_5/text/35b_a3b/mixed_e4m3_p4096_d4096.toml \
+  --template examples/configs/qwen3_5/text/35b_a3b/fp8_e4m3_experts_attn_gdn_p4096_d4096.toml \
   --output /path/to/new-moe.toml --input prompt_file=/path/to/prompt.txt \
   --input input_ids_sha256="$INPUT_IDS_SHA256"
 ```

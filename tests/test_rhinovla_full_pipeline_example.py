@@ -13,8 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "examples/configs/rhinovla/v3"
 
 
-@pytest.fixture(params=["full_pipeline_w8a16.toml",
-                        "full_pipeline_w8a16_high_precision_vector_qk.toml"])
+@pytest.fixture(params=["w8a16_pipeline.toml",
+                        "w8a16_pipeline_high_fused_vector_qk.toml"])
 def config_path(request):
     return CONFIG_DIR / request.param
 
@@ -31,7 +31,7 @@ def test_shared_runner_selects_caller_factory_and_preserves_controlled_v1(module
     selected = []
     monkeypatch.setattr(policies, "_factory", lambda runner: selected.append("factory"))
     monkeypatch.setattr(policies, "_official", lambda runner: selected.append("controlled"))
-    runner._prepare(common.load_config(CONFIG_DIR / "full_pipeline_w8a16.toml"))
+    runner._prepare(common.load_config(CONFIG_DIR / "w8a16_pipeline.toml"))
     runner._prepare(common.load_config(CONFIG_DIR.parent / "v1/official_fp16.toml"))
     runner._prepare(common.load_config(CONFIG_DIR.parent / "v1/fp16.toml"))
     assert selected == ["factory", "controlled", "factory"]

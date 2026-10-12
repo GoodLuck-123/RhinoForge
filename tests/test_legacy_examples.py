@@ -71,8 +71,8 @@ def test_run_model_lists_original_targets_without_config_or_runtime():
 
 
 @pytest.mark.parametrize("entry,config", [
-    ("gr00t", "gr00t/n1_7_droid/fp16.toml"),
-    ("internvla_navdp", "internvla/navdp/fp16.toml"),
+    ("gr00t", "gr00t/n1_7_droid/224/fp16.toml"),
+    ("internvla_navdp", "internvla/navdp/w8a16_system2.toml"),
     ("g05", "g05/3cam/fp16.toml"),
 ])
 def test_explicit_current_config_can_use_legacy_entry(entry, config):
@@ -133,7 +133,7 @@ def test_existing_config_alias_path_keeps_caller_file_or_directory(monkeypatch, 
 def test_cli_symlink_keeps_prompt_relative_to_real_config(monkeypatch, tmp_path):
     actual = tmp_path / "inputs/config.toml"
     actual.parent.mkdir()
-    actual.write_text((CONFIGS / "qwen3_5/text/35b_a3b/mixed_e4m3_p4096_d4096.toml").read_text())
+    actual.write_text((CONFIGS / "qwen3_5/text/35b_a3b/fp8_e4m3_experts_attn_gdn_p4096_d4096.toml").read_text())
     alias = tmp_path / "config.toml"
     alias.symlink_to(actual)
     seen = []

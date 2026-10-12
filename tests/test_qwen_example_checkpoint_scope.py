@@ -44,7 +44,7 @@ def write_metadata(tmp_path, metadata):
 
 @pytest.mark.parametrize("size", ["0_6b", "1_7b", "4b", "8b", "14b"])
 def test_qwen3_w8_declared_scope_accepts_metadata_not_path(common, tmp_path, size):
-    cfg = common.load_config(ROOT / f"examples/configs/qwen3/text/{size}/w8a16.toml")
+    cfg = common.load_config(ROOT / f"examples/configs/qwen3/text/{size}/w8a16_text_head.toml")
     common.validate_checkpoint_profile(cfg, write_metadata(tmp_path, qwen3_metadata(size, True)))
 
 
@@ -58,7 +58,8 @@ def test_dense_checkpoint_scope_accepts_original_example(common, tmp_path, size,
 
 @pytest.mark.parametrize("precision,quantized", [("fp16", True), ("w8a16", False)])
 def test_qwen3_valid_other_precision_cannot_inherit_label(common, tmp_path, precision, quantized):
-    cfg = common.load_config(ROOT / f"examples/configs/qwen3/text/0_6b/{precision}.toml")
+    stem = "w8a16_text_head" if precision == "w8a16" else precision
+    cfg = common.load_config(ROOT / f"examples/configs/qwen3/text/0_6b/{stem}.toml")
     with pytest.raises(common.ConfigError, match="precision/scope"):
         common.validate_checkpoint_profile(cfg, write_metadata(tmp_path, qwen3_metadata("0_6b", quantized)))
 
@@ -67,7 +68,7 @@ def test_qwen3_valid_other_precision_cannot_inherit_label(common, tmp_path, prec
     ("quantized_lm_head", False), ("quantized_lm_head", 1),
     ("skip_modules", ["lm_head"]), ("quantized_embed_tokens", True)])
 def test_qwen3_w8_head_embedding_and_skip_scope_are_bound(common, tmp_path, field, value):
-    cfg = common.load_config(ROOT / "examples/configs/qwen3/text/0_6b/w8a16.toml")
+    cfg = common.load_config(ROOT / "examples/configs/qwen3/text/0_6b/w8a16_text_head.toml")
     metadata = qwen3_metadata("0_6b", True)
     metadata["quant_config"][field] = value
     with pytest.raises(common.ConfigError, match="precision/scope"):
@@ -75,7 +76,7 @@ def test_qwen3_w8_head_embedding_and_skip_scope_are_bound(common, tmp_path, fiel
 
 
 def test_another_valid_qwen3_size_cannot_inherit_label(common, tmp_path):
-    cfg = common.load_config(ROOT / "examples/configs/qwen3/text/0_6b/w8a16.toml")
+    cfg = common.load_config(ROOT / "examples/configs/qwen3/text/0_6b/w8a16_text_head.toml")
     with pytest.raises(common.ConfigError, match="architecture and size"):
         common.validate_checkpoint_profile(cfg, write_metadata(tmp_path, qwen3_metadata("1_7b", True)))
 
@@ -96,7 +97,7 @@ def test_legacy32_accepts_only_legacy_metadata_not_runtime_w8(common, tmp_path):
     from rpu_backend.quant.load import _QWEN3_VL_32B_W8A16_QUANT_CONFIG
     from test_qwen3_vl_envelope_preflight import runtime_32b_config
 
-    cfg = common.load_config(ROOT / "examples/configs/qwen3_vl/vl/32b/w8a16_legacy.toml")
+    cfg = common.load_config(ROOT / "examples/configs/qwen3_vl/vl/32b/w8a16_text.toml")
     runtime = runtime_32b_config(8)
     with pytest.raises(common.ConfigError, match="precision/scope"):
         common.validate_checkpoint_profile(cfg, write_metadata(tmp_path, runtime.to_dict()))
@@ -108,7 +109,7 @@ def test_wrong_qwen3_precision_rejects_before_tokenizer_and_weights(common, tmp_
     import transformers
     import rpu_backend.model_registry
 
-    cfg = common.load_config(ROOT / "examples/configs/qwen3/text/0_6b/w8a16.toml")
+    cfg = common.load_config(ROOT / "examples/configs/qwen3/text/0_6b/w8a16_text_head.toml")
     checkpoint = write_metadata(tmp_path, qwen3_metadata("0_6b", False))
     monkeypatch.setattr(rpu_backend.model_registry, "model_path", lambda _: Path(checkpoint))
     tokenizer = Mock(side_effect=AssertionError("must reject before tokenizer/weight loading"))

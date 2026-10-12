@@ -1,84 +1,93 @@
 # LingBot 配置
 
-[当前 v2 配置](v2/README.md) · [配置索引](../CONFIGURATIONS.md)
+[配置索引](../CONFIGURATIONS.md) · [v2 详细配置](v2/README.md)
 
-| 入口 | 配置与范围 |
-|---|---|
-| [v2 runtime Graph](v2/README.md) | FP16/W8A16；2/3 相机；T16/32/64/128/160，另有三相机 T3 |
-| [v2 exact-Z2 归档](legacy/exact_z2/README.md) | W8A16；3 相机 256×256；REAL215–225、P225；公开默认对齐掩码 |
-| [v1](v1/4b_mixed.toml) | 单图输入；CPU FP32 Vision + 设备 FP16 文本/动作 |
+先按模型与调用入口选择目录。LingBot v1 使用 4B 权重；v2 使用 6B 权重，其中 runtime Graph 与 exact-Z2 对应不同输入和执行方式。
 
-v2 当前入口直接调用 `build_lingbot_vla_v2` / `get_action`，保留 Vision、Prefill、Action Graph，使用稀疏 Top4 路由。exact-Z2 使用旧 facade 和固定布局。两条路径均保留 32 个路由专家、共享专家、36 层 Action 和十步去噪；训练配置、输入及布局分别绑定。
-
-<a id="weights"></a>
-<a id="weight-sources"></a>
-## 官方来源与原始存储精度
-
-| 模型 / 资产 | 官方下载 / 源码 | 原始存储精度与目录 |
-|---|---|---|
-| LingBot v2 6B | [robbyant/lingbot-vla-v2-6b](https://huggingface.co/robbyant/lingbot-vla-v2-6b)；[官方源码](https://github.com/robbyant/lingbot-vla-v2) | [HF 元数据](https://huggingface.co/api/models/robbyant/lingbot-vla-v2-6b)中的主要模型 safetensors 为 **F32**，固定版本 `11c703bf6a5c1f45b3b69168482da11fdbba53d7`；当前入口读 `$RPU_MODEL_CACHE/lingbot-vla-v2-6b` |
-| LingBot v1 4B | [robbyant/lingbot-vla-4b](https://huggingface.co/robbyant/lingbot-vla-4b)；[官方源码](https://github.com/robbyant/lingbot-vla) | [HF 元数据](https://huggingface.co/api/models/robbyant/lingbot-vla-4b)为 **F32**，本次核对版本 `87712223fb463f0f6a6565f8feba64c35418e393`；registry 读 `$RPU_MODEL_CACHE/lingbot-vla-4b` |
-| exact-Z2 历史父资产 | 与 v2 同一模型系列；[归档来源](legacy/exact_z2/README.md#weight-sources) | 原始 F32 和历史 BF16 衍生资产分开记录；BF16 交付不是官方原始 F32 下载，不能互换参考 |
-
-下载原始权重后，按对应配置准备 observation；v2 另需配对训练 YAML。
-
-```bash
-export RPU_MODEL_CACHE=/path/to/model-cache
-hf download robbyant/lingbot-vla-v2-6b --revision 11c703bf6a5c1f45b3b69168482da11fdbba53d7 --local-dir "$RPU_MODEL_CACHE/lingbot-vla-v2-6b"
-hf download robbyant/lingbot-vla-4b --revision 87712223fb463f0f6a6565f8feba64c35418e393 --local-dir "$RPU_MODEL_CACHE/lingbot-vla-4b"
-```
+## 配置说明
 
 <a id="weight-recipes"></a>
-## 模块精度与配方
+<a id="配置与权重对应关系"></a>
 
-W/A 是权重/激活精度，不能用于反推官方下载文件的存储精度。同一配方的相机数和文本长度变体合并列出。
+| 配置 | 输入与执行范围 | 实际精度 | 权重获取 |
+|---|---|---|---|
+| [v2 FP16](v2/README.md) | 两/三相机，T16/32/64/128/160，另有三相机 T3 |设备FP16 | [共用 6B FP32 父权重](v2/README.md#weights) |
+| [v2 W8A16](v2/README.md#weight-recipes) | 与对应 FP16 模板配对 | Vision/Text/Action 主要投影 W8A16 | 同一份 [6B 父权重](v2/README.md#weights)，加载时量化 |
+| [exact-Z2 W8A16](legacy/exact_z2/6b/w8a16.toml) | 三相机 256×256，真实前缀 215–225，物理 P225 | W8A16 | [配对的 6B FP32 或 BF16 资产](legacy/exact_z2/README.md#weights) |
+| [v1 4B](v1/4b/fp16_cpu_vision.toml) | v1 observation，十步去噪 | CPU FP32 Vision +设备FP16 Text/Action | [官方 4B FP32 权重](#weights) |
 
-| 配置组 | 模块实际 W/A 精度 | 输入父权重 → 转换方式与命令 |
+T 是有效语言 token 数。各 v2 配置的逐模块量化范围与增量说明放在对应子页。
+
+<a id="v1-混合浮点基准"></a>
+
+### v1 精度与执行
+
+`v1/4b/fp16_cpu_vision.toml` 的 `example.dtype="cpu-fp32+rpu-fp16"` 选择 CPU FP32 视觉编码与设备FP16 文本/动作计算。前端接收已经分词的 observation，加载时转换浮点类型。前缀和专家使用地址稳定的缓冲与保留的 Graph，跨请求重放。
+
+<a id="v2-两种入口的区别"></a>
+
+### v2 两种入口的区别
+
+| 项目 | runtime Graph | exact-Z2 |
 |---|---|---|
-| `v2/{2,3}cam_t*/fp16.toml`，含 `3cam_t3` | Vision、Text、Action 投影 W16/A16；CPU 输入处理与输出快照另计 | 原始 F32 → 加载时转 FP16，无量化；[FP16 完整命令](v2/README.md#fp16-loading) |
-| `v2/{2,3}cam_t*/w8a16.toml`，含 `3cam_t3` | Vision block Q/K/V/O/FC1/FC2、Text 七类投影、Action Q/K/V/O 与共享/路由专家 Gate/Up/Down 为 W8/A16；Vision patch/merger、Action router/IO/条件与归一化参数保留浮点，设备权重为 FP16 | 同一原始 F32 → 加载时逐输出通道 INT8 + FP16 scale；[完整命令](#quantization)。无离线导出 CLI |
-| `legacy/exact_z2/6b_w8a16.toml` | 上述 W8 投影范围；grouped-expert/exact-Z2 安装，使用公开默认对齐掩码 | 配对的 F32 或 BF16 父资产 → [旧加载命令](legacy/exact_z2/README.md#quantization)；不导出量化目录 |
-| `v1/4b_mixed.toml` | Vision 在 CPU 为 W32/A32；Text/Action 在 设备 为 W16/A16 | 官方 F32 → 浮点类型转换，无低比特量化；[单图配置](v1/4b_mixed.toml) |
+| 调用 | `build_lingbot_vla_v2()` / `get_action()` | `Lingbot2Policy.prepare_graphs()` / `infer()` |
+| 执行 | Vision/Prefill/Action Graph，稀疏 Top4 专家 | 多视角 SPM、grouped-expert，固定 P225 |
+| 精度 | FP16、W8A16 | W8A16 |
+| 掩码 | 读取训练 YAML，公开 case 为 false/false | 固定 true/true |
 
-当前 v2 的 Text 使用 `_quantize_text_w8a16()`，Action 使用 `build_expert_moe()` / `pack_sparse_expert_projection()`，Vision 使用共享安装器；[源码与完整加载命令](#quantization)在下方。W8 不量化路由决策矩阵，Top4 语义不因精度名改变。
+两者均使用 36 层 Action、32 个路由专家及共享专家、Top4 和十步去噪。比较结果时选择相同父权重、输入和掩码。
 
+## 准备与运行
+
+<a id="weight-sources"></a>
+<a id="weights"></a>
 <a id="quantization"></a>
-## 加载时量化
+<a id="权重准备入口"></a>
 
-以下命令在仓库根目录执行。量化在最后一行加载模型时发生，不生成独立量化目录。先替换实际路径，再按注释用 `vi` 编辑副本并保存；`--check-config` 只校验配置，不能代替最后的运行命令。
+### 获取 v1 权重
 
-### 当前 v2 W8：三相机公开 T3
+源权重为官方 [robbyant/lingbot-vla-4b](https://huggingface.co/robbyant/lingbot-vla-4b)，FP32，固定 revision `87712223fb463f0f6a6565f8feba64c35418e393`。源码见 [robbyant/lingbot-vla](https://github.com/robbyant/lingbot-vla)。
+
+`example.registry_alias="lingbot-vla-4b"` 读取 `$RPU_MODEL_CACHE/lingbot-vla-4b`。在仓库根目录下载：
 
 ```bash
 export RPU_MODEL_CACHE=/path/to/model-cache
-# 上述缓存根下放完整原始 F32 目录 lingbot-vla-v2-6b。
-export LINGBOT2_TRAINING_CONFIG=/path/to/matching-training.yaml
-export LINGBOT2_PUBLIC_CASE=/path/to/frozen-3cam-t3-case
-cp examples/configs/lingbot/v2/3cam_t3/w8a16.toml /tmp/lingbot2_w8.toml
-# run.output_dir = 本次独立输出目录。input 的三个变量由上面 export 解析。
-vi /tmp/lingbot2_w8.toml
-python examples/run.py --config /tmp/lingbot2_w8.toml
+hf download robbyant/lingbot-vla-4b \
+  --revision 87712223fb463f0f6a6565f8feba64c35418e393 \
+  --local-dir "$RPU_MODEL_CACHE/lingbot-vla-4b"
 ```
+
+此配置不需要离线量化。v2 的固定版本、目录与运行命令分别见 [runtime Graph 准备步骤](v2/README.md#weights)与 [exact-Z2 准备步骤](legacy/exact_z2/README.md#weights)。
 
 <a id="当前-v2-w8两相机-t16-observation"></a>
-### 当前 v2 W8：两相机 T16 观测输入
+
+两相机 T16 的 v2 observation 用法见[对应步骤](v2/README.md#当前-v2-w8两相机-t16-observation)。
+
+<a id="使用"></a>
+<a id="v1-输入与运行"></a>
+
+### v1 输入与运行
+
+CPU observation 字典包含 `images`、`lang_tokens`、`state`、`noise`；可选 `img_masks` 和 `lang_masks` 标识有效输入，省略时对应输入全部有效。在已安装项目依赖的 设备环境中，复制模板并填写路径：
 
 ```bash
-export RPU_MODEL_CACHE=/path/to/model-cache
-export LINGBOT2_TRAINING_CONFIG=/path/to/matching-training.yaml
-export LINGBOT2_2CAM_T16_OBSERVATION=/path/to/real-2cam-t16-observation.pt
-cp examples/configs/lingbot/v2/2cam_t16/w8a16.toml /tmp/lingbot2_2cam_t16_w8.toml
-# run.output_dir = 本次独立输出目录。保留 cameras=2 和 expected_language_tokens=16。
-vi /tmp/lingbot2_2cam_t16_w8.toml
-python examples/run.py --config /tmp/lingbot2_2cam_t16_w8.toml
+cp examples/configs/lingbot/v1/4b/fp16_cpu_vision.toml /tmp/lingbot_v1.toml
+# input.observation 填配对 CPU 张量文件；在 [run] 中添加 output_dir。
+vi /tmp/lingbot_v1.toml
+python examples/run.py --config /tmp/lingbot_v1.toml --check-config
+python examples/run.py --config /tmp/lingbot_v1.toml
 ```
 
-其他相机/T 模板使用匹配的输入，并导出 `input.observation` 指定的变量，如 `LINGBOT2_3CAM_T160_OBSERVATION`。**v2 FP16 无需量化**，同目录 `fp16.toml` 使用原始父权重。v1 单图混合浮点无需量化；exact-Z2 使用独立的 grouped-expert 安装。
+### v1 常用参数
 
-**实现位置**：[examples/runners/lingbot2/optimized.py](../../runners/lingbot2/optimized.py)；[python/rpu_backend/adapters/lingbot_vla_v2/runtime.py](../../../python/rpu_backend/adapters/lingbot_vla_v2/runtime.py)；[python/rpu_backend/adapters/lingbot_vla_v2/convert.py](../../../python/rpu_backend/adapters/lingbot_vla_v2/convert.py)；[python/rpu_backend/adapters/qwen3_vl/vision.py](../../../python/rpu_backend/adapters/qwen3_vl/vision.py)。`run_example_config()` → `build_lingbot_vla_v2()`；Text 用 `_quantize_text_w8a16()`，Action 用 `build_expert_moe()` / `pack_sparse_expert_projection()`，Vision 经共享安装器。runner 从 TOML 选择冷量化参数，不需手设额外量化环境变量，也没有离线转换 CLI。
+| 字段 | 模板值 | 省略时 | 范围与关联 |
+|---|---|---|---|
+| `input.observation` | 文件占位路径 | 必填 | 已分词的 CPU observation，包含显式噪声 |
+| `input.num_steps` | 10 | 10 | 固定十步去噪 |
+| `input.max_seq` | 256 | 256 | RoPE/KV 总容量，至少 53，并覆盖真实前缀与 51 行动作后缀；语言前缀最多 178 行 |
 
-## v1 参数
+模板 `run.warmup/runs/seed=2/3/0`，`cpu.threads` 未配置。通用字段的省略值、日志与诊断选项见[公共参数说明](../PARAMETERS.md)。实现见 [v1 runner](../../runners/lingbot_v1/runner.py) 和 [v1 运行时](../../../python/rpu_backend/adapters/lingbot_vla/runtime.py)。
 
-`input.observation` 指向单图 CPU observation 字典，包含 `images`、`img_masks`、`lang_tokens`、`lang_masks`、`state`、`noise`。模型空间图像为 `[1,256,1176]`，状态为 `[1,75]`，噪声为 `[1,50,75]`；语言 token 与掩码长度一致。`input.num_steps/max_seq` 默认 `10/256`，`run.warmup/runs/seed` 默认 `2/3/0`。`cpu.threads` 为正整数，省略时继承环境。
+## 输出
 
-[运行入口](../../README.zh.md) · [运行库](../../../docs/runtime_assets.md)
+各入口保存归一化动作和运行摘要；输入及输出结构见对应版本说明。

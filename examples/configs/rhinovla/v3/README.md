@@ -1,143 +1,167 @@
-# RhinoVLA v3 factory 配置
-[上级选型](../README.md) · [使用](#使用)
+<a id="rhinovla-v3-factory-配置"></a>
 
-本目录供调用者集成v3 pipeline，入口为 `examples/run.py --config <TOML>`。需要独立的模型源码、checkpoint、真实输入、factory及factory JSON，仓库不附带这些私有资产。
+# RhinoVLA v3 配置
 
-<a id="weights"></a>
-<a id="weight-sources"></a>
-## 来源与原始存储精度
+v3 使用客户交付的 96D 模型，通过 factory 创建 Vision、语言模型和动作专家组成的流水线。五份配置从 FP16 开始，依次扩大量化范围，最后一档再调整非线性精度和 Q/K 归一化。
 
-| 资产 | 下载 / 源码来源 | 原始存储精度与边界 |
+[模型入口](../README.md) · [准备与运行](#quantization) · <a id="weight-recipes"></a>
+
+## 配置说明
+
+五份配置的 `input.checkpoint` 均填写同一份配对的客户 v3 原始浮点权重。W8 在模型加载时完成，不需要预先生成五份量化目录。W8A16 表示逐输出通道 INT8 权重、FP16 scale 和 FP16 激活。
+
+| 配置 | 相对前一档的主要变化 | 权重准备 |
 |---|---|---|
-| v3 / 96D checkpoint、源码和 factory | 调用者/客户配对交付；由资产提供方交付 | 存储 dtype 按交付清单确认；安装器接收相应浮点模块后量化 |
-| 可公开下载的 v1 / 72D | [HuixiAI/RhinoVLA](https://huggingface.co/HuixiAI/RhinoVLA)；[官方源码](https://github.com/HUIXI-AI/RhinoVLA) | 不同模型，不能作为 v3 量化父权重。官方下载命令只在 [v1 页](../v1/README.md#weight-sources)适用 |
+| [FP16](fp16.toml) | 浮点基准，已启用缓存、融合和 Graph replay | [同一套客户 v3 原始权重](#quantization)，加载为 FP16 |
+| [专家 W8](w8a16_action.toml) | 动作专家每层 Q/K/V/O、Gate/Up/Down 七类投影改为 W8 | [复用原始权重](#quantization)，加载时量化 |
+| [完整专家 W8](w8a16_action_adarms.toml) | 增加 18 组 AdaRMS 条件投影 W8 | [复用原始权重](#quantization)，加载时转换并生成表 |
+| [全流水线 W8](w8a16_pipeline.toml) | 增加 Vision、Text、动作 IO、最终 AdaRMS 的 W8；同时调整缓存、padding 和 CPU 设置 | [复用原始权重](#quantization)，加载时量化 |
+| [全流水线 W8 + HIGH/vector QK](w8a16_pipeline_high_fused_vector_qk.toml) | 权重范围相同，开启五项算术、融合和预计算选项 | [复用原始权重](#quantization)，同一量化配方 |
 
-因此没有可诚实提供的 v3 通用 `hf download` 命令。先向交付方取得实际 checkpoint、模型源码、可信 factory/JSON 和 request，再执行下方加载命令；公开 v1 下载不能补齐这组资产。
+两份全流水线配置为实验配方。各配置的模块范围和执行差异如下；表中的递进关系用于解释，每份 TOML 均为完整配置。
 
-<a id="weight-recipes"></a>
-## 模块精度与配方
+<a id="baseline"></a>
 
-以下全部由同一份匹配的客户 v3 浮点父权重加载，W8 表示逐输出通道 INT8 + FP16 scale，激活 A16。
+### FP16 基准
 
-| 配置 | 模块实际 W/A 精度 | 转换实现 / 完整命令 |
+流水线先编码图像，再生成语言模型 prefix，最后执行十步动作去噪。动作专家为 18 层、隐藏维度 1024，动作 horizon 为 30；加入 state token 后，专家处理 31 个有效 suffix token。
+
+FP16 模板已经开启下列优化，后续四档沿用：
+
+| 部分 | 已开启的行为 | 主要字段 |
 |---|---|---|
-| `fp16.toml` | Vision/Text/Action 的 设备 投影 W16/A16 | 无量化；[FP16 加载命令](#fp16-loading) |
-| `expert_w8a16.toml` | Action expert Q/K/V/O/Gate/Up/Down 为 W8/A16；其余 Vision/Text、AdaRMS 条件投影和 IO 为 FP16 | `convert_expert_for_rpu()`；[下方专家命令](#quantization) |
-| `full_expert_w8a16.toml` | 再增加 18 组 AdaRMS 条件投影 W8/A16；最终 norm 预计算、IO 与 Vision/Text 仍浮点 | 再调用 `_prepare_full_w8_cond_weights()` / `_prepare_full_w8_adarms_tables()`；[下方完整专家命令](#quantization) |
-| `full_pipeline_w8a16.toml` | Vision block/patch/merger、Text 七类投影、Action expert/IO/AdaRMS 线性投影 W8/A16；norm/bias/embedding/位置仍浮点 | 再覆盖 `quantize_text_prefix()`、Vision 安装和 `_prepare_denoise_loop_weights()`；[下方完整流水线命令](#quantization) |
-| `full_pipeline_w8a16_high_precision_vector_qk.toml` | 同上一行 W8/A16；HIGH 与向量 Q/K norm 改变计算精度，不是另一种权重格式 | 同一转换范围；[HIGH 命令](#全流水线-w8--highvector-qk) |
+| Vision | 多视角批处理、准备数据缓存；设备 patch/merger、融合 merger、将 merger 纳入图重放 | `VISION_BATCH_VIEWS`、`VISION_PREP_CACHE`；`rpu_patch_embed`、`rpu_mergers`、`fused_merger`、`bake_merger` |
+| Language | 缓存 prefix 准备数据，在设备组装 prefix；复用存储、partial MRoPE、merger scatter | `prefix_prep_cache`、`prefix_prep_rpu`、`prefix_no_clone`、`partial_mrope`、`merger_scatter` |
+| Action | 展开十步去噪、共享 prefix cache、复用 prefix 存储；state/mask 投影在每次请求的首步计算后复用 | `denoise_unroll`、`shared_cache`、`prefix_alias`、`DENOISE_STATIC_CONTEXT_CACHE` |
+| 专家计算 | AdaRMS 表预计算并驻留、gated residual 简化、SiLU×Mul 和专家算子融合、KV 对齐 | `PRECOMPUTE_ADARMS`、`ADARMS_RESIDENT`、`GATED_NO_SUB`、`FUSED_SILU_MUL`、`EXPERT_FUSIONS`、`ALIGNED_KV` |
+| 图执行 | 三个组件开启快速重放，Vision/Language 重放时跳过重复的预加载处理 | `fast_replay`、`preload_replay_skip` |
 
-实现源码和入口调用链列在下方。它们是运行时安装函数，**没有离线 checkpoint 转换 CLI，也不导出量化目录**；配置必须由真实 factory 安装并通过首次推理前的范围核对。
+本页表格中的大写开关均带 `RPU_RHINOVLA_` 前缀，写在 `[example.opt_in]`；小写字段位于对应的 `rpu_execution.components` 表。全部模板关闭 `PACKED_QKV` 和 `SKIP_ADARMS_GEMV`。
 
-<a id="quantization"></a>
-## 加载时量化
+FP16 描述运行时的主要权重与激活精度。AdaRMS 条件投影在加载时用浮点计算生成表，表以 FP16 存储；这些预计算不计入每次推理耗时。
 
-<a id="fp16-loading"></a>
-### FP16 加载
+### 专家 W8：量化七类主干投影
 
-```bash
-cp examples/configs/rhinovla/v3/fp16.toml /tmp/rhinovla_fp16.toml
-# input.checkpoint/request/factory_config = 同一客户交付的实际路径。
-# input.runtime_factory = 已安装可信 module:callable；run.output_dir = 本次独立目录。
-vi /tmp/rhinovla_fp16.toml
-python examples/run.py --config /tmp/rhinovla_fp16.toml
+相对 FP16，选择专家 W8 的 `example.profile_id`，将 `example.dtype` 改为 `w8a16`，并增加量化参数：
+
+```toml
+[example]
+profile_id = "rhinovla.v3.w8a16.expert.trusted-factory"
+dtype = "w8a16"
+
+[input]
+expert_w8a16 = true
+full_w8a16 = false
 ```
 
-此块只安装浮点模型，不执行 W8 转换；以下各块才选择不同 W8 范围。
+18 层专家中，Attention 的 Q/K/V/O 和 MLP 的 Gate/Up/Down 使用 W8A16。Vision、Text、AdaRMS 条件投影、最终 norm 和动作 IO 保持浮点路径。七类投影在去噪过程中反复执行，量化减少了这些权重的存储和读取量。
 
-以下命令在仓库根目录执行。量化在最后一行加载模型时发生，不生成独立量化目录。先替换实际路径，再按注释用 `vi` 编辑副本并保存；`--check-config` 只校验配置，不能代替最后的运行命令。
+该模板通过上述 factory 参数选择专家精度，两个环境开关 `EXPERT_W8A16` 和 `FULL_W8A16` 仍为 `"0"`。runner 在首次推理前核对实际安装的 INT8 权重和 FP16 scale。
 
-### 仅动作专家七类投影 W8
+### 完整专家 W8：再量化 AdaRMS 条件投影
 
-```bash
-cp examples/configs/rhinovla/v3/expert_w8a16.toml /tmp/rhinovla_expert.toml
-# input.checkpoint = 客户原始 v3 checkpoint；input.request = 配对请求文件。
-# input.runtime_factory = 已安装且可信的真实 module:callable。
-# input.factory_config = 该 factory 的真实 JSON 配置。
-# 在 [run] 中添加 output_dir；保留模板 expert_w8a16/full_w8a16、trust_model_code 和 opt_in。
-vi /tmp/rhinovla_expert.toml
-python examples/run.py --config /tmp/rhinovla_expert.toml
-```
+相对专家 W8，将 `input.full_w8a16` 改为 `true`，并选择 `example.profile_id="rhinovla.v3.w8a16.full-expert.trusted-factory"`。AdaRMS 条件投影根据 timestep 生成归一化使用的 scale、shift 和 gate。
 
-### 完整专家 W8（加条件投影）
+每层把 Attention 前和 MLP 前的两个条件投影拼成一组，形成 18 组物理权重，对应 36 个逻辑投影。加载时运行这些 W8 投影，生成十步去噪的 FP16 参数表；最终 norm 的条件投影仍用浮点预计算，动作 IO、Vision 和 Text 也保持浮点。
 
-```bash
-cp examples/configs/rhinovla/v3/full_expert_w8a16.toml /tmp/rhinovla_full_expert.toml
-# input.checkpoint = 客户原始 v3 checkpoint；input.request = 配对请求文件。
-# input.runtime_factory = 已安装且可信的真实 module:callable。
-# input.factory_config = 该 factory 的真实 JSON 配置。
-# 在 [run] 中添加 output_dir；保留模板 expert_w8a16/full_w8a16、trust_model_code 和 opt_in。
-vi /tmp/rhinovla_full_expert.toml
-python examples/run.py --config /tmp/rhinovla_full_expert.toml
-```
+基准已经预计算 AdaRMS，因此这一档主要改变生成参数表的权重和算术，量化范围扩大不意味着每次推理的计算量进一步减少。这里的 `input.full_w8a16` 只描述专家范围。
 
-### 全流水线 W8
+<a id="full-pipeline"></a>
 
-```bash
-cp examples/configs/rhinovla/v3/full_pipeline_w8a16.toml /tmp/rhinovla_pipeline.toml
-# input.checkpoint = 客户原始 v3 checkpoint；input.request = 配对请求文件。
-# input.runtime_factory = 已安装且可信的真实 module:callable。
-# input.factory_config = 该 factory 的真实 JSON 配置。
-# 在 [run] 中添加 output_dir；保留模板 expert_w8a16/full_w8a16、trust_model_code 和 opt_in。
-vi /tmp/rhinovla_pipeline.toml
-python examples/run.py --config /tmp/rhinovla_pipeline.toml
-```
+### 全流水线 W8：扩大范围并调整运行设置
+
+选用 `example.profile_id="rhinovla.v3.w8a16.full-pipeline.trusted-factory"`，在完整专家 W8 之上增加以下量化：
+
+| 部分 | 新增 W8 的投影 |
+|---|---|
+| Text prefix | 每层 Q/K/V/O、Gate/Up/Down |
+| Vision | block 投影、折叠后的 patch projection、最终和 DeepStack merger 的 MLP |
+| 动作 IO | action 输入、state 输入、state mask、action mask、action 输出 |
+| 最终 AdaRMS | 最终 norm 的条件投影；预计算从 18 组扩至 19 组 |
+
+norm、bias、embedding 和位置张量保留浮点。除量化外，该模板还显式设置：
+
+| 字段 | 相对完整专家 W8 的变化 | 作用 |
+|---|---|---|
+| `EXPERT_W8A16`、`FULL_W8A16` | `"0"` → `"1"` | 选择全流水线安装路径 |
+| `VISION_INPUT_CACHE` | 新增 `"1"` | 复用 CPU FP16 转换及设备图像输入缓冲，每次请求刷新像素 |
+| `language_model.prefill.padding_rows` | 新增 `10` | 指定物理 prefix padding，逻辑 token 数保持原值 |
+| Text/Vision `linear_acc32` | 显式设为 `false` | 选择 ACC16 累加 |
+| `cpu.threads` | 从继承环境改为 `12` | 指定 Torch CPU 线程数 |
+| `run.inference_mode` | 从默认 `true` 改为 `false` | 使用 `no_grad` 执行 |
+| HIGH、HIGH 融合、gate tanh 预计算、vector Q/K norm | 显式设为 `"0"` | 使用基础非线性和归一化路径 |
+| `PARTIAL_ROPE` | 显式设为 `"0"` | 保持专家原 RoPE 路径；与语言模型的 `partial_mrope` 分别控制 |
+
+全流水线配置同时改变上述量化、缓存和运行参数。
 
 <a id="全流水线-w8--highvector-qk"></a>
-### 全流水线 W8 + HIGH/向量 QK
+
+### HIGH/vector QK：保持权重配方，改变计算路径
+
+本档的 `example.profile_id` 为 `rhinovla.v3.w8a16.full-pipeline-high.trusted-factory`。相对普通全流水线 W8，以下五项从 `"0"` 改为 `"1"`。线程、padding 和 Text/Vision 的 `linear_acc32=false` 保持相同。
+
+| 开关 | 具体变化 |
+|---|---|
+| `HIGH_PRECISION` | Text/Action 使用 Newton RMSNorm、高精度 SiLU 和 gate tanh；Vision merger 使用 GELU-ERF，Vision encoder 的 GELU-tanh 使用 HIGH 实现 |
+| `HIGH_PRECISION_FUSIONS` | Action 使用高精度 norm+shift 融合，Text/Action 使用高精度 SiLU×up 融合，保留中间 FP16 舍入 |
+| `PRECOMPUTE_GATE_TANH` | 加载时把固定 gate 的 tanh 写入 AdaRMS 表，推理重放直接读取结果 |
+| `VECTOR_K_NORM` | 提前清零 K/V 尾部，用已有 `32×128` 对齐缓冲执行 Newton V32 K norm |
+| `VECTOR_Q_NORM` | Q norm 的物理输入从 `62×128` 补齐至 `64×128`，每次清零新增两行，使用 Newton V32 |
+
+vector Q/K 调整的是动作专家的归一化执行方式，后续 RoPE、attention 和投影仍使用逻辑尺寸。HIGH 调整非线性和归一化算术；Linear 的 ACC16/ACC32 由独立字段选择。
+
+<a id="weight-sources"></a>
+<a id="weights"></a>
+
+<a id="quantization"></a>
+
+## 准备与运行
+
+### 配套资产
+
+v3 的 checkpoint、源码和 factory 由客户交付。原始存储 dtype、交付版本及校验和按实际资产记录；公开 v1 的 72D checkpoint 对应另一模型。
+
+| 资产 | 填写位置 | 要求 |
+|---|---|---|
+| v3 原始浮点 checkpoint | `input.checkpoint` | 五份配置共用，路径指向 factory 接受的文件或目录 |
+| 模型源码与构造函数 | `input.runtime_factory` | 使用可导入的 `module:callable`，创建与配置匹配的 `RhinoVLAOnRPU` |
+| factory JSON | `input.factory_config` | 配套模型结构和输入设置；同名量化字段须与 TOML 的布尔值一致 |
+| 请求文件 | `input.request` | 配套的状态、噪声和掩码等请求参数，供 `policy.predict(**request)` 使用 |
+| 输出目录 | `run.output_dir` | 保存本次运行结果 |
+
+factory 接收 runner 传入的 `checkpoint`、`steps`、量化选择和组件配置。安装时同时绑定权重、缓存与算子路径，修改这些选择后使用新进程。缓存复用时仍需刷新图像、状态及噪声等本次输入。
+
+<a id="fp16-loading"></a>
+<a id="使用"></a>
+
+### 运行
+
+在已安装后端和模型依赖的环境中，从仓库根目录执行。以下以 FP16 为例；运行其他档位时，只需在复制步骤选择上表对应的完整 TOML，再填写同一套配对资产。
 
 ```bash
-cp examples/configs/rhinovla/v3/full_pipeline_w8a16_high_precision_vector_qk.toml /tmp/rhinovla_high.toml
-# input.checkpoint = 客户原始 v3 checkpoint；input.request = 配对请求文件。
-# input.runtime_factory = 已安装且可信的真实 module:callable。
-# input.factory_config = 该 factory 的真实 JSON 配置。
-# 在 [run] 中添加 output_dir；保留模板 expert_w8a16/full_w8a16、trust_model_code 和 opt_in。
-vi /tmp/rhinovla_high.toml
-python examples/run.py --config /tmp/rhinovla_high.toml
+cp examples/configs/rhinovla/v3/fp16.toml /tmp/rhinovla_v3.toml
+# 填写 input.checkpoint、runtime_factory、factory_config、request 和 run.output_dir。
+vi /tmp/rhinovla_v3.toml
+python examples/run.py --config /tmp/rhinovla_v3.toml --check-config
+python examples/run.py --config /tmp/rhinovla_v3.toml
 ```
 
-factory 模块须能被当前 Python 环境导入，并实际安装所选范围；仅改精度标签不会转换。绝对 checkpoint 路径不依赖 `RPU_MODEL_CACHE`。**v1/v3 FP16 均无需量化**；v1 官方 72D 权重不能代替 v3 客户 96D 父权重。
+`--check-config` 检查配置结构，最后一行在设备上加载和推理。W8 转换发生在加载阶段，结果保存在进程内；`trust_model_code=true` 允许执行所填写的 factory。
 
-**实现位置**：[python/rpu_backend/adapters/rhinovla/convert.py](../../../../python/rpu_backend/adapters/rhinovla/convert.py)；[python/rpu_backend/adapters/rhinovla/pipeline.py](../../../../python/rpu_backend/adapters/rhinovla/pipeline.py)；[python/rpu_backend/adapters/rhinovla/precision.py](../../../../python/rpu_backend/adapters/rhinovla/precision.py)。可信 factory 创建 `RhinoVLAOnRPU`；专家 W8 调用 `convert_expert_for_rpu()`，完整专家增加 `_prepare_full_w8_cond_weights()` / `_prepare_full_w8_adarms_tables()`，全流水线再含 `quantize_text_prefix()`、Vision 安装和 `_prepare_denoise_loop_weights()`。上述模块由 factory 调用，不导出 checkpoint。
+<a id="parameters"></a>
 
-## 选择配置
+### 需要填写和常用调整项
 
-| 配置 | 量化范围 / 区别 | 状态 |
-|---|---|---|
-| [fp16.toml](fp16.toml) | 浮点，保留原factory参数 | 调用者factory模板 |
-| [expert_w8a16.toml](expert_w8a16.toml) | 仅expert Q/K/V/O/Gate/Up/Down七类投影W8 | 调用者factory模板 |
-| [full_expert_w8a16.toml](full_expert_w8a16.toml) | 上述投影加18组AdaRMS条件投影W8；最终norm预计算与IO浮点 | 调用者factory模板，非全流水线W8 |
-| [full_pipeline_w8a16.toml](full_pipeline_w8a16.toml) | text/vision/expert/action IO/AdaRMS全流水线W8；HIGH关闭 | 实验配方 |
-| [full_pipeline_w8a16_high_precision_vector_qk.toml](full_pipeline_w8a16_high_precision_vector_qk.toml) | 同全W8范围，启用HIGH与vector Q/K norm | 实验配方 |
+| 字段 | 模板设置与调整方法 |
+|---|---|
+| `input.num_steps` | 固定 `10`，AdaRMS 表与十步 schedule 配套 |
+| `input.expert_w8a16/full_w8a16` | 按所选配方保留；同时匹配 `example.profile_id`、`dtype` 和 factory JSON |
+| `rpu_execution.components.language_model.prefill.linear_acc32` | 全流水线模板显式为 `false`；`true` 选择 Text Linear ACC32 |
+| `rpu_execution.components.vision_encoder.vision.linear_acc32` | 全流水线模板显式为 `false`；`true` 选择 Vision block 与融合 merger 的 Linear ACC32 |
+| `rpu_execution.components.language_model.prefill.padding_rows` | 全流水线为 `10`；随实际 prefix 的物理执行范围调整 |
+| `cpu.threads` | 全流水线为 `12`，其余继承环境 |
+| `run.warmup/runs` | 默认 `2/3` |
 
-`full_w8a16` 只控制 expert，完整流水线范围由模板指定。旧 `w8a16.toml` 请改用 `expert_w8a16.toml`。
+公共字段见[参数说明](../../PARAMETERS.md)。
 
-## 使用
-
-采样设置示例为 `run.warmup=2`、`run.runs=5`；前三份模板设 `cpu.threads=8`，两份 full-pipeline 设 `cpu.threads=12`。所有模板默认2次预热、3次正式运行。
-
-复制模板，填写checkpoint、`runtime_factory="your_package.module:create_runtime"`、request、factory_config和输出目录。factory必须接收配置的冷选择并返回 `RhinoVLAPolicy.from_factory` 接受的runtime：
-
-```bash
-python examples/run.py --config examples/configs/rhinovla/v3/expert_w8a16.toml --check-config
-python examples/run.py --config /path/to/my_rhinovla_v3.toml
-```
-
-factory 必须实际安装模板请求的量化范围与冷配置，runner 会在首次推理前核对。冷配置变化后使用新进程，板卡运行持既有设备锁；`--check-config` 仅检查配置。
-
-## 可修改参数
-
-| 字段 | 默认 / 选择 | 条件 |
-|---|---|---|
-| `input.runtime_factory/request/factory_config` | 必填实际集成/输入 | `trust_model_code=true`明确采用调用者代码 |
-| `input.expert_w8a16/full_w8a16` | W8模板严格bool | JSON中的同名值必须同类型同值；不能绕过模板范围 |
-| `input.num_steps` | 10 | AdaRMS表必须匹配实际schedule |
-| 组件 `prefill/vision.linear_acc32` | full-pipeline默认false=ACC16 | true选ACC32；不改变action/patch/AdaRMS，不可放进action表 |
-| `cpu.threads` | full-pipeline12，其余按运行环境 | full-pipeline默认no_grad、W2/R3 |
-| `rpu_execution.components.*` | 模板已选冷缓存/融合 | factory需声明和绑定实际实现，不具备即拒绝 |
-
-## 输入与限制
-
-expert-only 不量化其他组件，也不支持 packed QKV；full-pipeline 的 norm/bias/embedding/位置张量仍为浮点。HIGH 控制非线性精度，与 Linear ACC32 分开。
-
-factory 须负责缓存、量化安装和每次调用的输入状态刷新。库依赖为 [正式 main/DDR 两份 REF](../../../../docs/runtime_assets.md)；独立验证器的 [controlled 片段](controlled/README.md) 不能混入 factory schema。
+Text/Vision 的 ACC 字段不控制 action、patch embedding 和冷 AdaRMS 投影，也不写入 action 表。现有优化要求完整 18 层专家、96D 动作和上述十步输入结构。

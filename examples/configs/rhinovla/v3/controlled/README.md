@@ -7,16 +7,14 @@
 ## 配方与对应入口
 
 - 浮点：使用 [fp16.toml](../fp16.toml)。
-- Expert W8：使用 [expert_w8a16.toml](../expert_w8a16.toml)，仅量化指定专家范围。
-- 完整专家 W8：使用 [full_expert_w8a16.toml](../full_expert_w8a16.toml)。
-- 全流水线 W8 与传输优化：使用 [full_pipeline_w8a16.toml](../full_pipeline_w8a16.toml)。
-- 全流水线 W8、HIGH、融合与 vector QK：使用 [full_pipeline_w8a16_high_precision_vector_qk.toml](../full_pipeline_w8a16_high_precision_vector_qk.toml)。
+- Expert W8：使用 [expert_w8a16.toml](../w8a16_action.toml)，仅量化指定专家范围。
+- 完整专家 W8：使用 [full_expert_w8a16.toml](../w8a16_action_adarms.toml)。
+- 全流水线 W8 与传输优化：使用 [full_pipeline_w8a16.toml](../w8a16_pipeline.toml)。
+- 全流水线 W8、HIGH、融合与 vector QK：使用 [full_pipeline_w8a16_high_precision_vector_qk.toml](../w8a16_pipeline_high_fused_vector_qk.toml)。
 
 ## 参数与限制
 
 冷环境和组件参数修改后使用新进程与匹配的输入、资产。HIGH 控制非线性精度，与 Linear 累加模式不同；部分 RoPE、vector K/QK 与融合选项需要 factory 实际实现并绑定相应冷配置。保持量化安装范围、输入状态刷新、缓存与 Graph 生命周期一致。
-
-每项配置需匹配的构建、输入与参考身份，不能互相继承验证结论。固定浮点阈值仅作诊断，旧判词不表示当前验收结论；任务质量须独立评估。
 
 <a id="weights"></a>
 ## 权重来源

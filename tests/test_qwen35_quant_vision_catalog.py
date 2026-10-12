@@ -17,7 +17,8 @@ def common(monkeypatch):
 
 @pytest.mark.parametrize("size,bits", CASES)
 def test_quant_vision_example_binds_both_existing_contracts(common, size, bits, tmp_path):
-    path = ROOT / f"examples/configs/qwen3_5/vl/{size}/w{bits}a16.toml"
+    stem = "w8a16_text" if bits == 8 else "w4a16_text_rtn_g32"
+    path = ROOT / f"examples/configs/qwen3_5/vl/{size}/{stem}.toml"
     config = common.load_config(path)
     profiles = common.planner_profiles()
     profile = profiles[config["example"]["profile_id"]]

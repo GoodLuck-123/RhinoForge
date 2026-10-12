@@ -199,8 +199,8 @@ and legacy text bundles keep their separate formats.
 
 The [v3 W8 configurations](../examples/configs/rhinovla/v3/README.md) pass
 `expert_w8a16` and `full_w8a16` to a caller-owned, trusted runtime factory.
-`expert_w8a16.toml` quantizes the action expert's Q/K/V/O and gate/up/down projections.
-`full_expert_w8a16.toml` also selects its AdaRMS condition projections.
+`w8a16_action.toml` quantizes the action expert's Q/K/V/O and gate/up/down projections.
+`w8a16_action_adarms.toml` also selects its AdaRMS condition projections.
 Both use INT8 weights with FP16 scales and activations; neither template selects
 vision, prefix-language or action-IO quantization. The runner verifies actual
 installed expert storage rather than accepting a precision label from the

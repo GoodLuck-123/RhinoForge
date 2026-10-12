@@ -31,7 +31,13 @@ def common(monkeypatch):
 
 
 def config_path(size, bits, mode):
-    return ROOT / f'examples/configs/qwen3_vl/{mode}/{size}b/w{bits}a16.toml'
+    if bits == 8:
+        stem = 'w8a16_text_head_vision'
+    elif size == 32:
+        stem = 'w4a16_text_head_rtn_g32_vision_w8a16'
+    else:
+        stem = 'w4a16_text_awq_head_rtn_g32_vision_w8a16'
+    return ROOT / f'examples/configs/qwen3_vl/{mode}/{size}b/{stem}.toml'
 
 
 @pytest.mark.parametrize('size', [2, 4, 8, 32])
@@ -115,7 +121,7 @@ def original_quant_config(size, bits):
 @pytest.mark.parametrize('size,bits', [(2, 8), (2, 4), (4, 4)])
 @pytest.mark.parametrize('mode', ['text', 'vl'])
 def test_original_text_quant_configs_validate_actual_metadata(common, tmp_path, size, bits, mode):
-    variant = 'w8a16_text' if bits == 8 else 'w4a16_text_awq'
+    variant = 'w8a16_text' if bits == 8 else 'w4a16_text_awq_g32'
     config = common.load_config(ROOT / f'examples/configs/qwen3_vl/{mode}/{size}b/{variant}.toml')
     cfg = original_quant_config(size, bits)
     cfg.to_json_file(tmp_path / 'config.json')
@@ -129,7 +135,7 @@ def test_original_text_quant_configs_validate_actual_metadata(common, tmp_path, 
 
 def test_original_awq_wrong_recipe_fails_before_processor_or_weights(common, monkeypatch, tmp_path):
     runner = load('original_quantized_runner', 'examples/runners/qwen3_vl/runner.py', monkeypatch)
-    config = common.load_config(ROOT / 'examples/configs/qwen3_vl/vl/4b/w4a16_text_awq.toml')
+    config = common.load_config(ROOT / 'examples/configs/qwen3_vl/vl/4b/w4a16_text_awq_g32.toml')
     cfg = original_quant_config(4, 4)
     cfg.quantization_config['config_groups']['group_0']['weights']['group_size'] = 64
     cfg.to_json_file(tmp_path / 'config.json')
@@ -172,7 +178,8 @@ def test_public_quantized_prepare_uses_existing_loader_and_preserves_config(comm
 @pytest.mark.parametrize('recipe', ['w4a16', 'w4a16_lm_head'])
 def test_qwen3_w4_public_runner_selects_cold_quantization_without_changing_asset(common, monkeypatch, omit_dtype, recipe):
     runner = load('plain_qwen_w4_example_runner', 'examples/runners/qwen3/runner.py', monkeypatch)
-    config = common.load_config(ROOT / f'examples/configs/qwen3/text/0_6b/{recipe}.toml')
+    stem = {'w4a16': 'w4a16_text_rtn_g32', 'w4a16_lm_head': 'w4a16_text_head_rtn_g32'}[recipe]
+    config = common.load_config(ROOT / f'examples/configs/qwen3/text/0_6b/{stem}.toml')
     if omit_dtype:
         del config['example']['dtype']
     checkpoint = '/cache/Qwen3-0.6B'

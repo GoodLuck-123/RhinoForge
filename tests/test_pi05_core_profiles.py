@@ -96,7 +96,7 @@ def test_pi05_reduced_example_derives_profile_from_core_geometry(tmp_path):
     root = Path(__file__).resolve().parents[1]
     for precision in ("fp16", "w8a16"):
         for cores in (4, 6):
-            path = root / f"examples/configs/pi05/unoptimized/3cam/{precision}_tp{cores}.toml"
+            path = root / f"examples/configs/pi05/generic/3cam/{precision}_tp{cores}.toml"
             config = load_config(path)
             assert config["rpu_execution"]["model"]["num_cores"] == cores
             assert example_metadata(config)["profile_id"].endswith(f".vla-tp{cores}")

@@ -11,6 +11,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 EX = importlib.import_module("examples.runners.g05.optimized")
+CONFIG_FILENAMES = {
+    "fp16": "fp16", "w8a16": "w8a16", "w8a16_nvfp4": "w8a16_action_nvfp4",
+}
 
 
 @pytest.fixture
@@ -54,7 +57,7 @@ def test_g05_example_precision_mapping_and_real_entry_checks():
         result = subprocess.run([sys.executable, str(ROOT/'examples/run.py'), '--config', str(path), '--check-config'],
                                 capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
-    cfg = tomllib.loads((ROOT/'examples/configs/g05/3cam/w8a16_nvfp4.toml').read_text())
+    cfg = tomllib.loads((ROOT/'examples/configs/g05/3cam/w8a16_action_nvfp4.toml').read_text())
     for section, key, value in [('g05','precision','w4a16'),('input','cameras',2),
                                ('input','num_steps',9),('run','runs',True),
                                ('input','text_tokens',True),('input','text_tokens',257),
@@ -68,11 +71,11 @@ def test_legacy_precision_and_batch_remain_compatible():
     assert EX.precision_options('w8a16_action_nvfp4') == EX.precision_options('w8a16_nvfp4')
     for alias, canonical in EX.PRECISION_ALIASES.items():
         assert EX.precision_options(alias) == EX.precision_options(canonical)
-    for name in ('fp16', 'w8a16', 'w8a16_nvfp4'):
+    for name in ('fp16', 'w8a16', 'w8a16_action_nvfp4'):
         path = ROOT/f'examples/configs/g05/3cam/{name}.toml'
         assert path.is_file()
         EX.validate_example_config(tomllib.loads(path.read_text()))
-    cfg = tomllib.loads((ROOT/'examples/configs/g05/3cam/w8a16_nvfp4.toml').read_text())
+    cfg = tomllib.loads((ROOT/'examples/configs/g05/3cam/w8a16_action_nvfp4.toml').read_text())
     cfg['g05']['precision'] = 'w8a16_action_nvfp4'
     cfg.pop('libraries')
     cfg['input'] = {key: value for key, value in cfg['input'].items()
@@ -98,7 +101,7 @@ def test_batched_vision_requires_w8(precision):
 @pytest.mark.parametrize('precision', ['w8a16', 'w8a16_nvfp4'])
 @pytest.mark.parametrize('accumulation', ['acc16', 'acc32'])
 def test_grouped_vision_preserves_weight_and_accumulation_for_matching_cameras(cameras, precision, accumulation):
-    cfg = tomllib.loads((ROOT/f'examples/configs/g05/{cameras}cam/{precision}.toml').read_text())
+    cfg = tomllib.loads((ROOT/f'examples/configs/g05/{cameras}cam/{CONFIG_FILENAMES[precision]}.toml').read_text())
     cfg['g05'].update(vision_camera_batch=cameras, linear_accumulation=accumulation)
     EX.validate_example_config(cfg)
     actual = EX.precision_options(cfg['g05']['precision'], cfg['g05']['linear_accumulation'])
@@ -142,7 +145,7 @@ def test_new_example_consumes_mixed_precision_in_existing_release_loader(
     from unittest.mock import Mock
     from test_controlled_example_runners import module
     monkeypatch.syspath_prepend(str(ROOT/'examples'))
-    cfg = tomllib.loads((ROOT/'examples/configs/g05/3cam/w8a16_nvfp4.toml').read_text())
+    cfg = tomllib.loads((ROOT/'examples/configs/g05/3cam/w8a16_action_nvfp4.toml').read_text())
     cfg['example'] = {'target': 'g05'}
     cfg['g05']['vision_camera_batch'] = 1
     cfg['g05']['math_precision'] = math_precision
@@ -221,7 +224,7 @@ def test_public_measurement_keeps_runtime_checks_and_timing_scopes_separate(
     monkeypatch.syspath_prepend(str(ROOT/'examples'))
     from examples.runners.g05 import runner as _controlled_runners
     from examples.common import measurement as _runner
-    cfg = tomllib.loads((ROOT/'examples/configs/g05/3cam/w8a16_nvfp4.toml').read_text())
+    cfg = tomllib.loads((ROOT/'examples/configs/g05/3cam/w8a16_action_nvfp4.toml').read_text())
     cfg['input'].pop('text_lengths')
     cfg['input']['text_tokens'] = 52
     if lengths:
@@ -347,7 +350,7 @@ def test_explicit_accumulation_overrides_legacy_default_without_changing_weight_
 @pytest.mark.parametrize('accumulation', ['acc16', 'acc32'])
 @pytest.mark.parametrize('math_precision', ['base', 'high'])
 def test_math_precision_is_independent_of_weights_accumulation_and_lengths(cameras, precision, accumulation, math_precision):
-    cfg = tomllib.loads((ROOT/f'examples/configs/g05/{cameras}cam/{precision}.toml').read_text())
+    cfg = tomllib.loads((ROOT/f'examples/configs/g05/{cameras}cam/{CONFIG_FILENAMES[precision]}.toml').read_text())
     cfg['g05'].update(linear_accumulation=accumulation, math_precision=math_precision)
     EX.validate_example_config(cfg)
     opts = EX.precision_options(precision, accumulation, math_precision)
@@ -387,7 +390,7 @@ def test_text_tokens_and_lengths_are_exclusive_and_saved_batch_has_one_context()
 def test_multiple_actual_lengths_use_fresh_processes_and_preserve_failed_rows(
         monkeypatch, tmp_path, preserve_cpu_state, failure_mode):
     import json
-    cfg = tomllib.loads((ROOT/'examples/configs/g05/2cam/w8a16_nvfp4.toml').read_text())
+    cfg = tomllib.loads((ROOT/'examples/configs/g05/2cam/w8a16_action_nvfp4.toml').read_text())
     cfg['g05']['linear_accumulation'] = 'acc32'
     cfg['input']['text_lengths'] = [32, 64, 128]
     cfg['run']['output_dir'] = str(tmp_path)
@@ -470,7 +473,7 @@ raise SystemExit(3 if failed else 0)
 
 def test_auto_schedule_selects_only_exact_measured_camera_mode_and_text(monkeypatch, tmp_path):
     import json
-    cfg = tomllib.loads((ROOT/'examples/configs/g05/2cam/w8a16_nvfp4.toml').read_text())
+    cfg = tomllib.loads((ROOT/'examples/configs/g05/2cam/w8a16_action_nvfp4.toml').read_text())
     cfg['input'].pop('text_lengths')
     cfg['input']['text_tokens'] = 64
     cfg['g05']['linear_accumulation'] = 'acc32'
@@ -542,7 +545,7 @@ def test_explicit_schedules_win_and_mismatched_camera_groups_are_rejected(tmp_pa
 def test_auto_group_selection_requires_exact_mode_and_retains_explicit_library_binding(tmp_path, cameras, precision, accumulation):
     import json
 
-    cfg = tomllib.loads((ROOT/f'examples/configs/g05/{cameras}cam/{precision}.toml').read_text())
+    cfg = tomllib.loads((ROOT/f'examples/configs/g05/{cameras}cam/{CONFIG_FILENAMES[precision]}.toml').read_text())
     cfg['input'].pop('text_lengths')
     cfg['input']['text_tokens'] = 128
     cfg['g05']['linear_accumulation'] = accumulation

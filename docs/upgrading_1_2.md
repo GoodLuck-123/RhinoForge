@@ -34,19 +34,22 @@ must select a configuration explicitly after the input migrations below.
 The wrapper defaults and aliases are listed in
 [legacy.py](../examples/common/legacy.py).
 
-The duplicate files below have been removed. The runner's `--config` and migration
-tool's `--template` resolve missing repository paths to the canonical files.
-Use canonical paths when copying or editing files. Existing custom files are
-read unchanged. All paths below are relative to `examples/configs/`.
+Configuration names now identify quantized modules, conversion method and group
+size; see the [naming guide](../examples/configs/NAMING.md) and
+[rename map](../examples/configs/config_names.json). The runner's `--config` and
+migration tool's `--template` resolve missing repository paths to the canonical
+files, including the removed duplicates below. Use canonical paths when copying
+or editing files. Existing custom files are read unchanged. All paths below are
+relative to `examples/configs/`.
 
 | Old path | Canonical path |
 |---|---|
 | `wall_oss/base/fp16.toml` | `wall_oss/legacy/fp16.toml` |
 | `wall_oss/base/w8a16.toml` | `wall_oss/legacy/w8a16.toml` |
-| `wall_oss/base/w4a16.toml` | `wall_oss/legacy/w4a16.toml` |
-| `wall_oss/base/w4a16_pgrp.toml` | `wall_oss/legacy/w4a16_pgrp.toml` |
-| `lingbot/v2/6b_w8a16.toml` | `lingbot/legacy/exact_z2/6b_w8a16.toml` |
-| `rhinovla/v3/w8a16.toml` | `rhinovla/v3/expert_w8a16.toml` |
+| `wall_oss/base/w4a16.toml` | `wall_oss/legacy/w4a16_channel.toml` |
+| `wall_oss/base/w4a16_pgrp.toml` | `wall_oss/legacy/w4a16_g32.toml` |
+| `lingbot/v2/6b_w8a16.toml` | `lingbot/legacy/exact_z2/6b/w8a16.toml` |
+| `rhinovla/v3/w8a16.toml` | `rhinovla/v3/w8a16_action.toml` |
 
 `rhinovla/v1/fp16.toml` retains its caller-owned runtime factory, checkpoint and
 request contract. Use
@@ -83,12 +86,12 @@ filenames; the output parent directory must already exist.
 ```bash
 # GR00T: supply the three-camera observation for the selected checkpoint.
 python examples/migrate_config.py --source /path/to/old-gr00t.toml \
-  --template examples/configs/gr00t/n1_7_droid/fp16.toml --output /path/to/new-gr00t.toml \
+  --template examples/configs/gr00t/n1_7_droid/224/fp16.toml --output /path/to/new-gr00t.toml \
   --input observation=/path/to/three-camera-observation.pt
 
 # NavDP: supply a complete-chain fixture and asset manifest.
 python examples/migrate_config.py --source /path/to/old-navdp.toml \
-  --template examples/configs/internvla/navdp/fp16.toml --output /path/to/new-navdp.toml \
+  --template examples/configs/internvla/navdp/w8a16_system2.toml --output /path/to/new-navdp.toml \
   --input fixture=/path/to/fullchain-fixture.pt --input asset_manifest=/path/to/assets.json
 
 # SigLIP to Pi0.5: explicitly select a complete policy with its batch/checkpoint.
@@ -103,7 +106,7 @@ python examples/migrate_config.py --source /path/to/old-lingbot.toml \
 
 # MoE: provide actual prose and the target token sequence's SHA256.
 python examples/migrate_config.py --source /path/to/old-moe.toml \
-  --template examples/configs/qwen3_5/text/35b_a3b/mixed_e4m3_p4096_d4096.toml \
+  --template examples/configs/qwen3_5/text/35b_a3b/fp8_e4m3_experts_attn_gdn_p4096_d4096.toml \
   --output /path/to/new-moe.toml --input prompt_file=/path/to/prompt.txt \
   --input input_ids_sha256="$INPUT_IDS_SHA256"
 ```

@@ -200,7 +200,7 @@ def test_public_example_core_choice_matches_its_registered_profile(monkeypatch, 
     common = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(common)
     suffix = f"_tp{cores}" if cores != 8 else ""
-    path = root / f"examples/configs/qwen3_5/vl/35b_a3b/mixed_e4m3{suffix}.toml"
+    path = root / f"examples/configs/qwen3_5/vl/35b_a3b/fp8_e4m3_experts_attn_gdn{suffix}.toml"
     assert common.load_config(path)["rpu_execution"]["model"]["num_cores"] == cores
     bad = tmp_path / "mismatch.toml"
     for wrong in (value for value in (4, 6, 8) if value != cores):

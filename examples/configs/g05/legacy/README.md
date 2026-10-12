@@ -1,37 +1,55 @@
-# G0.5 Legacy 配置
-[优化模板](../README.md) · [使用](#使用)
+<a id="g05-legacy-配置"></a>
 
-| 模板 | 输入与区别 | 输入默认 |
-|---|---|---|
-| [fp16.toml](fp16.toml) | 原 K1/RTC/FM 登记的 `[example]` schema；客户预处理 batch、固定 step0 | FP16，三图/P245/H32 |
+# G0.5 固定 batch 配置
 
-支持级别为 `CONTROLLED_EVALUATION`；第二步RTC和任务质量未测。常规选型使用[六份优化模板](../README.md)。
+本目录提供 `[example]` 格式的 [fp16.toml](fp16.toml)，用于 K1 RTC/FM 客户交付的预处理 batch。两/三图、多长度与 W8/NVFP4 选择见[模型入口](../README.md)。
 
-<a id="weights"></a>
-<a id="weight-sources"></a>
-## 权重来源
+<a id="选择配置"></a>
 
-官方文件的存储 dtype 与本仓库运行时的 FP16/W8 等选项分开列示；`FP16` 配置不表示官方发布文件就是 FP16。
-
-| 身份 | 名称与发布者 / 下载渠道 | 文件存储精度 | 本地目录与配置绑定 |
-|---|---|---|---|
-| 官方公开发布 | 未核实这份 G0.5 K1 `vla_rtc` release 的官方公开 HF / GitHub 权重下载 | 未核实；不从 `fp16` 运行标签推断文件 dtype | 无可替代的公开下载目录 |
-| 当前实际父 | 客户 / 受控交付方提供的原始 K1 checkpoint，须配同版 release 源码、processor 和输入 | 原始 dtype 由交付清单指定；运行前按模块转 FP16 / FP32 | `/path/to/vla_rtc_release/checkpoint` → `input.checkpoint`；源码 → `input.release_root` |
-| 公开量化 | 本页不使用量化资产；未核实该交付的公开量化渠道 | 不适用 | 无量化输出目录 |
+<a id="配置与权重对应"></a>
 
 <a id="weight-recipes"></a>
-## 模块精度与配方
 
-W/A 与 ACC 定义见[精度记法](../../WEIGHTS.md#precision-notation)。
+<a id="fp16-基准"></a>
 
-| 配方与模板 | 加载后 Vision / Language | 加载后 Action / IO 与保留浮点部分 | 所需源权重、转换方式与完整命令 |
-|---|---|---|---|
-| [fp16.toml](fp16.toml) | Vision / Language 主投影 W16A16 | Action 主投影 / 设备 IO 为 W16A16；CPU AdaLN/时间条件 FP32；norm/bias 等保留浮点 | 原始 K1 + 配对 release/batch；无需转换；[完整命令](#run-fp16)，[examples/runners/g05/runner.py](../../../../examples/runners/g05/runner.py) |
+## 配置说明
+
+本目录仅有 [fp16.toml](fp16.toml)，使用[原始 K1 交付资产](#weight-sources)，无需离线量化。
+
+Vision、Language 和 Action 主投影及设备 IO 使用 FP16，CPU AdaLN、时间条件使用 FP32。入口经 `patch_g05_policy_for_rpu()` 安装融合执行路径；Vision、Language 预填充和 Action 的 chunk 均为 auto，使用相应 Graph 缓存。`example.dtype="fp16"`，本目录只有这一种精度配方。
+
+每次调用复制原 batch 再执行 `predict_action`，保持相同观测及调用方提供的 RTC 前缀。实现见[固定 batch runner](../../../runners/g05/runner.py)。
+
+<a id="准备权重并运行"></a>
 
 <a id="quantization"></a>
-## 下载与运行
+
+<a id="weight-sources"></a>
+
+<a id="weights"></a>
+
+<a id="准备并运行"></a>
+
+## 准备与运行
+
+### 获取资产
+
+| 资产 | 配置字段 | 要求 |
+|---|---|---|
+| 原始 K1 checkpoint | `input.checkpoint` | 客户 `vla_rtc` 交付目录 |
+| 配对 release 源码及 processor | `input.release_root` | 与 checkpoint 同一交付 |
+| 预处理输入 | `input.batch` | 由该 release processor 生成，含 `samples`、`pixel_values` |
+
+本配置直接加载浮点权重，不需要离线量化目录。registry 别名 `g05-base` 标识这份客户资产。
 
 <a id="run-fp16"></a>
+
+<a id="使用"></a>
+
+### 绑定路径并运行
+
+以下在仓库根目录执行，编辑副本后运行：
+
 ```bash
 cp examples/configs/g05/legacy/fp16.toml /tmp/g05_legacy_fp16.toml
 # input.checkpoint = 原始 K1 checkpoint；input.release_root = 同交付源码。
@@ -40,17 +58,13 @@ vi /tmp/g05_legacy_fp16.toml
 python examples/run.py --config /tmp/g05_legacy_fp16.toml
 ```
 
-**无需量化转换。** 本目录只有原受控 `fp16.toml`，使用配对的客户 K1 原始权重和 batch，仅支持 FP16，没有量化输出目录。
+### 常调参数
 
-## 使用
+| 字段 | 模板值 | 可选范围 | 修改时的关联 |
+|---|---|---|---|
+| `input.batch` | 占位路径 | 同交付预处理 batch | 包含 `samples` 和 `pixel_values`，由 release processor 生成 |
+| 三个组件的 `chunk_size` | auto | 自动或有效整数 | 分别位于 vision_encoder.vision、language_model.prefill、action_expert.action |
+| `run.warmup/runs/seed` | 2 / 3 / 7 | 预热≥0、采样≥1、seed≥0 | 正式运行次数可调整 |
+| `cpu.threads` | 未指定 | 正整数 | 省略时继承运行环境 |
 
-复制模板，填写 `input.checkpoint`、`release_root`、`batch`。batch需由相同客户release预处理器生成，满足原登记范围；运行时显式传入配置。
-
-```bash
-python examples/run.py --config /path/to/my_legacy_g05.toml --check-config
-python examples/run.py --config /path/to/my_legacy_g05.toml
-```
-
-模板默认 `run.runs=3`；可设 `cpu.threads=8`、`run.warmup=2`、`run.runs=5`。
-
-`--check-config`检查配置结构；实际权重、输入和数值由运行验证。
+组件路径位于 `rpu_execution.components` 下。公共字段见[参数说明](../../PARAMETERS.md)，运行库见[算子库说明](../../../../docs/runtime_assets.md)。

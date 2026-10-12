@@ -1,6 +1,6 @@
 # Model examples
 
-[简体中文](README.zh.md) · [Config index](configs/CONFIGURATIONS.md) · [Conversion commands](configs/WEIGHTS.md#quantization) · [Weight sources](configs/WEIGHTS.md) · [Support matrix](../docs/model_support.md)
+[简体中文](README.zh.md) · [Config index](configs/CONFIGURATIONS.md) · [Parameters](configs/PARAMETERS.md) · [Naming](configs/NAMING.md) · [Conversion commands](configs/WEIGHTS.md#quantization) · [Weight sources](configs/WEIGHTS.md) · [Support matrix](../docs/model_support.md)
 
 Choose a model and recommended TOML, then prepare weights and inputs using its guide. Current model templates use [`run.py`](run.py); `--config` is required.
 
@@ -13,7 +13,7 @@ Legacy model scripts remain compatibility wrappers. See the [v1.2.0 upgrade guid
 | [DINOv3](configs/dinov3/README.md) | [ViT-B FP16](configs/dinov3/vit_b/fp16.toml) |
 | [G0.5](configs/g05/README.md) | [3cam FP16](configs/g05/3cam/fp16.toml) |
 | [Gemma4](configs/gemma4/README.md) | [E4B FP16](configs/gemma4/e4b/fp16.toml) |
-| [GR00T](configs/gr00t/README.md) | [224 FP16](configs/gr00t/n1_7_droid/fp16.toml) |
+| [GR00T](configs/gr00t/README.md) | [224 FP16](configs/gr00t/n1_7_droid/224/fp16.toml) |
 | [HyVLA](configs/hy_vla/README.md) | [3cam FP16](configs/hy_vla/3cam/fp16.toml) |
 | [HY Embodied UMI](configs/hy_embodied/README.md) | [UMI FP16](configs/hy_embodied/umi/fp16.toml) |
 | [Llama](configs/llama/README.md) | [3.2-1B FP16](configs/llama/3_2_1b/fp16.toml) |
@@ -26,9 +26,9 @@ Legacy model scripts remain compatibility wrappers. See the [v1.2.0 upgrade guid
 | [Wall-OSS base](configs/wall_oss/README.md) | [3cam 224 FP16](configs/wall_oss/base/3cam/224/fp16.toml) |
 | [Wall-OSS RTC](configs/wall_oss/rtc/README.md) | [FP16](configs/wall_oss/rtc/fp16.toml) |
 | [Wall-OSS sorting](configs/wall_oss/sorting/README.md) | [W8A16](configs/wall_oss/sorting/w8a16.toml) |
-| [InternVLA](configs/internvla/README.md) | [NavDP FP16](configs/internvla/navdp/fp16.toml) |
+| [InternVLA](configs/internvla/README.md) | [NavDP System2 W8](configs/internvla/navdp/w8a16_system2.toml) |
 | [LingBot v2](configs/lingbot/v2/README.md) | [3cam T3 W8A16](configs/lingbot/v2/3cam_t3/w8a16.toml) |
-| [LingBot v1](configs/lingbot/README.md) | [4B mixed](configs/lingbot/v1/4b_mixed.toml) |
+| [LingBot v1](configs/lingbot/README.md) | [4B CPU Vision / FP16](configs/lingbot/v1/4b/fp16_cpu_vision.toml) |
 | [HALO](configs/halo/README.md) | [FP16 Expert](configs/halo/action_expert/fp16.toml) |
 
 Qwen3.5 35B MoE uses its controlled profiles.

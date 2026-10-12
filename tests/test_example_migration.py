@@ -15,10 +15,10 @@ from examples.common.migration import dumps, main, migrate, migration_kind
 ROOT = Path(__file__).resolve().parents[1]
 CONFIGS = ROOT / "examples/configs"
 CASES = (
-    ("gr00t", "gr00t/n1_7_droid/fp16.toml", '[runner]\ntarget="gr00t"\n'
+    ("gr00t", "gr00t/n1_7_droid/224/fp16.toml", '[runner]\ntarget="gr00t"\n'
      '[request]\ninput_pt="old-four-images.pt"\nseed=17\nnum_steps=10\n',
      {"observation": "new-three-images.pt"}),
-    ("internvla_navdp", "internvla/navdp/fp16.toml", '[runner]\ntarget="internvla_navdp"\n'
+    ("internvla_navdp", "internvla/navdp/w8a16_system2.toml", '[runner]\ntarget="internvla_navdp"\n'
      '[model]\nasset_manifest_json="old-components.json"\n'
      '[request]\ninput_pt="old-embeddings.pt"\nseed=19\nsample_num=3\n',
      {"fixture": "full-chain.pt", "asset_manifest": "full-chain.json"}),
@@ -31,11 +31,12 @@ CASES = (
      'instruction="Pick up the block."\nproprioception=[0.1,0.2]\nseed=23\n'
      '[run]\nwarmup=2\nruns=7\nseed=0\n',
      {"checkpoint": "original-checkpoint", "training_config": "training.yaml"}),
-    ("moe_synthetic", "qwen3_5/text/35b_a3b/mixed_e4m3_p4096_d4096.toml", None, {}),
+    ("moe_synthetic", "qwen3_5/text/35b_a3b/fp8_e4m3_experts_attn_gdn_p4096_d4096.toml", None, {}),
 )
 
 
-@pytest.mark.parametrize("old", PATH_ALIASES)
+@pytest.mark.parametrize("old", [old for old, new in PATH_ALIASES.items()
+                                 if not new.startswith("gr00t/")])
 def test_removed_template_alias_reaches_migration_contract(tmp_path, capsys, old):
     source = tmp_path / "old.toml"
     source.write_text('[runner]\ntarget="gr00t"\n')
@@ -45,6 +46,21 @@ def test_removed_template_alias_reaches_migration_contract(tmp_path, capsys, old
     assert error.value.code == 2
     assert "gr00t migration requires a current gr00t template" in capsys.readouterr().err
     assert not output.exists()
+
+
+@pytest.mark.parametrize("old", [old for old, new in PATH_ALIASES.items()
+                                 if new.startswith("gr00t/")])
+def test_renamed_gr00t_template_is_read_through_migration_command(tmp_path, old):
+    source = tmp_path / "old.toml"
+    source.write_text('[runner]\ntarget="gr00t"\n[request]\nseed=17\nnum_steps=10\n')
+    output = tmp_path / "new.toml"
+    assert main(["--source", str(source), "--template", str(CONFIGS / old),
+                 "--output", str(output), "--input", "observation=observation.pt"]) == 0
+    migrated = load_config(output)
+    template = load_config(CONFIGS / PATH_ALIASES[old])
+    assert migrated["example"] == template["example"]
+    assert migrated["input"]["image_size"] == template["input"]["image_size"]
+    assert migrated["input"]["observation"] == "observation.pt"
 
 
 def old_config(kind, text, template):
@@ -134,7 +150,7 @@ def test_failure_leaves_source_and_existing_output_unchanged(tmp_path):
     old = tmp_path / "old.toml"
     old.write_text('[runner]\ntarget="gr00t"\n')
     output = tmp_path / "new.toml"
-    args = ["--source", str(old), "--template", str(CONFIGS / "gr00t/n1_7_droid/fp16.toml"),
+    args = ["--source", str(old), "--template", str(CONFIGS / "gr00t/n1_7_droid/224/fp16.toml"),
             "--output", str(output)]
     with pytest.raises(SystemExit) as error:
         main(args)

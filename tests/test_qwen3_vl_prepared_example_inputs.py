@@ -19,7 +19,7 @@ from examples.runners.qwen3_vl.inputs import load_prepared_input, validate_prepa
 from examples.runners.qwen3_vl import runner
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = ROOT / 'examples/configs/qwen3_vl/vl/4b/w8a16.toml'
+TEMPLATE = ROOT / 'examples/configs/qwen3_vl/vl/4b/w8a16_text_head_vision.toml'
 
 
 @pytest.fixture

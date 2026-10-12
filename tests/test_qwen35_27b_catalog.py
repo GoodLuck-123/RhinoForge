@@ -18,8 +18,11 @@ def common(monkeypatch):
 
 
 def _path(component, bits, cores):
+    stem = "w8a16_text" if bits == 8 else "w4a16_text_rtn_g32"
     suffix = "" if cores == 8 else f"_tp{cores}"
-    return FAMILY / f"{component}/27b/w{bits}a16{suffix}.toml"
+    if component == "vl" and cores != 8:
+        suffix += "_image_mascot_d31"
+    return FAMILY / f"{component}/27b/{stem}{suffix}.toml"
 
 
 @pytest.fixture
@@ -124,5 +127,5 @@ def test_official_assets_do_not_replace_archived_legacy(common):
     assert aliases["qwen3_5-27b-w8a16"] != aliases["qwen3_8-27b-w8a16"]
     assert aliases["qwen3_5-27b-w4a16"] != aliases["qwen3_5-27b-w8a16"]
     for suffix in ("", "_tp4", "_tp6"):
-        config = common.load_config(FAMILY / f"legacy/27b/w8a16{suffix}.toml")
+        config = common.load_config(FAMILY / f"legacy/27b/w8a16_attn_mlp{suffix}.toml")
         assert profiles[config["example"]["profile_id"]]["asset_alias"] == "qwen3_8-27b-w8a16"

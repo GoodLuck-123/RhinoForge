@@ -1,6 +1,7 @@
 """Compatibility for the previous public example entry points."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
@@ -17,7 +18,7 @@ DEFAULTS = {
     "hy_embodied": "hy_embodied/umi/fp16.toml",
     "hy_vla": "hy_embodied/umi/fp16.toml",
     "internvla_navdp": None,
-    "lingbot2": "lingbot/legacy/exact_z2/6b_w8a16.toml",
+    "lingbot2": "lingbot/legacy/exact_z2/6b/w8a16.toml",
     "pi05": "pi05/2cam/fp16.toml",
     "qwen3_5_text": "qwen3_5/text/0_8b/fp16.toml",
     "qwen3_5_vision": "qwen3_5/vl/2b/fp16.toml",
@@ -35,10 +36,15 @@ TARGET_ALIASES = {
     "wall_oss": {"wall_oss", "wall_oss_sorting", "wall_oss_rtc"},
 }
 PATH_ALIASES = {
-    "lingbot/v2/6b_w8a16.toml": "lingbot/legacy/exact_z2/6b_w8a16.toml",
-    "rhinovla/v3/w8a16.toml": "rhinovla/v3/expert_w8a16.toml",
-    **{f"wall_oss/base/{name}.toml": f"wall_oss/legacy/{name}.toml"
-       for name in ("fp16", "w4a16", "w4a16_pgrp", "w8a16")},
+    "lingbot/v2/6b_w8a16.toml": "lingbot/legacy/exact_z2/6b/w8a16.toml",
+    "rhinovla/v3/w8a16.toml": "rhinovla/v3/w8a16_action.toml",
+    "wall_oss/base/fp16.toml": "wall_oss/legacy/fp16.toml",
+    "wall_oss/base/w8a16.toml": "wall_oss/legacy/w8a16.toml",
+    "wall_oss/base/w4a16.toml": "wall_oss/legacy/w4a16_channel.toml",
+    "wall_oss/base/w4a16_pgrp.toml": "wall_oss/legacy/w4a16_g32.toml",
+    **{old.removeprefix("examples/configs/"): new.removeprefix("examples/configs/")
+       for old, new in json.loads((CONFIGS / "config_names.json").read_text(
+           encoding="utf-8")).items()},
 }
 MIGRATIONS = {
     "gr00t": (
@@ -71,7 +77,7 @@ MIGRATIONS = {
     ),
     "moe_synthetic": (
         "The old MoE token-filler workload needs explicit input migration. Use "
-        "examples/configs/qwen3_5/text/35b_a3b/mixed_e4m3_p4096_d4096.toml: "
+        "examples/configs/qwen3_5/text/35b_a3b/fp8_e4m3_experts_attn_gdn_p4096_d4096.toml: "
         "replace prompt_token_ids/prefill_fill_token_id with prompt_file, prompt_sha256 "
         "and input_ids_sha256, and set run.timing_mode='forward_argmax'. Keep the same "
         "checkpoint and explicit prefill/decode lengths; the text content changes."

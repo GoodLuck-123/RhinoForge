@@ -207,7 +207,7 @@ def test_legacy_public_toml_selects_exact_profile_and_rejects_substitution(monke
 
     root = Path(__file__).resolve().parents[1]
     common = importlib.import_module("examples.common.config")
-    config = common.load_config(root / f"examples/configs/qwen3_5/legacy/27b/w8a16_tp{cores}.toml")
+    config = common.load_config(root / f"examples/configs/qwen3_5/legacy/27b/w8a16_attn_mlp_tp{cores}.toml")
     profile = common.planner_profiles()[config["example"]["profile_id"]]
     assert config["rpu_execution"]["model"]["num_cores"] == cores
     assert profile["precision"] == "w8a16" and profile["asset_alias"] == "qwen3_8-27b-w8a16"

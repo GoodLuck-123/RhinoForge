@@ -49,7 +49,7 @@ def test_shipped_configs_resolve_physical_choices_and_registered_scope():
                 for cameras in (2, 3)
                 for precision in ("fp16", "w8a16", "w8a16_action_nvfp4",
                                   "w8a16_prefill_w8a8_action_nvfp4")}
-    expected |= {CONFIGS / f"unoptimized/3cam/{precision}_tp{cores}.toml"
+    expected |= {CONFIGS / f"generic/3cam/{precision}_tp{cores}.toml"
                  for precision in ("fp16", "w8a16") for cores in (4, 6)}
     assert paths == expected
     registered = set()
@@ -84,7 +84,9 @@ def test_source_distribution_entries_use_public_catalog_without_manifests(tmp_pa
     for relative in ("examples/common", "examples/runners/pi05", "examples/configs/pi05"):
         shutil.copytree(ROOT / relative, tmp_path / relative,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
-    shutil.copy2(ROOT / "examples/configs/profiles.json", tmp_path / "examples/configs/profiles.json")
+    for filename in ("profiles.json", "config_names.json"):
+        relative = Path("examples/configs") / filename
+        shutil.copy2(ROOT / relative, tmp_path / relative)
     leaf = "python/rpu_backend/api/_execution.py"
     (tmp_path / leaf).parent.mkdir(parents=True)
     shutil.copy2(ROOT / leaf, tmp_path / leaf)
@@ -219,7 +221,7 @@ def test_public_entry_dispatches_one_engine_for_selected_config(monkeypatch, cap
     seen = []
     monkeypatch.setattr(runner, "run_example_config", lambda config: seen.append(config) or 0)
     monkeypatch.setattr(importlib.import_module("examples.common.cli"), "_pi05_runner", lambda: runner)
-    for selected in (path, default, CONFIGS / "unoptimized/3cam/fp16_tp4.toml"):
+    for selected in (path, default, CONFIGS / "generic/3cam/fp16_tp4.toml"):
         monkeypatch.setattr(sys, "argv", ["pi05.py", "--config", str(selected)])
         assert importlib.import_module("examples.common.cli").main() == 0
     assert [item["pi05"]["precision"] for item in seen] == ["w8a16_action_nvfp4", "w8a16", "fp16"]

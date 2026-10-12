@@ -8,11 +8,11 @@
 
 ```sh
 python examples/run.py --config examples/configs/qwen3/text/0_6b/fp16.toml --check-config
-python examples/run.py --config examples/configs/qwen3_vl/vl/4b/w8a16.toml
+python examples/run.py --config examples/configs/qwen3_vl/vl/4b/w8a16_text_head_vision.toml
 python examples/run.py --config examples/configs/pi05/2cam/w8a16_action_nvfp4.toml
 ```
 
-按模型指南填写 checkpoint 和输入，替换占位路径。相对路径按启动目录解析。`--check-config` 检查配置，不加载权重或访问设备。量化权重须携带加载器要求的元数据，见[量化](quantization.zh.md)。
+按模型指南填写 checkpoint 和输入，替换占位路径。`input.prompt_file` 和 `input.prepared_input_safetensors` 的相对路径按配置文件所在目录解析；其他资产路径按模型指南填写。`--check-config` 检查配置，不加载权重或访问设备。量化权重须携带加载器要求的元数据，见[量化](quantization.zh.md)。
 
 预处理输入使用对应 checkpoint 的 processor 产生的 CPU 张量字典，形状与组件须符合所选模型要求。
 

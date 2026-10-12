@@ -1,137 +1,134 @@
-# Wall-OSS 原 registry 配置
-[上级选型](../README.md) · [使用](#使用)
+<a id="wall-oss-原-registry-配置"></a>
 
-<a id="weights"></a>
-<a id="weight-sources"></a>
-## 权重来源
+# Wall-OSS registry 配置
 
-官方文件的存储 dtype 与本仓库运行时的 FP16/W8 等选项分开列示；`FP16` 配置不表示官方发布文件就是 FP16。
+本组通过 registry 别名加载公开 Wall-OSS 0.5，输入为三张图片、指令、状态和 mask。使用 `[example]` 格式，固定动作长度 32、十步去噪；按原始输入重放时选本组，按两/三图与分辨率选型见 [base](../base/README.md)。
 
-| 身份 | 名称与发布者 / 下载渠道 | 文件存储精度 | 本地目录与配置绑定 |
-|---|---|---|---|
-| 官方公开发布 | X Square Robot：[wall-oss-0.5](https://huggingface.co/x-square-robot/wall-oss-0.5/tree/b7dc23a82dbf70a65859c9fdd596703234597028)；[官方源码](https://github.com/X-Square-Robot/wall-x) | BF16 + FP32（官方 safetensors 元数据） | `wall-oss-0.5`；完整模型、processor/tokenizer、normalizer |
-| 当前公开基础模型父 | base / legacy 使用上述公开模型身份；固定 source revision 与文件校验和 | 原文件浮点；运行时转 FP16 / FP32 | base：`input.fp16_checkpoint`；legacy：`$RPU_MODEL_CACHE/wall-oss-0.5` |
-| 公开量化 / 本仓库转换 | 使用本仓库转换配方；下列 CLI 从本组原始父转换 | W8：2D linear INT8；W4：两个 decoder expert 的投影均为 INT4；浮点保留项 FP16 | `$RPU_MODEL_CACHE/wall-oss-0.5-w8a16` / `wall-oss-0.5-w4a16` / `wall-oss-0.5-w4a16-pgrp` → 各模板 registry 别名 |
+<a id="选择配置"></a>
+
+<a id="配置与权重对应"></a>
 
 <a id="weight-recipes"></a>
-## 模块精度与配方
 
-W/A 与 ACC 定义见[精度记法](../../WEIGHTS.md#precision-notation)。 W4 G0 是逐通道 INT4，G32 是 K 维每 32 值一组；两者 scale 为 FP16，均不是 NVFP4。
+## 配置说明
 
-| 配方与模板 | 加载后 Vision / Language | 加载后 Action / IO 与保留浮点部分 | 所需源权重、转换方式与完整命令 |
+| 配置 | Vision | Language / Action decoder | 权重获取 |
 |---|---|---|---|
-| legacy FP16：[fp16.toml](fp16.toml) | Vision / Language 主投影 W16A16 | Action 主投影 W16A16；浮点保留项见下文 | 公开原父；直接加载；[完整命令](#run-fp16) |
-| legacy W8：[w8a16.toml](w8a16.toml) | Vision / Language 主投影 W8A16 | Action 主投影 W8A16；浮点保留项见下文 | 公开原父 → 离线 W8；[完整命令](#公开-base-legacy-w8a16)，[python/rpu_backend/quant/convert_wall_oss_w8a16.py](../../../../python/rpu_backend/quant/convert_wall_oss_w8a16.py) |
-| legacy W4 G0：[w4a16.toml](w4a16.toml) | Vision 从配对 W8 目录加载；Language decoder W4A16 | Action decoder W4A16；Q/K/V/O/Gate/Up/Down 逐通道 INT4，FP16 scale，运行时打包 pgrp 布局；浮点保留项见下文 | 公开原父 + W8；离线 `--group-size 0`；[完整命令](#公开-base-legacy-w4逐通道-group0)，[convert_wall_oss.py](../../../../python/rpu_backend/quant/convert_wall_oss.py) |
-| legacy W4 G32：[w4a16_pgrp.toml](w4a16_pgrp.toml) | Vision W8A16；Language Q/K/V/O/Gate/Up/Down 均为 G32 W4A16 | Action decoder 全部七类投影 G32 W4A16；scale FP16；浮点保留项见下文 | 公开原父 + W8；离线 G32；[完整命令](#公开-base-legacy-w4-pgrp混合-group32)，[convert_wall_oss.py](../../../../python/rpu_backend/quant/convert_wall_oss.py) |
+| [fp16.toml](fp16.toml) | FP16 | FP16 | [原始公开模型](#download-parent) |
+| [w8a16.toml](w8a16.toml) | W8 | W8 | [原始模型 + W8](#公开-base-legacy-w8a16) |
+| [w4a16_channel.toml](w4a16_channel.toml) | W8 | 逐通道 INT4 | [原始/W8 + 逐通道 W4](#公开-base-legacy-w4逐通道-group0) |
+| [w4a16_g32.toml](w4a16_g32.toml) | W8 | 分组 INT4 | [原始/W8 + G32 W4](#公开-base-legacy-w4-pgrp混合-group32) |
 
-**各配方的浮点保留项：** patch/merger、norm/bias、embedding、动作预处理/输出回投保持浮点：设备路径 FP16，host 预处理/归一化 FP32；不使用 W8 文件中 action_preprocessor 的 INT8 副本。离线 W8 转换器会量化除 `embed_tokens` 外的全部浮点 2D `.weight`；运行器只取所需 INT8 投影，其余胶水权重仍从配对原父加载。
+<a id="fp16-基准与配置增量"></a>
+
+### FP16 基准
+
+FP16 基准为 `fp16.toml`，主投影和设备 IO 为 FP16，CPU 预处理/归一化为 FP32；已使用分阶段 Graph 和融合去噪。模板不设置额外精度开关，执行参数由普通 Wall-OSS 路径选择。
+
+### W8A16
+
+`example.dtype` 从 `"fp16"` 改为 `"w8a16"`，同步替换 profile/registry 别名并增加浮点父别名。Vision block、Language expert0 和 Action expert1 的 Q/K/V/O/Gate/Up/Down 为逐输出通道 INT8，scale 和激活为 FP16。
+
+patch/merger、norm/bias、embedding、动作预处理及输出回投保持浮点：设备部分 FP16，CPU 部分 FP32。转换器量化的额外二维浮点权重中，运行器只读取这些主体投影；其余模块仍从原始父目录取值。
+
+### W4 G0：在 W8 配方上量化两组 decoder
+
+`example.dtype="w4a16"`，别名改为 `wall-oss-0.5-w4a16`。Vision 继续读 W8；Language expert0 和 Action expert1 的 Q/K/V/O/Gate/Up/Down 改为逐输出通道 INT4、FP16 scale 和激活。离线使用 `--group-size 0`，加载时打包为运行所需的 pgrp 布局。
+
+### W4 G32：两组 decoder 分组量化
+
+`example.dtype="w4a16-pgrp"`，别名改为 `wall-oss-0.5-w4a16-pgrp`。离线使用 `--group-size 32`，沿 K 每 32 个权重计算一组 FP16 scale。Language expert0 和 Action expert1 的 Q/K/V/O/Gate/Up/Down 全部使用分组 INT4。
+
+INT4 值保存在 INT8 容器中，加载时打包；容器类型不改变逻辑位宽。这两档 W4 同时量化 Language 和 Action，均使用整数格式；base 的动作 NVFP4 和 sorting 的仅动作 W4 各有单独配方。
+
+转换使用 [W8 CLI](../../../../python/rpu_backend/quant/convert_wall_oss_w8a16.py)和 [W4 转换器](../../../../python/rpu_backend/quant/convert_wall_oss.py)，加载细节见 [llm.py](../../../../python/rpu_backend/adapters/wall_oss/llm.py)。
+
+<a id="准备权重并运行"></a>
 
 <a id="quantization"></a>
-## 下载与转换
 
-以下命令在仓库根目录执行。先把 `/path/to/...` 换成实际路径；`vi` 这一步编辑刚复制的 TOML，保存后再执行下一行。每个代码块是一个独立精度方案，只执行所需方案；已有同身份量化目录时跳过对应转换行。
+<a id="weight-sources"></a>
 
-下载固定 revision，记录源权重校验和。
+<a id="weights"></a>
+
+## 准备与运行
+
+### 获取所选权重
+
+源权重为 X Square Robot 的 [wall-oss-0.5](https://huggingface.co/x-square-robot/wall-oss-0.5/tree/b7dc23a82dbf70a65859c9fdd596703234597028)，revision `b7dc23a82dbf70a65859c9fdd596703234597028`，文件含 BF16 和 FP32。保留 processor/tokenizer 与 normalizer，源码见 [wall-x](https://github.com/X-Square-Robot/wall-x)。
+
+下面统一以 `RPU_MODEL_CACHE` 定位。原始和转换目录放在同一缓存根下，便于解析 `source` 元数据。所有转换都直接读取原始目录；W4 仍需要 W8 目录提供 Vision。
 
 <a id="download-parent"></a>
-### 下载公开基础模型原始权重
-
-```bash
-SRC=/path/to/model-cache/wall-oss-0.5
-hf download x-square-robot/wall-oss-0.5 --revision b7dc23a82dbf70a65859c9fdd596703234597028 --local-dir "$SRC"
-```
 
 <a id="run-fp16"></a>
-### FP16：原始浮点父权重直接运行
+
+**原始目录：FP16 直接使用。**
 
 ```bash
-export RPU_MODEL_CACHE=/path/to/model-cache
-cp examples/configs/wall_oss/legacy/fp16.toml /tmp/wall_legacy_fp16.toml
-# 原始公开父目录为 $RPU_MODEL_CACHE/wall-oss-0.5，保留 registry_alias。
-# input.images/instruction/proprioception/state_mask 填配对输入；在 [run] 添加 output_dir。
-vi /tmp/wall_legacy_fp16.toml
-python examples/run.py --config /tmp/wall_legacy_fp16.toml
+export RPU_MODEL_CACHE=/absolute/path/model-cache
+WALL_SRC="$RPU_MODEL_CACHE/wall-oss-0.5"
+hf download x-square-robot/wall-oss-0.5 \
+  --revision b7dc23a82dbf70a65859c9fdd596703234597028 \
+  --local-dir "$WALL_SRC"
 ```
 
 <a id="公开-base-legacy-w8a16"></a>
-### 公开基础模型旧版 W8A16
+
+**W8：三种量化配置均需准备。**
 
 ```bash
-export RPU_MODEL_CACHE=/path/to/model-cache
-SRC="$RPU_MODEL_CACHE/wall-oss-0.5"  # 原始公开 base 父目录
-DST="$RPU_MODEL_CACHE/wall-oss-0.5-w8a16"  # W8 registry 输出目录
-python python/rpu_backend/quant/convert_wall_oss_w8a16.py --src "$SRC" --dst "$DST"
-cp examples/configs/wall_oss/legacy/w8a16.toml /tmp/wall_legacy_w8.toml
-# input.images/instruction/proprioception/state_mask = 配对真实输入。
-# 在 [run] 添加 output_dir；保留原 registry_alias 和 fp16_registry_alias。
-# DST 按上述 registry 目录名解析，不另添加 input.checkpoint。
-vi /tmp/wall_legacy_w8.toml
-python examples/run.py --config /tmp/wall_legacy_w8.toml
+python python/rpu_backend/quant/convert_wall_oss_w8a16.py \
+  --src "$WALL_SRC" --dst "$RPU_MODEL_CACHE/wall-oss-0.5-w8a16"
 ```
 
 <a id="公开-base-legacy-w4逐通道-group0"></a>
-### 公开基础模型旧版 W4：逐通道 group0
+
+**逐通道 W4：选择逐通道模板时执行。**
 
 ```bash
-export RPU_MODEL_CACHE=/path/to/model-cache
-SRC="$RPU_MODEL_CACHE/wall-oss-0.5"  # 原始公开 base 父目录
-DST="$RPU_MODEL_CACHE/wall-oss-0.5-w4a16"  # 此精度的 registry 输出目录
-python python/rpu_backend/quant/convert_wall_oss_w8a16.py --src "$SRC" --dst "$RPU_MODEL_CACHE/wall-oss-0.5-w8a16"
-python -m rpu_backend.quant.convert_wall_oss --src "$SRC" --dst "$DST" --group-size 0
-cp examples/configs/wall_oss/legacy/w4a16.toml /tmp/wall_legacy_g0.toml
-# input.images = 真实 face/left/right 图片；input.instruction/proprioception/state_mask = 配对输入。
-# 在 [run] 添加 output_dir；保留 example.registry_alias 和 input.fp16_registry_alias。
-# DST 按 registry 目录名直接解析，无需把它填进不存在的 input.checkpoint 字段。
-vi /tmp/wall_legacy_g0.toml
-python examples/run.py --config /tmp/wall_legacy_g0.toml
+python -m rpu_backend.quant.convert_wall_oss \
+  --src "$WALL_SRC" \
+  --dst "$RPU_MODEL_CACHE/wall-oss-0.5-w4a16" --group-size 0
 ```
 
 <a id="公开-base-legacy-w4-pgrp混合-group32"></a>
-### 公开基础模型旧版 W4-pgrp：group32
+
+**G32 W4：选择分组模板时执行。**
 
 ```bash
-export RPU_MODEL_CACHE=/path/to/model-cache
-SRC="$RPU_MODEL_CACHE/wall-oss-0.5"  # 原始公开 base 父目录
-DST="$RPU_MODEL_CACHE/wall-oss-0.5-w4a16-pgrp"  # 此精度的 registry 输出目录
-python python/rpu_backend/quant/convert_wall_oss_w8a16.py --src "$SRC" --dst "$RPU_MODEL_CACHE/wall-oss-0.5-w8a16"
-python -m rpu_backend.quant.convert_wall_oss --src "$SRC" --dst "$DST" --group-size 32
-cp examples/configs/wall_oss/legacy/w4a16_pgrp.toml /tmp/wall_legacy_g32.toml
-# input.images = 真实 face/left/right 图片；input.instruction/proprioception/state_mask = 配对输入。
-# 在 [run] 添加 output_dir；保留 example.registry_alias 和 input.fp16_registry_alias。
-# DST 按 registry 目录名直接解析，无需把它填进不存在的 input.checkpoint 字段。
-vi /tmp/wall_legacy_g32.toml
-python examples/run.py --config /tmp/wall_legacy_g32.toml
+python -m rpu_backend.quant.convert_wall_oss \
+  --src "$WALL_SRC" \
+  --dst "$RPU_MODEL_CACHE/wall-oss-0.5-w4a16-pgrp" --group-size 32
 ```
 
-**FP16 无需量化。** 源/量化目录保持兄弟关系，以便 `source` 元数据解析。公开 base 与客户 WRC 不能混用；group0 与 group32 使用不同 scale 配方。转换计算使用 CPU，命令需在匹配的后端宿主环境中执行。
+`example.registry_alias` 与上面四个子目录同名。量化模板的 `input.fp16_registry_alias="wall-oss-0.5"` 绑定原始目录；保留两项别名即可，不添加 `input.checkpoint`。
 
-**实现位置**：[python/rpu_backend/quant/convert_wall_oss_w8a16.py](../../../../python/rpu_backend/quant/convert_wall_oss_w8a16.py)；[convert_wall_oss.py](../../../../python/rpu_backend/quant/convert_wall_oss.py)。W8/W4 CLI 分别调用各模块的 `convert_checkpoint()`。W4 默认 G32，两个 decoder expert 的投影均为 INT4；用 `--group-size 0` 选择逐通道 scale。
+<a id="使用"></a>
 
-## 选择配置
-
-| 配置 | 精度范围 / 区别 | 登记状态 |
-|---|---|---|
-| [FP16](fp16.toml) | 原浮点配方 | SUPPORTED_LIMITED，精确profile |
-| [W8](w8a16.toml) | 原INT8配方 | EXPERIMENTAL |
-| [W4](w4a16.toml) | Vision W8、Prefill/Action decoder per-channel W4、glue FP16 | EXPERIMENTAL |
-| [W4-pgrp](w4a16_pgrp.toml) | Vision W8、decoder group-wise W4、glue FP16 | EXPERIMENTAL |
-
-两种 W4 都量化 Prefill/Action decoder，区别在按通道或按组计算 scale；它们与 base 的 Action-only NVFP4、sorting 配方不同。
-
-## 使用
-
-通过 `examples/run.py --config <TOML>` 显式选择旧 registry 配置：
+### 绑定输入并运行
 
 ```bash
-python examples/run.py --config examples/configs/wall_oss/legacy/w4a16_pgrp.toml --check-config
-python examples/run.py --config /path/to/wall_legacy.toml
+WALL_CONFIG=examples/configs/wall_oss/legacy/w8a16.toml
+cp "$WALL_CONFIG" /tmp/wall_registry.toml
+# input.images/instruction/proprioception/state_mask = 配对实际输入。
+# run.output_dir = 本次结果目录；保留 registry_alias 与 fp16_registry_alias。
+vi /tmp/wall_registry.toml
+python examples/run.py --config /tmp/wall_registry.toml
 ```
 
-填写原checkpoint配对、face/left/right三张图片、指令与26维状态，保持真实prefix范围 `[545,640]`。
+<a id="输入与运行参数"></a>
 
-采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认3次正式运行。
+### 输入与常调参数
 
-## 参数与限制
+提供 face/left/right 三张图片、非空指令、26 维状态和 mask，实际图像 token 展开后的前缀范围为 `[545,640]`。动作长度 32，十步去噪。
 
-可修改图片、状态、prompt 和原 profile 允许的 run 参数；冷配置变化后使用新进程。`--check-config` 仅检查配置。库依赖见 [正式 main/DDR 两份 REF](../../../../docs/runtime_assets.md)。
+| 字段 | 模板值 | 可选范围 | 修改时的关联 |
+|---|---|---|---|
+| `input.images/instruction` | 图片占位路径、默认指令 | 三张图片、非空文本 | 实际前缀保持在 545–640 |
+| `input.proprioception/state_mask` | 26 维，mask 选择前 7 维 | 配对状态和维度选择 | mask 与输入状态及动作槽位一致 |
+| `input.noise_seed` | 0 | 非负整数 | 固定输入噪声 |
+| `run.warmup/runs` | 2 / 3 | 预热≥0、采样≥1 | 按所需运行次数调整 |
+| `cpu.threads` | 未指定 | 正整数 | 省略时继承运行环境 |
+
+公共字段见[参数说明](../../PARAMETERS.md)，运行库见[算子库说明](../../../../docs/runtime_assets.md)。更换冷配置后使用新进程。
