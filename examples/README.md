@@ -29,9 +29,9 @@ Legacy model scripts remain compatibility wrappers. See the [v1.2.0 upgrade guid
 | [InternVLA](configs/internvla/README.md) | [NavDP FP16](configs/internvla/navdp/fp16.toml) |
 | [LingBot v2](configs/lingbot/v2/README.md) | [3cam T3 W8A16](configs/lingbot/v2/3cam_t3/w8a16.toml) |
 | [LingBot v1 (deferred)](configs/lingbot/README.md) | [4B mixed](configs/lingbot/v1/4b_mixed.toml) |
-| [HALO (deferred)](configs/halo/README.md) | [FP16 Expert](configs/halo/action_expert/fp16.toml) |
+| [HALO](configs/halo/README.md) | [FP16 Expert](configs/halo/action_expert/fp16.toml) |
 
-HALO and LingBot v1 remain deferred. Qwen3.5 35B MoE uses its controlled profiles.
+LingBot v1 remains deferred. Qwen3.5 35B MoE uses its controlled profiles.
 
 ## Run
 

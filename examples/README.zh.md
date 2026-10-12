@@ -29,9 +29,9 @@
 | [InternVLA](configs/internvla/README.md) | [NavDP FP16](configs/internvla/navdp/fp16.toml) |
 | [LingBot v2](configs/lingbot/v2/README.md) | [3cam T3 W8A16](configs/lingbot/v2/3cam_t3/w8a16.toml) |
 | [LingBot v1（延期）](configs/lingbot/README.md) | [4B mixed](configs/lingbot/v1/4b_mixed.toml) |
-| [HALO（延期）](configs/halo/README.md) | [FP16 Expert](configs/halo/action_expert/fp16.toml) |
+| [HALO](configs/halo/README.md) | [FP16 Expert](configs/halo/action_expert/fp16.toml) |
 
-HALO、LingBot v1 的测试继续延期；Qwen3.5 35B MoE 已纳入本轮测试矩阵，其受控支持范围及任务评估限制仍适用。
+LingBot v1 测试延期。Qwen3.5 35B MoE 仅支持已登记的受控配置。
 
 ## 运行
 
