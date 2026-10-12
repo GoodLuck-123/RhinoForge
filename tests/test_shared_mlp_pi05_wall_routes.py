@@ -15,9 +15,28 @@ def test_shared_mlp_preserves_wall_fusion_and_pi05_residual_routes(tmp_path):
     start = header.index("    void emit_mlp_pipeline(")
     declaration = header[start:header.index(";", start) + 1]
     implementation = _block(source, "void FusedModelBase::emit_mlp_pipeline(")
-    adarms = (ROOT / "src/fused/rpu_adarms_model.cpp").read_text()
-    call_start = adarms.index("emit_mlp_pipeline(lw.gate_proj_w")
-    adarms_call = adarms[call_start:adarms.index(");", call_start) + 2]
+    caller_methods = []
+    for name, filename, marker in (
+        ("adarms", "rpu_adarms_model.cpp", "emit_mlp_pipeline(lw.gate_proj_w"),
+        ("denoise", "rpu_pi05_denoise_step_model.cpp", "emit_mlp_pipeline(lw.gate_proj_w"),
+        ("gate_up", "rpu_pi05_denoise_step_model.cpp", "emit_mlp_pipeline(weights.gate_proj_w"),
+    ):
+        caller = (ROOT / "src/fused" / filename).read_text()
+        call_start = caller.index(marker)
+        call = caller[call_start:caller.index(");", call_start) + 2]
+        caller_methods.append(f"void run_actual_{name}_call(bool quantized, bool linear_acc32_, bool xor3) {{" + r'''
+            struct Weights {
+                at::Tensor gate_proj_w, up_proj_w, down_proj_w;
+                at::Tensor gate_ws, up_ws, down_ws;
+            } lw;
+            const auto& weights = lw;
+            struct Tables { bool active; bool enabled() const { return active; } };
+            const Tables nvfp4_{quantized};
+            const int64_t seq_len = 50;
+            const int layer_idx = 3;
+            const struct { int64_t len; } chunk{seq_len};
+            const auto use_pi05_ring_xor3 = [xor3](int64_t) { return xor3; };
+        ''' + call + "\n}")
     enums = "\n".join(_block(header, marker) + ";" for marker in (
         "enum class FmbRouteFamily : int",
         "enum class FmbLinearRouteSelector : int",
@@ -100,18 +119,7 @@ public:
     uint32_t addr(int, const char* name) const {
         return std::string(name) == "residual2" ? 0x500000 : 0x100000;
     }
-''' + declaration + r'''
-    void run_actual_adarms_call(bool quantized, bool linear_acc32_) {
-        struct Weights {
-            at::Tensor gate_proj_w, up_proj_w, down_proj_w;
-            at::Tensor gate_ws, up_ws, down_ws;
-        } lw;
-        struct Tables { bool active; bool enabled() const { return active; } };
-        const Tables nvfp4_{quantized};
-        const int64_t seq_len = 50;
-        const int layer_idx = 3;
-''' + adarms_call + r'''
-    }
+''' + declaration + "\n".join(caller_methods) + r'''
 };
 ''' + implementation + r'''
 int main() {
@@ -187,21 +195,33 @@ int main() {
 
     // Exercise the production caller as well as the shared emitter. An omitted
     // boolean can otherwise shift the residual and precision arguments.
-    for (bool quantized : {false, true}) for (bool acc32 : {false, true}) {
+    using Caller = void (FusedModelBase::*)(bool, bool, bool);
+    const Caller callers[] = {&FusedModelBase::run_actual_adarms_call,
+        &FusedModelBase::run_actual_denoise_call, &FusedModelBase::run_actual_gate_up_call};
+    for (int caller = 0; caller < 3; ++caller)
+    for (bool quantized : {false, true}) for (bool acc32 : {false, true})
+    for (bool xor3 : {false, true}) {
         launches.clear(); routes.clear(); nvfp4_acc32.clear();
-        model.run_actual_adarms_call(quantized, acc32);
+        ring_residual = 0;
+        (model.*callers[caller])(quantized, acc32, xor3);
         const auto selector = quantized
             ? (acc32 ? FmbLinearRouteSelector::PI05_NVFP4_V2_ACC32
                      : FmbLinearRouteSelector::PI05_NVFP4_V2_ACC16)
             : FmbLinearRouteSelector::AUTO_TILE;
-        assert(routes.size() == 4);
-        for (size_t i = 0; i < 3; ++i)
+        const size_t projections = caller == 2 ? 2 : 3;
+        assert(routes.size() == (caller == 2 ? 2 : 4));
+        for (size_t i = 0; i < projections; ++i)
             assert(routes[i].family == FmbRouteFamily::LINEAR &&
                    routes[i].selector == static_cast<int64_t>(selector));
         assert(launches.front() == (quantized ? "nvfp4" : "linear"));
-        assert(ring_residual == 0x500000 && !ring_xor3);
+        if (caller == 0)
+            assert(ring_residual == 0x500000 && !ring_xor3);
+        else if (caller == 1)
+            assert(ring_residual == 0x100000 && ring_xor3 == xor3);
+        else
+            assert(ring_residual == 0 && launches.back() == "mul");
         if (quantized)
-            assert((nvfp4_acc32 == std::vector<bool>{acc32, acc32, acc32}));
+            assert(nvfp4_acc32 == std::vector<bool>(projections, acc32));
         else
             assert(nvfp4_acc32.empty());
     }

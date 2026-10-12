@@ -4084,6 +4084,7 @@ void Pi05DenoiseStepModel::build_layer_subgraph(int layer_idx, const ChunkInfo& 
                       nvfp4_.enabled() ? addr(0, "nvfp4_up_ts") : 0,
                       nvfp4_.enabled() ? addr(0, "nvfp4_down_ts") : 0, layer_idx,
                       /*down/residual bf16=*/false, false, /*acc32=*/linear_acc32_, false, false,
+                      /*fuse_wall_gate_up=*/false,
                       /*bind_silu_mul_route=*/false,
                       /*ring residual=*/addr(0, "final_out_spm"), use_pi05_ring_xor3(seq_len), nvfp4_.enabled());
     }
@@ -4195,6 +4196,7 @@ void Pi05DenoiseStepModel::emit_pi05_w4_xor3_mlp(
             nvfp4_.enabled() ? addr(0, "nvfp4_up_ts") : 0,
             nvfp4_.enabled() ? addr(0, "nvfp4_down_ts") : 0, layer_idx,
             /*down/residual bf16=*/false, false, /*acc32=*/linear_acc32_, false, true,
+            /*fuse_wall_gate_up=*/false,
             /*bind_silu_mul_route=*/false,
             /*ring residual=*/addr(0, "final_out_spm"), use_pi05_ring_xor3(chunk.len), nvfp4_.enabled());
     }

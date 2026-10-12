@@ -722,6 +722,43 @@ def test_request_validation(value, match):
         _MODULE.PlannerRequest.from_mapping(value)
 
 
+@pytest.mark.parametrize("precision", ["fp16", "w8a16"])
+def test_lingbot_three_camera_t128_budget_reaches_admitted_layout(precision):
+    import tomllib
+
+    template = _ROOT / f"examples/configs/lingbot/v2/3cam_t128/{precision}.toml"
+    config = tomllib.loads(template.read_text())
+    assert config["input"]["cameras"] == 3
+    assert config["input"]["expected_language_tokens"] == 128
+    logical_len = 326
+    queried = []
+
+    def resolve(execution_len):
+        queried.append(execution_len)
+        if execution_len == 400:
+            return ((400, 400, 400),)
+        raise _MODULE.PlannerRejectError("NO_FEASIBLE", requested=execution_len)
+
+    with pytest.raises(_MODULE.PlannerRejectError, match="NO_FEASIBLE"):
+        _MODULE.plan_prefill(
+            logical_len, 973, 63, alignment=16,
+            resolve_stage_domain=resolve,
+        )
+    assert queried == [336, 352, 368, 384]
+
+    queried.clear()
+    result = _MODULE.plan_prefill(
+        logical_len, 973, config["rpu_execution"]["prefill"]["padding_budget"],
+        alignment=16, resolve_stage_domain=resolve,
+    )
+    assert set(queried) == {336, 352, 368, 384, 400}
+    assert result.request.padding_budget == 64
+    assert result.selected.execution_len == 400
+    # Mandatory alignment adds ten rows before the optional search budget.
+    assert result.selected.padding_rows == 10 + 64
+    assert result.selected.execution_len - result.selected.padding_rows == logical_len
+
+
 def test_prefill_stage_domain_logs_typed_rejections():
     records = []
 
