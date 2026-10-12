@@ -8,11 +8,12 @@ import pytest
 
 @pytest.mark.parametrize("logical_rows", [128, 480])
 @pytest.mark.parametrize(
-    "stage, expected_chunk, expected_padding",
-    [({}, None, 0), ({"chunk_size": 64, "padding_rows": 16}, 64, 16)],
+    "stage, expected_chunk, expected_padding, expected_budget",
+    [({}, None, 0, 0), ({"chunk_size": 64, "padding_rows": 16}, 64, 16, 0),
+     ({"padding_rows": "auto", "padding_budget": 64}, None, "auto", 64)],
 )
 def test_prefill_planning_preserves_explicit_public_options(
-    logical_rows, stage, expected_chunk, expected_padding
+    logical_rows, stage, expected_chunk, expected_padding, expected_budget
 ):
     source = (
         Path(__file__).resolve().parents[1]
@@ -35,7 +36,8 @@ def test_prefill_planning_preserves_explicit_public_options(
     def planner(logical, max_length, budget, **kwargs):
         calls.append((logical, max_length, budget, kwargs))
         kwargs["plan_result_sink"](result)
-        return logical + kwargs["padding_rows"], kwargs["exact_chunk_size"] or 128
+        padding = 16 if kwargs["padding_rows"] == "auto" else kwargs["padding_rows"]
+        return logical + padding, kwargs["exact_chunk_size"] or 128
 
     namespace = {"plan_bounded_prefill_execution": planner}
     extracted = ast.Module(body=[cap, method], type_ignores=[])
@@ -48,11 +50,28 @@ def test_prefill_planning_preserves_explicit_public_options(
     logical, max_length, budget, kwargs = calls[0]
     assert logical == logical_rows
     assert max_length == namespace["_CERTIFIED_MAX_KV_LEN"]
-    assert budget == 0
+    assert budget == expected_budget
     assert kwargs["exact_chunk_size"] == expected_chunk
     assert kwargs["padding_rows"] == expected_padding
     assert kwargs["execution_owner"] is model
     assert kwargs["execution_native"] == ("causal_decoder", 7)
-    assert execution_rows == logical_rows + expected_padding
+    assert execution_rows == logical_rows + (16 if expected_padding == "auto" else expected_padding)
     assert chunk == (expected_chunk or 128)
     assert actual is result
+
+
+def test_registered_template_resolves_bounded_backbone_padding():
+    from examples.common.config import load_config
+    from rpu_backend.adapters.internvla_n1.execution import (
+        BACKBONE_COMPONENT, resolve_internvla_execution,
+    )
+
+    path = Path(__file__).resolve().parents[1] / "examples/configs/internvla/navdp/fp16.toml"
+    config = load_config(path)
+    _, children = resolve_internvla_execution(
+        config["rpu_execution"], entry_point="registered example"
+    )
+    stage = children[BACKBONE_COMPONENT]["prefill"]
+    assert stage["chunk_size"] == "auto"
+    assert stage["padding_rows"] == "auto"
+    assert stage["padding_budget"] == 64

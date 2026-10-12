@@ -213,6 +213,117 @@ def test_cli_preserves_wall_run_schema(tmp_path, family, relative):
     assert process.returncode == 0, process.stderr
 
 
+@pytest.mark.parametrize("family", ["base", "sorting"])
+@pytest.mark.parametrize("existing", ["", "actions.pt", "native-old.stdout.log"])
+def test_wall_cli_reaches_engine_with_only_current_session_logs(tmp_path, family, existing):
+    process = _run(tmp_path, r'''
+        import sys
+        from pathlib import Path
+        from examples.common import cli, config as common
+        from examples.runners.wall_oss import base_engine, sorting
+        root = Path(sys.argv[1])
+        family, existing = sys.argv[2:]
+        relative = "base/2cam/224/fp16.toml" if family == "base" else "sorting/fp16.toml"
+        path = Path("examples/configs/wall_oss") / relative
+        config = common.load_config(path)
+        output = root / "results"
+        config["run"]["output_dir"] = str(output)
+        config["logging"] = {"summary": False}
+        if existing:
+            output.mkdir()
+            (output / existing).write_text("user content")
+        if family == "base":
+            batch = root / "batch.pt"
+            batch.touch()
+            config["input"].pop("batch_template", None)
+            config["input"].update(fp16_checkpoint=str(root), batch=str(batch))
+        class EngineReached(Exception):
+            pass
+        def reached(*args):
+            assert len(list(output.glob("native-*.log"))) == 2
+            raise EngineReached
+        # Keep the real CLI, config validation and output-directory preflight.
+        base_engine.main = reached
+        sorting.cold_environment = reached
+        cli.load_config = lambda _: config
+        try:
+            cli.main(["--config", str(path)])
+        except EngineReached:
+            assert not existing
+        except SystemExit as error:
+            assert existing and error.code == 2
+            assert (output / existing).read_text() == "user content"
+        else:
+            raise AssertionError("engine preflight was skipped")
+    ''', family, existing)
+    assert process.returncode == 0, process.stderr
+    if existing:
+        assert "output directory must be empty" in process.stderr
+
+
+def test_output_directory_rejects_other_sessions_and_log_aliases(tmp_path):
+    process = _run(tmp_path, r'''
+        import sys
+        from pathlib import Path
+        from examples.common.logging import logging_session, prepare_output_directory
+        root = Path(sys.argv[1])
+        output = root / "results"
+        assert prepare_output_directory(output) == output
+        with logging_session({"run": {"output_dir": str(output)}, "logging": {"summary": False}}) as session:
+            assert prepare_output_directory(output) == output
+            alias = output / "user-alias.log"
+            alias.symlink_to(session.native.paths["stdout"])
+            try:
+                prepare_output_directory(output)
+            except FileExistsError:
+                pass
+            else:
+                raise AssertionError("a user alias is not a session-owned file")
+            alias.unlink()
+        for active in (False, True):
+            def reject():
+                try:
+                    prepare_output_directory(output)
+                except FileExistsError:
+                    return
+                raise AssertionError("prior-session logs must not be accepted")
+            if active:
+                with logging_session({"run": {"output_dir": str(root / "other")}, "logging": {"summary": False}}):
+                    reject()
+            else:
+                reject()
+    ''')
+    assert process.returncode == 0, process.stderr
+
+
+def test_argparse_error_visible_at_default_level(tmp_path):
+    process = _run(tmp_path, r'''
+        import argparse, sys
+        from examples.common.logging import logging_session
+        with logging_session({"run": {"output_dir": sys.argv[1]}, "logging": {"summary": False}}):
+            parser = argparse.ArgumentParser(prog="example")
+            parser.add_argument("--required", required=True)
+            parser.parse_args([])
+    ''')
+    assert process.returncode == 2
+    assert "usage: example" in process.stderr
+    assert "example: error: the following arguments are required: --required" in process.stderr
+
+
+def test_unmarked_stderr_retains_default_filtering(tmp_path):
+    process = _run(tmp_path, r'''
+        import sys
+        from examples.common.logging import logging_session
+        with logging_session({"run": {"output_dir": sys.argv[1]}, "logging": {"summary": False}}):
+            print("The image processor now uses the fast implementation.", file=sys.stderr)
+            print("[WARNING] processor option changed", file=sys.stderr)
+            print("[ERROR] model input failed", file=sys.stderr)
+    ''')
+    assert process.returncode == 0, process.stderr
+    assert "processor" not in process.stderr
+    assert "[ERROR] model input failed" in process.stderr
+
+
 @pytest.mark.parametrize("level", ["ERROR", "INFO"])
 def test_g05_spawned_row_uses_same_logging_policy(tmp_path, monkeypatch, level):
     from examples.runners.g05 import optimized

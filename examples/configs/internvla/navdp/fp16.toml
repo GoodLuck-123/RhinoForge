@@ -20,4 +20,6 @@ hwperf = false
 profile = false
 seed = 0
 
-[rpu_execution]
+[rpu_execution.components.system2_backbone.prefill]
+padding_rows = "auto"
+padding_budget = 64

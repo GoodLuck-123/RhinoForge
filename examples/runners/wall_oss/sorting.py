@@ -6,6 +6,7 @@ from __future__ import annotations
 from examples.common import cpu as _cpu_helpers
 from examples.common import libraries as _library_helpers
 from examples.common import results as _result_helpers
+from examples.common.logging import prepare_output_directory
 
 import json
 import logging
@@ -167,6 +168,7 @@ def run_example_config(config: dict) -> int:
     validate_example_config(config)
     precision = config["wall_oss_sorting"]["precision"]
     inputs, run = config["input"], config["run"]
+    output_dir = prepare_output_directory(run["output_dir"])
     env, libraries = cold_environment(precision)
     bind_cold_environment(env)
     # Match the validation CLI's source-checkout import isolation.
@@ -190,8 +192,6 @@ def run_example_config(config: dict) -> int:
     batch_path = Path(inputs["batch"]).expanduser().resolve(strict=True)
     common = observation(torch.load(batch_path, map_location="cpu", weights_only=True), inputs.get("inference_delay", 0))
     checkpoint, kwargs = checkpoint_arguments(inputs, precision)
-    output_dir = Path(run["output_dir"]).expanduser()
-    output_dir.mkdir(parents=True, exist_ok=False)
     torch.rpu.set_caching_allocator(True)
     torch.rpu.set_ddr_flush(False)
     torch.rpu.set_ddr_flush_force(True)

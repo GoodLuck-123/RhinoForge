@@ -85,7 +85,8 @@ class _PrintLog(io.TextIOBase):
                                              "Exception ignored in", "Fatal Python error:")):
             self.traceback = True
         if line.strip():
-            level = logging.ERROR if self.traceback else _line_level(line)
+            argument_error = self.stderr and (line.startswith("usage: ") or ": error: " in line)
+            level = logging.ERROR if self.traceback or argument_error else _line_level(line)
             logging.getLogger("examples.captured").log(level, "%s", line)
 
     def flush(self):
@@ -110,6 +111,19 @@ def _summary_line(channel, message):
 
 def configuration_checked(message):
     _summary_line("CONFIG", message)
+
+
+def prepare_output_directory(path):
+    """Require an empty directory, apart from this session's native logs."""
+    directory = Path(path).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    owned = set()
+    if _ACTIVE is not None and _ACTIVE.capturing and not _ACTIVE.closed:
+        owned = set(_ACTIVE.native.paths.values())
+    for entry in directory.resolve().iterdir():
+        if entry not in owned or entry.is_symlink() or not entry.is_file():
+            raise FileExistsError(f"output directory must be empty: {directory}")
+    return directory
 
 
 def emit_performance(config, report):

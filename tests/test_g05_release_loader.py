@@ -52,8 +52,10 @@ def release(monkeypatch, tmp_path):
 
 
 def test_source_package_imports_real_loader_without_release_installed(tmp_path):
+    dependency_paths = os.environ.get("PYTHONPATH", "").split(os.pathsep)
     env = dict(os.environ, TORCH_DEVICE_BACKEND_AUTOLOAD="0",
-               PYTHONPATH=str(ROOT / "python"))
+               PYTHONPATH=os.pathsep.join(
+                   [str(ROOT / "python"), *(p for p in dependency_paths if p)]))
     script = (
         "import pathlib, sys\n"
         "from rpu_backend.adapters.g05 import release_replay as m\n"

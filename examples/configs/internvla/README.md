@@ -64,6 +64,8 @@ python examples/run.py --config /path/to/internvla.toml
 
 asset manifest用于核对权重与fixture身份，必须与本次bundle配对。
 
+模板为 System2 prefill 显式启用最多 64 行自动补齐，仅用于物理执行对齐；逻辑输入、位置和输出长度保持不变。
+
 采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认3次正式运行。
 
 ## 可修改参数

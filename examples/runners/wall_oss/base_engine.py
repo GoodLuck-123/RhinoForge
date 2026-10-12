@@ -2,6 +2,7 @@
 from examples.common import cpu as _cpu_helpers
 from examples.common import libraries as _library_helpers
 from examples.common import results as _result_helpers
+from examples.common.logging import prepare_output_directory
 #!/usr/bin/env python3
 """Wall base H32/10-step validation and benchmark. Invoke inside a device lock.
 
@@ -113,9 +114,10 @@ def arguments(argv=None):
         path = getattr(args, name)
         if path is not None and not path.exists():
             parser.error(f"missing {name}: {path}")
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    if any(args.output_dir.iterdir()):
-        parser.error("--output-dir must be empty")
+    try:
+        prepare_output_directory(args.output_dir)
+    except FileExistsError as error:
+        parser.error(str(error))
     return args
 
 

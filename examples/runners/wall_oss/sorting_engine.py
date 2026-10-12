@@ -565,7 +565,8 @@ def main() -> None:
         return
     if os.geteuid() != 0:
         raise RuntimeError("run under the project's exclusive device device-lock wrapper as root")
-    args.output_dir.mkdir(parents=True, exist_ok=False)
+    from examples.common.logging import prepare_output_directory
+    prepare_output_directory(args.output_dir)
     try:
         report, tensors = run(args, fp16, w8, w4, golden)
     except Exception as exc:
