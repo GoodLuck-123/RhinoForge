@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -76,6 +78,76 @@ def test_shipped_configs_resolve_physical_choices_and_registered_scope():
     retired = "pi05-libero-finetuned-w4real-kvint8.w4a16-kvint8.vla"
     assert retired in required  # Its registered capability was not withdrawn.
     assert registered == required - {retired}
+
+
+def test_source_distribution_entries_use_public_catalog_without_manifests(tmp_path):
+    for relative in ("examples/common", "examples/runners/pi05", "examples/configs/pi05"):
+        shutil.copytree(ROOT / relative, tmp_path / relative,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    shutil.copy2(ROOT / "examples/configs/profiles.json", tmp_path / "examples/configs/profiles.json")
+    leaf = "python/rpu_backend/api/_execution.py"
+    (tmp_path / leaf).parent.mkdir(parents=True)
+    shutil.copy2(ROOT / leaf, tmp_path / leaf)
+    script = """
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path.cwd()))
+class NoBackendImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in ('torch', 'rpu_backend'):
+            raise AssertionError('configuration metadata imported the backend')
+sys.meta_path.insert(0, NoBackendImports())
+from examples.common import config as common
+from examples.runners.pi05 import optimized as runner
+
+assert not Path('manifests').exists()
+profiles = common.example_profiles()
+seen = []
+def capture(args, *, bind_libraries):
+    assert bind_libraries is True
+    seen.append(args)
+runner.run_profile = capture
+configs = [common.load_config(path) for path in sorted(Path('examples/configs/pi05').rglob('*.toml'))]
+legacy = common.load_config(Path('examples/configs/pi05/3cam/fp16.toml'))
+legacy['pi05']['precision'] = 'w4a16_kvint8'
+legacy['input']['checkpoint'] = 'pi05-libero-finetuned-w4real-kvint8'
+configs.append(legacy)
+registered = set()
+for config in configs:
+    metadata = runner.registered_example(config)
+    assert runner.run_example_config(config) == 0
+    if metadata is None:
+        assert seen[-1].registered_profile is None
+    else:
+        profile = profiles[metadata['profile_id']]
+        assert seen[-1].registered_profile == {
+            key: profile[key] for key in ('id', 'support', 'input_envelope')}
+        registered.add(profile['id'])
+assert registered == {key for key, profile in profiles.items()
+                      if profile['family'] == 'pi05' and common.required_example(profile)}
+
+# Missing public support metadata must fail before model execution.
+path = Path('examples/configs/profiles.json')
+catalog = json.loads(path.read_text())
+profile_id = 'pi05-libero-finetuned.fp16.vla'
+catalog['profiles'] = [row for row in catalog['profiles'] if row['id'] != profile_id]
+path.write_text(json.dumps(catalog))
+common.planner_profiles.cache_clear()
+before = len(seen)
+try:
+    runner.run_example_config(common.load_config(Path('examples/configs/pi05/3cam/fp16.toml')))
+except KeyError as exc:
+    assert exc.args == (profile_id,)
+else:
+    raise AssertionError('missing public profile reached execution')
+assert len(seen) == before
+assert 'torch' not in sys.modules and 'rpu_backend' not in sys.modules
+"""
+    result = subprocess.run([sys.executable, "-I", "-S", "-c", script], cwd=tmp_path,
+                            text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("section,key,value", [

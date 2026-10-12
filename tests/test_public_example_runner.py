@@ -925,6 +925,7 @@ def test_provenance_binds_config_tracked_untracked_and_dependency_bytes(monkeypa
         "commit", "-qm", "fixture")
     clean = runner._provenance({"run": {"runs": 1}})
     assert clean["source"]["dirty"] is False
+    assert clean["dependencies"] == {"status": "UNAVAILABLE"}
     source.write_text("changed\n")
     dirty = runner._provenance({"run": {"runs": 1}})
     assert dirty["source"]["dirty"] is True
@@ -932,18 +933,20 @@ def test_provenance_binds_config_tracked_untracked_and_dependency_bytes(monkeypa
     (tmp_path / "new.py").write_text("new source\n")
     untracked = runner._provenance({"run": {"runs": 1}})
     assert untracked["source"]["worktree_delta_sha256"] != dirty["source"]["worktree_delta_sha256"]
-    manifest = {"state": "pending_build", "launch_kernel": {"checkout_sha": "launch"},
-                "rhino_ops": {"refs": {"main": {"checkout_sha": "main"},
-                                      "expansion": {"checkout_sha": "expansion"}}}}
+    manifest = {"schema_version": 1, "launch_kernel": {"commit": "launch"},
+                "artifacts": {"rhino_ops_main": {"commit": "main"},
+                              "rhino_ops_expansion": {"commit": "expansion"}}}
     raw = json.dumps(manifest).encode()
-    (tmp_path / "manifests").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "manifests/dependency_manifest.v1.json").write_bytes(raw)
+    (tmp_path / "release").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "release/runtime-dependencies.json").write_bytes(raw)
+    assert not (tmp_path / "manifests").exists()
     changed = runner._provenance({"run": {"runs": 2}})
     assert changed["config_sha256"] != clean["config_sha256"]
     assert changed["source"]["commit"] == clean["source"]["commit"]
     assert changed["dependencies"]["manifest_sha256"] == hashlib.sha256(raw).hexdigest()
     assert changed["dependencies"]["scope"] == "declared_build_inputs"
-    assert changed["dependencies"]["manifest_state"] == "pending_build"
+    assert changed["dependencies"]["launch_kernel"] == "launch"
+    assert changed["dependencies"]["rhino_ops"] == {"main": "main", "expansion": "expansion"}
 
 
 def test_hw_profile_context_is_enabled_before_prepare(monkeypatch, tmp_path):

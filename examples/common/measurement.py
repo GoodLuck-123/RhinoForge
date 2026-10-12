@@ -46,15 +46,16 @@ def _provenance(config):
                   "worktree_delta_sha256": patch_digest.hexdigest()}
     except (OSError, subprocess.CalledProcessError) as exc:
         source = {"commit": None, "status": "UNAVAILABLE", "reason": type(exc).__name__}
-    manifest_path = root / "manifests/dependency_manifest.v1.json"
+    manifest_path = root / "release/runtime-dependencies.json"
     if manifest_path.is_file():
         manifest_bytes = manifest_path.read_bytes()
         manifest = json.loads(manifest_bytes)
         dependencies = {"manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
-                        "manifest_state": manifest["state"], "scope": "declared_build_inputs",
-                        "launch_kernel": manifest["launch_kernel"]["checkout_sha"],
-                        "rhino_ops": {name: value["checkout_sha"] for name, value in
-                                      manifest["rhino_ops"]["refs"].items()}}
+                        "scope": "declared_build_inputs",
+                        "launch_kernel": manifest["launch_kernel"]["commit"],
+                        "rhino_ops": {name: manifest["artifacts"][role]["commit"]
+                                      for name, role in (("main", "rhino_ops_main"),
+                                                         ("expansion", "rhino_ops_expansion"))}}
     else:
         dependencies = {"status": "UNAVAILABLE"}
     config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()

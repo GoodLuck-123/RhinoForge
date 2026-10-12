@@ -694,9 +694,9 @@ def run_example_config(config: dict) -> int:
     example = registered_example(config)
     args.registered_profile = None
     if example is not None:
-        manifest = json.loads((Path(__file__).resolve().parents[3]
-                               / "manifests/planner_owners.v1.json").read_text())
-        profile = next(item for item in manifest["profiles"] if item["id"] == example["profile_id"])
+        from examples.common.config import example_profiles
+
+        profile = example_profiles()[example["profile_id"]]
         args.registered_profile = {key: profile[key] for key in ("id", "support", "input_envelope")}
     run_profile(args, bind_libraries=True)
     return 0

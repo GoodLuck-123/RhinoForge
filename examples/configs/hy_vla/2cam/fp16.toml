@@ -25,7 +25,7 @@ seed = 0
 output_dir = "./hyvla_results/2cam/fp16"
 
 # Use the current native build and the two bundled REF aliases.
-# Source/build provenance is in manifests/dependency_manifest.v1.json.
+# Runtime sources are pinned in release/runtime-dependencies.json.
 # Changing cameras/text_tokens does not require selecting another library.
 [libraries]
 native = "/path/to/current-build/rpu_backend.so"
