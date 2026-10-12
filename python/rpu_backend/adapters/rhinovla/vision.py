@@ -1,44 +1,23 @@
-"""Qwen3-VL vision encoder → rpu_backend (R-Phase 3).
+"""RhinoVLA vision encoder integration.
 
-Wires `Qwen3VLVisionModel` into the C++ vision subsystem registered as
-`torch.ops.rpu.qwen3vl_vision_*`. Mirrors SigLIP's `patch_siglip_model_for_rpu`
-pattern: handle lifecycle, weight conversion, forward replacement.
+Installs the vision forward path through ``torch.ops.rpu.qwen3vl_vision_*``
+and returns ``BaseModelOutputWithDeepstackFeatures`` for the caller.
 
-R-Phase 3 deliverable surface:
-  - install_qwen3_vl_vision_for_rpu(vision_model)
-  - build_vision_rope_tables(...)              # FreqCos / FreqSin static tables
-  - The forward replacement returns
-    BaseModelOutputWithDeepstackFeatures(last_hidden_state, pooler_output,
-                                          deepstack_features) matching the HF
-    reference (so callers and R-Phase 4 e2e can use it transparently).
+Patch embedding defaults to CPU FP16. The optional device path swizzles
+folded Conv3d weights for the eight-core column partition before linear
+execution; plain row-major weights are not accepted by that layout.
+Position embedding interpolation stays on CPU FP16 to avoid the device
+permute-then-flatten contiguity issue.
 
-Architecture decisions (carried over from save branch findings F7 / F13 /
-F31 / F32):
-  - Patch embed runs OUTSIDE the fused graph on **CPU fp16** by default.
-    RhinoVLA can opt in to a device path that pre-swizzles the folded Conv3d
-    weight for the 8-core col partition before calling `aten::linear`. Plain
-    row-major folded weights silently produce garbage on device. (F31)
-  - `fast_pos_embed_interpolate` runs on **CPU fp16**. The HF
-    `nn.Embedding` + `view` + `permute(0,1,3,2,4,5)` + `flatten(0,4)` path
-    has a permute-then-flatten contiguity bug on device (empirically cos_sim
-    mean ~0.1 with bimodal distribution). (F32)
-  - Merger + DeepStack mergers run on **CPU fp32** by default. RhinoVLA can
-    opt in to device merger MLPs: LayerNorm stays on CPU by default (fp32 or
-    fp16, selected by env) for numerical stability and lower temporary
-    pressure, the two Linear projections execute on device with swizzled
-    8-core FP16 or W8A16 weights. RhinoVLA may keep output on device for prefix prep.
-  - Full W8A16 is a cold install option: encoder, folded patch embedding and
-    every merger use actual INT8 projections with FP16 channel scales.
-  - 2D RoPE: position_idx built per forward, copy_in to model-owned
-    keepalive `[MAX_KEEPALIVE_SEQ, 2] int16`.
+Merger and DeepStack projections default to CPU FP32. Device merger MLPs
+use swizzled eight-core FP16 or W8A16 weights; LayerNorm stays on CPU with
+its selected FP32/FP16 dtype. The output may remain on device for prefix
+preparation. Full W8A16 installation includes encoder, patch embedding and
+merger projections with INT8 weights and FP16 channel scales.
 
-R-Phase 3 migration vs save branch:
-  - Per-image vision call wrapped in `with cache.capture(sig)` (F8) so each
-    unique `num_patches` produces one BUILD + many REPLAYs. Replaces the
-    deleted C++ `cfg.main_graph_id / weights_graph_id` admission.
-  - Dynamo-safety stamping (F6): eager RPUCache init, `_rpu_lazy_init_checked`,
-    `_rpu_required_attrs`, `_verify_lazy_init(...)` — mirrors
-    `siglip.py:481`.
+2D RoPE positions use a model-owned ``[MAX_KEEPALIVE_SEQ, 2]`` INT16 buffer.
+Each image shape has one Graph BUILD followed by REPLAY. Eager cache setup
+and lazy-initialization checks keep the installed forward path Dynamo-safe.
 """
 from __future__ import annotations
 

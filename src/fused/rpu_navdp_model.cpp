@@ -14,9 +14,8 @@
 // Design/reuse: mirrors src/fused/rpu_gr00t_dit_model.cpp (build_self_attn_block /
 //   build_cross_attn_block / finish_attn_and_ffn), swapping AdaLN -> plain affine LayerNorm
 //   (learnable gamma/beta per norm) and adding a per-layer THREE-subblock structure.
-// Validation boundary: full-hidden metrics are record-only; the exact profile is admitted by
-// its final-action, action-MAE, performance, and Graph lifecycle gates.  Native handle creation
-// requires the controlled numeric-blocked evaluation selector before creating a handle.
+// Native handle creation requires the controlled evaluation selector and
+// the matching model profile before allocating device resources.
 //
 // set_weights ENDS with invalidate_model_state() (D-503).
 

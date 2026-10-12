@@ -1,33 +1,17 @@
-"""Pi0.5 public entry class (Pi05Policy) — owning module per ADR §10 #16.
+"""Pi0.5 policy entry point and device lifecycle.
 
-Phase 01.2-01a-2-policy-split (REQ SKEL-03 + REQ SKEL-01b). This file is the
-canonical home for ``Pi05Policy``. Module-top-level imports are limited to
-``torch / typing / threading / os`` per ADR §6.2 — every adapters / lerobot
-reference goes through method-body lazy imports to keep ``api/`` free of
-reverse-direction DAG edges and to avoid importing lerobot at package load time.
+Adapter and LeRobot imports are deferred until use to avoid importing
+optional dependencies at package load time.
 
-v5-02 D-12: lazy-import paths swung from ``rpu_backend.transformers.pi05.*``
-to ``rpu_backend.adapters.pi05.*``. The transition shim at
-``rpu_backend.transformers.pi05.policy`` is gone (transformers/pi05/ deleted
-entirely with v5-02); the v5-01a-2 splits remain — Pi05Policy here, Pi05Adapter
-in adapters/pi05/__init__.py.
-
-Class lifecycle:
-  - ``Pi05Policy.from_pretrained(...)`` — canonical constructor; lazy-imports
-    ``rpu_backend.adapters.pi05.loader.load_and_construct_pi05_policy``.
-  - ``Pi05Policy.from_lerobot_policy(...)`` — convenience wrapper that lazy-imports
-    ``rpu_backend.adapters.pi05.Pi05Adapter`` (the internal orchestrator owns
-    the swizzle / patch lock per G1-A).
-  - ``Pi05Policy.to('rpu')`` — irreversible CPU→device mutation routed through
-    ``self._adapter.to_rpu()``.
-  - ``Pi05Policy.select_action(batch)`` — public inference API; CR-R5 BLOCKER 7
-    queue-pin loop CPU-pins ``_action_queue`` entries.
-  - ``Pi05Policy._forward_rpu(batch, ...)`` — internal MSE-harness path; AM-7
-    requires ``_rpu_ready`` before claiming the device path.
+``from_pretrained`` loads the policy; ``from_lerobot_policy`` wraps an
+existing policy. The adapter owns weight conversion and its mutation lock.
+``to('rpu')`` performs the irreversible device conversion. ``select_action``
+keeps queued actions on CPU. ``_forward_rpu`` requires conversion to have
+completed and can return a device action chunk or a CPU action.
 """
 from __future__ import annotations
 import os
-import threading  # noqa: F401  (intentional; matches policy.py:14 for byte-equal lift discipline. ADR §6.2 allows it.)
+import threading  # noqa: F401
 from typing import Any
 
 import torch
@@ -388,14 +372,12 @@ class Pi05Policy:
     @torch.no_grad()
     def _forward_rpu(self, batch: dict, *, return_chunk: bool = True,
                      num_steps: "int | None" = None) -> torch.Tensor:
-        """D-701 internal surface — MSE harness path.
+        """Return a device action chunk or a CPU action after device setup.
 
-        return_chunk=True -> predict_action_chunk (device tensor).
-        return_chunk=False -> self.select_action (CPU-pinned, AM-2).
-        AM-7: requires `_rpu_ready` (set by Pi05Policy.to('rpu')).
+        ``return_chunk=True`` uses ``predict_action_chunk``; otherwise this
+        delegates to ``select_action``. Both require ``_rpu_ready``.
         """
-        # AM-7: _rpu_ready is a plain Python attr on Pi05Policy (NOT nn.Module),
-        # so A9 validator does not intercept; no whitelist extension required.
+        # Policy readiness is checked directly; this class is not an nn.Module.
         if not getattr(self, '_rpu_ready', False):
             from rpu_backend.api.errors import RPUBackendError   # ADR §6.2 lazy
             raise RPUBackendError(

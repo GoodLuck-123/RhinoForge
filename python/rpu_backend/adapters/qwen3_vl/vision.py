@@ -1,39 +1,17 @@
-"""Qwen3-VL vision encoder → rpu_backend (R-Phase 3).
+"""Qwen3-VL vision encoder integration.
 
-Wires `Qwen3VLVisionModel` into the C++ vision subsystem registered as
-`torch.ops.rpu.qwen3vl_vision_*`. Mirrors SigLIP's `patch_siglip_model_for_rpu`
-pattern: handle lifecycle, weight conversion, forward replacement.
+Installs the vision forward path through ``torch.ops.rpu.qwen3vl_vision_*``
+and returns ``BaseModelOutputWithDeepstackFeatures`` for the caller.
 
-R-Phase 3 deliverable surface:
-  - install_qwen3_vl_vision_for_rpu(vision_model)
-  - build_vision_rope_tables(...)              # FreqCos / FreqSin static tables
-  - The forward replacement returns
-    BaseModelOutputWithDeepstackFeatures(last_hidden_state, pooler_output,
-                                          deepstack_features) matching the HF
-    reference (so callers and R-Phase 4 e2e can use it transparently).
+Patch embedding runs on CPU FP16: device linear operations require swizzled
+weights, while the folded Conv3d weights have a row-major layout. Position
+embedding interpolation also stays on CPU FP16 to avoid the device
+permute-then-flatten contiguity issue. Merger and DeepStack projections run
+on CPU FP32 after the encoder.
 
-Architecture decisions (carried over from save branch findings F7 / F13 /
-F31 / F32):
-  - Patch embed runs OUTSIDE the fused graph on **CPU fp16**. `aten::linear`
-    on device expects the weight to be pre-swizzled (col/row partition); the
-    folded Conv3d weight is plain `[embed_dim, cin*tp*ps*ps]` row-major and
-    silently produces garbage if run on device without swizzle. (F31)
-  - `fast_pos_embed_interpolate` runs on **CPU fp16**. The HF
-    `nn.Embedding` + `view` + `permute(0,1,3,2,4,5)` + `flatten(0,4)` path
-    has a permute-then-flatten contiguity bug on device (empirically cos_sim
-    mean ~0.1 with bimodal distribution). (F32)
-  - Merger + DeepStack mergers run on **CPU fp32** — saves ~192 MB device DDR
-    and runs once per image post-encoder on small `[N/sm², 2048]` tensors.
-  - 2D RoPE: position_idx built per forward, copy_in to model-owned
-    keepalive `[MAX_KEEPALIVE_SEQ, 2] int16`.
-
-R-Phase 3 migration vs save branch:
-  - Per-image vision call wrapped in `with cache.capture(sig)` (F8) so each
-    unique `num_patches` produces one BUILD + many REPLAYs. Replaces the
-    deleted C++ `cfg.main_graph_id / weights_graph_id` admission.
-  - Dynamo-safety stamping (F6): eager RPUCache init, `_rpu_lazy_init_checked`,
-    `_rpu_required_attrs`, `_verify_lazy_init(...)` — mirrors
-    `siglip.py:481`.
+2D RoPE positions use a model-owned ``[MAX_KEEPALIVE_SEQ, 2]`` INT16 buffer.
+Each image shape has one Graph BUILD followed by REPLAY. Eager cache setup
+and lazy-initialization checks keep the installed forward path Dynamo-safe.
 """
 from __future__ import annotations
 

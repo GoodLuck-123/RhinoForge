@@ -18,7 +18,7 @@ from rpu_backend.api.errors import RPUBackendError, UnsupportedModelError
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_wall_kernel_ids_have_expansion_preload_routes() -> None:
+def test_wall_and_mixed_precision_ids_have_expansion_preload_routes() -> None:
     header = (ROOT / "src/core/rpu_kernel_cache.h").read_text()
     cache = (ROOT / "src/core/rpu_kernel_cache.inc").read_text()
     enum = header.split("enum class KernelId : uint16_t {", 1)[1].split("};", 1)[0]
@@ -30,7 +30,9 @@ def test_wall_kernel_ids_have_expansion_preload_routes() -> None:
         header.split("KERNEL_ID_NAMES[] = {", 1)[1].split("};", 1)[0],
     )
     assert len(ids) == len(names)
-    wall = {name for kernel_id, name in zip(ids, names) if kernel_id.startswith("WALL_")}
+    wall = {name for kernel_id, name in zip(ids, names)
+            if kernel_id.startswith(("WALL_", "PL_ACC32_OUT_BF16_"))
+            or ("BF16" in kernel_id and kernel_id.startswith(("LLM_ALL_REDUCE_", "RMS_NORM_BF16IN_")))}
     fixed = cache.split("KERNEL_LIST = {", 1)[1].split("};", 1)[0]
     routes = dict(re.findall(r'\{"([^"\n]+)",\s*(\w+)\}', fixed))
     mixed = cache.split("kMixedNames[] = {", 1)[1].split("};", 1)[0]
@@ -38,7 +40,7 @@ def test_wall_kernel_ids_have_expansion_preload_routes() -> None:
         if name in wall:
             assert routes.get(name, "RHINO_EXPANSION_OP_LIB_PATH") == "RHINO_EXPANSION_OP_LIB_PATH"
         routes[name] = "RHINO_EXPANSION_OP_LIB_PATH"
-    # Wall dispatch selects fixed IDs, including names shared with projection
+    # These paths select fixed IDs, including names shared with projection
     # helpers. Every declared route must reach its designated preload source.
     assert wall
     assert {name: routes.get(name) for name in wall} == {

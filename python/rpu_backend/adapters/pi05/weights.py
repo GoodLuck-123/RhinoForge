@@ -24,7 +24,7 @@ from rpu_backend.runtime.log import _LOG
 # Iteration 3/4 called that recursive-walk helper on each of the 4 root Linears
 # directly,
 # which was therefore a no-op: the 4 root Linears stayed row-major, and the
-# `rpu_linear` kernel read them with the wrong layout -> MSE catastrophic.
+# `rpu_linear` reads an incorrect layout unless the weights are swizzled.
 #
 # The correct operation: call `transform_linear_weight` directly on the leaf's
 # `.weight.data`. This helper does exactly that, using the same

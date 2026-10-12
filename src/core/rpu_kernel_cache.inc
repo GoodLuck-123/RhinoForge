@@ -1116,6 +1116,15 @@ void KernelCache::initialize() {
             "wall_action_fp16_linear_ring_postnorm_m20n1024k256",
             "wall_action_fp16_linear_ring_postnorm_spm_weight_m20n1024k256",
             "qkv_parallel_w8a16_multibase_m192x3n96k128",
+            // Mixed-precision fixed IDs use the expansion asset.
+            "parallel_linear_acc32_out_bf16_m416n48k128",
+            "parallel_linear_acc32_out_bf16_m496n32k128",
+            "llm_all_reduce_residual_bf16_partial_fp16_residual",
+            "llm_all_reduce_residual_bf16_partial_fp16_residual_nopace",
+            "llm_all_reduce_residual_fp16_partial_bf16_residual",
+            "llm_all_reduce_residual_fp16_partial_bf16_residual_nopace",
+            "llama_rms_norm_bf16in_fp16out_v32",
+            "llm_all_reduce_residual_fp16_partial_bf16_residual_local_spm",
             // Wall fixed routes are supplied by the expansion asset.
             "qkv_parallel_w8a16_multibase_m448n64k128",
             "qkv_parallel_w8a16_multibase_m400n80k128",
