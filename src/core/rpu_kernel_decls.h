@@ -2016,7 +2016,15 @@ void rpu_launch_linear_spm_to_spm_acc16_kernel(
     bool qkv_planar_direct = false,
     // Explicit bounded row W8A16 route. A selected route fails closed on any
     // contract/payload mismatch; false retains existing dispatch unchanged.
-    bool prefer_row_weight_reuse = false);
+    bool prefer_row_weight_reuse = false,
+    // Packed W4 only: empty selects signed INT4; FP16 -z selects UINT4.
+    const at::Tensor& negative_zero = {});
+
+// Production W4 launcher probe with replay-stable caller-owned DMA tensors.
+void rpu_parallel_linear_w4_test_out(
+    const at::Tensor& input_per_core, const at::Tensor& weight,
+    const at::Tensor& scale, const std::optional<at::Tensor>& negative_zero,
+    const at::Tensor& output_per_core, bool is_col_parallel, bool linear_acc32);
 
 // Exact Pi ten-step layer-0 Gate/Up route. Packing is a cold byte permutation
 // of installed controller-striped W8 [4096,1024], never another quantization.
@@ -3086,7 +3094,10 @@ void rpu_qwen3_5_set_weights(
     at::TensorList gdn_q_scale_list, at::TensorList gdn_k_scale_list,
     at::TensorList gdn_v_scale_list, at::TensorList gdn_b_bg_scale_list,
     at::TensorList gdn_a_bg_scale_list,
-    const std::optional<std::vector<at::Tensor>>& nvfp4_tensor_scales = std::nullopt);
+    const std::optional<std::vector<at::Tensor>>& nvfp4_tensor_scales = std::nullopt,
+    const std::optional<std::vector<at::Tensor>>& gate_negative_zero = std::nullopt,
+    const std::optional<std::vector<at::Tensor>>& up_negative_zero = std::nullopt,
+    const std::optional<std::vector<at::Tensor>>& down_negative_zero = std::nullopt);
 void rpu_qwen3_5_set_prefill_rope(int64_t handle, const at::Tensor& cos, const at::Tensor& sin);
 void rpu_qwen3_5_set_valid_prefill_len(int64_t handle, int64_t n);
 void rpu_qwen3_5_set_mrope_position_delta(int64_t handle, int64_t d);

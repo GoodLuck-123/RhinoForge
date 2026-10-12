@@ -75,8 +75,8 @@ python examples/run.py --config qwen3.local.toml
 ```
 
 The `INFO` setting above displays generated text. Without it, the default
-`ERROR` level hides ordinary output; `[logging].summary` controls the separate
-model and timing summaries. See [example logging](../examples/README.md#logging-and-performance-output).
+`ERROR` level hides ordinary output; `[logging].summary` controls the model
+summary. See [example logging](../examples/README.md#logging-and-output).
 For a basic device setup diagnosis, `python examples/verify_install.py` performs a small host/device
 copy; it is optional when model inference already succeeds. Reuse the successful
 run instead of launching a model matrix.

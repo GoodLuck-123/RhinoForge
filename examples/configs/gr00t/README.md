@@ -69,7 +69,7 @@ python examples/run.py --config /tmp/gr00t.toml --check-config
 python examples/run.py --config /tmp/gr00t.toml
 ```
 
-输出独立子目录的 `report.json`、`output.pt`；`--profile/--hwperf` 用于诊断，`--check-config` 仅检查配置。运行需匹配 native、空闲板卡和既有设备锁；冷配置变化后使用新进程。
+输出独立子目录的 `output.pt`；`--profile/--hwperf` 用于诊断，`--check-config` 仅检查配置。运行需匹配 native、空闲板卡和既有设备锁；冷配置变化后使用新进程。
 
 ## 可修改参数
 

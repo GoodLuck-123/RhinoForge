@@ -142,7 +142,7 @@ cameras = 2
 - `instruction_residency="auto"` 由 `GraphRuntimePolicy`、SDK 和匹配的算子资产共同选择快照重放；不满足条件时使用普通 Graph。`"off"` 关闭快照，仍保留 Graph。旧快照环境开关会报错。
 - 训练 YAML 决定对齐和注意力掩码，缺省字段遵循官方解析默认值。输入须匹配 Top4、32 专家、36 层 Action 和长度 50。
 - AUTO 填充预算：短输入为 15；T128/T160 及三相机 T64 为 63。规划器选择物理布局，保留实际语言 token 和 mask。
-- 默认 `warmup=2`、`runs=5`、`cpu.threads=1`。另有五次 A/B/A 与 READY 准备，共 12 次调用。准备后 Graph 身份保持稳定，重放及提交计数递增；OFF 或回退路径的 prepared miss 可递增。
-- `run.output_dir` 保存 `actions.pt`、`report.json`、执行计划和 Graph 状态。`--profile` 在常规运行后增加一次诊断调用。
+- 默认 `warmup=2`、`runs=5`、`cpu.threads=1`。`warmup=0` 保留 A/B/A 与 READY 准备，以首个运行输出为后续重放基线。另有五次准备调用；准备后 Graph 身份保持稳定，重放及提交计数递增；OFF 或回退路径的 prepared miss 可递增。
+- `run.output_dir` 保存 `actions.pt`、执行计划和 Graph 状态。`--profile` 在常规运行后增加一次诊断调用。
 
 实验性 Prefill KV 配对、QK-norm/RoPE 融合、稀疏 KV 镜像和路由替换保持关闭。

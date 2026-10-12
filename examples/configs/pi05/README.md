@@ -123,7 +123,7 @@ python examples/run.py --config /tmp/pi05.toml
 python -m rpu_backend.quant.convert_pi05 --src /path/to/pi05_fp16 --dst /path/to/pi05_action_nvfp4 --action-w4
 ```
 
-`--action-w4` 默认采用 NVFP4，参数见 `--help`。运行需匹配 native、空闲板卡和既有设备锁；冷配置变化后使用新进程。输出 `report.json`、`actions.pt`；`--check-config` 仅检查配置。
+`--action-w4` 默认采用 NVFP4，参数见 `--help`。运行需匹配 native、空闲板卡和既有设备锁；冷配置变化后使用新进程。输出 `actions.pt`；`--check-config` 仅检查配置。
 
 采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认6次正式运行。
 
@@ -137,7 +137,7 @@ python -m rpu_backend.quant.convert_pi05 --src /path/to/pi05_fp16 --dst /path/to
 | `rpu_execution.prefill.chunk_size` | auto | 自定义 chunk 不继承精确 paired profile；NVFP4/A8 不匹配时拒绝 |
 | `cpu.threads` | 8，正整数 | CPU intra-op/OMP/MKL 线程；与设备核数无关 |
 | `run.warmup/runs/seed` | 2 / 6 / 0 | 可用 `input.noise` 固定 CPU noise |
-| `run.profile/hwperf` | false | 诊断调用和跟踪不能作为无跟踪计时 |
+| `run.profile/hwperf` | false | 仅用于诊断调用和跟踪 |
 
 AUTO paired chunk 对应 T32/64/96/128/160：两图 C272/288/304/320/336，三图 C400/416/432/448/464。
 

@@ -4108,6 +4108,18 @@ KernelId autotile_pgrp_acc32_kernel_id(int n_tile) {
       autotile_n_index(n_tile));
 }
 
+KernelId autotile_uint4_pgrp_kernel_id(int n_tile) {
+  return static_cast<KernelId>(
+      static_cast<int>(KernelId::PL_AT_UINT4_PGRP_M304N128) +
+      autotile_n_index(n_tile));
+}
+
+KernelId autotile_uint4_pgrp_acc32_kernel_id(int n_tile) {
+  return static_cast<KernelId>(
+      static_cast<int>(KernelId::PL_AT_UINT4_PGRP_ACC32_M208N128) +
+      autotile_n_index(n_tile));
+}
+
 KernelId autotile_nvfp4_acc16_kernel_id(int n_tile) {
   return static_cast<KernelId>(
       static_cast<int>(KernelId::PL_AT_NVFP4_ACC16_M176N128) +
@@ -4533,9 +4545,16 @@ void rpu_launch_linear_spm_to_spm_acc16_kernel(
     bool force_acc32,
     bool prefer_gemv,
     bool qkv_planar_direct,
-    bool prefer_row_weight_reuse)
+    bool prefer_row_weight_reuse,
+    const at::Tensor& negative_zero)
 {
   validate_parallel_linear_geometry(M, N, K, partition, num_cores);
+  const bool is_uint4 = negative_zero.defined() && negative_zero.numel() != 0;
+  const bool packed_w4 = weight.scalar_type() == at::kByte &&
+      weight.dim() == 2 && weight.size(0) == N && weight.size(1) == K / 2 &&
+      scale.defined() && scale.scalar_type() == at::kHalf;
+  TORCH_CHECK(!is_uint4 || packed_w4,
+              "negative_zero is only valid for packed W4 with FP16 scale");
   if (prefer_row_weight_reuse) {
     TORCH_CHECK(
         rpu_pl_tiling::supports_w8a16_row_weight_reuse(
@@ -4587,9 +4606,9 @@ void rpu_launch_linear_spm_to_spm_acc16_kernel(
   if (register_census_active) {
     TORCH_CHECK(weight.scalar_type() == at::kHalf ||
                     weight.scalar_type() == at::kChar ||
-                    fp8_e4m3_weight,
+                    fp8_e4m3_weight || is_uint4,
                 "typed DDR-register census admits FP16 Linear, signed-int8 "
-                "W8A16, or full-byte raw-uint8 E4M3 weights");
+                "W8A16, full-byte E4M3 or packed UINT4 weights");
   }
 
   if (force_acc32) {
@@ -4922,6 +4941,100 @@ void rpu_launch_linear_spm_to_spm_acc16_kernel(
       TORCH_CHECK(weight.numel() == N * K / 2, "pgrp int4: packed weight numel ",
                   weight.numel(), " != N*K/2=", N * K / 2);
 
+      // UINT4 alone uses the shared main payload and its typed metadata ABI.
+      if (is_uint4) {
+        TORCH_CHECK(weight.device().type() == c10::DeviceType::PrivateUse1 &&
+                        weight.is_contiguous() && scale.device() == weight.device(),
+                    "pgrp W4 requires contiguous RPU weight and scale");
+        TORCH_CHECK(local_m <= UINT16_MAX && local_k <= UINT16_MAX &&
+                        local_k % 64 == 0 && local_n % 16 == 0,
+                    "pgrp W4 requires uint16 localM/localK, K%64 and N%16");
+        {
+          TORCH_CHECK(negative_zero.device() == weight.device() &&
+                          negative_zero.scalar_type() == at::kHalf &&
+                          negative_zero.is_contiguous() &&
+                          negative_zero.sizes() == scale.sizes(),
+                      "pgrp UINT4 negative_zero must match the contiguous RPU FP16 scale payload");
+        }
+        const size_t scale_alignment =
+            static_cast<size_t>(num_cores) * kScaleStripeBytes;
+
+        const auto tp = use_acc32
+            ? rpu_pl_tiling::select_tile_int4_acc32(
+                  static_cast<int>(local_m), static_cast<int>(local_n),
+                  static_cast<int>(local_k))
+            : rpu_pl_tiling::select_tile_int4(
+                  static_cast<int>(local_m), static_cast<int>(local_n),
+                  static_cast<int>(local_k));
+        const KernelId pgrp_kernel_id = use_acc32
+            ? autotile_uint4_pgrp_acc32_kernel_id(tp.n_tile)
+            : autotile_uint4_pgrp_kernel_id(tp.n_tile);
+        std::vector<GraphDdrRegisterOperandSpec> operands{
+            {{GraphDdrRegisterRole::PackedUint4ModelWeight,
+              GraphDdrRegisterAccess::Read,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 2, 3}, weight},
+            {{GraphDdrRegisterRole::PerGroupScale, GraphDdrRegisterAccess::Read,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 20, 21}, scale}};
+        {
+          operands.push_back({
+              {GraphDdrRegisterRole::NegativeZeroPoint, GraphDdrRegisterAccess::Read,
+               GraphDdrRegisterEncoding::DevAddrShift8LoHi, 22, 23}, negative_zero});
+        }
+        auto register_writer = RpuKernelGraph::active().stage_kernel_ddr_registers(
+            pgrp_kernel_id, std::move(operands));
+        for (const auto* metadata : {&scale, &negative_zero}) {
+          if (!metadata->defined() || metadata->numel() == 0) continue;
+          TORCH_CHECK(RpuGetDevAddr(metadata->data_ptr()) % scale_alignment == 0,
+                      "pgrp W4 scale/negative_zero DDR must be aligned to cores*512=",
+                      scale_alignment, " bytes");
+          rpu_ddr_flush(metadata->data_ptr());
+        }
+        TORCH_CHECK(RpuGetDevAddr(weight.data_ptr()) % 256 == 0,
+                    "pgrp UINT4: weight DDR not 256-byte aligned");
+        rpu_ddr_flush(weight.data_ptr());
+        const size_t sgblock_byte_step_size =
+            scale_n_blocks * static_cast<size_t>(num_cores) * kScaleStripeBytes;
+        TORCH_CHECK(sgblock_byte_step_size <= UINT32_MAX,
+                    "pgrp int4: SGBlockByteStep exceeds uint32: ",
+                    sgblock_byte_step_size);
+        const uint32_t sgblock_byte_step =
+            static_cast<uint32_t>(sgblock_byte_step_size);
+        Kernel_t *kpg = GET_KERNEL(pgrp_kernel_id);
+        TORCH_CHECK(kpg != nullptr, "pgrp int4: failed to get ",
+                    use_acc32 ? "ACC32" : "ACC16", " tile m", tp.m_tile,
+                    "n", tp.n_tile, "k128");
+        kpg->reset_regs();
+        rpu_pl_tiling::set_parallel_linear_w4_group_regs(
+            *kpg,
+            rpu_pl_tiling::ParallelLinearW4GroupRegisterArgs{
+                rpu_pl_tiling::ParallelLinearRegisterArgs{
+                    input_spm_addr, 0, output_spm_addr, bias_spm_addr,
+                    static_cast<uint32_t>(local_m),
+                    static_cast<uint32_t>(local_n),
+                    static_cast<uint32_t>(local_k),
+                    static_cast<uint16_t>(bias_spm_addr != 0),
+                    static_cast<uint16_t>(num_cores),
+                    static_cast<uint32_t>(local_k * dwidth),
+                    static_cast<uint32_t>(local_n * dwidth), 0,
+                    static_cast<uint16_t>(partition), 1},
+                static_cast<uint16_t>(k_bs),
+                static_cast<uint16_t>(local_g),
+                sgblock_byte_step, 0, true});
+        uint16_t gxg = (uint16_t)CeilDiv(local_n, (size_t)tp.n_tile);
+        uint16_t gyg = (uint16_t)CeilDiv(local_m, (size_t)tp.m_tile);
+        kpg->set_regs(64, gxg);
+        kpg->set_regs(65, gyg);
+        kpg->set_regs(66, (uint16_t)1);
+        register_writer.write(*kpg);
+
+        auto *wqg = GET_QUEUE(num_cores);
+        wqg->set_broadcast_mode(true);
+        std::vector<uint8_t> core_list_g;
+        for (int i = 0; i < num_cores; ++i) core_list_g.push_back(i);
+        wqg->enqueu_kernel(*kpg, {gxg, gyg, (uint16_t)1}, core_list_g);
+        return;
+      }
+
       uint8_t *wpg = weight.data_ptr<uint8_t>();
       c10::Half *spg = scale.data_ptr<c10::Half>();
       rpu_ddr_flush(wpg);
@@ -4945,7 +5058,7 @@ void rpu_launch_linear_spm_to_spm_acc16_kernel(
                 static_cast<int>(local_k));
       // GET_KERNEL(id) routes through the graph-aware get_kernel_reset(id) so the pgrp
       // variant is GRAPH-RECORDABLE (sets pending_kernel_id_); the by-name get_kernel()
-      // path leaves it unset -> the whole segment falls back to PASSTHROUGH (3x slow).
+      // keep the graph-aware lookup for replay recording.
       // Same fix as the acc16 variants.
       const KernelId pgrp_kernel_id = use_acc32
           ? autotile_pgrp_acc32_kernel_id(tp.n_tile)
@@ -4965,7 +5078,7 @@ void rpu_launch_linear_spm_to_spm_acc16_kernel(
       // Bias uses per-core SPM byte addresses in regs 6/7,
        // in the same address space as input/output regs 0/1 and 4/5.
        // Scale uses regs 20/21 and bias uses reg14. Only col-partition +bias is
-      // exercised by Wall-OSS int4 qkv/gate/up; o/down are bias-free.
+      // used by the int4 qkv/gate/up path; o/down are bias-free.
       // Row+bias stays out-of-envelope (needs core-0-only bias staging, unvalidated).
       kpg->reset_regs();
       rpu_pl_tiling::set_parallel_linear_int4_group_regs(
@@ -9220,4 +9333,61 @@ void rpu_launch_g05_gate_up_swiglu_nvfp4_acc32_kernel(
   launch_g05_gate_up_nvfp4_typed(input, gate_weight, up_weight, gate_output, up_output,
       gate_scale, up_scale, gate_tensor_scale, up_tensor_scale, layer,
       KernelId::G05_GATE_UP_SWIGLU_NVFP4_ACC32_M32N512K1024_N128);
+}
+
+
+void rpu_parallel_linear_w4_test_out(
+    const at::Tensor& input_per_core, const at::Tensor& weight,
+    const at::Tensor& scale, const std::optional<at::Tensor>& negative_zero,
+    const at::Tensor& output_per_core, bool is_col_parallel, bool linear_acc32) {
+  TORCH_CHECK(weight.defined() && weight.scalar_type() == at::kByte &&
+                  weight.dim() == 2 && weight.is_contiguous(),
+              "W4 probe requires packed uint8 [N,K/2] weight");
+  for (const auto* tensor : {&input_per_core, &output_per_core}) {
+    TORCH_CHECK(tensor->defined() &&
+                    tensor->device().type() == c10::DeviceType::PrivateUse1 &&
+                    tensor->scalar_type() == at::kHalf && tensor->dim() == 3 &&
+                    tensor->is_contiguous(),
+                "W4 probe input/output must be contiguous RPU FP16 [cores,M,local_dim]");
+  }
+  const int64_t cores = input_per_core.size(0), m = input_per_core.size(1);
+  const int64_t n = weight.size(0), k = weight.size(1) * 2;
+  const int partition = is_col_parallel ? 1 : 0;
+  validate_parallel_linear_geometry(m, n, k, partition, cores);
+  const int64_t local_k = is_col_parallel ? k : k / cores;
+  const int64_t local_n = is_col_parallel ? n / cores : n;
+  TORCH_CHECK(input_per_core.size(2) == local_k &&
+                  output_per_core.sizes() == at::IntArrayRef({cores, m, local_n}),
+              "W4 probe per-core input/output shape mismatch");
+  TORCH_CHECK(scale.defined() && scale.scalar_type() == at::kHalf &&
+                  scale.dim() == 2 && scale.is_contiguous() &&
+                  scale.device() == input_per_core.device() &&
+                  weight.device() == input_per_core.device(),
+              "W4 probe requires RPU weight and contiguous FP16 2D scale metadata");
+  if (negative_zero.has_value() && negative_zero->defined() && negative_zero->numel()) {
+    TORCH_CHECK(negative_zero->device() == scale.device() &&
+                    negative_zero->scalar_type() == at::kHalf &&
+                    negative_zero->is_contiguous() &&
+                    negative_zero->sizes() == scale.sizes(),
+                "W4 probe negative_zero must match FP16 scale metadata");
+  }
+  at::assert_no_overlap(output_per_core, input_per_core);
+  at::assert_no_overlap(output_per_core, weight);
+  at::assert_no_overlap(output_per_core, scale);
+  if (negative_zero.has_value() && negative_zero->defined() && negative_zero->numel())
+    at::assert_no_overlap(output_per_core, *negative_zero);
+  if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
+  SpmAllocator::ScopedTemporary scope;
+  const uint32_t input_addr = SPM_ALLOC.addr(0,
+      SPM_ALLOC.alloc_temporary(m * local_k * sizeof(c10::Half)));
+  const uint32_t output_addr = SPM_ALLOC.addr(0,
+      SPM_ALLOC.alloc_temporary(m * local_n * sizeof(c10::Half)));
+  rpu_launch_ddr_scatter_spm_dma(input_per_core, 0, m * local_k,
+      m * local_k * sizeof(c10::Half), input_addr, cores);
+  rpu_launch_linear_spm_to_spm_acc16_kernel(
+      input_addr, weight, output_addr, m, n, k, partition, cores, 0, scale,
+      0, 0, linear_acc32, false, false, false,
+      negative_zero.value_or(at::Tensor{}));
+  rpu_launch_spm_scatter_ddr_dma(output_addr, output_per_core, 0,
+      m * local_n, m * local_n * sizeof(c10::Half), cores);
 }

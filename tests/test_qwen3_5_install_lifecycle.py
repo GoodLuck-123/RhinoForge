@@ -547,11 +547,9 @@ def test_multimodal_persistent_barrier_replans_against_peer_floor(
     reserved = {"text": own if text_started else 0, "vision": 0}
     events, budgets = [], []
     state = text._rpu_qwen3_5
-    state.prefill_debug_graph_cache = rpu_backend.graph.GraphCache()
     vision._rpu_vision_graph_cache = rpu_backend.graph.GraphCache()
     for label, graph in (("decode", state.graph_cache),
                          ("prefill", state.prefill_graph_cache),
-                         ("debug-prefill", state.prefill_debug_graph_cache),
                          ("vision", vision._rpu_vision_graph_cache)):
         original = graph.clear
         def clear(original=original, label=label):
@@ -600,7 +598,7 @@ def test_multimodal_persistent_barrier_replans_against_peer_floor(
     early = text_module._preflight_qwen3_5_text(text, cache, 4095, multimodal_prefill=True)
     assert early[1] == oversized
     assert vision_module._prepare_qwen3_5_multimodal_spm(model, ids, pixels, grid, early[0])
-    assert events == ["install", "clear-decode", "clear-prefill", "clear-debug-prefill",
+    assert events == ["install", "clear-decode", "clear-prefill",
                       "clear-vision", "clear-raw-text", "clear-raw-vision",
                       "vision-fixed"] + ([] if text_started else ["text-fixed"])
     assert reserved == {"text": own, "vision": vision_bytes}
@@ -769,6 +767,7 @@ def test_text_install_clears_prepared_graph_cache_on_base_exception(monkeypatch)
     monkeypatch.setattr(torch.ops.rpu, "qwen3_5_set_linear_acc32", lambda *args: None, raising=False)
     events = []
     execution = normalize_rpu_execution(None, entry_point="test")
+    monkeypatch.setattr(torch.ops.rpu, "qwen3_5_set_linear_acc32", lambda *_: None, raising=False)
 
     class GraphCache:
         def cache_invariant_ok(self):

@@ -54,6 +54,7 @@ from rpu_backend.runtime.registry import register_adapter
 from rpu_backend.runtime.weights import transform_linear_weight
 from rpu_backend.adapters.qwen3_5.quant_scope import (
     validate_legacy_text_profile, validate_modern_27b_profile,
+    resolve_quant_config, quanttrio_awq_config, is_mlp_only_text_profile,
 )
 
 # Text backbone (== HF Qwen3_5TextModel). `layer_types_to_is_full` is re-exported
@@ -461,14 +462,12 @@ def _apply_qwen3_5_execution_config(
     # after that commit; a later failure is restored by the session rollback.
     _clear_execution_graph(state.graph_cache)
     _clear_execution_graph(getattr(state, "prefill_graph_cache", None))
-    _clear_execution_graph(getattr(state, "prefill_debug_graph_cache", None))
     state.prefill_graph.invalidate()
     if vision_handle is not None:
         _clear_execution_graph(vision_model._rpu_vision_graph_cache)
         vision_model._rpu_vision_debug_graph.invalidate()
 
     state.prefill_graph_sig = None
-    state.prefill_debug_graph_sig = None
     state.prefill_rope_shape = None
     state.prefill_rope_cache = None
     state.execution_generation = int(generation)
@@ -532,6 +531,22 @@ def _check_quant_checkpoint_loaded(model) -> None:
     Qwen3.5 loader stamps the model after installing the checkpoint's declared
     projection layouts.
     """
+    if quanttrio_awq_config(model.config) is not None:
+        # Installation retires the raw CPU owners. A complete live runtime
+        # owns the transformed tensors and can be wrapped again unchanged.
+        if _qwen3_5_text_runtime_state(model) is not None:
+            return
+        fusion = getattr(model, "model", None)
+        inner = getattr(fusion, "language_model", fusion)
+        if (getattr(model, "_rpu_swizzled", False)
+                or getattr(model, "_rpu_swizzle_started", False)
+                or hasattr(inner, "_rpu_qwen3_5")
+                or getattr(inner, "_rpu_qwen3_5_text_install_started", False)):
+            raise RPUBackendError(
+                "QuantTrio AWQ installation is incomplete; reload the checkpoint")
+        from .loader import validate_awq_loaded_model
+        validate_awq_loaded_model(model)
+        return
     quant = getattr(model.config, "quant_config", None)
     if not isinstance(quant, dict) or not quant:
         return
@@ -546,7 +561,9 @@ def _check_quant_checkpoint_loaded(model) -> None:
 
 
 def _check_quant_policy(config) -> None:
-    quant = getattr(config, "quant_config", None)
+    if not getattr(config, "quant_config", None) and getattr(config, "quantization_config", None) is None:
+        return
+    quant = resolve_quant_config(config)
     if not quant or os.environ.get("QWEN3_5_QUANT_ALLOW_UNCERTIFIED") == "1":
         return
     raise UnsupportedModelError(
@@ -722,10 +739,15 @@ class Qwen3_5Adapter:
             validate_core_profile, is_dense_large_vl_candidate, validate_dense_large_vl_profile,
         )
         validate_core_profile(config, execution_config)
+        awq = quanttrio_awq_config(config)
+        if (awq is not None or is_mlp_only_text_profile(config)) and (execution_config.get("vision")
+                or os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") == "1"):
+            recipe = "QuantTrio AWQ" if awq is not None else "Qwen3.5 MLP-only W4"
+            raise UnsupportedModelError(f"{recipe} supports pure text only; Vision is not admitted")
         from .text import _validate_qwen35_linear_accumulation
         _validate_qwen35_linear_accumulation(config, execution_config)
         if (is_dense_large_vl_candidate(config)
-                and (not getattr(config, "quant_config", None)
+                and (not resolve_quant_config(config)
                      or os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") == "1")):
             validate_dense_large_vl_profile(config)
         if validate_legacy_text_profile(config) and execution_config.get("vision"):
@@ -821,6 +843,15 @@ class Qwen3_5Adapter:
                 "reload the model before retrying."
             )
         modern27 = validate_modern_27b_profile(getattr(model, "config", None))
+        awq = quanttrio_awq_config(getattr(model, "config", None))
+        if awq is not None:
+            from .loader import validate_awq_loaded_model
+            from .text import require_quanttrio_awq_native, _validate_projection_specs
+            validate_awq_loaded_model(model)
+            require_quanttrio_awq_native()
+            _validate_projection_specs(
+                model.model.language_model, layer_types_to_is_full(model.config),
+                resolve_quant_config(model.config))
         arena_candidate = is_dense_large_vl_candidate(getattr(model, "config", None))
         arena_opt_in = (arena_candidate
                         and os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") == "1")
@@ -841,7 +872,7 @@ class Qwen3_5Adapter:
         # weights consume the PC-addressable allocation range. This exact
         # FP16 resource plan is independent of the controlled Vision gate.
         arena_required = (arena_candidate
-                          and (modern27 or arena_opt_in or not getattr(model.config, "quant_config", None)))
+                          and (modern27 or arena_opt_in or not resolve_quant_config(model.config)))
         if arena_required:
             validate_dense_large_vl_weights(model)
         if topology.num_cores != 8:
@@ -963,7 +994,7 @@ class Qwen3_5Adapter:
             # Legacy direct allocations may retain physical pages after the
             # source tensor dies. Upload only the installer's finalized large
             # projections instead of creating a second raw device copy.
-            if not (is_legacy_text or modern27):
+            if not (is_legacy_text or modern27 or awq is not None):
                 inner.to("rpu")
 
             # ── Step A: text backbone (swizzle + create + set_weights) ──
@@ -1053,6 +1084,15 @@ def _rpu_qwen3_5_forward(self, input_ids=None, inputs_embeds=None,
     decoder (device) → lm_head. Fragmented image-token layouts fall back to a
     host scatter; text-only skips the vision branch entirely.
     """
+    awq = quanttrio_awq_config(getattr(self, "config", None))
+    if awq is not None or is_mlp_only_text_profile(getattr(self, "config", None)):
+        recipe = "QuantTrio AWQ" if awq is not None else "Qwen3.5 MLP-only W4"
+        request = input_ids if input_ids is not None else inputs_embeds
+        if any(value is not None for value in
+               (pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw, mm_token_type_ids)):
+            raise NotImplementedError(f"{recipe} supports pure text only")
+        if not isinstance(request, torch.Tensor) or request.ndim not in (2, 3) or request.shape[0] != 1:
+            raise NotImplementedError(f"{recipe} requires batch size 1")
     if getattr(self, "_qwen3_5_legacy_text_only", False) and any(
         value is not None for value in
         (pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw)

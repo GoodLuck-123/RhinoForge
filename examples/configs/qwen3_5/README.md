@@ -44,6 +44,34 @@ Dense“**全部文本投影**”指：每层 MLP `gate_proj/up_proj/down_proj`�
 
 Dense 转换器同时排除 Vision、MTP、embedding、lm_head、norm、GDN `A_log/dt_bias` 与 conv1d 的量化；未量化浮点文件按既有 BF16→FP16 路径保存。W4值在文件中仍占 INT8 容器，加载时才打包，不能据 W4 名称预期磁盘大小减半。MoE RTN 转换器相反保留非路由原张量 dtype/值（包括 MTP），由 loader 在运行时转 FP16；它不量化 shared expert，也不做校准或 GPTQ 误差反馈。
 
+<a id="text-w4-recipes"></a>
+### 纯文本 W4 配方
+
+新增文本模板包括 2B MLP-only G32，以及 2B、4B、9B 的 QuantTrio AWQ G128。MLP-only 使用官方浮点父和 `w4_mlp_only` 转换配置；AWQ 包直接下载，loader 保留其量化元数据，不做再次量化。四个 alias 已登记在 `profiles.json` 与模型注册表中，使用对应 `text/*/*.toml` 模板运行。
+
+<a id="cmd-mlp-only-g32"></a>
+#### MLP-only G32
+
+```bash
+SRC="$RPU_MODEL_CACHE/Qwen3.5-2B"
+DST="$RPU_MODEL_CACHE/qwen3_5-2b-w4a16-g32-mlp-only"
+hf download Qwen/Qwen3.5-2B --local-dir "$SRC"
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5.py \
+  --src "$SRC" --dst "$DST" --profile w4_mlp_only
+python examples/run.py --config examples/configs/qwen3_5/text/2b/w4_mlp_only_g32.toml
+```
+
+<a id="cmd-quanttrio-awq"></a>
+#### QuantTrio AWQ
+
+```bash
+SIZE=2  # 2、4 或 9
+DST="$RPU_MODEL_CACHE/Qwen3.5-${SIZE}B-AWQ"
+hf download "QuantTrio/Qwen3.5-${SIZE}B-AWQ" --local-dir "$DST"
+python examples/run.py --config "examples/configs/qwen3_5/text/${SIZE}b/quanttrio_awq_g128.toml"
+```
+
+
 <a id="quantization"></a>
 ## 下载与转换
 
@@ -191,7 +219,7 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5.
 python examples/run.py --config examples/configs/qwen3_5/legacy/27b/w8a16.toml
 ```
 
-`--profile` 自动生成W8主干/FP16 GDN声明；源配置不得预先带 `quant_config`。不能输入官方27B父，新输出不声称与历史包字节/SHA相同；原测量复现须使用证据绑定的原包。[来源及精确配置要求](#历史legacy27-w8只能使用原exact-legacy浮点父)见后文。
+`--profile` 自动生成W8主干/FP16 GDN声明；源配置不得预先带 `quant_config`。不能输入官方27B父，新输出不声称与历史包字节/SHA相同。[来源及精确配置要求](#历史legacy27-w8只能使用原exact-legacy浮点父)见后文。
 
 0.8/2/4/9B FP16模板无需量化，直接读取[权重来源](#weights)的原浮点目录；官方27B没有公开FP16运行模板。
 

@@ -194,7 +194,8 @@ def test_actual_qwen35_weight_guards_distinguish_logical_and_prepared_mlp(tmp_pa
     parameter_call, = re.findall(r"    set_model_params\([^;]+;", weights)
     lists = re.findall(r"at::TensorList\s+(\w+)", signature)
     # Tensor-scale tables are optional profile input, not one entry per layer.
-    layer_lists = [name for name in lists if name != "nvfp4_tensor_scales"]
+    layer_lists = [name for name in lists if name != "nvfp4_tensor_scales"
+                   and not name.endswith("_negative_zero_list")]
     nvfp4_header = (ROOT / "src/fused/g05_nvfp4.h").read_text()
     nvfp4_metadata = nvfp4_header[
         nvfp4_header.index("struct G05Nvfp4Tables"):
@@ -236,13 +237,15 @@ struct Tensor {
     const IntArrayRef& sizes() const {return shape;}
     int scalar_type() const {return dtype;}
     bool is_contiguous() const {return contiguous;}
-    struct Device {int value;int type() const{return value;}};
+    struct Device {int value;int type() const{return value;}
+        bool operator==(const Device& other)const{return value==other.value;}};
     Device device() const {return {device_type};}
     Tensor cpu() const {assert(false);return *this;}
     template<class T> const T* data_ptr() const {assert(false);return nullptr;}
 };
 using TensorList=std::vector<Tensor>;
 }
+at::Tensor rpu_retain_linear_quant_scale(const at::Tensor&,const at::Tensor& zero) {return zero;}
 // These device preflights must stay unreachable for the ordinary dense inputs.
 __NVFP4_METADATA__
     void install(at::TensorList) {assert(false);}
@@ -327,6 +330,30 @@ struct Qwen3_5Model : FusedModelBase {
             }
         }
     }
+
+    void use_awq_2b() {
+        use_w8_2b();
+        for(auto* list : {&q_w_list,&k_w_list,&v_w_list,&o_w_list,&attn_gate_list,
+                &gdn_q_list,&gdn_k_list,&gdn_v_list,&gdn_in_z_list,&gdn_out_list,
+                &gdn_b_bg_list,&gdn_a_bg_list,&gate_list,&up_list,&down_list})
+            for(auto& weight:*list) weight.dtype=at::kHalf;
+        for(auto* list : {&q_scale_list,&k_scale_list,&v_scale_list,&o_scale_list,
+                &attn_gate_scale_list,&gdn_q_scale_list,&gdn_k_scale_list,&gdn_v_scale_list,
+                &gdn_in_z_scale_list,&gdn_out_scale_list,&gdn_b_bg_scale_list,
+                &gdn_a_bg_scale_list,&gate_scale_list,&up_scale_list,&down_scale_list})
+            for(auto& scale:*list) scale={};
+        gate_negative_zero_list.resize(24);up_negative_zero_list.resize(24);down_negative_zero_list.resize(24);
+        const auto quant=[](at::Tensor& w,at::Tensor& s,at::Tensor& z,bool row) {
+            const auto local_n=w.size(0)/(row?1:8),local_g=w.size(1)/128/(row?8:1);
+            const auto elements=((local_n+63)/64)*((local_g+3)/4)*8*4*64;
+            w.dtype=at::kByte;w.shape[1]/=2;s={128,elements/128};z=s;
+        };
+        for(int i=1;i<24;++i) {
+            quant(gate_list[i],gate_scale_list[i],gate_negative_zero_list[i],false);
+            quant(up_list[i],up_scale_list[i],up_negative_zero_list[i],false);
+            quant(down_list[i],down_scale_list[i],down_negative_zero_list[i],true);
+        }
+    }
     void use_legacy() {
         num_q_heads=num_kv_heads=24;hidden_size=5120;intermediate_size=17408;
         gdn_num_v_heads=48;gdn_conv_dim=10240;final_norm_w={5120};
@@ -408,6 +435,24 @@ template<class F> void reject_modern27(int cores,bool w4,F mutate) {
     assert(rejected && !m.validated && m.impl.hidden_size_==0);
 }
 int main() {
+
+    { Qwen3_5Model awq(8);awq.use_awq_2b();awq.validate();assert(awq.validated); }
+    for(int fault=0;fault<11;++fault) {
+        Qwen3_5Model awq(8);awq.use_awq_2b();
+        if(fault==0)awq.gate_negative_zero_list.pop_back();
+        if(fault==1)awq.up_negative_zero_list[1]={};
+        if(fault==2)awq.down_negative_zero_list[1].device_type=0;
+        if(fault==3)awq.gate_negative_zero_list[0]=awq.gate_negative_zero_list[1];
+        if(fault==4)awq.q_w_list[3].dtype=at::kChar;
+        if(fault==5)awq.intermediate_size=8192;
+        if(fault==6)awq.num_q_heads=16;
+        if(fault==7)awq.layer_is_full[0]=1;
+        if(fault==8)awq.eps=1e-5;
+        if(fault==9)awq.gdn_conv_dim=8192;
+        if(fault==10)awq.impl.num_cores_=4;
+        bool rejected=false;try{awq.validate();}catch(const std::exception&){rejected=true;}
+        assert(rejected&&!awq.validated&&awq.impl.hidden_size_==0);
+    }
     for(int cores:{4,6,8}) {
         Qwen3_5Model m(cores);m.validate();
         assert(m.validated && m.intermediate_size==3584);

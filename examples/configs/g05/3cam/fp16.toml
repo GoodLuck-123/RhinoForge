@@ -5,7 +5,7 @@
 [g05]
 precision = "fp16"
 linear_accumulation = "acc32"
-# HIGH borrows the BASE schedule; its performance must be measured separately.
+# HIGH borrows the BASE schedule; keep it as a separate profile.
 math_precision = "base"
 # FP16 Vision supports B1 only; auto must retain B1.
 vision_camera_batch = "auto"

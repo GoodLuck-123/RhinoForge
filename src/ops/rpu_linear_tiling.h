@@ -730,6 +730,15 @@ inline std::string autotile_kernel_name_int4_acc32(int m_tile, int n_tile) {
          "n" + std::to_string(n_tile) + "k128";
 }
 
+inline std::string autotile_kernel_name_uint4(int m_tile, int n_tile) {
+  return "parallel_linear_w4a16_pgrp_m" + std::to_string(m_tile) +
+         "n" + std::to_string(n_tile) + "k128";
+}
+inline std::string autotile_kernel_name_uint4_acc32(int m_tile, int n_tile) {
+  return "parallel_linear_w4a16_pgrp_acc32_m" + std::to_string(m_tile) +
+         "n" + std::to_string(n_tile) + "k128";
+}
+
 inline std::string autotile_kernel_name_nvfp4_acc16(int m_tile, int n_tile) {
   return "parallel_linear_wnvfp4a16_acc16_m" + std::to_string(m_tile) +
          "n" + std::to_string(n_tile) + "k128";
@@ -741,17 +750,20 @@ inline std::string autotile_kernel_name_nvfp4_acc32(int m_tile, int n_tile) {
 }
 
 // Order: existing 21 acc16 IDs first, then the 21 acc32 IDs. Within every
-// family n_tile is 128,112,96,80,64,48,32. KernelCache enum order must match.
+// family n_tile is 128,112,96,80,64,48,32. Shared UINT4 families follow;
+// old KernelIds and signed expansion names retain their original order.
 inline std::vector<std::string> autotile_kernel_names() {
   static constexpr int ntiles[] = {128, 112, 96, 80, 64, 48, 32};
   std::vector<std::string> names;
-  names.reserve(42);
+  names.reserve(56);
   for (int n : ntiles) names.push_back(autotile_kernel_name(false, mtile_w8a16(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name(true, mtile_w16(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name_int4(mtile_int4(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name_acc32(false, mtile_w8a16_acc32(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name_acc32(true, mtile_fp16_acc32(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name_int4_acc32(mtile_int4_acc32(n), n));
+  for (int n : ntiles) names.push_back(autotile_kernel_name_uint4(mtile_int4(n), n));
+  for (int n : ntiles) names.push_back(autotile_kernel_name_uint4_acc32(mtile_int4_acc32(n), n));
   return names;
 }
 
@@ -800,6 +812,30 @@ inline void set_parallel_linear_regs(Kernel& kernel,
   set_u32_reg_pair(kernel, 20, a.scale_dev_addr >> 8);
   kernel.set_regs(22, a.partition);
   kernel.set_regs(23, a.dtype_mode);
+}
+
+// Shared W4 register payload.
+struct ParallelLinearW4GroupRegisterArgs {
+  ParallelLinearRegisterArgs linear;
+  uint16_t group_size;
+  uint16_t local_groups;
+  uint32_t scale_group_block_byte_step;
+  uint64_t negative_zero_dev_addr = 0;
+  bool is_uint4 = false;
+};
+
+template <typename Kernel>
+inline void set_parallel_linear_w4_group_regs(
+    Kernel& kernel, const ParallelLinearW4GroupRegisterArgs& a) {
+  set_parallel_linear_regs(kernel, a.linear);
+  kernel.set_regs(8, a.linear.partition);
+  kernel.set_regs(9, static_cast<uint16_t>(a.linear.local_m));
+  set_u32_reg_pair(kernel, 22, a.is_uint4 ? a.negative_zero_dev_addr >> 8 : 0);
+  set_u32_reg_pair(kernel, 24, a.scale_group_block_byte_step);
+  kernel.set_regs(26, static_cast<uint16_t>(2));  // FP16 activation/output.
+  kernel.set_regs(27, static_cast<uint16_t>(a.is_uint4 ? 8 : 9));
+  kernel.set_regs(28, a.group_size);
+  kernel.set_regs(29, a.local_groups);
 }
 
 struct ParallelLinearInt4GroupRegisterArgs {

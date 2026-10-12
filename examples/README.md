@@ -46,8 +46,8 @@ python examples/run.py --config /tmp/g05.toml
 
 `--check-config` validates configuration without importing Torch or accessing a device; `--help` lists the unified CLI options. Edit supported ACC, text length, CPU threads, and sample counts in the same TOML; the model guide lists legal values.
 
-<a id="logging-and-performance-output"></a>
-## Logging
+<a id="logging-and-output"></a>
+## Logging and run output
 
 Add this top-level table beside `[run]`; these are also the defaults:
 
@@ -57,7 +57,7 @@ level = "ERROR"
 summary = true
 ```
 
-`level` accepts the uppercase values below. It filters diagnostics; `summary=true` keeps `[MODEL]` configuration and `[PERF]` runtime summaries at every level.
+`level` accepts the uppercase values below. It filters diagnostics; `summary=true` keeps the model configuration summary at every level.
 
 | Level | Diagnostics shown |
 |---|---|
@@ -65,15 +65,15 @@ summary = true
 | `ERROR` | ERROR and CRITICAL; default |
 | `WARNING` | Warnings, including tagged fallback and Graph messages, plus errors |
 | `INFO` | Loading, ordinary `print()` output and generated text, plus warnings/errors |
-| `DEBUG` | Existing Graph diagnostics, complete reports and native TRACE output |
+| `DEBUG` | Existing Graph diagnostics and native TRACE output |
 
-Ordinary `print()` is INFO; recognized tags select their own level. Exceptions propagate. `summary=false` hides only `[MODEL]` and `[PERF]`. There is no `logging.file` field. Native output is saved as `native-*.stdout.log` / `native-*.stderr.log` under `run.output_dir` and replayed with the selected filter when the process finishes. `report.json` is saved at every level.
+Ordinary `print()` is INFO; recognized tags select their own level. Exceptions propagate. `summary=false` hides the model summary. There is no `logging.file` field. Native output is saved as `native-*.stdout.log` / `native-*.stderr.log` under `run.output_dir` and replayed with the selected filter when the process finishes.
 
-`[MODEL]` lists precision, inputs, device settings, CPU threads, warmup/runs and output location. `[PERF]` labels the runner's actual call boundary and separates complete-model, component and diagnostic calls. LLM/VLM summaries use actual input tokens, decode calls and output counts; prefill produces the first output token. Unmeasured Vision or TTFT fields are omitted.
+`[MODEL]` lists inputs, device settings, CPU threads and output location.
 
 ## Results
 
-`run.output_dir` selects the output location; some profiles create subdirectories. Read `report.json` for timings, checks, and actual artifact paths. Multi-length G05 results use one `text_N/` directory per length.
+`run.output_dir` selects the output location; some profiles create subdirectories. Read the generated files for checks and artifact paths. Multi-length results use one `text_N/` directory per length.
 
 [Runtime setup](../docs/runtime_assets.md)
 

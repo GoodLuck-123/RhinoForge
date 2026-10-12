@@ -1,4 +1,4 @@
-# Fixed-length language benchmark; this TOML does not certify the profile.
+# Fixed-length text configuration.
 [example]
 profile_id = "qwen3_5-2b.w4a16.text-controlled"
 registry_alias = "qwen3_5-2b-w4a16"

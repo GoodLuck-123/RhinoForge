@@ -529,6 +529,8 @@ def _load_forward(*, run=None, fuse=None, preflight=None, prepare=None):
     namespace = {
         "os": __import__("os"),
         "torch": torch,
+        "quanttrio_awq_config": lambda _config: None,
+        "is_mlp_only_text_profile": lambda _config: False,
         "F": torch.nn.functional,
         "Qwen3_5Cache": _ForwardCache,
         "Qwen3_5CausalLMOutputWithPast": object,

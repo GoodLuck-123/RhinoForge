@@ -99,7 +99,7 @@ python examples/run.py --config /tmp/wall_sorting.toml --check-config
 python examples/run.py --config /tmp/wall_sorting.toml
 ```
 
-输出 `report.json`、`actions.pt`。每个冷配置用新进程和独立输出目录，运行需匹配 native、空闲板卡及既有设备锁；`--check-config` 仅检查配置。
+输出 `actions.pt`。每个冷配置用新进程和独立输出目录，运行需匹配 native、空闲板卡及既有设备锁；`--check-config` 仅检查配置。
 
 采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认6次正式运行。
 

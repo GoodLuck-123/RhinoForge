@@ -4,7 +4,7 @@ Sibling module of ``__init__.py`` (the orchestration entry) in the
 ``adapters/qwen3_5/`` package. This module owns the text-decoder half of the
 adapter: config-driven layer dispatch, weight swizzle + GDN mixer prep, the C++
 ``qwen3_5_*`` handle install, and the per-forward device decoder run (route-B pad +
-partial M-RoPE + capture). It is a VERBATIM move of the text algorithm that used
+partial M-RoPE + capture). It is the text algorithm adapted from the code that used
 to live inline in ``qwen3_5.py::to_rpu`` — the only boundary change is that
 embedding + lm_head are lifted to the orchestration top forward (``__init__.py``),
 so ``run_qwen3_5_text`` takes an already-embedded ``hidden`` and returns the raw
@@ -43,12 +43,15 @@ from rpu_backend.runtime.execution_planner import GRAPH_RETAINED_CACHE
 from rpu_backend.adapters.qwen3_5.quant_scope import (
     FP16,
     W4A16_PGRP,
+    W4A16_AWQ,
     W8A16,
     normalize_quant_config,
     validate_legacy_text_profile,
     validate_modern_27b_profile,
     quant_relpaths,
     resolve_quant_specs,
+    resolve_quant_config,
+    quanttrio_awq_config,
 )
 
 
@@ -148,7 +151,7 @@ def _refresh_qwen35_text_retirement(state):
     resource = getattr(state, "retirement", None)
     if resource is not None:
         resource.graphs = tuple(value for name in (
-            "graph_cache", "prefill_graph_cache", "prefill_debug_graph_cache",
+            "graph_cache", "prefill_graph_cache",
             "action_graph_cache", "action_trace_graph_cache")
             if (value := getattr(state, name, None)) is not None)
 
@@ -158,7 +161,7 @@ def _clear_qwen35_graphs(states, vision=None):
     caches, raw_graphs = [], []
     for state in states:
         child_caches = tuple(getattr(state, name, None) for name in (
-            "graph_cache", "prefill_graph_cache", "prefill_debug_graph_cache",
+            "graph_cache", "prefill_graph_cache",
             "action_graph_cache", "action_trace_graph_cache"))
         child_raw = (getattr(state, "prefill_graph", None),)
         resource = getattr(state, "retirement", None)
@@ -231,7 +234,7 @@ def _poison_qwen3_5_text_retirement(inner, state, cleanup_error, session=None):
     from rpu_backend.api import causal_lm
 
     # A failed release makes the *process* unsafe. This current claim is
-    # not evidence that its model owns this particular pending handle.
+    # not proof that its model owns this pending handle.
     with causal_lm._LIVE_LOCK:
         if causal_lm._LIVE_TERMINAL_REASON is None:
             owner = causal_lm._LIVE_REF() if causal_lm._LIVE_REF is not None else None
@@ -279,7 +282,7 @@ def _retire_qwen3_5_text_state(inner, *, state=None, _graphs_retired=False):
         if handle is not None and resource is None and finalizer is not None and not finalizer.alive:
             raise RuntimeError("Qwen3.5 text handle has a dead finalizer without a confirmed retirement")
         if not _graphs_retired:
-            for name in ("graph_cache", "prefill_graph_cache", "prefill_debug_graph_cache",
+            for name in ("graph_cache", "prefill_graph_cache",
                          "action_graph_cache", "action_trace_graph_cache"):
                 cache = getattr(state, name, None)
                 if cache is not None:
@@ -420,26 +423,14 @@ def _plan_prefill_execution(real_len, physical_limit, padding_budget,
 
 _VALID_LAYER_TYPES = {"linear_attention", "full_attention"}
 
-# Declared chunk envelope.
-#
-# Keyed by (num_hidden_layers, hidden_size) -> (max_kv_len, safe chunk ceiling).
-# Public exact requests are allowed only at-or-below a positive ceiling; a zero
-# row admits auto only. Deny-by-default: a size with no row here
-# cannot prefill at all, because the C++ planner refuses an undeclared handle.
-#
-# Long-prefill rows describe the implemented language capability. They are
-# ceilings, not pins: the shared planner still selects only native-feasible
-# SDPA/SPM stage tuples at or below each row.  The historical constant name is
-# retained for compatibility, but the current-ref hardware status of these
-# enlarged rows remains unverified on hardware until profile validation completes.
+# Declared text chunk envelope, keyed by (num_hidden_layers, hidden_size).
+# Entries are upper bounds; requests outside the table are rejected.
 CERTIFIED_CHUNK_ENVELOPE: dict[tuple[int, int], tuple[int, int]] = {
     (24, 1024): (8192, 512),  # qwen3_5-0.8b
     (24, 2048): (8192, 640),  # qwen3_5-2b
     (32, 2560): (8192, 448),  # qwen3_5-4b
     (32, 4096): (8192, 256),  # qwen3_5-9b
-    # Legacy W8A16 text-only candidate; current-runtime HW unverified.
-    # Historical C192 numerics failed. AUTO/exact remain inside C128 and the
-    # actual native domain; P8192 is a capacity declaration, not certification.
+    # Legacy text-only entry retained for compatibility.
     (64, 5120): (8192, 128),
 }
 
@@ -461,9 +452,8 @@ def _declare_qwen3_5_chunk_envelope(
     if env is None:
         raise UnsupportedModelError(
             f"Qwen3.5: no declared chunk envelope for (num_hidden_layers, "
-            f"hidden_size)={key}. Validate the SPM capacity and declare "
-            f"the supported bound before using this profile. "
-            f"See docs/runtime_config.md."
+            f"hidden_size)={key}. This profile has no implemented/qualified "
+            f"hardware envelope; this profile is not enabled."
         )
     _torch.ops.rpu.qwen3_5_set_chunk_envelope(handle, env[0], env[1])
     return env
@@ -564,7 +554,7 @@ def _projection_scale(linear, name):
 
     weight = linear.weight
     scale = getattr(linear, "weight_scale", None)
-    if weight.dtype == torch.int8:
+    if weight.dtype in (torch.int8, torch.uint8):
         if not isinstance(scale, torch.Tensor):
             raise RPUBackendError(
                 f"Qwen3.5 quantized projection {name} has int8 weight but no "
@@ -573,6 +563,8 @@ def _projection_scale(linear, name):
             raise RPUBackendError(
                 f"Qwen3.5 quantized projection {name} scale must be 1D or 2D "
                 f"fp16, got dtype={scale.dtype}, shape={tuple(scale.shape)}")
+        if weight.dtype == torch.uint8 and scale.dim() != 2:
+            raise RPUBackendError(f"AWQ projection {name} requires a 2D group scale")
         n_out = weight.size(0)
         if scale.dim() == 1:
             if scale.numel() != n_out:
@@ -587,7 +579,7 @@ def _projection_scale(linear, name):
                     f"Qwen3.5 W4A16 projection {name} scale shape "
                     f"{tuple(scale.shape)} incompatible with weight "
                     f"{tuple(weight.shape)}; expected [K/group_size, {n_out}]")
-        # Sources may already be on device or remain on CPU for legacy direct
+        # Sources may already be on the device or remain on CPU for legacy direct
         # installation. Scale layout is a CPU transform in both cases.
         return _as_channel_first(scale.detach().to("cpu").contiguous())
     if weight.dtype != torch.float16:
@@ -623,8 +615,11 @@ def _validate_projection_specs(inner, is_full, quant_config):
         raise UnsupportedModelError(str(exc)) from exc
     for linear, name in _iter_text_projections(inner, is_full):
         scale = _projection_scale(linear, name)
+        zero = getattr(linear, "weight_zero", None)
         if linear.weight.dtype == torch.float16:
             actual_method = FP16
+        elif linear.weight.dtype == torch.uint8:
+            actual_method = W4A16_AWQ
         else:
             actual_method = W8A16 if scale.dim() == 1 else W4A16_PGRP
         spec = specs[name]
@@ -632,14 +627,39 @@ def _validate_projection_specs(inner, is_full, quant_config):
             raise RPUBackendError(
                 f"Qwen3.5 projection {name} declares method={spec.method} but "
                 f"its tensors encode {actual_method}")
-        if spec.method == W4A16_PGRP:
+        if spec.method in (W4A16_PGRP, W4A16_AWQ):
             actual_group_size = linear.weight.size(1) // scale.size(1)
             if actual_group_size != spec.group_size:
                 raise RPUBackendError(
                     f"Qwen3.5 projection {name} declares group_size="
                     f"{spec.group_size} but its scale encodes "
                     f"group_size={actual_group_size}")
+        if spec.method == W4A16_AWQ:
+            weight = linear.weight
+            if weight.device.type != "cpu" or not weight.is_contiguous():
+                raise RPUBackendError(f"AWQ projection {name} requires original contiguous CPU codes")
+            if (not isinstance(zero, torch.Tensor) or zero.dtype != torch.uint8
+                    or tuple(zero.shape) != (weight.shape[1] // 128, weight.shape[0])
+                    or not zero.is_contiguous() or zero.device != weight.device
+                    or int(zero.max()) > 15 or int(weight.max()) > 15
+                    or not bool(torch.isfinite(scale).all()) or not bool((scale > 0).all())):
+                raise RPUBackendError(f"AWQ projection {name} requires UINT4 codes and direct zero [K/128,N]")
+        elif isinstance(zero, torch.Tensor) and zero.numel():
+            raise RPUBackendError(f"Non-AWQ projection {name} must not carry weight_zero")
     return specs
+
+
+def require_quanttrio_awq_native():
+    """Check real schema before creating handles, claiming owners or uploading."""
+    import torch
+    schemas = getattr(getattr(torch.ops.rpu, "qwen3_5_set_weights", None), "_schemas", {})
+    names = {"gate_negative_zero", "up_negative_zero", "down_negative_zero"}
+    if not isinstance(schemas, dict) or not any(
+            names <= {arg.name for arg in schema.arguments
+                      if str(arg.type) == "Optional[List[Tensor]]"}
+            for schema in schemas.values()):
+        raise RuntimeError("QuantTrio AWQ requires native qwen3_5_set_weights with "
+                           "gate_negative_zero/up_negative_zero/down_negative_zero; rebuild before installing")
 
 
 def _build_partial_mrope_cos_sin(head_dim, rotary_dim, rope_theta, max_seq,
@@ -663,7 +683,8 @@ def _build_partial_mrope_cos_sin(head_dim, rotary_dim, rope_theta, max_seq,
 
 
 def _apply_interleaved_mrope(freqs, mrope_section):
-    """M-RoPE T/H/W interleave.
+    """M-RoPE T/H/W interleave (verbatim port of PartialRopeGenerator /
+    modeling_qwen3_5, mirrored in tests/ops/test_partial_mrope_isolated.py).
     freqs: [3, 1, N, rd/2] (T/H/W). Returns [1, N, rd/2] with H/W columns strobed
     in. Text-only (T==H==W) ⇒ no-op, degenerates to arange×inv_freq."""
     import torch  # noqa: F401
@@ -768,6 +789,7 @@ def _drop_tensor_data(owner, name):
 def _drop_linear_data(linear):
     _drop_tensor_data(linear, "weight")
     _drop_tensor_data(linear, "weight_scale")
+    _drop_tensor_data(linear, "weight_zero")
 
 
 def _drop_linears_data(owner, names):
@@ -911,6 +933,11 @@ def install_qwen3_5_text_for_rpu(
         validate_core_profile, validate_text_weight_geometry, validate_text_mlp_padding_storage,
     )
     topology = validate_core_profile(config, execution_config)
+    if quanttrio_awq_config(config) is not None:
+        require_quanttrio_awq_native()
+        if _cpu_stage_weights or _g05_w8a16 or _g05_action_nvfp4 is not None:
+            raise UnsupportedModelError("QuantTrio AWQ requires the ordinary TP8 text installer")
+        _validate_projection_specs(text_model, layer_types_to_is_full(config), resolve_quant_config(config))
     validate_text_weight_geometry(text_model, config, topology)
     validate_text_mlp_padding_storage(text_model, config, topology)
     if _public_prefill_graph_mode not in (None, "RETAINED_CACHE", "BOUNDED_ONESHOT"):
@@ -938,7 +965,7 @@ def install_qwen3_5_text_for_rpu(
         _graph_runtime_policy = _rb.graph.GraphRuntimePolicy.from_environment(
             execution_core_count=topology.num_cores)
     if retained_prefill and getattr(_text_config(config), "hidden_size", None) == 4096:
-        expected_arenas = 0 if getattr(config, "quant_config", None) else 4
+        expected_arenas = 0 if resolve_quant_config(config) else 4
         actual_arenas = getattr(_graph_runtime_policy, "graph_arena_count", 0)
         if actual_arenas != expected_arenas:
             raise ValueError("Qwen3.5 retained 9B text conflicts with its cold graph arena policy")
@@ -1054,7 +1081,7 @@ def _install_qwen3_5_text_for_rpu_impl(
 
     inner = text_model
     linear_acc32 = _validate_qwen35_linear_accumulation(config, execution_config)
-    # device kernels are fp16-only. Like every rpu_backend adapter, the swizzle
+    # Device kernels use FP16. Like every rpu_backend adapter, the swizzle
     # (convert_linear_weights_inplace / transform_linear_weight) PRESERVES weight
     # dtype (so int8/w8a16 quant paths stay intact) and relies on the CALLER having
     # loaded the model as fp16. Fail fast with a clear message here instead of a
@@ -1102,9 +1129,10 @@ def _install_qwen3_5_text_for_rpu_impl(
             raise UnsupportedModelError(
                 f"Qwen3.5 GDN requires key/value head dimensions 128/128, got {dk}/{dv}"
             )
-    quant_config = getattr(config, "quant_config", None) or {}
+    quant_config = resolve_quant_config(config) or {}
     projection_specs = _validate_projection_specs(
         inner, is_full, quant_config or None)
+    has_awq = any(spec.method == W4A16_AWQ for spec in projection_specs.values())
     if cpu_stage_weights and quant_config and not g05_w8a16:
         raise UnsupportedModelError(
             "Qwen3.5 quantized CPU-staged installation is not enabled; "
@@ -1126,7 +1154,7 @@ def _install_qwen3_5_text_for_rpu_impl(
     mlp_physical_size = decoder_mlp_intermediate_size(tc.intermediate_size, mlp_cores)
     legacy_text = validate_legacy_text_profile(config)
     modern_27b = validate_modern_27b_profile(config)
-    finalized_only = legacy_text or modern_27b
+    finalized_only = legacy_text or modern_27b or has_awq
     if finalized_only and any(parameter.device.type != "cpu" for parameter in inner.parameters()):
         raise UnsupportedModelError(
             "large Qwen3.5 installation requires original CPU source weights")
@@ -1177,13 +1205,19 @@ def _install_qwen3_5_text_for_rpu_impl(
     _gdk = int(tc.linear_key_head_dim)
     _gdv = int(tc.linear_value_head_dim)
     _gHc = _gnvh // NUM_CORES
-
+    # GQA-GDN (nkh < nvh): NO weight replication — q/k stay at their true nkh heads;
+    # the 16→nvh GQA expansion happens at RUNTIME via a tile op in build_gdn (matches
+    # in_proj_qkv = [all-q(nkh) | all-k(nkh) | all-v(nvh)].
     _gksz = _gnkh * _gdk                   # q proj size = k proj size (2048, no rep)
 
     def _prep_weight(w, partition, spec, *, num_cores=NUM_CORES):
         """Swizzle FP16/W8, or swizzle+nibble-pack W4, for one ``[N,K]``."""
         wc = w.detach().to("cpu").contiguous()
-        if spec.method != W4A16_PGRP:
+        if spec.method == W4A16_AWQ:
+            from rpu_backend.quant.awq_gemm import swizzle_pack_uint4_pgrp
+            n, k = wc.shape
+            out = swizzle_pack_uint4_pgrp(wc, partition, num_cores).reshape(n, k // 2)
+        elif spec.method != W4A16_PGRP:
             out = transform_linear_weight(wc, partition, num_cores)
         else:
             from rpu_backend.quant.int4_pgrp_pack import swizzle_pack_int4_pgrp
@@ -1252,7 +1286,7 @@ def _install_qwen3_5_text_for_rpu_impl(
         if scale.numel() == 0:
             return empty
         spec = projection_specs[name]
-        if finalized_only and ".mlp." in name and mlp_physical_size != tc.intermediate_size:
+        if (legacy_text or modern_27b) and ".mlp." in name and mlp_physical_size != tc.intermediate_size:
             from rpu_backend.adapters.qwen3_5.weights import (
                 pad_legacy_mlp_scale, pad_dense_27b_mlp_scale)
 
@@ -1261,6 +1295,13 @@ def _install_qwen3_5_text_for_rpu_impl(
         return _scale_to_rpu(
             scale, partition, mlp_cores if ".mlp." in name else NUM_CORES,
             spec.group_size or 0)
+
+    def _zero_rpu(linear, name, partition):
+        if projection_specs[name].method != W4A16_AWQ:
+            return empty
+        from rpu_backend.quant.awq_gemm import swizzle_awq_negative_zero
+        zero = linear.weight_zero.detach().to("cpu").contiguous()
+        return swizzle_awq_negative_zero(zero, partition, mlp_cores).to("rpu")
 
     def _qkv_scale_path(scale, lo, hi, spec):
         if scale.numel() == 0:
@@ -1282,6 +1323,7 @@ def _install_qwen3_5_text_for_rpu_impl(
     empty = torch.empty(0)
     q, k, v, o, qn, kn, ag, inrm, postrm, g, u, d = ([] for _ in range(12))
     q_s, k_s, v_s, o_s, ag_s, g_s, u_s, d_s = ([] for _ in range(8))
+    g_zero, u_zero, d_zero = ([] for _ in range(3))
     # GDN mixer weight lists (parallel to num_layers; full slots = empty).
     g_z, g_out, g_alog, g_dt, g_nrm = ([] for _ in range(5))
     # prefill (chunk) per-path weights: separate q/k/v proj + conv, N_bg b/a
@@ -1324,6 +1366,10 @@ def _install_qwen3_5_text_for_rpu_impl(
             g_s.append(_scale_rpu(layer.mlp.gate_proj, gate_name, 1))
             u_s.append(_scale_rpu(layer.mlp.up_proj, up_name, 1))
             d_s.append(_scale_rpu(layer.mlp.down_proj, down_name, 0))
+            if has_awq:
+                g_zero.append(_zero_rpu(layer.mlp.gate_proj, gate_name, 1))
+                u_zero.append(_zero_rpu(layer.mlp.up_proj, up_name, 1))
+                d_zero.append(_zero_rpu(layer.mlp.down_proj, down_name, 0))
             la = layer.linear_attn
             # input_layernorm goes into the unified input_norm channel (inrm); the
             # C++ layer-level rmsnorm reads persistent "norm_w" for ALL layers.
@@ -1445,6 +1491,10 @@ def _install_qwen3_5_text_for_rpu_impl(
         g_s.append(_scale_rpu(layer.mlp.gate_proj, gate_name, 1))
         u_s.append(_scale_rpu(layer.mlp.up_proj, up_name, 1))
         d_s.append(_scale_rpu(layer.mlp.down_proj, down_name, 0))
+        if has_awq:
+            g_zero.append(_zero_rpu(layer.mlp.gate_proj, gate_name, 1))
+            u_zero.append(_zero_rpu(layer.mlp.up_proj, up_name, 1))
+            d_zero.append(_zero_rpu(layer.mlp.down_proj, down_name, 0))
         del query_raw, gate_raw, qg_scale, k_scale, v_scale
         if free_raw_hf_weights:
             _drop_raw_hf_text_layer_weights(layer, True)
@@ -1478,7 +1528,7 @@ def _install_qwen3_5_text_for_rpu_impl(
 
     if cpu_stage_weights:
         # G0.5 installs Vision before text. Performing swizzle or scalar norm
-        # arithmetic after moving the text modules to device can enqueue hundreds
+        # arithmetic after moving the text modules to the device can enqueue many
         # of eager kernels behind that live runtime and stall installation.
         # Keep every transformation above on CPU and upload only the finalized
         # contiguous tensors used by set_weights(). Integer swizzled weights
@@ -1526,7 +1576,7 @@ def _install_qwen3_5_text_for_rpu_impl(
                        final_norm, g_z, g_out, g_alog, g_dt, g_nrm, g_q, g_k, g_v,
                        g_cq, g_ck, g_cv, g_b_bg, g_a_bg, q_s, k_s, v_s, o_s,
                        ag_s, g_s, u_s, d_s, g_z_s, g_out_s, g_q_s, g_k_s,
-                       g_v_s, g_b_bg_s, g_a_bg_s),
+                       g_v_s, g_b_bg_s, g_a_bg_s, g_zero, u_zero, d_zero),
             label="Qwen3.5 text", handle_name="handle")
         pending_state.retirement.keepalive += tuple(nvfp4_tensor_scales)
         handle_finalizer = pending_state.retirement.finalizer
@@ -1543,6 +1593,9 @@ def _install_qwen3_5_text_for_rpu_impl(
             torch.ops.rpu.qwen3_5_set_high_precision(handle, True)
         nvfp4_kwargs = ({"nvfp4_tensor_scales": nvfp4_tensor_scales}
                          if g05_action_nvfp4 is not None else {})
+        if has_awq:
+            nvfp4_kwargs.update(gate_negative_zero=g_zero, up_negative_zero=u_zero,
+                                down_negative_zero=d_zero)
         torch.ops.rpu.qwen3_5_set_weights(
             handle, q, k, v, o, qn, kn, ag, inrm, postrm, g, u, d,
             cos, sin, final_norm, is_full,
@@ -1563,8 +1616,8 @@ def _install_qwen3_5_text_for_rpu_impl(
         torch.ops.rpu.qwen3_5_set_prefill_chunk_size(
             handle, exact_chunk_size
         )
-        # MR-A: declared chunk envelope, deny-by-default. Must precede the first
-        # forward. Rows and current evidence status live by the table above.
+        # Declared chunk envelope, deny-by-default. Must precede the first
+        # forward. Rows and current ownership status live by the table above.
         chunk_envelope = _declare_qwen3_5_chunk_envelope(
             handle,
             int(tc.num_hidden_layers),
@@ -1618,9 +1671,8 @@ def _install_qwen3_5_text_for_rpu_impl(
 def _prepare_qwen35_prefill_capture(st, *, seq_len, real_len, planned_chunk_size, plan):
     """Validate READY and retire stale RoPE users before any native mutation.
 
-    A physical shape change can reallocate native prefill cos/sin backing,
-    so its retained graph must be evicted first. Equal shapes retain their
-    addresses and refresh values through native copy_.
+    A physical shape change can reallocate native prefill cos/sin backing.
+    Evict the retained graph before changing it; equal shapes refresh in place.
     """
     import torch
     import rpu_backend as _rb
@@ -1644,7 +1696,8 @@ def _prepare_qwen35_prefill_capture(st, *, seq_len, real_len, planned_chunk_size
     rope_shape = (seq_len, st.rotary_dim // 2) if st.mrope_section else None
     old_shape = getattr(st, "prefill_rope_shape", None)
     if old_shape is not None and rope_shape != old_shape:
-        siblings = [(prefill_cache, "prefill_graph_sig")]
+        siblings = [(getattr(st, "prefill_graph_cache", None),
+                     "prefill_graph_sig")]
         if any(cache is not None and cache.is_frozen() for cache, _ in siblings):
             raise RuntimeError("Qwen3.5 READY cannot replace shared prefill RoPE backing; begin warmup first")
         for cache, attr in siblings:
@@ -1663,7 +1716,7 @@ def _preflight_qwen3_5_text(
     text_model, cache, real_len, *, multimodal_prefill=False, _cost_request=None,
     _cost_position=None
 ):
-    """Resolve the text envelope and A6 plan before any mutating device work."""
+    """Resolve the text envelope and plan before mutating device state."""
     import torch
 
     st = text_model._rpu_qwen3_5
@@ -1821,7 +1874,7 @@ def _plan_qwen3_5_decode(text_model):
 def run_qwen3_5_text(text_model, hidden, cache, *, attention_mask=None,
                      position_ids=None, multimodal_prefill=False,
                      preflight_plan=None, _private_cpu_prefill=False):
-    """Drive the device text decoder for one forward and return the RAW output.
+    """Drive the device text decoder for one forward and return the raw output.
 
     ``hidden`` is the already-embedded [B, seq, hidden] input (the orchestration
     top forward does the embed + any vision scatter). Returns the decoder output
@@ -1842,7 +1895,7 @@ def run_qwen3_5_text(text_model, hidden, cache, *, attention_mask=None,
     rotary_dim = st.rotary_dim
     rope_theta = st.rope_theta
     mrope_section = st.mrope_section
-    # CPU→device prep MUST stay OUTSIDE capture (a DMA recorded inside would
+    # CPU-to-device preparation stays outside capture.
     # freeze the first call's pointer across replays).
     if hidden.dtype != torch.float16:
         hidden = hidden.to(torch.float16)

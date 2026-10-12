@@ -1,4 +1,4 @@
-# Three-camera GR00T-N1.7; precision/input select the measured optimizations.
+# Three-camera GR00T-N1.7; precision/input select the supported profile.
 # See ../README.md. Change text_tokens and observation together for T64/T128.
 [example]
 profile_id = "gr00t-n1d7-3b.w8a16.vla"

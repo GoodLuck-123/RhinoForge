@@ -140,7 +140,7 @@ summary = true
 ```
 
 `summary` separately controls the model and runtime summaries. Output files and
-log levels are described in [example logging](../examples/README.md#logging-and-performance-output).
+log levels are described in [example logging](../examples/README.md#logging-and-output).
 
 Wall-OSS W4 conversion now uses `--group-size 32` by default and converts both
 decoder experts, including expert-0 Down, to INT4. Use `--group-size 0` for

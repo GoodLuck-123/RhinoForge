@@ -173,7 +173,7 @@ python examples/run.py --config examples/configs/qwen3/text/4b/w4a16_lm_head.tom
 python examples/run.py --config /path/to/my_qwen3.toml
 ```
 
-FP16 使用浮点 checkpoint；W8 需量化 decoder、独立量化 head 和浮点 embedding。运行需空闲板卡及既有设备锁，冷配置变化后使用新进程。输出 `report.json` 与生成结果；`--check-config` 仅检查配置。
+FP16 使用浮点 checkpoint；W8 需量化 decoder、独立量化 head 和浮点 embedding。运行需空闲板卡及既有设备锁，冷配置变化后使用新进程。输出生成结果；`--check-config` 仅检查配置。
 
 采样设置示例为 `run.warmup=2`、`run.runs=5`；模板默认次数见所选文件，保持对应输入、精度和核数。
 

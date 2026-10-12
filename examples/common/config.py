@@ -240,6 +240,39 @@ def validate_checkpoint_profile(config: dict, checkpoint: str) -> None:
         return
     expected = limits.get("checkpoint_quant_profile")
     checkpoint_format = limits.get("checkpoint_format")
+    awq_geometries = {
+        "qwen3_5_2b_quanttrio_awq_g128": (24, 2048, 6144),
+        "qwen3_5_4b_quanttrio_awq_g128": (32, 2560, 9216),
+        "qwen3_5_9b_quanttrio_awq_g128": (32, 4096, 12288),
+    }
+    if checkpoint_format in awq_geometries:
+        metadata = json.loads((Path(checkpoint) / "config.json").read_text(encoding="utf-8"))
+        scope = _backend_leaf("adapters/qwen3_5/quant_scope.py")
+        try:
+            quant = scope.resolve_quant_config(metadata)
+            text = metadata.get("text_config", {})
+            geometry = tuple(text.get(k) for k in
+                             ("num_hidden_layers", "hidden_size", "intermediate_size"))
+            valid = (quant is not None and quant.get("profile") == "quanttrio_awq_g128"
+                     and geometry == awq_geometries[checkpoint_format])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ConfigError(f"invalid QuantTrio AWQ G128 checkpoint: {exc}") from exc
+        if not valid:
+            raise ConfigError(f"profile requires its exact {checkpoint_format} checkpoint")
+        return
+    if checkpoint_format == "qwen3_5_2b_w4_mlp_only_g32":
+        metadata = json.loads((Path(checkpoint) / "config.json").read_text(encoding="utf-8"))
+        scope = _backend_leaf("adapters/qwen3_5/quant_scope.py")
+        try:
+            valid = (metadata.get("model_type") == "qwen3_5"
+                     and metadata.get("architectures") == ["Qwen3_5ForConditionalGeneration"]
+                     and isinstance(metadata.get("text_config"), dict)
+                     and scope.validate_mlp_only_text_profile(metadata))
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ConfigError(f"invalid MLP-only G32 checkpoint: {exc}") from exc
+        if not valid:
+            raise ConfigError("profile requires the exact Qwen3.5 2B MLP-only G32 recipe")
+        return
     on_install = limits.get("on_install_quantization")
     if expected is None and checkpoint_format is None and on_install is None:
         _validate_unbound_qwen_checkpoint(profile, checkpoint)

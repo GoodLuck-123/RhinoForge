@@ -2020,7 +2020,7 @@ void Qwen3_5Model::launch_linear(
     uint32_t input, const at::Tensor& weight, uint32_t output,
     int64_t m, int64_t n, int64_t k, int partition, int num_cores,
     uint32_t bias_spm_addr, const at::Tensor& scale,
-    int nvfp4_family, int layer) {
+    int nvfp4_family, int layer, const at::Tensor& negative_zero) {
     if (action_nvfp4_.enabled() && nvfp4_family >= 0) {
         TORCH_CHECK(use_action_nvfp4(m) && nvfp4_family < 5 &&
                         layer >= 0 && layer < 24 && num_cores == 8 && bias_spm_addr == 0 &&
@@ -2064,7 +2064,9 @@ void Qwen3_5Model::launch_linear(
         bias_spm_addr, scale,
         /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
         /*force_acc32=*/linear_acc32_,
-        /*prefer_gemv=*/selector == FmbLinearRouteSelector::GEMV);
+        /*prefer_gemv=*/selector == FmbLinearRouteSelector::GEMV,
+        /*qkv_planar_direct=*/false, /*prefer_row_weight_reuse=*/false,
+        negative_zero);
 }
 
 void Qwen3_5Model::consume_manifest_route(
@@ -5350,7 +5352,7 @@ void Qwen3_5Model::emit_mlp_and_output(int layer_idx, const ChunkInfo& chunk,
         launch_linear(
             chunk.idx,
             addr(0, "residual1"), lw.gate_w, addr(0, "gate"),
-            seq_len, intermediate_size(), h, 1, mlp_tp(), 0, gate_scale, 2, layer_idx);
+            seq_len, intermediate_size(), h, 1, mlp_tp(), 0, gate_scale, 2, layer_idx, lw.gate_negative_zero);
     }
     if (use_silu_ && !fused_silu_mul && !text_fused_silu_mul && !high_silu_mul) {
         if (ctx().has_complete_physical_manifest()) {
@@ -5370,7 +5372,7 @@ void Qwen3_5Model::emit_mlp_and_output(int layer_idx, const ChunkInfo& chunk,
         launch_linear(
             chunk.idx,
             addr(0, "residual1"), lw.up_w, addr(0, "up"),
-            seq_len, intermediate_size(), h, 1, mlp_tp(), 0, up_scale, 3, layer_idx);
+            seq_len, intermediate_size(), h, 1, mlp_tp(), 0, up_scale, 3, layer_idx, lw.up_negative_zero);
     }
     if (!fused_gateup) {
         if (text_fused_silu_mul) {
@@ -5395,7 +5397,7 @@ void Qwen3_5Model::emit_mlp_and_output(int layer_idx, const ChunkInfo& chunk,
         launch_linear(
             chunk.idx,
             product_buf, lw.down_w, addr(0, "down"),
-            seq_len, h, intermediate_size(), 0, mlp_tp(), 0, down_scale, 4, layer_idx);
+            seq_len, h, intermediate_size(), 0, mlp_tp(), 0, down_scale, 4, layer_idx, lw.down_negative_zero);
     }
     if (action_mlp_tail_handoff(layer_idx,chunk,true)) {
         launch_action_mlp_tail(layer_idx,chunk);
@@ -6842,7 +6844,9 @@ void Qwen3_5Model::set_weights(
     at::TensorList gdn_in_z_scale_list, at::TensorList gdn_out_scale_list,
     at::TensorList gdn_q_scale_list, at::TensorList gdn_k_scale_list,
     at::TensorList gdn_v_scale_list, at::TensorList gdn_b_bg_scale_list,
-    at::TensorList gdn_a_bg_scale_list, at::TensorList nvfp4_tensor_scales) {
+    at::TensorList gdn_a_bg_scale_list, at::TensorList nvfp4_tensor_scales,
+    at::TensorList gate_negative_zero_list, at::TensorList up_negative_zero_list,
+    at::TensorList down_negative_zero_list) {
 
     const int64_t N = static_cast<int64_t>(layer_is_full.size());
     TORCH_CHECK(N > 0, "qwen3_5 set_weights: layer_is_full must be non-empty");
@@ -6887,6 +6891,30 @@ void Qwen3_5Model::set_weights(
             TORCH_CHECK(layer_is_full[i] == ((i + 1) % 4 == 0 ? 1 : 0),
                         "Qwen3.5 reduced execution requires the 3-GDN/1-full layer schedule");
         }
+    }
+    const bool uint4_mlp = !gate_negative_zero_list.empty() ||
+        !up_negative_zero_list.empty() || !down_negative_zero_list.empty();
+    if (uint4_mlp) {
+        const bool exact_geometry =
+            (N == 24 && hidden_size == 2048 && intermediate_size == 6144 && num_q_heads == 8) ||
+            (N == 32 && hidden_size == 2560 && intermediate_size == 9216 && num_q_heads == 16) ||
+            (N == 32 && hidden_size == 4096 && intermediate_size == 12288 && num_q_heads == 16);
+        const int64_t value_heads = hidden_size == 2048 ? 16 : 32;
+        TORCH_CHECK(num_cores() == 8 && nvfp4_tensor_scales.empty() && exact_geometry &&
+                        !action_mode_ && !z2_bound_ && num_kv_heads == 8 && head_dim == 256 &&
+                        use_silu && eps == 1e-6 && mrope_section == at::IntArrayRef({11, 11, 10}) &&
+                        gdn_num_v_heads == value_heads && gdn_key_head_dim == 128 &&
+                        gdn_value_head_dim == 128 && gdn_conv_kernel == 4 &&
+                        gdn_conv_dim == (32 + value_heads) * 128,
+                    "QuantTrio UINT4 MLP requires exact dense 2B/4B/9B TP8 text without NVFP4");
+        for (int64_t layer = 0; layer < N; ++layer) {
+            TORCH_CHECK(layer_is_full[layer] == ((layer + 1) % 4 == 0 ? 1 : 0),
+                        "QuantTrio UINT4 MLP requires the 3-GDN/1-full layer schedule");
+        }
+        TORCH_CHECK(gate_negative_zero_list.size() == static_cast<size_t>(N) &&
+                        up_negative_zero_list.size() == static_cast<size_t>(N) &&
+                        down_negative_zero_list.size() == static_cast<size_t>(N),
+                    "UINT4 MLP requires complete gate/up/down negative_zero lists");
     }
     const auto check_list = [N](at::TensorList list, const char* name) {
         TORCH_CHECK(static_cast<int64_t>(list.size()) == N,
@@ -6992,7 +7020,7 @@ void Qwen3_5Model::set_weights(
         gdn_q_list[0].scalar_type() == at::kByte;
     TORCH_CHECK(!dense27_w4 || !reduced,
                 "official Qwen3.5-27B W4 group32 requires eight cores");
-    const auto check_linear = [reduced, dense27, dense27_w8, dense27_w4, reduced_w8_2b, nvfp4](const at::Tensor& weight,
+    const auto check_linear = [reduced, dense27, dense27_w8, dense27_w4, reduced_w8_2b, nvfp4, uint4_mlp](const at::Tensor& weight,
                                  const at::Tensor& scale,
                                  const char* name, int64_t layer) {
         TORCH_CHECK(weight.defined() && weight.numel() > 0 && weight.dim() == 2,
@@ -7023,6 +7051,11 @@ void Qwen3_5Model::set_weights(
                                 weight.sizes() == at::IntArrayRef({2048, 1024}),
                             "G05 NVFP4 preserves W8 K/V/attention-gate owners");
             }
+        }
+        if (uint4_mlp && role != "gate" && role != "up" && role != "down") {
+            TORCH_CHECK(weight.scalar_type() == at::kHalf,
+                        "QuantTrio AWQ only quantizes MLP projections; ", name,
+                        "[", layer, "] must remain FP16");
         }
         const bool legacy_main = dense27 && !dense27_w8 && !dense27_w4 &&
             role.rfind("gdn_", 0) != 0;
@@ -7180,6 +7213,50 @@ void Qwen3_5Model::set_weights(
     TORCH_CHECK((!reduced && !dense27) || (cos.size(1) == 32 && final_norm_w.numel() == hidden_size),
                 "Qwen3.5 reduced RoPE/final norm geometry mismatch");
 
+    // Validate and align every zero owner before publishing any new weights.
+    // Empty first-layer placeholders may be ordinary CPU tensors, like scales.
+    const auto prepare_zeros = [&](at::TensorList weights, at::TensorList scales,
+                                   at::TensorList zeros, const char* role,
+                                   int64_t out_features, int64_t in_features) {
+        std::vector<at::Tensor> owners(N);
+        if (!uint4_mlp) return owners;
+        for (int64_t layer = 0; layer < N; ++layer) {
+            const auto& zero = zeros[layer];
+            const bool present = zero.defined() && zero.numel() != 0;
+            if (layer == 0) {
+                TORCH_CHECK(!present && weights[layer].scalar_type() == at::kHalf &&
+                                weights[layer].sizes() == at::IntArrayRef({out_features, in_features}),
+                            "QuantTrio AWQ layer 0 MLP must remain FP16 without zero: ", role);
+                continue;
+            }
+            const auto& weight = weights[layer];
+            const auto& scale = scales[layer];
+            const bool row = std::string(role) == "down";
+            const int64_t local_n = row ? out_features : out_features / num_cores();
+            const int64_t local_k = row ? in_features / num_cores() : in_features;
+            const int64_t metadata_elements = ((local_k / 128 + 3) / 4) *
+                ((local_n + 63) / 64) * num_cores() * 4 * 64;
+            TORCH_CHECK(local_k % 128 == 0 && local_n % 16 == 0,
+                        "QuantTrio AWQ projection does not preserve TP8 G128 geometry");
+            TORCH_CHECK(present && weight.scalar_type() == at::kByte &&
+                            weight.sizes() == at::IntArrayRef({out_features, in_features / 2}) &&
+                            scale.defined() && scale.dim() == 2 && scale.size(0) == 128 &&
+                            scale.numel() == metadata_elements &&
+                            zero.device() == weight.device() && zero.scalar_type() == at::kHalf &&
+                            zero.is_contiguous() && zero.sizes() == scale.sizes(),
+                        "QuantTrio AWQ ", role, "[", layer,
+                        "] requires packed UINT4, G128 FP16 scale and matching RPU FP16 negative_zero");
+            owners[layer] = rpu_retain_linear_quant_scale(weight, zero);
+        }
+        return owners;
+    };
+    auto gate_zero_owners = prepare_zeros(gate_list, gate_scale_list,
+        gate_negative_zero_list, "gate", prepared_intermediate_size, hidden_size);
+    auto up_zero_owners = prepare_zeros(up_list, up_scale_list,
+        up_negative_zero_list, "up", prepared_intermediate_size, hidden_size);
+    auto down_zero_owners = prepare_zeros(down_list, down_scale_list,
+        down_negative_zero_list, "down", hidden_size, prepared_intermediate_size);
+
     action_nvfp4_ = std::move(candidate_nvfp4);
     action_nvfp4_o_resident_available_ = false;
     action_nvfp4_o_resident_ = {};
@@ -7248,6 +7325,9 @@ void Qwen3_5Model::set_weights(
         lw.input_norm_w = input_norm_list[i];
         lw.post_norm_w = post_norm_list[i];
         lw.gate_w = gate_list[i]; lw.up_w = up_list[i]; lw.down_w = down_list[i];
+        lw.gate_negative_zero = std::move(gate_zero_owners[i]);
+        lw.up_negative_zero = std::move(up_zero_owners[i]);
+        lw.down_negative_zero = std::move(down_zero_owners[i]);
         lw.gate_ws = rpu_retain_linear_quant_scale(
             gate_list[i], gate_scale_list[i]);
         lw.up_ws = rpu_retain_linear_quant_scale(
@@ -7642,7 +7722,10 @@ void rpu_qwen3_5_set_weights(
     at::TensorList gdn_q_scale, at::TensorList gdn_k_scale,
     at::TensorList gdn_v_scale, at::TensorList gdn_b_bg_scale,
     at::TensorList gdn_a_bg_scale,
-    const std::optional<std::vector<at::Tensor>>& nvfp4_tensor_scales) {
+    const std::optional<std::vector<at::Tensor>>& nvfp4_tensor_scales,
+    const std::optional<std::vector<at::Tensor>>& gate_negative_zero,
+    const std::optional<std::vector<at::Tensor>>& up_negative_zero,
+    const std::optional<std::vector<at::Tensor>>& down_negative_zero) {
     auto* m = Qwen3_5Registry::get(handle, "rpu_qwen3_5_set_weights");
     m->set_weights(q, k, v, o, qn, kn, ag, in_norm, post_norm, gate, up, down,
                    cos, sin, final_norm, layer_is_full,
@@ -7656,7 +7739,10 @@ void rpu_qwen3_5_set_weights(
                    gdn_in_z_scale, gdn_out_scale,
                    gdn_q_scale, gdn_k_scale, gdn_v_scale,
                    gdn_b_bg_scale, gdn_a_bg_scale,
-                   nvfp4_tensor_scales.value_or(std::vector<at::Tensor>{}));
+                   nvfp4_tensor_scales.value_or(std::vector<at::Tensor>{}),
+                   gate_negative_zero.value_or(std::vector<at::Tensor>{}),
+                   up_negative_zero.value_or(std::vector<at::Tensor>{}),
+                   down_negative_zero.value_or(std::vector<at::Tensor>{}));
 }
 
 void rpu_qwen3_5_set_prefill_rope(int64_t handle, const at::Tensor& cos, const at::Tensor& sin) {

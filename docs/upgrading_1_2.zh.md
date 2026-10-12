@@ -124,7 +124,7 @@ summary = true
 ```
 
 `summary` 单独控制模型与运行摘要。日志等级及输出文件见
-[示例日志说明](../examples/README.zh.md#logging-and-performance-output)。
+[示例日志说明](../examples/README.zh.md#logging-and-output)。
 
 Wall-OSS W4 转换默认 `--group-size 32`，两个 decoder expert 的投影均使用 INT4，
 包含 expert0 Down。逐通道 scale 使用 `--group-size 0`；非空 `--keep-int8` 会被拒绝。

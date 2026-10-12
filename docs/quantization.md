@@ -44,10 +44,8 @@ python -m rpu_backend.quant.verify_qwen3_w8a16 \
 ```
 
 The verifier checks the declared method, expected INT8/scale tensor pairs, and
-a representative sample of dequantized weights. Its default sample limit is 21
-and its default minimum weight cosine is `0.999`; these are converter checks,
-not model-level acceptance criteria. Use `--max-samples` and `--min-cosine` to
-apply the release procedure's values, then run end-to-end validation.
+representative dequantized weights. These checks cover conversion consistency;
+they do not certify a model or device.
 
 ## Qwen3 explicit W4/G32 installation
 

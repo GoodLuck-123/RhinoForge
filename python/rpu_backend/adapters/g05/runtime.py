@@ -1735,8 +1735,6 @@ def _g05_vlm_runtime_ready(model) -> bool:
             return False
     for name in (
         "prefill_graph_sig",
-        "prefill_debug_graph_cache",
-        "prefill_debug_graph_sig",
         "prefill_rope_cache",
         "rotary_dim",
         "rope_theta",
@@ -1934,14 +1932,9 @@ def patch_g05_vlm_for_rpu(
 
         vlm._rpu_qwen3_5.prefill_graph_cache = _rb.graph.GraphCache(max_entries=1)
         vlm._rpu_qwen3_5.prefill_graph_sig = None
-        # Debug prefill is lazy and uses a separate cache because its graph has
-        # diagnostic-only fixed-address SPM→DDR taps. Never replay it as the
-        # production prefill graph (or vice versa).
-        vlm._rpu_qwen3_5.prefill_debug_graph_cache = None
         from rpu_backend.adapters.qwen3_5.text import _refresh_qwen35_text_retirement
 
         _refresh_qwen35_text_retirement(vlm._rpu_qwen3_5)
-        vlm._rpu_qwen3_5.prefill_debug_graph_sig = None
         vlm._rpu_qwen3_5.prefill_rope_cache = None
 
         vlm._rpu_g05_max_seq_len = int(max_seq_len)
@@ -3073,7 +3066,6 @@ def _apply_g05_execution_config(
         text_state.decode_stage_descriptor = None
         _clear_g05_graph(text_state.graph_cache)
         _clear_g05_graph(getattr(text_state, "prefill_graph_cache", None))
-        _clear_g05_graph(getattr(text_state, "prefill_debug_graph_cache", None))
         text_state.prefill_graph.invalidate()
     if _G05_VISION_COMPONENT in changed and vision_handle is not None:
         (

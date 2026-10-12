@@ -1,0 +1,34 @@
+# Qwen3.5 text recipe.
+[example]
+profile_id = "qwen3_5-2b.w4-mlp-only-g32.text-controlled"
+registry_alias = "qwen3_5-2b-w4-mlp-only-g32"
+target = "qwen3_5"
+dtype = "w4a16"
+architecture = "Qwen3_5ForConditionalGeneration"
+
+[example.opt_in]
+QWEN3_5_QUANT_ALLOW_UNCERTIFIED = "1"
+
+[input]
+prompt_token_ids = [760, 8427, 4821, 506, 279, 11911, 314, 411, 1785, 13205, 1396, 27510, 15167, 303, 2136, 18211, 12858, 4779, 11, 748, 264, 23776, 6000, 628, 6052, 1973, 3397, 4237, 1142, 310, 1822, 4779, 13, 2844, 3074, 5307, 20182, 279, 2645, 314, 279, 2790, 13, 1165, 2707, 513, 16610, 680, 8047, 314, 854, 303, 279, 4581, 1906, 279, 12204, 7896, 1301, 1070, 11, 89303, 513, 79046]
+prefill_tokens = 64
+decode_steps = 4096
+stop_on_eos = false
+
+[run]
+warmup = 2
+runs = 5
+inference_mode = false
+hwperf = false
+profile = false
+seed = 0
+
+[rpu_execution.model]
+num_cores = 8
+
+[rpu_execution.prefill]
+chunk_size = "auto"
+linear_acc32 = false
+
+[cpu]
+threads = 4

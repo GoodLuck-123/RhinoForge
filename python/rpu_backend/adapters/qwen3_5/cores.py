@@ -71,7 +71,16 @@ def validate_core_profile(config, execution=None):
     Legacy eight-core profiles retain their existing independent admission.
     """
     topology = core_topology(execution)
-    from .quant_scope import validate_modern_27b_profile, resolve_quant_specs, is_full_from_layer_types, W4A16_PGRP
+    from .quant_scope import (
+        validate_modern_27b_profile, resolve_quant_specs, is_full_from_layer_types,
+        W4A16_PGRP, quanttrio_awq_config,
+    )
+    if quanttrio_awq_config(config) is not None and topology.num_cores != 8:
+        raise ValueError("QuantTrio AWQ supports TP8 text only")
+    if validate_mlp_only_text_profile(config):
+        if topology.num_cores != 8:
+            raise ValueError("Qwen3.5 MLP-only W4 supports TP8 text only")
+        return topology
     if validate_modern_27b_profile(config):
         tc = getattr(config, "text_config", config)
         spec = next(iter(resolve_quant_specs(is_full_from_layer_types(tc.layer_types), config.quant_config).values()))
@@ -95,6 +104,15 @@ def validate_core_profile(config, execution=None):
     return topology
 
 
+def validate_mlp_only_text_profile(config):
+    """Validate full runtime semantics after the shared named-recipe scope check."""
+    from .quant_scope import validate_mlp_only_text_profile as validate_scope
+    if not validate_scope(config):
+        return False
+    _validate_dense_text_profile(config, mlp_only_quant=True)
+    return True
+
+
 def _reduced_w8_specs(config):
     """Exact 2B W8 main/GDN projections with FP16 scalar b/a projections.
 
@@ -116,8 +134,16 @@ def _reduced_w8_specs(config):
     return specs
 
 
-def _validate_dense_text_profile(config, *, uniform_quant=False):
-    if uniform_quant and getattr(config, "quant_config", None):
+def _validate_dense_text_profile(config, *, uniform_quant=False, mlp_only_quant=False):
+    from .quant_scope import quanttrio_awq_config
+    awq = quanttrio_awq_config(config)
+    if mlp_only_quant:
+        from .quant_scope import validate_mlp_only_text_profile
+        validate_mlp_only_text_profile(config)
+    elif awq is not None:
+        if not uniform_quant:
+            raise ValueError("QuantTrio AWQ is admitted only through the TP8 text profile")
+    elif uniform_quant and getattr(config, "quant_config", None):
         from .quant_scope import W8A16, W4A16_PGRP, is_full_from_layer_types, resolve_quant_specs
         tc = getattr(config, "text_config", config)
         specs = set(resolve_quant_specs(
@@ -147,7 +173,9 @@ def _validate_dense_text_profile(config, *, uniform_quant=False):
              and getattr(tc, "full_attention_interval", 4) == 4
              and not getattr(tc, "mlp_only_layers", ())
              and not any(getattr(owner, name, None) for owner in (config, tc) for name in (
-                 "quantization_config", "num_experts", "adaptive_mode"))
+                 "num_experts", "adaptive_mode"))
+             and (awq is not None or not any(getattr(owner, "quantization_config", None)
+                                            for owner in (config, tc)))
              and (tc is config or not getattr(tc, "quant_config", None))
              and isinstance(rope, Mapping)
              and rope.get("rope_type", rope.get("type")) == "default"
@@ -318,6 +346,9 @@ def is_dense_9b_vl_candidate(config):
 
 
 def validate_dense_9b_vl_profile(config):
+    from .quant_scope import quanttrio_awq_config
+    if quanttrio_awq_config(config) is not None:
+        raise ValueError("QuantTrio AWQ does not admit Vision")
     if not is_dense_9b_vl_candidate(config):
         raise ValueError("the four-arena owner requires exact dense Qwen3.5 9B VL")
     specs = _dense_9b_vl_w8_specs(config)

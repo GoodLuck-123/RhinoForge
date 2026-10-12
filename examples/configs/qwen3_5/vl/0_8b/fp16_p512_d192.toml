@@ -1,4 +1,4 @@
-# Dense VL image + language generation; see ../../README.md for timing/status.
+# Dense VL image + language generation; see ../../README.md for profile notes.
 # Run from the repository root. The image is resized once before measurement.
 [example]
 profile_id = "qwen3_5-0.8b.fp16.vision-controlled"

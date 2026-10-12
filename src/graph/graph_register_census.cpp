@@ -288,6 +288,17 @@ void validate_grouped_uint4_metadata_address(
         spec.abi.role != GraphDdrRegisterRole::NegativeZeroPoint)
         return;
     const auto shape = spec.tensor.sizes();
+    if (shape.size() == 2) {
+        // Dense shared W4 carries group size in its 2D view. Exact physical
+        // element count and core_count*512 alignment belong to its launcher,
+        // which knows N/K/TP. Keep grouped experts' stricter 6D rule below.
+        TORCH_CHECK(spec.tensor.is_contiguous() &&
+                        (shape[0] == 32 || shape[0] == 64 || shape[0] == 128) &&
+                        shape[1] > 0,
+                    "Dense W4 metadata requires contiguous [group_size, payload] "
+                    "with group_size 32/64/128");
+        return;
+    }
     TORCH_CHECK(shape.size() == 6 && spec.tensor.is_contiguous() &&
                     shape[0] > 0 && shape[1] > 0 && shape[2] > 0 &&
                     shape[3] >= 1 && shape[3] <= 8 &&

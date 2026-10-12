@@ -27,15 +27,18 @@ def config(tmp_path, precision="w8a16"):
 @pytest.mark.parametrize("section,key,value", [
     ("lingbot2", "precision", "w4a16"), ("lingbot2", "instruction_residency", True),
     ("lingbot2", "top_k", 2), ("input", "case", ""), ("input", "num_steps", 5),
-    ("run", "warmup", 0), ("run", "runs", True), ("run", "output_dir", ""),
+    ("run", "warmup", -1), ("run", "warmup", True), ("run", "warmup", False),
+    ("run", "warmup", 0.5), ("run", "runs", True), ("run", "output_dir", ""),
     ("run", "hwperf", 1), ("cpu", "threads", 0)])
 def test_config_rejects_semantic_and_ambiguous_controls(tmp_path, section, key, value):
     runner = load(); value_config = config(tmp_path); value_config[section][key] = value
     with pytest.raises(ValueError): runner.validate_example_config(value_config)
 
 
-def test_validation_stays_cpu_safe_and_does_not_relabel_z2(tmp_path, monkeypatch):
+@pytest.mark.parametrize("warmup", [0, 2])
+def test_validation_stays_cpu_safe_and_does_not_relabel_z2(tmp_path, monkeypatch, warmup):
     runner = load(); value = config(tmp_path)
+    value["run"]["warmup"] = warmup
     import builtins
     original = builtins.__import__
     def guarded(name, *args, **kwargs):
@@ -159,6 +162,80 @@ def test_real_flow_counts_clean_calls_and_separates_diagnostics(tmp_path, monkey
     assert report["cpu_reference"]["metrics"]["cosine"] == pytest.approx(-1)
     assert report["validation"]["reference"]["status"] == "MEASURED"
     assert torch.equal(torch.load(tmp_path / "actions.pt", weights_only=True), torch.ones(1, 50, 55))
+
+
+def test_zero_warmup_saves_an_independent_first_output(tmp_path, monkeypatch):
+    runner = load(); policy = FakePolicy(); mock_runtime(monkeypatch, runner, policy)
+    shared = torch.ones(1, 50, 55)
+    original = policy.get_action
+    def shared_action(obs):
+        original(obs)
+        return shared
+    monkeypatch.setattr(policy, "get_action", shared_action)
+    def diagnostics(owner, infer, first, cfg, out, report):
+        assert first.data_ptr() != shared.data_ptr()
+        shared.zero_()
+        assert torch.equal(first, torch.ones_like(shared))
+        report["diagnostic_calls"] = 0
+    monkeypatch.setattr(runner, "_diagnostics", diagnostics)
+    value = config(tmp_path)
+    value["run"].update(warmup=0, runs=1)
+    assert runner.run_example_config(value) == 0
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert policy.calls == 1 and policy.closed == 1
+    assert policy.prepared == {"prefix_length_range": (217, 217)}
+    assert report["graph_prepare"]["ready_replay_validated"] is True
+    assert report["runtime_calls"] == {"prepare": 5, "warmup": 0, "measured": 1,
+                                        "diagnostic": 0, "total": 6}
+    assert torch.equal(torch.load(tmp_path / "actions.pt", weights_only=True),
+                       torch.ones(1, 50, 55))
+
+
+@pytest.mark.parametrize("warmup,runs,changed_call,message", [
+    (0, 2, 2, "measured replay changed actions"),
+    (2, 1, 2, "warm replay changed actions"),
+    (1, 1, 2, "measured replay changed actions"),
+])
+def test_replay_rejects_changed_reused_output(tmp_path, monkeypatch, warmup, runs, changed_call, message):
+    runner = load(); policy = FakePolicy(); mock_runtime(monkeypatch, runner, policy)
+    shared = torch.ones(1, 50, 55)
+    original = policy.get_action
+    def changing_action(obs):
+        original(obs)
+        if policy.calls == changed_call:
+            shared.add_(1)
+        return shared
+    monkeypatch.setattr(policy, "get_action", changing_action)
+    value = config(tmp_path); value["run"].update(warmup=warmup, runs=runs)
+    with pytest.raises(RuntimeError, match=message):
+        runner.run_example_config(value)
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert policy.closed == 1 and policy.calls == changed_call
+    assert report["execution"]["status"] == "FAILED"
+    assert report["artifacts"]["outputs"] == []
+
+
+def test_default_warmup_remains_two(tmp_path, monkeypatch):
+    runner = load(); policy = FakePolicy(); mock_runtime(monkeypatch, runner, policy)
+    value = config(tmp_path); del value["run"]["warmup"]
+    value["run"]["runs"] = 1
+    assert runner.run_example_config(value) == 0
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["warmup"] == report["runtime_calls"]["warmup"] == 2
+    assert policy.calls == 3
+
+
+@pytest.mark.parametrize("prepared", [None,
+    {"phase": "READY", "ready_replay_validated": False},
+    {"phase": "BUILD", "ready_replay_validated": True},
+])
+def test_zero_warmup_still_requires_ready_validation(tmp_path, monkeypatch, prepared):
+    runner = load(); policy = FakePolicy(); mock_runtime(monkeypatch, runner, policy)
+    monkeypatch.setattr(policy, "prepare_graphs", lambda *a, **kw: prepared)
+    value = config(tmp_path); value["run"].update(warmup=0, runs=1)
+    with pytest.raises(RuntimeError, match="adapter prepare did not validate"):
+        runner.run_example_config(value)
+    assert policy.calls == 0 and policy.closed == 1
 
 
 def test_failure_closes_owner_restores_stage_methods_and_records_error(tmp_path, monkeypatch):

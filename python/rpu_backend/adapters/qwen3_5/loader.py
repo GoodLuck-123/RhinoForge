@@ -1,6 +1,7 @@
 """Qwen3.5 checkpoint loader: read the quant declaration, build the full
 conditional-generation skeleton on meta, and install int8 text weights + fp16
-scales without letting HF cast them. Modern formats retain fp16 Vision; the
+scales without letting HF cast them. The original QuantTrio AWQ declaration
+uses a lossless UINT4/direct-zero importer. Modern formats retain fp16 Vision; the
 exact pre-v1 27B bundle loads only its text model.
 
 Mirrors the Pi0.5 loader shape (``adapters/pi05/loader.py``): the quantization
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import copy
 from pathlib import Path
 
 import torch
@@ -32,9 +34,11 @@ from rpu_backend.api.errors import (
     RPUBackendError, RPUUnsupportedDtypeError, UnsupportedModelError,
 )
 from rpu_backend.adapters.qwen3_5.quant_scope import (
-    FP16, W4A16_PGRP, LEGACY_W8A16_PROFILE, is_full_from_layer_types,
+    FP16, W4A16_PGRP, W4A16_AWQ, QUANTTRIO_AWQ_PROFILE,
+    LEGACY_W8A16_PROFILE, is_full_from_layer_types,
     normalize_quant_config, resolve_quant_specs, scale_key,
     validate_legacy_text_profile, validate_modern_27b_profile,
+    resolve_quant_config, quanttrio_awq_config,
 )
 from rpu_backend.runtime.log import _LOG
 
@@ -47,7 +51,10 @@ _CONFIG_KWARGS = frozenset({
 
 def parse_quant_config(config):
     """Return the validated quant declaration, or ``None`` for a FP16 checkpoint."""
-    quant = getattr(config, "quant_config", None)
+    try:
+        quant = resolve_quant_config(config)
+    except ValueError as exc:
+        raise UnsupportedModelError(str(exc)) from exc
     if quant is None:
         return None
     if not isinstance(quant, dict):
@@ -65,9 +72,10 @@ def parse_quant_config(config):
 
     storage = quant.get("storage", "int8")
     scale_dtype = quant.get("scale_dtype", "float16")
-    if storage != "int8" or scale_dtype != "float16":
+    expected_storage = "uint8" if quant.get("profile") == QUANTTRIO_AWQ_PROFILE else "int8"
+    if storage != expected_storage or scale_dtype != "float16":
         raise UnsupportedModelError(
-            "Qwen3.5 quantized checkpoints require storage='int8' and "
+            f"Qwen3.5 quantized checkpoints require storage={expected_storage!r} and "
             f"scale_dtype='float16', got {storage!r} and {scale_dtype!r}")
     if quant.get("format_version", 1) == 1:
         method = quant["method"]
@@ -305,6 +313,150 @@ def _legacy_tensor_locations(ckpt_dir: Path):
     return locations
 
 
+def _awq_tensor_locations(ckpt_dir):
+    """Validate the whole index before any payload or module mutation."""
+    index = ckpt_dir / "model.safetensors.index.json"
+    weight_map = None
+    if index.is_file():
+        if (ckpt_dir / "model.safetensors").exists():
+            raise RPUBackendError("AWQ checkpoint has ambiguous single/sharded layouts")
+        weight_map = json.loads(index.read_text()).get("weight_map")
+        if (not isinstance(weight_map, dict) or not weight_map
+                or any(not isinstance(k, str) or not isinstance(v, str)
+                       or Path(v).name != v or not v.endswith(".safetensors")
+                       for k, v in weight_map.items())):
+            raise RPUBackendError("AWQ requires a valid local safetensors weight_map")
+    locations, headers = {}, {}
+    for shard in _shard_paths(ckpt_dir):
+        with safe_open(str(shard), framework="pt", device="cpu") as tensors:
+            for key in tensors.keys():
+                if key in locations:
+                    raise RPUBackendError(f"AWQ duplicate checkpoint tensor {key}")
+                view = tensors.get_slice(key)
+                locations[key] = shard
+                headers[key] = (view.get_dtype(), tuple(view.get_shape()))
+    if weight_map is not None and {k: p.name for k, p in locations.items()} != weight_map:
+        raise RPUBackendError("AWQ shard contents disagree with weight_map")
+    return locations, headers
+
+
+def _awq_inventory(model):
+    return tuple((name, id(t), t._version, t.data_ptr(), tuple(t.shape),
+                  tuple(t.stride()), str(t.dtype), str(t.device))
+                 for name, t in (*model.named_parameters(), *model.named_buffers()))
+
+
+def validate_awq_loaded_model(model):
+    """Reject a generic HF load or changed CPU owners before device mutation."""
+    quant = quanttrio_awq_config(model.config)
+    if quant is None:
+        return False
+    if (getattr(model, "_qwen3_5_quant_config", None) != quant
+            or getattr(model, "_qwen3_5_awq_inventory", None) != _awq_inventory(model)
+            or any(t.device.type != "cpu" for t in (*model.parameters(), *model.buffers()))):
+        raise RPUBackendError("QuantTrio AWQ requires its original CPU loader owners; reload the checkpoint")
+    return True
+
+
+@torch.inference_mode(False)
+def _load_quanttrio_awq(ckpt_dir, config, quant):
+    from rpu_backend.quant.awq_gemm import unpack_awq_gemm
+
+    # Cold identity uses tensor version counters even if the caller loads under
+    # inference_mode. Source tensors therefore retain ordinary version tracking.
+    # Never hand the external declaration to HF's automatic quantizer. Keep the
+    # caller and source files unchanged, and restore provenance only afterwards.
+    skeleton_config = copy.deepcopy(config)
+    source_quant = copy.deepcopy(getattr(skeleton_config, "quantization_config", None))
+    if hasattr(skeleton_config, "quantization_config"):
+        delattr(skeleton_config, "quantization_config")
+    skeleton_config.quant_config = copy.deepcopy(quant)
+    with torch.device("meta"):
+        model = AutoModelForImageTextToText.from_config(skeleton_config)
+    model.requires_grad_(False)
+    modules, own = dict(model.named_modules()), model.state_dict()
+    specs = resolve_quant_specs(is_full_from_layer_types(_layer_types(config)), quant)
+    quantized = {f"model.language_model.{name}": spec for name, spec in specs.items()
+                 if spec.method == W4A16_AWQ}
+    locations, headers = _awq_tensor_locations(ckpt_dir)
+    replaced = {name + ".weight" for name in quantized}
+    source_keys = {name + suffix for name in quantized for suffix in (".qweight", ".qzeros", ".scales")}
+    expected = (set(own) - replaced) | source_keys
+    missing = expected - set(locations)
+    if missing and not (missing == {"lm_head.weight"} and config.tie_word_embeddings):
+        raise RPUBackendError(f"AWQ checkpoint missing tensors: {sorted(missing)[:8]}")
+    extra = set(locations) - expected
+    # Quantized extras are always errors, even in an HF-ignored namespace.
+    if any(k.endswith((".qweight", ".qzeros", ".scales", ".weight_scale", ".weight_zero")) for k in extra):
+        raise RPUBackendError("AWQ checkpoint carries out-of-scope quantized tensors")
+    _assert_expected_unexpected(sorted(extra), model)
+    for key in set(locations) & (set(own) - replaced):
+        dtype, shape = headers[key]
+        if dtype not in ("BF16", "F16", "F32") or shape != tuple(own[key].shape):
+            raise RPUBackendError(f"AWQ ordinary tensor {key} has incompatible dtype/shape")
+    for name in quantized:
+        linear = modules.get(name)
+        if not isinstance(linear, nn.Linear) or linear.bias is not None:
+            raise RPUBackendError(f"AWQ requires a bias-free Linear for {name}")
+        n, k = linear.weight.shape
+        for suffix, want in ((".qweight", ("I32", (k, n // 8))),
+                             (".qzeros", ("I32", (k // 128, n // 8))),
+                             (".scales", ("F16", (k // 128, n)))):
+            if headers[name + suffix] != want:
+                raise RPUBackendError(f"AWQ {name + suffix} has incompatible dtype/shape")
+    # One payload read per shard, through the ordinary load_file hook (deployment
+    # runners may supply buffered reads). Keep only incomplete triplets
+    # across shards. Headers above used safe_open only for small metadata.
+    pending, imported = {}, []
+    for shard in sorted(set(locations.values())):
+        raw = load_file(str(shard))
+        if set(raw) != {key for key, path in locations.items() if path == shard}:
+            raise RPUBackendError("AWQ shard changed after header validation")
+        state = {}
+        for key, value in raw.items():
+            if key in own and key not in replaced:
+                state[key] = value.to(torch.float16).contiguous()
+            elif key in source_keys:
+                name, suffix = key.rsplit(".", 1)
+                pending.setdefault(name, {})[suffix] = value
+        model.load_state_dict(state, strict=False, assign=True)
+        del state, raw
+        for name in list(pending):
+            values = pending[name]
+            if set(values) != {"qweight", "qzeros", "scales"}:
+                continue
+            linear = modules[name]
+            try:
+                q, zero, scale = unpack_awq_gemm(values["qweight"], values["qzeros"], values["scales"],
+                                                n=linear.out_features, k=linear.in_features)
+            except ValueError as exc:
+                raise RPUBackendError(f"AWQ {name}: {exc}") from exc
+            linear.weight = nn.Parameter(q, requires_grad=False)
+            linear.register_buffer("weight_scale", scale)
+            linear.register_buffer("weight_zero", zero)
+            imported.append(name)
+            del pending[name], values
+    if pending or set(imported) != set(quantized):
+        raise RPUBackendError("AWQ import left incomplete q/zero/scale triplets")
+    model.tie_weights()
+    _materialize_meta_buffers(model)
+    model.half()
+    if any(t.is_meta for t in (*model.parameters(), *model.buffers())):
+        raise RPUBackendError("AWQ loader left unmaterialized tensors")
+    if source_quant is not None:
+        model.config.quantization_config = source_quant
+    model._qwen3_5_quant_config = copy.deepcopy(quant)
+    model._qwen3_5_awq_import = {
+        "source": str(ckpt_dir), "profile": QUANTTRIO_AWQ_PROFILE,
+        "completed": True, "triplet_roundtrip_count": len(imported),
+        "quantized_modules": sorted(imported), "zero_convention": "direct; no +1",
+        "logical_weight_dtype": "uint8", "logical_zero_dtype": "uint8",
+        "scale_dtype": "float16", "ordinary_cast": "published dtype directly to float16",
+    }
+    model._qwen3_5_awq_inventory = _awq_inventory(model)
+    return model.eval()
+
+
 def _load_legacy_qwen38_text_model(ckpt_dir: Path, config, quant: dict):
     """Stream the exact legacy text bundle without instantiating Vision or MTP."""
     from transformers import AutoModelForCausalLM
@@ -394,8 +546,8 @@ def load_qwen3_5_model(
     only the declared text projections with W8/W4 tensors. Vision is present and
     fp16 for modern formats. The exact legacy 27B policy uses a text-only
     CausalLM skeleton and skips Vision/MTP. Quantized checkpoints must be a
-    local directory produced by ``rpu_backend.quant.convert_qwen3_5``. Returns an eval-mode CPU
-    model ready for ``Qwen3_5Adapter(...).to_rpu()``.
+    local converter directory or an original QuantTrio AWQ GEMM directory.
+    Returns an eval-mode CPU model ready for ``Qwen3_5Adapter(...).to_rpu()``.
 
     The FP16 branch is byte-for-byte the call every existing caller already
     makes. That matters: this checkpoint stores the 24 GDN ``linear_attn.norm``
@@ -435,6 +587,12 @@ def load_qwen3_5_model(
 
     if quant.get("profile") == LEGACY_W8A16_PROFILE:
         return _load_legacy_qwen38_text_model(ckpt_dir, config, quant)
+    if quant.get("profile") == QUANTTRIO_AWQ_PROFILE:
+        unsupported = set(hf_kwargs) - _CONFIG_KWARGS - {"device_map", "low_cpu_mem_usage"}
+        if (unsupported or hf_kwargs.get("device_map", "cpu") not in (None, "cpu")
+                or hf_kwargs.get("low_cpu_mem_usage", True) is not True):
+            raise RPUBackendError("QuantTrio AWQ loader accepts only CPU checkpoint/config options")
+        return _load_quanttrio_awq(ckpt_dir, config, quant)
 
     is_full = is_full_from_layer_types(_layer_types(config))
     specs = resolve_quant_specs(is_full, quant)

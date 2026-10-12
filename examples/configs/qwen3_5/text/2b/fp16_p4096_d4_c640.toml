@@ -23,5 +23,5 @@ seed = 0
 
 [rpu_execution.prefill]
 # Exact request for this named long-prefill profile; retained within its declared
-# capability envelope. This value is not a measured fastest-chunk recommendation.
+# capability envelope. This value is not a default chunk recommendation.
 chunk_size = 640

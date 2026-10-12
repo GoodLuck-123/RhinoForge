@@ -51,7 +51,7 @@ python examples/run.py --config /path/to/my_dinov3.toml --check-config
 python examples/run.py --config /path/to/my_dinov3.toml
 ```
 
-结果保存 `report.json` 和输出 tensor 快照；图片由 checkpoint processor 预处理。
+结果保存输出 tensor 快照；图片由 checkpoint processor 预处理。
 
 采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认3次正式运行。
 

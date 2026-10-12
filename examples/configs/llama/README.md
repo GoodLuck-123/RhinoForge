@@ -51,7 +51,7 @@ python examples/run.py --config examples/configs/llama/3_2_1b/fp16.toml --check-
 python examples/run.py --config /path/to/my_llama.toml
 ```
 
-公共runner保存 `report.json` 和生成输出。
+公共 runner 保存生成输出。
 
 采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认3次正式运行。
 

@@ -112,7 +112,7 @@ python examples/run.py --config /tmp/wall_base.toml --check-config
 python examples/run.py --config /tmp/wall_base.toml
 ```
 
-`input.batch_template` 展开 cameras/image_size/text_tokens，必须包含 `{text_tokens}`；固定 `input.batch` 与它互斥。入口读取已有输入，输出 `report.json`、`outputs.pt`。冷配置使用新进程，运行需空闲板卡及既有设备锁；`--check-config` 仅检查配置。
+`input.batch_template` 展开 cameras/image_size/text_tokens，必须包含 `{text_tokens}`；固定 `input.batch` 与它互斥。入口读取已有输入，输出 `outputs.pt`。冷配置使用新进程，运行需空闲板卡及既有设备锁；`--check-config` 仅检查配置。
 
 ## 可修改参数
 

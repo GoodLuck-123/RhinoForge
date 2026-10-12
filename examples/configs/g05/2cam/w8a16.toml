@@ -5,7 +5,7 @@
 [g05]
 precision = "w8a16"
 linear_accumulation = "acc16"
-# HIGH borrows the BASE schedule; its performance must be measured separately.
+# HIGH borrows the BASE schedule; keep it as a separate profile.
 math_precision = "base"
 # W8 Vision ACC16/ACC32: B1 or B2; requires cold runtime/REF capability.
 vision_camera_batch = "auto"

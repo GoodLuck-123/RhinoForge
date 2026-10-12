@@ -53,4 +53,4 @@ REF 依赖使用 [当前两份正式库](../../docs/runtime_assets.md)，配置�
 <a id="本轮路径迁移"></a>
 Rhino v3 新命令使用 [expert_w8a16.toml](rhinovla/v3/expert_w8a16.toml)，旧 `w8a16.toml` 保留为兼容别名。完整路径映射与输入迁移见 [v1.2.0 升级指南](../../docs/upgrading_1_2.zh.md)。
 
-`[logging]` 与 `[run]` 同级，默认 `level="ERROR"`、`summary=true`。等级和输出文件见[日志说明](../README.zh.md#logging-and-performance-output)。
+`[logging]` 与 `[run]` 同级，默认 `level="ERROR"`、`summary=true`。等级和输出文件见[日志说明](../README.zh.md#logging-and-output)。

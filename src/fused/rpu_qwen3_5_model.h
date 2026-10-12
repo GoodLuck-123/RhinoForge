@@ -85,7 +85,10 @@ public:
         at::TensorList gdn_q_scale_list, at::TensorList gdn_k_scale_list,
         at::TensorList gdn_v_scale_list, at::TensorList gdn_b_bg_scale_list,
         at::TensorList gdn_a_bg_scale_list,
-        at::TensorList nvfp4_tensor_scales = {});
+        at::TensorList nvfp4_tensor_scales = {},
+        at::TensorList gate_negative_zero_list = {},
+        at::TensorList up_negative_zero_list = {},
+        at::TensorList down_negative_zero_list = {});
 
     // Per-forward entry. gdn_states / conv_states are parallel-indexed (full
     // slots empty). Stashed for the GDN seam, then run_all_layers.
@@ -313,7 +316,8 @@ private:
         uint32_t input, const at::Tensor& weight, uint32_t output,
         int64_t m, int64_t n, int64_t k, int partition, int num_cores,
         uint32_t bias_spm_addr = 0, const at::Tensor& scale = {},
-        int nvfp4_family = -1, int layer = -1);
+        int nvfp4_family = -1, int layer = -1,
+        const at::Tensor& negative_zero = {});
     bool use_action_nvfp4(int64_t rows) const;
     std::vector<int64_t> action_nvfp4_arguments(int family) const;
     RpuUnaryPrecision unary_precision() const;
@@ -532,6 +536,7 @@ private:
         at::Tensor gate_w, up_w, down_w;
         at::Tensor q_ws, k_ws, v_ws, o_ws, attn_gate_ws;
         at::Tensor gate_ws, up_ws, down_ws;
+        at::Tensor gate_negative_zero, up_negative_zero, down_negative_zero;
         // GDN mixer weights (linear_attention layers only). in_proj_* / out_proj
         // are col/row-swizzled for device GEMM; conv_w is the DDR-repacked
         // [num_cores, Kc, ld_pad] conv1d weight; A_log/dt_bias/norm_w are plain.
@@ -714,6 +719,7 @@ private:
                     &weights.post_norm_w, &weights.gate_w, &weights.up_w, &weights.down_w,
                     &weights.q_ws, &weights.k_ws, &weights.v_ws, &weights.o_ws,
                     &weights.attn_gate_ws, &weights.gate_ws, &weights.up_ws, &weights.down_ws,
+                    &weights.gate_negative_zero, &weights.up_negative_zero, &weights.down_negative_zero,
                     &weights.gdn_in_z_w, &weights.gdn_out_w, &weights.gdn_A_log, &weights.gdn_dt_bias,
                     &weights.gdn_norm_w, &weights.gdn_q_w, &weights.gdn_k_w, &weights.gdn_v_w,
                     &weights.gdn_conv_q_w, &weights.gdn_conv_k_w, &weights.gdn_conv_v_w, &weights.gdn_b_bg_w,

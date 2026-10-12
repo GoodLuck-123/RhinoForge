@@ -37,9 +37,8 @@ python -m rpu_backend.quant.verify_qwen3_w8a16 \
   --quant-lm-head
 ```
 
-Verifier 检查 method、INT8/scale tensor 配对和代表性 dequantized weight 样本。默认最多
-21 个样本、minimum weight cosine `0.999`；这些是 converter 检查，不是模型 acceptance。
-用 `--max-samples`、`--min-cosine` 设置 release procedure 值，再运行端到端验证。
+Verifier 检查 method、INT8/scale tensor 配对和代表性 dequantized weight 样本。
+这些检查只覆盖转换一致性，不代表模型或设备准入。
 
 ## Qwen3 显式安装 W4/G32
 

@@ -70,8 +70,8 @@ RhinoForge 源码许可分别适用。所有示例配置均在
 python examples/run.py --config qwen3.local.toml
 ```
 
-上面的 `INFO` 设置用于显示生成文本。默认 `ERROR` 会隐藏普通输出，模型和计时摘要
-由 `[logging].summary` 单独控制，见[日志输出](../examples/README.zh.md#logging-and-performance-output)。
+上面的 `INFO` 设置用于显示生成文本。默认 `ERROR` 会隐藏普通输出，模型摘要
+由 `[logging].summary` 单独控制，见[日志输出](../examples/README.zh.md#logging-and-output)。
 需要诊断基础设备配置时，可用
 `python examples/verify_install.py` 做一次小规模 host/设备拷贝；模型已运行成功时
 无需额外执行。复用本次成功结果，不展开模型矩阵。

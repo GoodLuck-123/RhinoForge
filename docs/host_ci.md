@@ -37,4 +37,4 @@ the host Docker socket. Use a dedicated cache and bounded CPU/memory resources.
 When dependencies change, drain the Runner, build a new image tag and update its
 allowed/default image. One normal host CI run checks the deployment. Hardware
 verification uses a separate board worker with an idle-device check and the
-existing device lock; avoid host CI load during performance measurements.
+existing device lock; avoid host CI load during device checks.

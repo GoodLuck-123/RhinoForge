@@ -114,7 +114,7 @@ python examples/run.py --config /tmp/g05.toml --check-config
 python examples/run.py --config /tmp/g05.toml
 ```
 
-`--check-config` 检查配置结构。实际运行在空闲板卡持设备锁，每种精度/运行库使用新进程。结果包含 `report.json`、`actions.pt`、`input_batch.pt`；多长度按顺序各起独立进程，失败即停止，结果分存于 `text_N/`；`stdout.log` 和 `process_exit_code` 记录子进程结果。模板默认六次采样；可通过 `run.runs` 修改正式采样次数。
+`--check-config` 检查配置结构。实际运行在空闲板卡持设备锁，每种精度/运行库使用新进程。结果包含 `actions.pt`、`input_batch.pt`；多长度按顺序各起独立进程，失败即停止，结果分存于 `text_N/`；`stdout.log` 和 `process_exit_code` 记录子进程结果。模板默认六次采样；可通过 `run.runs` 修改正式采样次数。
 
 ## 修改参数
 

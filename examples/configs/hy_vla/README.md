@@ -98,7 +98,7 @@ python examples/run.py --config /tmp/hyvla.toml --check-config
 python examples/run.py --config /tmp/hyvla.toml
 ```
 
-synthetic 使用 checkpoint tokenizer 和 `run.seed` 生成 RGB/state/noise，保存 `input_batch.pt`、`report.json`。每个冷配置使用新进程和独立输出目录；运行需空闲板卡及既有设备锁，`--check-config` 仅检查配置。
+synthetic 使用 checkpoint tokenizer 和 `run.seed` 生成 RGB/state/noise，保存 `input_batch.pt`。每个冷配置使用新进程和独立输出目录；运行需空闲板卡及既有设备锁，`--check-config` 仅检查配置。
 
 ## 可修改参数
 

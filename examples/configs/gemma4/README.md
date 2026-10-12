@@ -52,7 +52,7 @@ python examples/run.py --config examples/configs/gemma4/e4b/fp16.toml --check-co
 python examples/run.py --config /path/to/my_gemma4.toml
 ```
 
-公共runner保存 `report.json` 和实际生成输出。
+公共 runner 保存实际生成输出。
 
 采样设置示例：`cpu.threads=8`、`run.warmup=2`、`run.runs=5`；模板默认3次正式运行。
 

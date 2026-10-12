@@ -51,6 +51,7 @@ and tests together. New examples use canonical paths; old paths remain only for
 compatibility. See the [v1.2.0 upgrade guide](../docs/upgrading_1_2.md).
 Model TOML files belong in their family directories.
 Keep persistent model construction outside inference mode; apply the selected mode to inference only. Warm a new Graph with BUILD and REPLAY. With `warmup >= 2`, omit `warmup_decode_steps` or match `input.decode_steps`; fixed-length runs use `stop_on_eos=false`.
+The [LingBot v2 runner](../examples/configs/lingbot/v2/README.md) permits `warmup=0` after its A/B/A and READY preparation; retain an independent first output and compare subsequent replays against it.
 Count retained, temporary-capture and validation queues against the same cold arena pool. Snapshot policy is per-instance and frozen; unsupported SDK/asset combinations use ordinary replay. See [runtime configuration](../docs/runtime_config.md).
 For cache-maintenance changes, trace the actual CPU reads and writes through
 their producing copy operations. Device-only handoffs retain storage and DMA

@@ -69,7 +69,7 @@ def validate_example_config(config):
         raise ValueError("[lingbot2].instruction_residency must be auto or off")
     from .inputs import validate_input_config
     validate_input_config(inputs)
-    for key, default, minimum in (("warmup", 2, 1), ("runs", 5, 1), ("seed", 0, 0)):
+    for key, default, minimum in (("warmup", 2, 0), ("runs", 5, 1), ("seed", 0, 0)):
         value = run.get(key, default)
         if type(value) is not int or value < minimum:
             raise ValueError(f"[run].{key} must be an integer >= {minimum}")
@@ -483,7 +483,12 @@ def run_example_config(config):
                     for index in range(report["runs"]):
                         started = time.perf_counter(); value = infer()
                         total = (time.perf_counter() - started) * 1000
-                        if not torch.equal(first, value): raise RuntimeError("measured replay changed actions")
+                        # Without extra warmup, the first measured output is
+                        # the baseline for subsequent replay checks.
+                        if first is None:
+                            first = value
+                        elif not torch.equal(first, value):
+                            raise RuntimeError("measured replay changed actions")
                         if any(len(rows) != index + 1 for rows in phases.values()):
                             raise RuntimeError("incomplete measured stage boundaries")
                         report["samples_ms"].append({"total_ms": total, **{k: rows[-1] for k, rows in phases.items()}})

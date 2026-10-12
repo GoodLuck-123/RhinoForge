@@ -56,7 +56,7 @@ python examples/run.py --config examples/configs/hy_embodied/umi/fp16.toml --che
 python examples/run.py --config /path/to/hy_umi.toml
 ```
 
-输出为归一化动作，公共runner保存report与输出快照；不是物理机器人执行。
+输出为归一化动作和输出快照；不是物理机器人执行。
 
 ## 可修改参数
 

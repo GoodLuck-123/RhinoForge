@@ -56,7 +56,7 @@ except ImportError:  # standalone: bypass any unrelated editable package install
 ARCHITECTURE = "Qwen3_5ForConditionalGeneration"
 FORMAT_VERSION = 1
 METHODS = ("w8a16", "w4a16_pgrp")
-PROFILES = ("w4_main_w8_gdn", "w8_main_w8_gdn", LEGACY_W8A16_PROFILE)
+PROFILES = ("w4_main_w8_gdn", "w8_main_w8_gdn", "w4_mlp_only", LEGACY_W8A16_PROFILE)
 DEFAULT_GROUP_SIZE = 32
 SKIP_MODULES = ["lm_head", "embed_tokens", "visual", "mtp", "conv1d"]
 
@@ -142,13 +142,21 @@ def _quant_config(is_full, method: str | None, group_size: int,
                 f"profile={profile} requires the default --group-size="
                 f"{DEFAULT_GROUP_SIZE}, got {group_size}"
             )
-        default = ({"method": W4A16_PGRP, "group_size": group_size}
-                   if profile == "w4_main_w8_gdn"
-                   else {"method": W8A16})
-        overrides = {
-            "linear_attn.in_proj_b": {"method": FP16},
-            "linear_attn.in_proj_a": {"method": FP16},
-        }
+        if profile == "w4_mlp_only":
+            # Existing v2 roles apply to every layer, including layer zero.
+            default = {"method": FP16}
+            overrides = {
+                f"mlp.{role}": {"method": W4A16_PGRP, "group_size": group_size}
+                for role in ("gate_proj", "up_proj", "down_proj")
+            }
+        else:
+            default = ({"method": W4A16_PGRP, "group_size": group_size}
+                       if profile == "w4_main_w8_gdn"
+                       else {"method": W8A16})
+            overrides = {
+                "linear_attn.in_proj_b": {"method": FP16},
+                "linear_attn.in_proj_a": {"method": FP16},
+            }
         if profile == "w4_main_w8_gdn":
             overrides.update({
                 "linear_attn.in_proj_qkv": {"method": W8A16},
@@ -359,7 +367,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  shards    : {stats['n_shards']}")
     selected = (f"profile={args.profile}" if args.profile
                 else f"method={args.method or W8A16}")
-    uses_w4 = (args.profile == "w4_main_w8_gdn"
+    uses_w4 = (args.profile in ("w4_main_w8_gdn", "w4_mlp_only")
                or args.method == W4A16_PGRP)
     print(f"  precision : {selected}"
           + (f" (group_size={args.group_size})" if uses_w4 else ""))

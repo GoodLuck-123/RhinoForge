@@ -1,7 +1,7 @@
 # Official dense Qwen3-32B source, converted once during cold installation.
 # Decoder seven projections: symmetric INT4/G32; lm_head: FP16.
 # TP8/B1, default ACC16; bounded P128/D7 ACC16 numerics/Graph checks archived.
-# Unmeasured length/ACC combinations and task quality are not certified.
+# Only the listed length/ACC combinations are supported.
 # Uses one-step device="rpu" streaming; full CPU FP16 loading is rejected.
 [example]
 profile_id = "qwen3-32b.w4a16-g32.text"

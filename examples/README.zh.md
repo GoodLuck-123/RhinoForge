@@ -46,7 +46,7 @@ python examples/run.py --config /tmp/g05.toml
 
 `--check-config` 无需 Torch/设备，只检查配置；`--help` 显示统一命令的选项。ACC、文本长度、CPU 线程和采样次数在同一 TOML 中修改，合法值见模型指南。
 
-<a id="logging-and-performance-output"></a>
+<a id="logging-and-output"></a>
 ## 日志与运行摘要
 
 在 `[run]` 同级加入以下配置；省略时使用相同默认值：
@@ -58,7 +58,7 @@ summary = true
 ```
 
 <a id="日志等级对照"></a>
-`level` 接受下列大写值，按等级过滤诊断信息；`summary=true` 时各级均显示 `[MODEL]` 配置摘要和 `[PERF]` 运行摘要。
+`level` 接受下列大写值，按等级过滤诊断信息；`summary=true` 时各级均显示模型配置摘要。
 
 | 等级 | 显示内容 |
 |---|---|
@@ -66,15 +66,15 @@ summary = true
 | `ERROR` | ERROR、CRITICAL；默认值 |
 | `WARNING` | 增加告警及对应等级的 fallback/Graph 信息 |
 | `INFO` | 增加加载过程、普通 `print()` 和生成文本 |
-| `DEBUG` | 增加已有 Graph 诊断、完整报告及原生 TRACE |
+| `DEBUG` | 增加已有 Graph 诊断及原生 TRACE |
 
-普通 `print()` 按 INFO 处理；可识别标签按其等级过滤，Python 异常继续传播。`summary=false` 仅关闭两类摘要；没有 `logging.file` 字段。原生输出存入 `run.output_dir` 的 `native-*.stdout.log` / `native-*.stderr.log`，进程结束时按等级回放。`report.json` 在所有等级下保存。
+普通 `print()` 按 INFO 处理；可识别标签按其等级过滤，Python 异常继续传播。`summary=false` 关闭模型摘要；没有 `logging.file` 字段。原生输出存入 `run.output_dir` 的 `native-*.stdout.log` / `native-*.stderr.log`，进程结束时按等级回放。
 
-`[MODEL]` 列出精度、输入、设备配置、CPU 线程、预热/运行次数和输出位置。`[PERF]` 标注实际调用边界，分别列出完整模型、组件及诊断调用。LLM/VLM 使用实际输入 token、decode 调用和输出数量；prefill 产生首个输出 token。未单独测量的 Vision 或 TTFT 字段省略。
+`[MODEL]` 列出输入、设备配置、CPU 线程和输出位置。
 
 ## 查看结果
 
-`run.output_dir` 指定输出位置；部分配置创建子目录。查看 `report.json` 的耗时、检查结果和实际产物路径。G05 多长度结果位于各 `text_N/`。
+`run.output_dir` 指定输出位置；部分配置创建子目录。查看生成文件中的检查结果和产物路径。多长度结果位于各 `text_N/`。
 
 [运行库准备](../docs/runtime_assets.md)
 

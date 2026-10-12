@@ -126,7 +126,7 @@ def test_g05_private_same_config_rebuild_retires_each_child_graph(monkeypatch, r
     text_state = _native_fixture_state(request,
         handle=11, control_snapshot={}, chunk_envelope=(8192, 640),
         graph_cache=Graph(), prefill_graph_cache=Graph(),
-        prefill_debug_graph_cache=Graph(), prefill_graph=Graph(),
+        prefill_graph=Graph(),
     )
     action_state = _native_fixture_state(request,
         handle=33, graph_cache=Graph(), action_graph_cache=Graph(),
@@ -919,7 +919,6 @@ def test_g05_failed_install_cleanup_preserves_irreversible_owner_contract():
     for cache_name in (
         "graph_cache",
         "prefill_graph_cache",
-        "prefill_debug_graph_cache",
         "action_graph_cache",
         "action_trace_graph_cache",
     ):
@@ -1584,8 +1583,6 @@ def test_g05_vlm_runtime_ready_requires_live_graphs_owner_and_bound_hooks(reques
         prefill_graph=object(),
         prefill_graph_cache=object(),
         prefill_graph_sig=None,
-        prefill_debug_graph_cache=None,
-        prefill_debug_graph_sig=None,
         prefill_rope_cache=None,
         max_seq_len=2048,
         num_layers=24,

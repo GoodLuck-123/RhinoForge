@@ -110,4 +110,4 @@ python examples/run.py --config /path/to/rhinovla.toml
 
 ## 可修改参数与限制
 
-版本和精度范围由模板决定，输入、factory、组件冷配置按各版本README修改；运行中不能改变冷选项。性能/误差来自对应输入和构建，固定误差阈值只作诊断。全族只使用正式main/DDR两份REF，见 [算子库规则](../../../docs/runtime_assets.md)。<a id="路径迁移"></a>
+版本和精度范围由模板决定，输入、factory、组件冷配置按各版本README修改；运行中不能改变冷选项。全族只使用正式main/DDR两份REF，见 [算子库规则](../../../docs/runtime_assets.md)。<a id="路径迁移"></a>

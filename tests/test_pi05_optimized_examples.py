@@ -238,7 +238,17 @@ def test_optimized_config_rejects_inherited_execution_and_input_overrides(monkey
         runner.run_profile(args, bind_libraries=True)
 
 
-def test_actual_runtime_roles_must_match_selected_libraries(monkeypatch):
+@pytest.mark.parametrize("mutation,error_role", [
+    (None, None),
+    ("missing_roles", "main"),
+    ("missing_main", "main"),
+    ("missing_expansion", "expansion"),
+    ("combined_only", "main"),
+    ("swapped_roles", "main"),
+    ("main_hash", "main"),
+    ("expansion_hash", "expansion"),
+])
+def test_actual_runtime_roles_must_match_selected_libraries(monkeypatch, mutation, error_role):
     runner = load("examples/runners/pi05/optimized.py")
     libraries = {"RPU_KERNEL_LIB_PATH": {"path": "/main.ref", "sha256": "main"},
                  "RPU_KERNEL_LIB_PATH_EXPANSION": {"path": "/pi05.ref", "sha256": "pi05"}}
@@ -247,9 +257,21 @@ def test_actual_runtime_roles_must_match_selected_libraries(monkeypatch):
     backend = ModuleType("rpu_backend")
     backend._cpp_ext = SimpleNamespace(get_runtime_payload_paths=lambda: actual)
     monkeypatch.setitem(sys.modules, "rpu_backend", backend)
-    assert runner.runtime_payloads(libraries) is actual
-    actual["oplib_payloads"]["/pi05.ref"]["sha256"] = "wrong"
-    with pytest.raises(RuntimeError, match="loaded expansion library"):
+    if mutation is None:
+        assert runner.runtime_payloads(libraries) is actual
+        return
+    if mutation == "missing_roles":
+        del actual["oplib_roles"]
+    elif mutation.startswith("missing_"):
+        del actual["oplib_roles"][error_role]
+    elif mutation == "combined_only":
+        actual["oplib_roles"] = {"combined": "/main.ref"}
+    elif mutation == "swapped_roles":
+        actual["oplib_roles"] = {"main": "/pi05.ref", "expansion": "/main.ref"}
+    else:
+        path = actual["oplib_roles"][error_role]
+        actual["oplib_payloads"][path]["sha256"] = "wrong"
+    with pytest.raises(RuntimeError, match=f"loaded {error_role} library"):
         runner.runtime_payloads(libraries)
 
 

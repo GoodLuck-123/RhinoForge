@@ -6817,6 +6817,154 @@
       "controlled_gates": [],
       "example_only": true,
       "support": {}
+    },
+    {
+      "asset_alias": "qwen3_5-2b-w4-mlp-only-g32",
+      "authority": "fmb-qwen35-text",
+      "component": "text",
+      "controlled_gates": [
+        {
+          "kind": "env",
+          "name": "QWEN3_5_QUANT_ALLOW_UNCERTIFIED",
+          "value": "1"
+        }
+      ],
+      "example": {
+        "eligible": true,
+        "runner_target": "qwen3_5"
+      },
+      "family": "qwen3-5",
+      "hw_status": "IMPLEMENTED_UNVERIFIED_HW",
+      "id": "qwen3_5-2b.w4-mlp-only-g32.text-controlled",
+      "input_envelope": {
+        "kind": "BOUNDED",
+        "limits": {
+          "checkpoint_format": "qwen3_5_2b_w4_mlp_only_g32",
+          "batch_size": 1,
+          "num_cores": 8,
+          "max_kv_len": 8192,
+          "chunk_alignment": 64,
+          "chunk_policy": "native-exact-spm-and-kernel-oracle"
+        }
+      },
+      "owner": "fmb-qwen35-text",
+      "precision": "w4a16",
+      "support": {
+        "status": "CONTROLLED_EVALUATION",
+        "reason_code": "QWEN35_QUANT_RECIPE_CONTROLLED"
+      },
+      "variant": "default"
+    },
+    {
+      "asset_alias": "qwen3_5-2b-quanttrio-awq-g128",
+      "authority": "fmb-qwen35-text",
+      "component": "text",
+      "controlled_gates": [
+        {
+          "kind": "env",
+          "name": "QWEN3_5_QUANT_ALLOW_UNCERTIFIED",
+          "value": "1"
+        }
+      ],
+      "example": {
+        "eligible": true,
+        "runner_target": "qwen3_5"
+      },
+      "family": "qwen3-5",
+      "hw_status": "IMPLEMENTED_UNVERIFIED_HW",
+      "id": "qwen3_5-2b.quanttrio-awq-g128.text-controlled",
+      "input_envelope": {
+        "kind": "BOUNDED",
+        "limits": {
+          "checkpoint_format": "qwen3_5_2b_quanttrio_awq_g128",
+          "batch_size": 1,
+          "num_cores": 8,
+          "max_kv_len": 8192,
+          "chunk_alignment": 64,
+          "chunk_policy": "native-exact-spm-and-kernel-oracle"
+        }
+      },
+      "owner": "fmb-qwen35-text",
+      "precision": "w4a16",
+      "support": {
+        "status": "CONTROLLED_EVALUATION",
+        "reason_code": "QWEN35_QUANT_RECIPE_CONTROLLED"
+      },
+      "variant": "default"
+    },
+    {
+      "asset_alias": "qwen3_5-4b-quanttrio-awq-g128",
+      "authority": "fmb-qwen35-text",
+      "component": "text",
+      "controlled_gates": [
+        {
+          "kind": "env",
+          "name": "QWEN3_5_QUANT_ALLOW_UNCERTIFIED",
+          "value": "1"
+        }
+      ],
+      "example": {
+        "eligible": true,
+        "runner_target": "qwen3_5"
+      },
+      "family": "qwen3-5",
+      "hw_status": "IMPLEMENTED_UNVERIFIED_HW",
+      "id": "qwen3_5-4b.quanttrio-awq-g128.text-controlled",
+      "input_envelope": {
+        "kind": "BOUNDED",
+        "limits": {
+          "checkpoint_format": "qwen3_5_4b_quanttrio_awq_g128",
+          "batch_size": 1,
+          "num_cores": 8,
+          "max_kv_len": 8192,
+          "chunk_alignment": 64,
+          "chunk_policy": "native-exact-spm-and-kernel-oracle"
+        }
+      },
+      "owner": "fmb-qwen35-text",
+      "precision": "w4a16",
+      "support": {
+        "status": "CONTROLLED_EVALUATION",
+        "reason_code": "QWEN35_QUANT_RECIPE_CONTROLLED"
+      },
+      "variant": "default"
+    },
+    {
+      "asset_alias": "qwen3_5-9b-quanttrio-awq-g128",
+      "authority": "fmb-qwen35-text",
+      "component": "text",
+      "controlled_gates": [
+        {
+          "kind": "env",
+          "name": "QWEN3_5_QUANT_ALLOW_UNCERTIFIED",
+          "value": "1"
+        }
+      ],
+      "example": {
+        "eligible": true,
+        "runner_target": "qwen3_5"
+      },
+      "family": "qwen3-5",
+      "hw_status": "IMPLEMENTED_UNVERIFIED_HW",
+      "id": "qwen3_5-9b.quanttrio-awq-g128.text-controlled",
+      "input_envelope": {
+        "kind": "BOUNDED",
+        "limits": {
+          "checkpoint_format": "qwen3_5_9b_quanttrio_awq_g128",
+          "batch_size": 1,
+          "num_cores": 8,
+          "max_kv_len": 8192,
+          "chunk_alignment": 64,
+          "chunk_policy": "native-exact-spm-and-kernel-oracle"
+        }
+      },
+      "owner": "fmb-qwen35-text",
+      "precision": "w4a16",
+      "support": {
+        "status": "CONTROLLED_EVALUATION",
+        "reason_code": "QWEN35_QUANT_RECIPE_CONTROLLED"
+      },
+      "variant": "default"
     }
   ]
 }

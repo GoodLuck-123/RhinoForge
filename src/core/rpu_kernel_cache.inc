@@ -749,8 +749,8 @@ void KernelCache::initialize() {
                 (missing_required.empty() ? std::string() : missing_required.front()),
                 "'. Check the .ref install and RPU_KERNEL_LIB_PATH[_EXPANSION].");
 
-    // All six 7-tile families remain required: FP16/W8 x ACC16/ACC32
-    // belong to main; the signed W4-pgrp ABI belongs to expansion.
+    // All eight 7-tile families are required: FP16/W8/UINT4 x ACC16/ACC32
+    // belong to main; the unchanged signed W4-pgrp ABI belongs to expansion.
     // Never satisfy a missing tile from the other role.
     {
         auto at_names = rpu_pl_tiling::autotile_kernel_names();

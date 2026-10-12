@@ -666,6 +666,21 @@ enum class KernelId : uint16_t {
     LINGBOT2_ATTN_ALL_REDUCE_ADARMS_T51_H768,
     // Optional M224 learned-gamma V32 Q/K norms plus original partial RoPE.
     LINGBOT2_PREFILL_QK_NORM_ROPE_M224,
+    // Shared main UINT4 ABI; existing signed W4 IDs retain expansion ABI.
+    PL_AT_UINT4_PGRP_M304N128,
+    PL_AT_UINT4_PGRP_M336N112,
+    PL_AT_UINT4_PGRP_M368N96,
+    PL_AT_UINT4_PGRP_M416N80,
+    PL_AT_UINT4_PGRP_M464N64,
+    PL_AT_UINT4_PGRP_M512N48,
+    PL_AT_UINT4_PGRP_M592N32,
+    PL_AT_UINT4_PGRP_ACC32_M208N128,
+    PL_AT_UINT4_PGRP_ACC32_M224N112,
+    PL_AT_UINT4_PGRP_ACC32_M256N96,
+    PL_AT_UINT4_PGRP_ACC32_M304N80,
+    PL_AT_UINT4_PGRP_ACC32_M352N64,
+    PL_AT_UINT4_PGRP_ACC32_M400N48,
+    PL_AT_UINT4_PGRP_ACC32_M496N32,
     _COUNT
 };
 static_assert(static_cast<size_t>(KernelId::_COUNT) <= UINT16_MAX,
@@ -1479,6 +1494,20 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "lingbot2_shared_gateup_resident_silu_fp16_t51_h768_i96",
     "lingbot2_ring_adarms_norm_shift_t51_h768",
     "lingbot2_prefill_qk_norm_rope_m224",
+    "parallel_linear_w4a16_pgrp_m304n128k128",
+    "parallel_linear_w4a16_pgrp_m336n112k128",
+    "parallel_linear_w4a16_pgrp_m368n96k128",
+    "parallel_linear_w4a16_pgrp_m416n80k128",
+    "parallel_linear_w4a16_pgrp_m464n64k128",
+    "parallel_linear_w4a16_pgrp_m512n48k128",
+    "parallel_linear_w4a16_pgrp_m592n32k128",
+    "parallel_linear_w4a16_pgrp_acc32_m208n128k128",
+    "parallel_linear_w4a16_pgrp_acc32_m224n112k128",
+    "parallel_linear_w4a16_pgrp_acc32_m256n96k128",
+    "parallel_linear_w4a16_pgrp_acc32_m304n80k128",
+    "parallel_linear_w4a16_pgrp_acc32_m352n64k128",
+    "parallel_linear_w4a16_pgrp_acc32_m400n48k128",
+    "parallel_linear_w4a16_pgrp_acc32_m496n32k128",
 };
 static_assert(sizeof(KERNEL_ID_NAMES) / sizeof(KERNEL_ID_NAMES[0]) == static_cast<size_t>(KernelId::_COUNT),
               "KERNEL_ID_NAMES size must match KernelId::_COUNT");

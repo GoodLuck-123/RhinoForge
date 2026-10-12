@@ -21,7 +21,7 @@ python examples/run.py --config examples/configs/pi05/2cam/w8a16_action_nvfp4.to
 - `run.warmup` 默认两次调用，让新 Graph 完成 BUILD 和 REPLAY；`run.runs` 设置后续调用次数。
 - `warmup >= 2` 时，省略 `warmup_decode_steps` 或令其等于 `input.decode_steps`。显式 `warmup=0/1` 可做缩短 decode 的冷路径诊断。
 - decode 步数不含 prefill 产生的首 token。EOS 可提前结束；固定长度运行时，两阶段均设 `stop_on_eos=false`。
-- `run.output_dir` 指定输出目录；文件位置和 Graph 状态见运行器生成的 `report.json`。
+- `run.output_dir` 指定输出目录；在生成文件中查看输出位置和 Graph 状态。
 
 ## 诊断调用
 

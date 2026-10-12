@@ -37,6 +37,7 @@ W 表示权重、A 表示线性算子输入激活。W16/A16 为 FP16；W8/A16 �
 | Qwen3 普通款 | [Qwen 官方](https://huggingface.co/Qwen/Qwen3-4B)：BF16；[全部尺寸及历史 Instruct 来源](qwen3/README.md#weight-sources) | [FP16 / W8 / W4、head 是否量化](qwen3/README.md#weight-recipes) | [完整命令](qwen3/README.md#quantization) |
 | Qwen3-VL | [官方浮点父](https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct)：BF16；[cyankiwi AWQ](https://huggingface.co/cyankiwi/Qwen3-VL-4B-Instruct-AWQ-4bit) 是第三方 W4/G32；[各尺寸来源](qwen3_vl/README.md#weight-sources) | [运行时 W8/W4、仅文本量化、AWQ 直用](qwen3_vl/README.md#weight-recipes) | [完整命令](qwen3_vl/README.md#quantization) |
 | Qwen3.5 稠密模型 0.8–27B | [官方 27B](https://huggingface.co/Qwen/Qwen3.5-27B)及[各尺寸](qwen3_5/README.md#weight-sources)：BF16 主体＋少量 FP32 | [FP16 / W8 / W4、文本主干与 GDN/Vision 范围](qwen3_5/README.md#weight-recipes) | [完整命令](qwen3_5/README.md#quantization) |
+| Qwen3.5 仅 MLP RTN / QuantTrio AWQ | [官方 2B 浮点父](https://huggingface.co/Qwen/Qwen3.5-2B)用于 RTN；[QuantTrio 社区 2B/4B/9B AWQ](qwen3_5/README.md#weight-sources)为公开量化包 | [MLP-only G32 与 AWQ G128 的首层、Attention/GDN 范围](qwen3_5/README.md#text-w4-recipes)，纯文本 B1/TP8 | [RTN 转换](qwen3_5/README.md#cmd-mlp-only-g32) / [AWQ 下载直用](qwen3_5/README.md#cmd-quanttrio-awq) |
 | Qwen3.5 35B-A3B MoE | [官方父](https://huggingface.co/Qwen/Qwen3.5-35B-A3B)：BF16＋FP32；[官方 GPTQ](https://huggingface.co/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4)：路由专家 W4/G128；已供 mixed 包来源另列 | [RTN / GPTQ / mixed E4M3 的专家与非专家区别](qwen3_5/README.md#weight-recipes) | [完整命令](qwen3_5/README.md#quantization) |
 | 历史 legacy27 | 已供 BF16 父；公开来源未核实，不能替代为官方 Qwen3.5-27B | [历史混合 W8/FP16 配方](qwen3_5/README.md#weight-recipes) | [归档说明与命令](qwen3_5/legacy/27b/README.md) |
 | Llama 3.2-1B | [Meta 官方](https://huggingface.co/meta-llama/Llama-3.2-1B)：BF16 | [FP16 运行范围](llama/README.md#weight-recipes) | [下载后直接运行](llama/README.md#quantization) |
@@ -66,13 +67,14 @@ cd /path/to/rpu_backend
 export RPU_MODEL_CACHE=/path/to/model-cache
 ```
 
-离线命令只生成权重，不测推理性能。Qwen 的 `DST` 使用模板实际查找的缓存路径；转换完成后选择对应 TOML。原始权重尚未下载时，先看本页[权重来源](#sources)。Wall 的交付量化脚本需在已安装匹配后端的环境运行。
+离线命令只生成权重。Qwen 的 `DST` 使用模板实际查找的缓存路径；转换完成后选择对应 TOML。原始权重尚未下载时，先看本页[权重来源](#sources)。Wall 的交付量化脚本需在已安装匹配后端的环境运行。
 
 | 要执行什么 | 仓库中的转换脚本 / 方式 | 本页完整命令 |
 |---|---|---|
 | Qwen3 W8 / 加载时 W4 | W8：[convert_qwen3.py](../../python/rpu_backend/quant/convert_qwen3.py)；W4：运行入口加载时量化 | [Qwen3](#cmd-qwen3) |
 | Qwen3-VL W8、AWQ→W4、32B W4、仅文本 W8 | [convert_qwen3_vl.py](../../python/rpu_backend/quant/convert_qwen3_vl.py)；仅文本 W8 用 [convert_qwen3.py](../../python/rpu_backend/quant/convert_qwen3.py) | [Qwen3-VL](#cmd-qwen3-vl) |
 | Qwen3.5 稠密模型 W8/W4，含官方27B | [convert_qwen3_5.py](../../python/rpu_backend/quant/convert_qwen3_5.py) | [稠密模型](#cmd-qwen35-dense) |
+| Qwen3.5 2B MLP-only RTN / 2B/4B/9B AWQ | RTN：Dense 脚本 `--profile w4_mlp_only`；QuantTrio AWQ：直接下载 | [四个文本配方](#cmd-qwen35-text-w4) |
 | Qwen3.5 MoE RTN W4 / 官方 GPTQ | RTN：[convert_qwen3_5_moe_rtn.py](../../python/rpu_backend/quant/convert_qwen3_5_moe_rtn.py)；GPTQ：直接下载 | [MoE](#cmd-qwen35-moe) |
 | Pi0.5 W8 / 动作 NVFP4 | [convert_pi05.py](../../python/rpu_backend/quant/convert_pi05.py) | [Pi0.5](#cmd-pi05) |
 | Wall-OSS W8 / W4 / 分拣动作 W4 | W8：[convert_wall_oss_w8a16.py](../../python/rpu_backend/quant/convert_wall_oss_w8a16.py)；W4：[convert_wall_oss.py](../../python/rpu_backend/quant/convert_wall_oss.py) | [Wall-OSS](#cmd-wall) |
@@ -170,6 +172,32 @@ DST="$RPU_MODEL_CACHE/qwen3_5_quant_ckpts/qwen3_5-27b-w4a16"
 TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5.py \
   --src "$SRC" --dst "$DST" --method w4a16_pgrp --group-size 32
 ```
+
+<a id="cmd-qwen35-text-w4"></a>
+## Qwen3.5 仅 MLP RTN / QuantTrio AWQ
+
+四个配方均为纯文本、B1、TP8；短示例和固定长度模板共用各自权重。普通 uniform W4 不能通过重命名充当 MLP-only。四个 alias 与缓存目录见[模型指南](qwen3_5/README.md#text-w4-recipes)。
+
+**2B MLP-only RTN G32** 使用官方浮点父，量化全部 24 层的 72 个 MLP gate/up/down，Attention/GDN 及其他部分 FP16。先[下载父](qwen3_5/README.md#cmd-mlp-only-g32)，再执行：
+
+```bash
+SRC="$RPU_MODEL_CACHE/Qwen3.5-2B"
+DST="$RPU_MODEL_CACHE/qwen3_5-2b-w4a16-g32-mlp-only"
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5.py \
+  --src "$SRC" --dst "$DST" --profile w4_mlp_only
+python examples/run.py --config examples/configs/qwen3_5/text/2b/w4_mlp_only_g32.toml
+```
+
+**QuantTrio AWQ G128** 是社区原包，2B/4B/9B 仅第 1 层起的 MLP 量化，分别 69/93/93 个投影；首层 MLP 和 Attention/GDN FP16。源 qweight/qzeros 为 I32 打包容器，逻辑权重为 UINT4，scale 为 FP16。下载后直接运行，不做 RTN 转换或再量化：
+
+```bash
+SIZE=2  # 可选：2、4、9
+hf download "QuantTrio/Qwen3.5-${SIZE}B-AWQ" \
+  --local-dir "$RPU_MODEL_CACHE/Qwen3.5-${SIZE}B-AWQ"
+python examples/run.py --config "examples/configs/qwen3_5/text/${SIZE}b/quanttrio_awq_g128.toml"
+```
+
+loader 不写回源配置/分片，保留整数码、direct zero-point、原 FP16 scale，未量化参数直接转 FP16。需要匹配的 native 扩展；下载、转换和 `--check-config` 只检查配置与资产格式，不代表设备验证。
 
 <a id="cmd-qwen35-moe"></a>
 ## Qwen3.5 35B-A3B MoE

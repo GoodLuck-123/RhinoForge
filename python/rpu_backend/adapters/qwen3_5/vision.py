@@ -2860,8 +2860,7 @@ def _prepare_qwen3_5_multimodal_spm(model, input_ids, pixel_values,
                        [n // (merge * merge) for n in patches])
     # A new peer changes the feasible domain; the caller must leave READY
     # before installing it, just as for a new physical graph shape.
-    for owner, names in ((state, ("graph_cache", "prefill_graph_cache",
-                                 "prefill_debug_graph_cache")),
+    for owner, names in ((state, ("graph_cache", "prefill_graph_cache")),
                          (vision, ("_rpu_vision_graph_cache",))):
         for name in names:
             graph = getattr(owner, name, None)
@@ -2872,9 +2871,8 @@ def _prepare_qwen3_5_multimodal_spm(model, input_ids, pixel_values,
         "_text_bridge": _text_bridge,
     })
     vision_handle = _install_lazy_qwen3_5_vision(model, state, **vision_options)
-    # Existing graphs retain absolute temporary SPM addresses. Retire them
-    # before a new peer lowers the floor, including the earlier text-only
-    # decode graph and every normal/debug prefill owner.
+    # Existing graphs retain temporary SPM addresses. Retire them before a new
+    # peer lowers the floor, including the earlier text-only decode graph.
     _clear_qwen35_graphs((state,), vision)
     from rpu_backend.api._execution import prepared_execution_plan_cache
 
@@ -2882,7 +2880,7 @@ def _prepare_qwen3_5_multimodal_spm(model, input_ids, pixel_values,
                                   (vision, "qwen3_5_vision", ("vision",))):
         for stage in stages:
             prepared_execution_plan_cache(owner, stage, None, prefix).clear()
-    state.prefill_graph_sig = state.prefill_debug_graph_sig = None
+    state.prefill_graph_sig = None
     state.prefill_plan = state.last_a6_plan = state.decode_plan = None
     state.decode_stage_descriptor = None
     vision._rpu_vision_graph_key = vision._rpu_vision_graph_sig = None

@@ -1,7 +1,7 @@
 # Wall-OSS base: real cameras, H32, ten denoising steps, TP8.
 # Edit text_tokens and linear_acc32 in this file; no separate ACC/text config.
 # CPU and optional exact padding below are the selected T32 ACC16 settings.
-# For another input/text length, remove padding_rows and consult the performance report.
+# For another input/text length, use the matching template.
 # Paths resolve from the invocation directory; use the checkout root.
 
 [wall_oss]
@@ -27,7 +27,7 @@ threads = 8
 [rpu_execution.prefill]
 chunk_size = "auto"
 linear_acc32 = false
-# Exact padding for the measured T32 fixture; remove when its prompt changes.
+# Exact padding for the T32 fixture; remove when its prompt changes.
 padding_rows = 26
 
 [rpu_execution.vision]
