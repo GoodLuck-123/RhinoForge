@@ -52,6 +52,7 @@ compatibility. See the [v1.2.0 upgrade guide](../docs/upgrading_1_2.md).
 Model TOML files belong in their family directories.
 Keep persistent model construction outside inference mode; apply the selected mode to inference only. Warm a new Graph with BUILD and REPLAY. With `warmup >= 2`, omit `warmup_decode_steps` or match `input.decode_steps`; fixed-length runs use `stop_on_eos=false`.
 The [LingBot v2 runner](../examples/configs/lingbot/v2/README.md) permits `warmup=0` after its A/B/A and READY preparation; retain an independent first output and compare subsequent replays against it.
+The [archived exact-Z2 entry](../examples/configs/lingbot/legacy/exact_z2/README.md) requires explicit `input.training_config` and `input.qwen3vl_base`; pass both to the policy before graph preparation.
 The [HALO example](../examples/configs/halo/README.md) resolves `halo_action_expert`
 directly to `HALO/action_expert.safetensors` under the model cache. Check the
 paired single-step fixture before weight loading; do not append checkpoint directories.

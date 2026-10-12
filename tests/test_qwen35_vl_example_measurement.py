@@ -1,5 +1,6 @@
 """Host regressions for the published Dense VL input and timer boundaries."""
 from pathlib import Path
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
@@ -198,8 +199,18 @@ def test_median_rates_are_not_rates_from_mean_time_and_default_is_unchanged(modu
 
 @pytest.mark.parametrize("cache_failure", [False, True])
 def test_legacy_setup_binds_one_execution_and_exact_capacity_before_upload(
-        modules, monkeypatch, cache_failure):
+        modules, monkeypatch, tmp_path, cache_failure):
     config = legacy_config()
+    (tmp_path / "config.json").write_text(json.dumps({
+        "model_type": "qwen3_5",
+        "architectures": ["Qwen3_5ForConditionalGeneration"],
+        "text_config": {
+            "num_hidden_layers": 24, "hidden_size": 2048,
+            "intermediate_size": 6144, "num_attention_heads": 8,
+            "num_key_value_heads": 2, "head_dim": 256,
+            "layer_types": (["linear_attention"] * 3 + ["full_attention"]) * 6,
+        },
+    }))
     model, raw, adapter = Mock(), Mock(), Mock()
     raw.half.return_value = raw
     adapter.to_rpu.return_value = model
@@ -225,7 +236,7 @@ def test_legacy_setup_binds_one_execution_and_exact_capacity_before_upload(
     })
     install_module("transformers", AutoProcessor=SimpleNamespace(from_pretrained=Mock(return_value=processor)))
     monkeypatch.setattr(modules.vision, "_images", lambda _: [object()])
-    monkeypatch.setattr(modules.vision, "_checkpoint", lambda _: Path("/model"))
+    monkeypatch.setattr(modules.vision, "_checkpoint", lambda _: tmp_path)
     original_to = torch.Tensor.to
 
     def to(tensor, *args, **kwargs):

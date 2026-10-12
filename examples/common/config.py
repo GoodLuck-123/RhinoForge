@@ -700,6 +700,11 @@ def load_config(path: Path) -> dict:
             import_module("examples.runners.gr00t.config").validate_config(config)
         except (TypeError, ValueError) as exc:
             raise ConfigError(str(exc)) from exc
+    if target == "lingbot2":
+        try:
+            import_module("examples.runners.lingbot2.runner").validate_legacy_config(config)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(str(exc)) from exc
     if ("checkpoint" in inputs and target not in {"wall_oss_rtc", "g05"}
             and not profile.get("example_only")):
         raise ConfigError("[input].checkpoint is only accepted for exact Wall RTC/G0.5 releases")

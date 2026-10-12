@@ -32,13 +32,17 @@ def config(target):
 
 
 @pytest.mark.parametrize("target", ["lingbot2", "wall_oss_rtc"])
-def test_policy_examples_use_public_api_and_forward_execution(monkeypatch, target):
+def test_policy_examples_use_public_api_and_forward_execution(monkeypatch, target, tmp_path):
     from examples.common import preparation
     from examples.runners.lingbot2 import runner as lingbot2
     from examples.runners.wall_oss import rtc
     runner = lingbot2 if target == "lingbot2" else rtc
     value = config(target)
     value["input"]["fp16_registry_alias"] = "exact-fp16"
+    if target == "lingbot2":
+        (tmp_path / "config.json").write_text("{}")
+        (tmp_path / "training.yaml").write_text("model: {}")
+        value["input"].update(qwen3vl_base=str(tmp_path), training_config=str(tmp_path / "training.yaml"))
     policy = Mock()
     policy.to.return_value = policy
     output = object()
@@ -67,6 +71,8 @@ def test_policy_examples_use_public_api_and_forward_execution(monkeypatch, targe
     assert policy.prepare_graphs.call_args.kwargs["images"] is images
     if target == "lingbot2":
         assert constructor.call_args.kwargs["dtype"] == "w8a16"
+        assert constructor.call_args.kwargs["qwen3vl_base"] == tmp_path
+        assert constructor.call_args.kwargs["training_config_path"] == tmp_path / "training.yaml"
         assert policy.prepare_graphs.call_args.kwargs["prefix_length_range"] == [215, 225]
     else:
         arena_policy.assert_called_once_with(graph_arena_count=15)
@@ -107,6 +113,9 @@ def test_missing_assets_fail_before_model_load(monkeypatch, tmp_path):
     module(monkeypatch, "rpu_backend.api", Lingbot2Policy=SimpleNamespace(from_checkpoint=constructor))
     value = config("lingbot2")
     value["input"] = {"images": [str(tmp_path / "absent.png")], "instruction": "move", "proprioception": [0.0]}
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "training.yaml").write_text("model: {}")
+    value["input"].update(qwen3vl_base=str(tmp_path), training_config=str(tmp_path / "training.yaml"))
     with pytest.raises(FileNotFoundError, match="absent.png"):
         preparation.prepare(value)
     constructor.assert_not_called()

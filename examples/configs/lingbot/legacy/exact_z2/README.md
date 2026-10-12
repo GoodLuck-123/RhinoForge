@@ -39,6 +39,7 @@ export RPU_MODEL_CACHE=/path/to/model-cache
 # 此旧 registry 需要 hf/robbyant/lingbot-vla-v2-6b 子目录及原交付配套源码/配置。
 cp examples/configs/lingbot/legacy/exact_z2/6b_w8a16.toml /tmp/lingbot2_exact_z2_w8.toml
 # input.observation = 匹配原 exact-Z2 的真实 observation 文件。
+# input.training_config = 配套训练 YAML；input.qwen3vl_base = 本地 Qwen3-VL-4B-Instruct 配置和完整 processor 目录。
 # 在 [run] 中添加 output_dir = 本次目录；保留原 profile、dtype 和受控 opt-in。
 vi /tmp/lingbot2_exact_z2_w8.toml
 python examples/run.py --config /tmp/lingbot2_exact_z2_w8.toml
@@ -51,7 +52,7 @@ python examples/run.py --config /tmp/lingbot2_exact_z2_w8.toml
 
 官方原始 F32 权重与下载版本见 [v2 权重说明](../../v2/README.md#weights)。归档入口在加载时生成 W8；已有 BF16 派生资产须配套使用原训练配置和输入。
 
-复制模板，填写 checkpoint、配套源码和含显式噪声的 CPU observation，再执行：
+复制模板，填写配套训练配置、processor 目录和含显式噪声的 CPU observation，再执行：
 
 ```bash
 python examples/run.py --config /path/to/exact_z2.toml --check-config
