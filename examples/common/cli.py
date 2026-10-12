@@ -31,13 +31,15 @@ def main(argv=None, *, keep_logging_until_exit=False, default_config=None,
     try:
         from examples.common.legacy import (
             G05_INTEGRATION, LIST_TARGETS, MIGRATIONS, TARGET_ALIASES, is_runner_config,
+            resolve_config_path,
         )
         if getattr(args, "list_targets", False):
             print("\n".join(LIST_TARGETS))
             return 0
         if args.config is None:
             raise ConfigError(MIGRATIONS[legacy_entry])
-        config = load_config(args.config.expanduser().resolve())
+        args.config = resolve_config_path(args.config)
+        config = load_config(args.config.resolve())
         if legacy_entry and legacy_entry != "run_model":
             from examples.common.config import config_target
 

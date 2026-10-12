@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-import tomllib
 from types import SimpleNamespace
 
 import pytest
@@ -101,9 +100,46 @@ def test_legacy_dispatch_preserves_user_config_options(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("old,new", legacy.PATH_ALIASES.items())
-def test_old_paths_preserve_canonical_profile_and_precision(old, new):
-    assert tomllib.loads((CONFIGS / old).read_text()) == tomllib.loads((CONFIGS / new).read_text())
+def test_removed_paths_preserve_canonical_profile_and_precision(old, new):
+    assert not (CONFIGS / old).exists()
     assert load_config(CONFIGS / old) == load_config(CONFIGS / new)
+    for path in (CONFIGS / old, (CONFIGS / old).relative_to(ROOT)):
+        result = _cli_without_runtime("run", "--config", str(path), "--check-config")
+        assert result.returncode == 0, result.stderr
+        assert str(CONFIGS / new) in result.stdout
+
+
+def test_config_aliases_do_not_redirect_outside_the_repository(tmp_path):
+    old = tmp_path / "examples/configs/wall_oss/base/fp16.toml"
+    with pytest.raises(FileNotFoundError):
+        load_config(old)
+    old.parent.mkdir(parents=True)
+    old.write_text((CONFIGS / "wall_oss/legacy/fp16.toml").read_text().replace("runs = 3", "runs = 7"))
+    assert load_config(old)["run"]["runs"] == 7
+
+
+def test_existing_config_alias_path_keeps_caller_file_or_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(legacy, "CONFIGS", tmp_path)
+    old = tmp_path / "wall_oss/base/fp16.toml"
+    old.parent.mkdir(parents=True)
+    old.write_text((CONFIGS / "wall_oss/legacy/fp16.toml").read_text().replace("runs = 3", "runs = 7"))
+    assert load_config(old)["run"]["runs"] == 7
+    old.unlink()
+    old.mkdir()
+    with pytest.raises(IsADirectoryError):
+        load_config(old)
+
+
+def test_cli_symlink_keeps_prompt_relative_to_real_config(monkeypatch, tmp_path):
+    actual = tmp_path / "inputs/config.toml"
+    actual.parent.mkdir()
+    actual.write_text((CONFIGS / "qwen3_5/text/35b_a3b/mixed_e4m3_p4096_d4096.toml").read_text())
+    alias = tmp_path / "config.toml"
+    alias.symlink_to(actual)
+    seen = []
+    monkeypatch.setattr(cli, "_dispatch", lambda config, args: seen.append(config) or 0)
+    assert cli.main(["--config", str(alias), "--check-config"]) == 0
+    assert seen[0]["input"]["prompt_file"] == str(actual.parent / "prefill_realtext.txt")
 
 
 @pytest.mark.parametrize("old_target,required", [

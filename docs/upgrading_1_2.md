@@ -34,8 +34,10 @@ must select a configuration explicitly after the input migrations below.
 The wrapper defaults and aliases are listed in
 [legacy.py](../examples/common/legacy.py).
 
-The following old paths remain compatibility aliases. New commands should use
-the canonical paths; all paths below are relative to `examples/configs/`.
+The duplicate files below have been removed. The runner's `--config` and migration
+tool's `--template` resolve missing repository paths to the canonical files.
+Use canonical paths when copying or editing files. Existing custom files are
+read unchanged. All paths below are relative to `examples/configs/`.
 
 | Old path | Canonical path |
 |---|---|

@@ -9,6 +9,7 @@ import tomllib
 import pytest
 
 from examples.common.config import ConfigError, load_config
+from examples.common.legacy import PATH_ALIASES
 from examples.common.migration import dumps, main, migrate, migration_kind
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +33,18 @@ CASES = (
      {"checkpoint": "original-checkpoint", "training_config": "training.yaml"}),
     ("moe_synthetic", "qwen3_5/text/35b_a3b/mixed_e4m3_p4096_d4096.toml", None, {}),
 )
+
+
+@pytest.mark.parametrize("old", PATH_ALIASES)
+def test_removed_template_alias_reaches_migration_contract(tmp_path, capsys, old):
+    source = tmp_path / "old.toml"
+    source.write_text('[runner]\ntarget="gr00t"\n')
+    output = tmp_path / "new.toml"
+    with pytest.raises(SystemExit) as error:
+        main(["--source", str(source), "--template", str(CONFIGS / old), "--output", str(output)])
+    assert error.value.code == 2
+    assert "gr00t migration requires a current gr00t template" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def old_config(kind, text, template):

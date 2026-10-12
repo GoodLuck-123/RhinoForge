@@ -47,8 +47,9 @@ and validate the selected file with `examples/run.py --check-config`.
 Keep one canonical template per model/version/component/precision/workload.
 When reorganizing paths, retain documented compatibility aliases where semantics
 match; otherwise give explicit migration steps. Update defaults, documentation
-and tests together. New examples use canonical paths; old paths remain only for
-compatibility. See the [v1.2.0 upgrade guide](../docs/upgrading_1_2.md).
+and tests together. Keep aliases in the command-line path resolver, without
+duplicate TOML files; existing caller files take precedence. New examples and
+file-copy commands use canonical paths. See the [v1.2.0 upgrade guide](../docs/upgrading_1_2.md).
 Model TOML files belong in their family directories.
 Keep persistent model construction outside inference mode; apply the selected mode to inference only. Warm a new Graph with BUILD and REPLAY. With `warmup >= 2`, omit `warmup_decode_steps` or match `input.decode_steps`; fixed-length runs use `stop_on_eos=false`.
 The [LingBot v2 runner](../examples/configs/lingbot/v2/README.md) permits `warmup=0` after its A/B/A and READY preparation; retain an independent first output and compare subsequent replays against it.

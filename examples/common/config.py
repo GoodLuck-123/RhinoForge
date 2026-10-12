@@ -602,9 +602,10 @@ def load_config(path: Path) -> dict:
     """Check profile identity and syntax; assets/capability require the runtime."""
     from examples.common.legacy import (
         is_runner_config, migration_error, missing_config_message,
-        validate_g05_integration,
+        resolve_config_path, validate_g05_integration,
     )
 
+    path = resolve_config_path(path)
     if not path.is_file() and (message := missing_config_message(path)):
         raise ConfigError(message)
     with path.open("rb") as stream:

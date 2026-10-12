@@ -12,6 +12,7 @@ import tempfile
 import tomllib
 
 from examples.common.config import ConfigError, config_target, load_config
+from examples.common.legacy import resolve_config_path
 
 
 def migration_kind(config):
@@ -173,6 +174,7 @@ def main(argv=None):
             raise ConfigError("each --input key may be supplied only once")
         source = tomllib.loads(args.source.read_text(encoding="utf-8"))
         # Validate the chosen template before retaining its literal, serializable fields.
+        args.template = resolve_config_path(args.template)
         load_config(args.template)
         template = tomllib.loads(args.template.read_text(encoding="utf-8"))
         converted = migrate(source, template, inputs)

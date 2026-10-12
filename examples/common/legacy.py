@@ -17,14 +17,14 @@ DEFAULTS = {
     "hy_embodied": "hy_embodied/umi/fp16.toml",
     "hy_vla": "hy_embodied/umi/fp16.toml",
     "internvla_navdp": None,
-    "lingbot2": "lingbot/v2/6b_w8a16.toml",
+    "lingbot2": "lingbot/legacy/exact_z2/6b_w8a16.toml",
     "pi05": "pi05/2cam/fp16.toml",
     "qwen3_5_text": "qwen3_5/text/0_8b/fp16.toml",
     "qwen3_5_vision": "qwen3_5/vl/2b/fp16.toml",
     "qwen3_vl": "qwen3_vl/vl/2b/fp16.toml",
     "rhinovla": "rhinovla/v1/fp16.toml",
     "siglip": None,
-    "wall_oss": "wall_oss/base/fp16.toml",
+    "wall_oss": "wall_oss/legacy/fp16.toml",
 }
 LIST_TARGETS = tuple(sorted(set(DEFAULTS) - {"run_model", "causal_lm", "hy_embodied"}))
 TARGET_ALIASES = {
@@ -121,6 +121,19 @@ def migration_error(config):
             and {"prompt_token_ids", "prefill_fill_token_id"} & inputs.keys()):
         return MIGRATIONS["moe_synthetic"]
     return None
+
+
+def resolve_config_path(path):
+    """Resolve removed repository templates without replacing caller files."""
+    path = Path(path).expanduser()
+    if path.exists() or path.is_symlink():
+        return path
+    try:
+        relative = path.resolve().relative_to(CONFIGS.resolve()).as_posix()
+    except ValueError:
+        return path
+    target = PATH_ALIASES.get(relative)
+    return CONFIGS / target if target else path
 
 
 def missing_config_message(path):

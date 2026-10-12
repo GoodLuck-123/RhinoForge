@@ -385,18 +385,18 @@ CPU 列是请求值：`继承` 保留原运行器默认，不表示实际使用�
 | [wall_oss/sorting/w8a16.toml](wall_oss/sorting/w8a16.toml) | [run.py](../run.py)<br>运行模板 | `w8a16` | 继承 | 未登记；模型专用模板 |
 | [wall_oss/sorting/w8a16_action_w4a16.toml](wall_oss/sorting/w8a16_action_w4a16.toml) | [run.py](../run.py)<br>运行模板 | `w8a16_action_w4a16` | 继承 | 未登记；模型专用模板 |
 
-合计 **228** 份配置；支持状态未因目录整理改变。
+合计 **280** 份 TOML：279 份运行配置和 1 份源码集成元数据。
 
 ## 兼容路径
 
-以下别名保留旧命令；新命令使用对应标准配置。输入契约变化另见
+以下旧文件已删除，命令行会将仓库内缺失的旧路径转到标准配置。复制或编辑时使用标准配置。输入契约变化另见
 [v1.2.0 升级指南](../../docs/upgrading_1_2.zh.md)。
 
 | 兼容路径 | 标准配置 |
 |---|---|
-| [wall_oss/base/fp16.toml](wall_oss/base/fp16.toml) | [wall_oss/legacy/fp16.toml](wall_oss/legacy/fp16.toml) |
-| [wall_oss/base/w8a16.toml](wall_oss/base/w8a16.toml) | [wall_oss/legacy/w8a16.toml](wall_oss/legacy/w8a16.toml) |
-| [wall_oss/base/w4a16.toml](wall_oss/base/w4a16.toml) | [wall_oss/legacy/w4a16.toml](wall_oss/legacy/w4a16.toml) |
-| [wall_oss/base/w4a16_pgrp.toml](wall_oss/base/w4a16_pgrp.toml) | [wall_oss/legacy/w4a16_pgrp.toml](wall_oss/legacy/w4a16_pgrp.toml) |
-| [lingbot/v2/6b_w8a16.toml](lingbot/v2/6b_w8a16.toml) | [lingbot/legacy/exact_z2/6b_w8a16.toml](lingbot/legacy/exact_z2/6b_w8a16.toml) |
-| [rhinovla/v3/w8a16.toml](rhinovla/v3/w8a16.toml) | [rhinovla/v3/expert_w8a16.toml](rhinovla/v3/expert_w8a16.toml) |
+| `wall_oss/base/fp16.toml` | [wall_oss/legacy/fp16.toml](wall_oss/legacy/fp16.toml) |
+| `wall_oss/base/w8a16.toml` | [wall_oss/legacy/w8a16.toml](wall_oss/legacy/w8a16.toml) |
+| `wall_oss/base/w4a16.toml` | [wall_oss/legacy/w4a16.toml](wall_oss/legacy/w4a16.toml) |
+| `wall_oss/base/w4a16_pgrp.toml` | [wall_oss/legacy/w4a16_pgrp.toml](wall_oss/legacy/w4a16_pgrp.toml) |
+| `lingbot/v2/6b_w8a16.toml` | [lingbot/legacy/exact_z2/6b_w8a16.toml](lingbot/legacy/exact_z2/6b_w8a16.toml) |
+| `rhinovla/v3/w8a16.toml` | [rhinovla/v3/expert_w8a16.toml](rhinovla/v3/expert_w8a16.toml) |
