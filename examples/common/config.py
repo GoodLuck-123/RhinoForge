@@ -194,6 +194,54 @@ def _is_official_qwen35_27b_profile(profile):
                 "qwen3_5-27b-w8a16", "qwen3_5-27b-w4a16"})
 
 
+def _validate_dense_qwen35_checkpoint(profile, checkpoint):
+    """Bind ordinary Dense templates to their size and uniform text recipe."""
+    if profile["family"] != "qwen3-5":
+        return
+    geometries = {
+        "0.8b": (24, 1024, 3584, 8, 2, 256),
+        "2b": (24, 2048, 6144, 8, 2, 256),
+        "4b": (32, 2560, 9216, 16, 4, 256),
+        "9b": (32, 4096, 12288, 16, 4, 256),
+    }
+    alias = profile["asset_alias"]
+    size = next((size for size in geometries if alias in {
+        f"qwen3_5-{size}", f"qwen3_5-{size}-w8a16", f"qwen3_5-{size}-w4a16"}), None)
+    if size is None:
+        return
+    metadata = json.loads((Path(checkpoint) / "config.json").read_text(encoding="utf-8"))
+    scope = _backend_leaf("adapters/qwen3_5/quant_scope.py")
+    try:
+        text = metadata.get("text_config", {})
+        fields = ("num_hidden_layers", "hidden_size", "intermediate_size",
+                  "num_attention_heads", "num_key_value_heads", "head_dim")
+        actual = tuple(text.get(key) for key in fields)
+        layers = text.get("layer_types")
+        expected_layers = (["linear_attention"] * 3 + ["full_attention"]) * (geometries[size][0] // 4)
+        if (metadata.get("model_type") != "qwen3_5"
+                or metadata.get("architectures") != ["Qwen3_5ForConditionalGeneration"]
+                or actual != geometries[size] or any(type(value) is not int for value in actual)
+                or layers != expected_layers):
+            raise ValueError(f"requires the declared Qwen3.5 {size} architecture and size")
+        if (metadata.get("quantization_config") is not None
+                or any(text.get(key) is not None for key in ("quant_config", "quantization_config"))):
+            raise ValueError("requires a single top-level quant_config for quantized text projections")
+        quant = metadata.get("quant_config")
+        precision = profile["precision"]
+        if precision == "fp16":
+            if quant is not None:
+                raise ValueError("FP16 requires a floating checkpoint without quantization metadata")
+            return
+        expected = scope.QuantSpec(scope.W8A16) if precision == "w8a16" else scope.QuantSpec(scope.W4A16_PGRP, 32)
+        specs = scope.resolve_quant_specs(scope.is_full_from_layer_types(layers), quant)
+        if not isinstance(quant, dict) or set(specs.values()) != {expected}:
+            raise ValueError(f"requires uniform {precision} text projections (W4 uses group_size=32)")
+        if quant.get("storage", "int8") != "int8" or quant.get("scale_dtype", "float16") != "float16":
+            raise ValueError("requires int8 weight storage and FP16 scales")
+    except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        raise ConfigError(f"profile {profile['id']} rejects checkpoint: {exc}") from exc
+
+
 def validate_checkpoint_profile(config: dict, checkpoint: str) -> None:
     """Bind quantized examples to their recipe before loading weights.
 
@@ -275,6 +323,7 @@ def validate_checkpoint_profile(config: dict, checkpoint: str) -> None:
         return
     on_install = limits.get("on_install_quantization")
     if expected is None and checkpoint_format is None and on_install is None:
+        _validate_dense_qwen35_checkpoint(profile, checkpoint)
         _validate_unbound_qwen_checkpoint(profile, checkpoint)
         return
     if on_install is not None or checkpoint_format == "qwen3_32b_w8a16":
