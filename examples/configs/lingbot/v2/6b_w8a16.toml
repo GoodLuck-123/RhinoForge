@@ -1,6 +1,6 @@
 # Compatibility path; canonical template: lingbot/legacy/exact_z2/6b_w8a16.toml
 # 已归档的 exact-Z2 复现配置；当前 FP16/W8A16 输入见 ../../v2/README.md。
-# 本配置保留历史掩码与固定 P225 执行合同。
+# 本配置使用公开默认对齐掩码与固定 P225 执行合同。
 [example]
 profile_id = "lingbot-vla-v2-6b.w8a16.exact-z2"
 registry_alias = "lingbot-vla-v2-6b"

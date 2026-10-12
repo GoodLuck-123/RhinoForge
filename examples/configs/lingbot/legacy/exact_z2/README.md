@@ -2,7 +2,7 @@
 
 [6b_w8a16.toml](6b_w8a16.toml) 保留 `lingbot-vla-v2-6b.w8a16.exact-z2` 配置，原路径为 `lingbot/v2/6b_w8a16.toml`。新集成使用 [v2 runtime Graph](../../v2/README.md)。
 
-此配置通过 `Lingbot2Policy.prepare_graphs` / `infer` 运行，输入为三相机 256×256、有效 prefix 215–225、固定执行 P225、W8A16 和 true/true 掩码，不接受 RTC 动作或延迟参数。
+此配置通过 `Lingbot2Policy.prepare_graphs` / `infer` 运行，输入为三相机 256×256、有效 prefix 215–225、固定执行 P225、W8A16，不接受 RTC 动作或延迟参数。后缀对齐掩码采用公开 `AlignConfig` 的 `false/false` 默认值。
 
 <a id="weights"></a>
 <a id="weight-sources"></a>
@@ -27,7 +27,7 @@ hf download robbyant/lingbot-vla-v2-6b --revision 11c703bf6a5c1f45b3b69168482da1
 |---|---|---|
 | `6b_w8a16.toml` | Vision block 六类投影、Text 七类投影、Action 注意力及共享/路由专家三类 MLP 投影为 W8/A16（INT8 + FP16 scale）；Vision patch/merger、Action router/IO/条件与其他浮点参数不量化 | 对应历史记录的父资产 → [旧加载时量化完整命令](#quantization)，经 `Lingbot2Policy` → `build_lingbot_vla_v2()` / `build_expert_moe()`；没有离线转换 CLI 或独立量化下载 |
 
-这里只保留 exact-Z2、grouped-expert 和 true/true 掩码的历史合同，不将当前 v2 稀疏路径替换进来，也不新增支持声明。
+此入口使用 exact-Z2 和 grouped-expert 安装；当前 v2 使用独立的稀疏路径。
 
 <a id="quantization"></a>
 ## 加载时量化：归档配置这样运行
@@ -44,7 +44,7 @@ cp examples/configs/lingbot/legacy/exact_z2/6b_w8a16.toml /tmp/lingbot2_exact_z2
 vi /tmp/lingbot2_exact_z2_w8.toml
 python examples/run.py --config /tmp/lingbot2_exact_z2_w8.toml
 ```
-这里使用旧加载期 W8 安装，不导出量化目录；原父权重、true/true 掩码与固定输入合同不能用当前 v2 配方替换。
+此入口在加载时安装 W8，不导出量化目录；保留配套父权重和固定输入范围。
 
 **实现位置**：[python/rpu_backend/adapters/lingbot_vla_v2/runtime.py](../../../../../python/rpu_backend/adapters/lingbot_vla_v2/runtime.py)；[python/rpu_backend/adapters/lingbot_vla_v2/convert.py](../../../../../python/rpu_backend/adapters/lingbot_vla_v2/convert.py)。旧 `Lingbot2Policy` 加载路径调用 `build_lingbot_vla_v2()` / `build_expert_moe()`；实现文件不是 CLI。
 

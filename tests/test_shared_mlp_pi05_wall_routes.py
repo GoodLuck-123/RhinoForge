@@ -15,6 +15,9 @@ def test_shared_mlp_preserves_wall_fusion_and_pi05_residual_routes(tmp_path):
     start = header.index("    void emit_mlp_pipeline(")
     declaration = header[start:header.index(";", start) + 1]
     implementation = _block(source, "void FusedModelBase::emit_mlp_pipeline(")
+    adarms = (ROOT / "src/fused/rpu_adarms_model.cpp").read_text()
+    call_start = adarms.index("emit_mlp_pipeline(lw.gate_proj_w")
+    adarms_call = adarms[call_start:adarms.index(");", call_start) + 2]
     enums = "\n".join(_block(header, marker) + ";" for marker in (
         "enum class FmbRouteFamily : int",
         "enum class FmbLinearRouteSelector : int",
@@ -98,6 +101,17 @@ public:
         return std::string(name) == "residual2" ? 0x500000 : 0x100000;
     }
 ''' + declaration + r'''
+    void run_actual_adarms_call(bool quantized, bool linear_acc32_) {
+        struct Weights {
+            at::Tensor gate_proj_w, up_proj_w, down_proj_w;
+            at::Tensor gate_ws, up_ws, down_ws;
+        } lw;
+        struct Tables { bool active; bool enabled() const { return active; } };
+        const Tables nvfp4_{quantized};
+        const int64_t seq_len = 50;
+        const int layer_idx = 3;
+''' + adarms_call + r'''
+    }
 };
 ''' + implementation + r'''
 int main() {
@@ -170,6 +184,27 @@ int main() {
     assert((launches == std::vector<std::string>{"linear", "unary", "linear", "mul", "linear", "ring"}));
     assert(ring_residual == 0x500000 && !ring_xor3);
     assert(routes[0].selector == static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE));
+
+    // Exercise the production caller as well as the shared emitter. An omitted
+    // boolean can otherwise shift the residual and precision arguments.
+    for (bool quantized : {false, true}) for (bool acc32 : {false, true}) {
+        launches.clear(); routes.clear(); nvfp4_acc32.clear();
+        model.run_actual_adarms_call(quantized, acc32);
+        const auto selector = quantized
+            ? (acc32 ? FmbLinearRouteSelector::PI05_NVFP4_V2_ACC32
+                     : FmbLinearRouteSelector::PI05_NVFP4_V2_ACC16)
+            : FmbLinearRouteSelector::AUTO_TILE;
+        assert(routes.size() == 4);
+        for (size_t i = 0; i < 3; ++i)
+            assert(routes[i].family == FmbRouteFamily::LINEAR &&
+                   routes[i].selector == static_cast<int64_t>(selector));
+        assert(launches.front() == (quantized ? "nvfp4" : "linear"));
+        assert(ring_residual == 0x500000 && !ring_xor3);
+        if (quantized)
+            assert((nvfp4_acc32 == std::vector<bool>{acc32, acc32, acc32}));
+        else
+            assert(nvfp4_acc32.empty());
+    }
 
     bool rejected = false;
     try {

@@ -1203,6 +1203,7 @@ protected:
                           nvfp4_.enabled() ? addr(0, "nvfp4_up_ts") : 0,
                           nvfp4_.enabled() ? addr(0, "nvfp4_down_ts") : 0, layer_idx,
                           false, false, /*acc32=*/linear_acc32_, false, false,
+                          /*fuse_wall_gate_up=*/false,
                           /*bind_silu_mul_route=*/false,
                           /*residual_spm_addr=*/0, /*pi05_xor3=*/false, nvfp4_.enabled());
 
