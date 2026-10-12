@@ -26,7 +26,6 @@ seed = 0
 [rpu_execution]
 
 # Optional cold 4/6-core budget.
-# No formal certificate or universal performance claim for reduced budgets.
 # Default remains 8. At 6: Vision 4, text 4/6/4; existing Vision padding is preserved.
 # [rpu_execution.model]
 # num_cores = 6

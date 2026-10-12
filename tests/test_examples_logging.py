@@ -84,6 +84,37 @@ def test_summary_switch_does_not_hide_errors(tmp_path):
     assert "recoverable error visible" in output
 
 
+@pytest.mark.parametrize("level", ["ERROR", "INFO"])
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_model_root_handler_can_write_to_captured_stream(tmp_path, level, stream):
+    process = _run(tmp_path, r'''
+        import logging, os, sys, warnings
+        from examples.common.logging import logging_session
+        level, stream = sys.argv[2:]
+        root = logging.getLogger()
+        original = logging.StreamHandler(sys.stderr)
+        root.handlers, root.level = [original], logging.WARNING
+        with logging_session({"run": {"output_dir": sys.argv[1]},
+                              "logging": {"level": level, "summary": False}}):
+            # Model imports may replace the root handler after capture starts.
+            handler = logging.StreamHandler(getattr(sys, stream))
+            handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+            root.handlers, root.level = [handler], logging.DEBUG
+            print("model initialization detail")
+            root.error("model error visible")
+            warnings.warn("model warning detail")
+            os.write(2, b"[ERROR] native error visible\n")
+        assert root.handlers == [original] and root.level == logging.WARNING
+        root.error("logging restored")
+    ''', level, stream)
+    assert process.returncode == 0, process.stderr
+    output = process.stdout + process.stderr
+    for message in ("model error visible", "native error visible", "logging restored"):
+        assert output.count(message) == 1
+    assert ("model initialization detail" in output) == (level == "INFO")
+    assert ("model warning detail" in output) == (level == "INFO")
+
+
 def test_state_restored_and_primary_exception_preserved(tmp_path):
     process = _run(tmp_path, r'''
         import logging, os, sys, warnings

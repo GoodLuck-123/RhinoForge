@@ -214,6 +214,13 @@ class _Session:
         root = logging.getLogger()
         root.handlers = [diagnostic]
         root.setLevel(level)
+        # Model imports can replace root handlers with captured stdout/stderr.
+        # Send capture records directly to the saved descriptor to avoid a loop.
+        for name in ("examples.captured", "examples.native", "py.warnings"):
+            logger = logging.getLogger(name)
+            logger.handlers = [diagnostic]
+            logger.setLevel(level)
+            logger.propagate = False
         logger = logging.getLogger("examples.summary")
         logger.handlers = [summary_handler]
         logger.setLevel(logging.INFO)

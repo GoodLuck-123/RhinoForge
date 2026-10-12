@@ -23,7 +23,6 @@ seed = 0
 [rpu_execution]
 
 # Optional cold 4/6-core budget.
-# No formal certificate or universal performance claim for reduced budgets.
 # Default remains 8. Vision uses 4; text attention/MLP/head uses 4/6/4 at 6.
 # [rpu_execution.model]
 # num_cores = 6

@@ -28,10 +28,10 @@
 | [Wall-OSS sorting](configs/wall_oss/sorting/README.md) | [W8A16](configs/wall_oss/sorting/w8a16.toml) |
 | [InternVLA](configs/internvla/README.md) | [NavDP FP16](configs/internvla/navdp/fp16.toml) |
 | [LingBot v2](configs/lingbot/v2/README.md) | [3cam T3 W8A16](configs/lingbot/v2/3cam_t3/w8a16.toml) |
-| [LingBot v1（延期）](configs/lingbot/README.md) | [4B mixed](configs/lingbot/v1/4b_mixed.toml) |
+| [LingBot v1](configs/lingbot/README.md) | [4B mixed](configs/lingbot/v1/4b_mixed.toml) |
 | [HALO](configs/halo/README.md) | [FP16 Expert](configs/halo/action_expert/fp16.toml) |
 
-LingBot v1 测试延期。Qwen3.5 35B MoE 仅支持已登记的受控配置。
+Qwen3.5 35B MoE 仅支持已登记的受控配置。
 
 ## 运行
 

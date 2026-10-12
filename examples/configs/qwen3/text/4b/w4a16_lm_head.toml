@@ -1,6 +1,6 @@
 # Official dense Qwen3-4B source, converted once during cold installation.
 # Decoder seven projections: symmetric INT4/G32; lm_head: INT4/G32.
-# TP8/B1, default ACC16; bounded P128/D7 ACC16 numerics/Graph checks archived.
+# TP8/B1, default ACC16, P128/D7.
 # Second prompt: first token exact, greedy 5/8 in ACC16 and ACC32.
 # Only the listed length/ACC combinations are supported.
 [example]

@@ -1,5 +1,5 @@
 # Existing W8A16 checkpoint with INT8 decoder and lm_head; other weights FP16.
-# TP8/B1, default ACC16; bounded P128/D7 ACC16/ACC32 checks archived.
+# TP8/B1, default ACC16, P128/D7; ACC32 is also available.
 # Public runner uses one-step device loading; API also permits a quantized mmap CPU stage.
 # Only the listed lengths and ACC settings are supported.
 [example]

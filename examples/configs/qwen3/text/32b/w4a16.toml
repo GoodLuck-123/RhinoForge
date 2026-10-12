@@ -1,6 +1,6 @@
 # Official dense Qwen3-32B source, converted once during cold installation.
 # Decoder seven projections: symmetric INT4/G32; lm_head: FP16.
-# TP8/B1, default ACC16; bounded P128/D7 ACC16 numerics/Graph checks archived.
+# TP8/B1, default ACC16, P128/D7.
 # Only the listed length/ACC combinations are supported.
 # Uses one-step device="rpu" streaming; full CPU FP16 loading is rejected.
 [example]

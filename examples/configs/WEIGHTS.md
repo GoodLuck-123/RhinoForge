@@ -54,8 +54,8 @@ W 表示权重、A 表示线性算子输入激活。W16/A16 为 FP16；W8/A16 �
 | RhinoVLA v3 | 客户 96D 权重与 factory；公开下载及发布 dtype 未核实 | [专家 W8 / 完整 W8 / 完整流水线范围](rhinovla/README.md#weight-recipes) | [加载时转换与调用者参数](rhinovla/v3/README.md#quantization) |
 | InternVLA-N1 NavDP | [InternRobotics 官方](https://huggingface.co/InternRobotics/InternVLA-N1-w-NavDP)：BF16 | [System2 W8 与浮点 Vision / RGBD / NavDP](internvla/README.md#weight-recipes) | [提取、转换、准备输入的完整命令](internvla/README.md#quantization) |
 | LingBot v2 | [Robbyant 官方](https://huggingface.co/robbyant/lingbot-vla-v2-6b)：FP32；旧 exact-Z2 BF16 派生父另列 | [FP16 / W8 的 Vision、文本与 MoE 范围](lingbot/v2/README.md#weight-recipes) | [下载与加载时转换](lingbot/v2/README.md#quantization) |
-| LingBot v1（延期） | [Robbyant 官方](https://huggingface.co/robbyant/lingbot-vla-4b)：FP32 | [CPU FP32 + 设备 FP16 混合执行](lingbot/README.md#weight-recipes) | [来源与使用说明](lingbot/README.md#quantization) |
-| HALO 专家组件（延期） | [官方预训练](https://huggingface.co/qshou-coder/halo_pt_weight) / [官方微调](https://huggingface.co/qshou-coder/halo_ft_weight)：BF16；当前已供 CoT EMA 资产的公开亲缘未核实 | [组件范围及不能替代的资产](halo/README.md#weight-recipes) | [原配对资产的运行说明](halo/README.md#quantization) |
+| LingBot v1 | [Robbyant 官方](https://huggingface.co/robbyant/lingbot-vla-4b)：FP32 | [CPU FP32 + 设备 FP16 混合执行](lingbot/README.md#weight-recipes) | [来源与使用说明](lingbot/README.md#quantization) |
+| HALO 专家组件 | [官方预训练](https://huggingface.co/qshou-coder/halo_pt_weight) / [官方微调](https://huggingface.co/qshou-coder/halo_ft_weight)：BF16；当前已供 CoT EMA 资产的公开亲缘未核实 | [组件范围及不能替代的资产](halo/README.md#weight-recipes) | [原配对资产的运行说明](halo/README.md#quantization) |
 
 <a id="quantization"></a>
 ## 先设置仓库与模型目录
@@ -383,7 +383,7 @@ python examples/run.py --config /tmp/rhino_expert_w8.toml
 <a id="no-local-converter"></a>
 ## 不需要量化转换的配置
 
-当前 Llama、Gemma4、DINOv3、HY Embodied 原 UMI、HALO、RhinoVLA v1、LingBot v1 模板直接使用各自浮点资产，没有需要先调用的量化脚本。Qwen3-VL 独立 Text-AWQ 与 MoE 官方 GPTQ 使用对应公开量化包。HALO/LingBot v1 的测试延期状态保持不变。
+当前 Llama、Gemma4、DINOv3、HY Embodied 原 UMI、HALO、RhinoVLA v1、LingBot v1 模板直接使用各自浮点资产，没有需要先调用的量化脚本。Qwen3-VL 独立 Text-AWQ 与 MoE 官方 GPTQ 使用对应公开量化包。
 
 ## 下载与缓存
 

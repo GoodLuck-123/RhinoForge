@@ -87,7 +87,7 @@ vi /tmp/lingbot2_2cam_t16_w8.toml
 python examples/run.py --config /tmp/lingbot2_2cam_t16_w8.toml
 ```
 
-其他相机/T 模板使用匹配的输入，并导出 `input.observation` 指定的变量，如 `LINGBOT2_3CAM_T160_OBSERVATION`。**v2 FP16 无需量化**，同目录 `fp16.toml` 使用原始父权重。**v1 混合浮点无需量化，测试仍延期**；旧 exact-Z2 的掩码/安装合同保持独立。
+其他相机/T 模板使用匹配的输入，并导出 `input.observation` 指定的变量，如 `LINGBOT2_3CAM_T160_OBSERVATION`。**v2 FP16 无需量化**，同目录 `fp16.toml` 使用原始父权重。v1 单图混合浮点无需量化；旧 exact-Z2 的掩码/安装合同保持独立。
 
 **实现位置**：[examples/runners/lingbot2/optimized.py](../../../runners/lingbot2/optimized.py)；[python/rpu_backend/adapters/lingbot_vla_v2/runtime.py](../../../../python/rpu_backend/adapters/lingbot_vla_v2/runtime.py)；[python/rpu_backend/adapters/lingbot_vla_v2/convert.py](../../../../python/rpu_backend/adapters/lingbot_vla_v2/convert.py)；[python/rpu_backend/adapters/qwen3_vl/vision.py](../../../../python/rpu_backend/adapters/qwen3_vl/vision.py)。`run_example_config()` → `build_lingbot_vla_v2()`；Text 用 `_quantize_text_w8a16()`，Action 用 `build_expert_moe()` / `pack_sparse_expert_projection()`，Vision 经共享安装器。runner 从 TOML 选择冷量化参数，不需手设额外量化环境变量，也没有离线转换 CLI。
 

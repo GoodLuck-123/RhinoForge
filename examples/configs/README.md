@@ -21,9 +21,9 @@
 | Gemma4 | [gemma4](gemma4/README.md) | E4B FP16 |
 | Llama | [llama](llama/README.md) | 3.2-1B FP16 |
 | HY Embodied | [hy_embodied](hy_embodied/README.md) | 原 UMI fixture；优化模板见 HyVLA |
-| HALO | [halo](halo/README.md) | Action expert；延期状态保留 |
+| HALO | [halo](halo/README.md) | 配对单步输入与前缀缓存的 Action expert |
 | InternVLA | [internvla](internvla/README.md) | NavDP fixture |
-| LingBot | [lingbot](lingbot/README.md) | v1/v2 分开；v1 延期状态保留 |
+| LingBot | [lingbot](lingbot/README.md) | v1 单图混合浮点；v2 多相机 |
 
 ## 目录与模板规则
 

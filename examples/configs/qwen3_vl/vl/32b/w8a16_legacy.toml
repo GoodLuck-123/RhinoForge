@@ -1,4 +1,4 @@
-# Controlled evaluation only; no device numeric/Graph/performance certification.
+# Legacy controlled profile.
 # See docs/model_assets.md for asset identity limits.
 [example]
 profile_id = "qwen3-vl-32b.w8a16.multimodal-controlled"
