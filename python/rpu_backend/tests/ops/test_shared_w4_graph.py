@@ -12,7 +12,7 @@ import torch
 
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("RPU_HW_AVAILABLE") != "1", reason="requires exclusive RPU")
+    os.environ.get("RPU_HW_AVAILABLE") != "1", reason="requires exclusive device")
 
 
 @pytest.mark.parametrize("acc32", [False, True], ids=["acc16", "acc32"])

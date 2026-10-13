@@ -4945,7 +4945,7 @@ void rpu_launch_linear_spm_to_spm_acc16_kernel(
       if (is_uint4) {
         TORCH_CHECK(weight.device().type() == c10::DeviceType::PrivateUse1 &&
                         weight.is_contiguous() && scale.device() == weight.device(),
-                    "pgrp W4 requires contiguous RPU weight and scale");
+                    "pgrp W4 requires contiguous device weight and scale");
         TORCH_CHECK(local_m <= UINT16_MAX && local_k <= UINT16_MAX &&
                         local_k % 64 == 0 && local_n % 16 == 0,
                     "pgrp W4 requires uint16 localM/localK, K%64 and N%16");
@@ -4954,7 +4954,7 @@ void rpu_launch_linear_spm_to_spm_acc16_kernel(
                           negative_zero.scalar_type() == at::kHalf &&
                           negative_zero.is_contiguous() &&
                           negative_zero.sizes() == scale.sizes(),
-                      "pgrp UINT4 negative_zero must match the contiguous RPU FP16 scale payload");
+                      "pgrp UINT4 negative_zero must match the contiguous device FP16 scale payload");
         }
         const size_t scale_alignment =
             static_cast<size_t>(num_cores) * kScaleStripeBytes;
@@ -9348,7 +9348,7 @@ void rpu_parallel_linear_w4_test_out(
                     tensor->device().type() == c10::DeviceType::PrivateUse1 &&
                     tensor->scalar_type() == at::kHalf && tensor->dim() == 3 &&
                     tensor->is_contiguous(),
-                "W4 probe input/output must be contiguous RPU FP16 [cores,M,local_dim]");
+                "W4 probe input/output must be contiguous device FP16 [cores,M,local_dim]");
   }
   const int64_t cores = input_per_core.size(0), m = input_per_core.size(1);
   const int64_t n = weight.size(0), k = weight.size(1) * 2;
@@ -9363,7 +9363,7 @@ void rpu_parallel_linear_w4_test_out(
                   scale.dim() == 2 && scale.is_contiguous() &&
                   scale.device() == input_per_core.device() &&
                   weight.device() == input_per_core.device(),
-              "W4 probe requires RPU weight and contiguous FP16 2D scale metadata");
+              "W4 probe requires device weight and contiguous FP16 2D scale metadata");
   if (negative_zero.has_value() && negative_zero->defined() && negative_zero->numel()) {
     TORCH_CHECK(negative_zero->device() == scale.device() &&
                     negative_zero->scalar_type() == at::kHalf &&

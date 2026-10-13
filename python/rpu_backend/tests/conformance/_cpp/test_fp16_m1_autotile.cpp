@@ -125,19 +125,19 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> rpu_test_m1_linear_graph_ab(
     TORCH_CHECK(input.device().type() == c10::DeviceType::PrivateUse1 &&
                     input.scalar_type() == at::kHalf && input.is_contiguous() &&
                     input.dim() == 2 && input.size(0) == 1 && input.size(1) == k,
-                "M1 A/B input must be contiguous RPU fp16 [1,K]");
+                "M1 A/B input must be contiguous device fp16 [1,K]");
     TORCH_CHECK(weight.device().type() == c10::DeviceType::PrivateUse1 &&
                     weight.is_contiguous() && weight.dim() == 2 &&
                     weight.size(0) == n && weight.size(1) == k &&
                     (weight.scalar_type() == at::kHalf || weight.scalar_type() == at::kChar),
-                "M1 A/B weight must be contiguous RPU fp16/int8 [N,K]");
+                "M1 A/B weight must be contiguous device fp16/int8 [N,K]");
     const bool int8_weight = weight.scalar_type() == at::kChar;
     const at::Tensor scales = scale.value_or(at::Tensor{});
     TORCH_CHECK(!int8_weight ||
                     (scales.defined() && scales.device() == input.device() &&
                      scales.scalar_type() == at::kHalf && scales.is_contiguous() &&
                      scales.dim() == 1 && scales.size(0) == n),
-                "M1 A/B int8 weight requires RPU fp16 [N] scales");
+                "M1 A/B int8 weight requires device fp16 [N] scales");
     TORCH_CHECK(int8_weight || !scales.defined(), "M1 A/B fp16 has no scales");
     TORCH_CHECK((partition == 0 ? k : n) % num_cores == 0,
                 "M1 A/B partition dimension must divide TP");
@@ -276,10 +276,10 @@ at::Tensor rpu_test_fp16_m1_autotile_projection(
                 "fp16_m1_autotile: requires no outer Graph");
     TORCH_CHECK(
         input.device().type() == c10::DeviceType::PrivateUse1,
-        "fp16_m1_autotile: input must be on RPU");
+        "fp16_m1_autotile: input must be on device");
     TORCH_CHECK(
         weight_swizzled.device().type() == c10::DeviceType::PrivateUse1,
-        "fp16_m1_autotile: weight must be on RPU");
+        "fp16_m1_autotile: weight must be on device");
     TORCH_CHECK(
         input.scalar_type() == at::kHalf &&
             weight_swizzled.scalar_type() == at::kHalf,
@@ -308,7 +308,7 @@ at::Tensor rpu_test_fp16_m1_autotile_projection(
             bias->device().type() == c10::DeviceType::PrivateUse1 &&
                 bias->scalar_type() == at::kHalf && bias->is_contiguous() &&
                 bias->numel() == n,
-            "fp16_m1_autotile: bias must be a contiguous fp16 RPU tensor with N elements");
+            "fp16_m1_autotile: bias must be a contiguous fp16 device tensor with N elements");
     }
 
     const int64_t m = input.size(0);

@@ -7245,7 +7245,7 @@ void Qwen3_5Model::set_weights(
                             zero.device() == weight.device() && zero.scalar_type() == at::kHalf &&
                             zero.is_contiguous() && zero.sizes() == scale.sizes(),
                         "QuantTrio AWQ ", role, "[", layer,
-                        "] requires packed UINT4, G128 FP16 scale and matching RPU FP16 negative_zero");
+                        "] requires packed UINT4, G128 FP16 scale and matching device FP16 negative_zero");
             owners[layer] = rpu_retain_linear_quant_scale(weight, zero);
         }
         return owners;
