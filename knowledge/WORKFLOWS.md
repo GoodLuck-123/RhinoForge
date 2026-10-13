@@ -114,8 +114,9 @@ its default-off state preserves other models' K RoPE parameters and layout hash.
 Retire all
 Graphs before their handles and weights. Preserve original CPU FP32 codec weights
 and fold LayerScale only into the new FP16 frontend copies; keep the original
-FP32 rotary frequencies. The frontend is limited to 1–63 frames, below its
-72-frame sliding window. Missing native setter selects CPU; arbitrary
+FP32 rotary frequencies. The RPU frontend is limited to 1–63 frames, below its
+72-frame sliding window. For 64–255 frames, use the original CPU FP32 forward
+with sliding attention and report that route. Missing native setter selects CPU; arbitrary
 execution failures must remain visible. TTS declares five arenas before the first
 device allocation (four retained Graphs plus one immediate-launch slot), using
 the existing owner runtime policy. An incompatible frozen process plan requires
@@ -132,13 +133,25 @@ Its causal-LM wrapper reuses the shared fused decode head and projects only the
 last prefill hidden position, retaining CPU single-token embedding lookup because
 its RPU launch costs more than the lookup. Prefill assembly stays on RPU. Do not enable
 that head on a base-model caller expecting hidden outputs. Retire the decoder
-before releasing that head. TTS Predictor's fixed 15-step greedy loop resets KV
-per frame; Talker still owns stopping and repetition penalties. Compare full
-tokens/waveforms when changing either route. CPU codec thread tuning belongs to
+before releasing that head. TTS Predictor's fixed 15-step sampling loop resets KV
+per frame; Talker still owns stopping and repetition penalties. Use the frozen top-k 50 / temperature 0.9 / top-p 1.0 recipe on both decoders.
+Greedy generation can collapse into repeated or near-silent audio even on CUDA
+FP32. Compare full tokens/waveforms with official sampling after resetting the
+same RNG seed when changing either route. Require EOS before codec decoding;
+the bounded token cap is 256 per segment and missing EOS is an explicit error.
+Long-form requests (up to 1024 characters) split at punctuation with a 12-token target /
+128-character bound; tiny sentence endings may merge with their preceding clause
+within 16 tokens; existing 32-token short requests retain their route. Use sentence
+stops and the request-initial CPU RNG state for each segment; later segments
+restore caller RNG state after the first. Return owned concatenated audio only
+after every segment succeeds. Record segment steps and disclose changed pauses;
+EOS alone does not establish speech quality. CPU codec thread tuning belongs to
 the caller/CLI, not a hidden process-wide change inside the API.
-TTS output-head reuse is bound to the exact current CPU hidden object and is
-consumed once; never reuse a stale RPU decoder output after another replay.
-Talker prefill reuses the measured 28-layer/1024 envelope within 128 positions;
+TTS output-head reuse is bound to the exact current hidden object and consumed
+once. Predictor privately borrows the final RPU row for its immediate head, avoiding
+a CPU round trip; callers requesting hidden states retain owned CPU outputs.
+Never reuse a stale RPU decoder output after another replay.
+Talker prefill reuses the measured 28-layer/1024 envelope within 512 positions;
 evict only its old prefill Graph on a prompt-length change, retain decode and
 bounded prepared plans, and advance KV by logical tokens, excluding padding.
 Predictor retains its single decode Graph.

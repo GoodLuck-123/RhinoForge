@@ -74,9 +74,21 @@ def test_old_native_falls_back_without_allocation(monkeypatch, capability):
     assert owner._components == {} and owner._restore == []
 
 
-@pytest.mark.parametrize("hidden", [None, torch.zeros(1, 0, 1024), torch.zeros(1, 64, 1024),
+@pytest.mark.parametrize("hidden", [None, torch.zeros(1, 0, 1024), torch.zeros(1, 256, 1024),
     torch.zeros(2, 3, 1024), torch.zeros(1, 3, 512), torch.zeros(1, 3, 1024).half(),
     torch.full((1, 3, 1024), float("nan"))])
 def test_input_rejection_precedes_native_access(hidden):
-    with pytest.raises(ValueError, match="1–63"):
+    with pytest.raises(ValueError, match="1–255"):
         codec._forward({}, hidden)
+
+
+@pytest.mark.parametrize("count", [64, 72, 255])
+def test_long_codec_uses_original_sliding_window_without_native_access(count):
+    hidden = torch.randn(1, count, 1024)
+    result = object()
+    def cpu_forward(*, inputs_embeds):
+        assert inputs_embeds is hidden
+        return result
+    part = {"cpu_forward": cpu_forward}
+    assert codec._forward(part, hidden) is result
+    assert part["last_device"] == "cpu"

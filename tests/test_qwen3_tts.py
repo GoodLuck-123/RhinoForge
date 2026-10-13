@@ -11,7 +11,7 @@ from rpu_backend.api import qwen3_tts as tts
 from rpu_backend.api.errors import RPUUnsupportedDtypeError
 
 
-def test_fixed_predictor_greedy_steps_and_cache():
+def test_fixed_predictor_sampling_steps_and_cache():
     class Predictor:
         generation_config = SimpleNamespace(eos_token_id=None, repetition_penalty=None)
 
@@ -30,23 +30,51 @@ def test_fixed_predictor_greedy_steps_and_cache():
                 assert kwargs["input_ids"].item() == index - 1
             self.calls += 1
             logits = torch.zeros(1, 1, 16)
-            logits[0, 0, index] = 1
+            logits[0, 0, index] = 1000
             return SimpleNamespace(logits=logits, past_key_values=self.calls)
 
     owner = Predictor()
-    result = tts._greedy_predictor_generate(owner, torch.zeros(1, 2, 1024),
-        max_new_tokens=15, do_sample=False)
+    result = tts._predictor_generate(owner, torch.zeros(1, 2, 1024),
+        max_new_tokens=15, do_sample=True)
     assert result.sequences.tolist() == [list(range(15))]
-    for count, sampling in ((14, False), (15, True)):
+    for count, sampling in ((14, True), (15, False)):
         with pytest.raises(ValueError, match="15-step"):
-            tts._greedy_predictor_generate(owner, torch.zeros(1, 2, 1024),
+            tts._predictor_generate(owner, torch.zeros(1, 2, 1024),
                 max_new_tokens=count, do_sample=sampling)
     assert owner.calls == 15
 
 
+def test_predictor_uses_checkpoint_sampling_and_rejects_other_recipes():
+    from transformers.generation.logits_process import TemperatureLogitsWarper, TopKLogitsWarper
+
+    class Predictor:
+        generation_config = SimpleNamespace(eos_token_id=None, repetition_penalty=None)
+
+        def __call__(self, **kwargs):
+            scores = torch.linspace(-2, 2, 128).roll(kwargs["generation_steps"])
+            return SimpleNamespace(logits=scores.view(1, 1, -1), past_key_values=None)
+
+    owner = Predictor()
+    torch.manual_seed(17)
+    actual = tts._predictor_generate(owner, torch.zeros(1, 2, 1024),
+        max_new_tokens=15, do_sample=True).sequences
+    torch.manual_seed(17)
+    expected = []
+    for index in range(15):
+        scores = owner(generation_steps=index).logits[:, -1]
+        scores = TemperatureLogitsWarper(0.9)(None, scores)
+        scores = TopKLogitsWarper(50)(None, scores)
+        expected.append(torch.multinomial(scores.softmax(-1), 1))
+    assert torch.equal(actual, torch.cat(expected, dim=1))
+    for recipe in ({"top_k": 0}, {"top_p": 0.8}, {"temperature": 1.0}):
+        with pytest.raises(ValueError, match="sampling profile"):
+            tts._predictor_generate(owner, torch.zeros(1, 2, 1024),
+                max_new_tokens=15, do_sample=True, **recipe)
+
+
 @pytest.mark.parametrize("text,language,limit", [
-    ("", "English", 32), ("  ", "Chinese", 32), ("x" * 129, "English", 32),
-    ("hello", "French", 32), ("hello", "English", 1), ("hello", "English", 65),
+    ("", "English", 32), ("  ", "Chinese", 32), ("x" * 1025, "English", 32),
+    ("hello", "French", 32), ("hello", "English", 1), ("hello", "English", 257),
     ("hello", "English", True), ("hello", "English", 1.5),
 ])
 def test_request_rejection(text, language, limit):
@@ -56,7 +84,81 @@ def test_request_rejection(text, language, limit):
 
 def test_supported_request_boundaries():
     assert tts._validate_request("hello", "English", 2) == 2
-    assert tts._validate_request("你好。", "Chinese", 64) == 64
+    assert tts._validate_request("你好。", "Chinese", 256) == 256
+    assert tts._validate_request("字" * 1024, "Chinese", 256) == 256
+
+
+@pytest.mark.parametrize("text", [
+    "大家好，欢迎收听今天的工作安排。" * 12,
+    "We measured a distance of 3.14 meters today. " * 4,
+    "没有标点的长文本" * 20,
+])
+def test_text_splitting_preserves_content_and_component_limits(text):
+    tokenizer = lambda value: {"input_ids": list(value)}
+    segments = tts._split_text(text, tokenizer)
+    assert len(segments) > 1
+    assert all(0 < len(segment) <= 16 for segment in segments)
+    assert "".join("".join(segment.split()) for segment in segments) == "".join(text.split())
+    if "3.14" in text:
+        assert sum(segment.count("3.14") for segment in segments) == 4
+    assert tts._split_text("  Hello.  ", tokenizer) == ["  Hello.  "]
+
+
+def test_text_splitting_keeps_tiny_sentence_endings_with_their_clause():
+    tokenizer = lambda value: {"input_ids": list(range((len(value) * 2 + 2) // 3))}
+    sentence = "甲" * 14 + "，" + "乙" * 7 + "。"
+    assert tts._split_text(sentence * 4, tokenizer) == [sentence] * 4
+
+
+def test_text_splitting_also_bounds_characters():
+    segments = tts._split_text("字" * 300, lambda value: {"input_ids": [1]})
+    assert list(map(len, segments)) == [128, 128, 44]
+
+
+@pytest.mark.parametrize("fail_second", [False, True])
+@pytest.mark.parametrize("punctuation", ["。", "，"])
+def test_long_synthesis_owns_chunks_and_never_returns_partial_audio(monkeypatch, fail_second, punctuation):
+    model = Qwen3TTSModel()
+    model._closed = False
+    model._components = {"talker": {}}
+    calls = []
+    draws = []
+    torch.manual_seed(17)
+    torch.rand(1)
+    expected_rng = torch.random.get_rng_state()
+    torch.manual_seed(17)
+    buffer = np.ones(8, dtype=np.float32)
+    def generate(**kwargs):
+        calls.append(kwargs["text"])
+        if fail_second and len(calls) == 2:
+            raise RuntimeError("segment failure")
+        draws.append(torch.rand(1).item())
+        buffer[:] = len(calls)
+        model._last_generation = {"steps": len(calls) + 1, "eos": True}
+        return [buffer], 24000
+    model._wrapper = SimpleNamespace(
+        model=SimpleNamespace(speaker_encoder_sample_rate=24000,
+            extract_speaker_embedding=lambda **kwargs: torch.ones(1)),
+        processor=SimpleNamespace(tokenizer=lambda value: {"input_ids": list(value)}),
+        generate_voice_clone=generate)
+    monkeypatch.setattr(tts, "_read_reference", lambda path: (np.ones(12000, dtype=np.float32), 24000))
+    try:
+        text = ("甲" * 10 + punctuation) * 3
+        if fail_second:
+            with pytest.raises(RuntimeError, match="segment failure"):
+                model.synthesize(text, reference_audio="unused")
+            assert len(calls) == 2
+        else:
+            result, rate = model.synthesize(text, reference_audio="unused")
+            assert rate == 24000 and np.array_equal(result, np.repeat([1, 2, 3], 8))
+            assert "".join(calls) == text.replace("，", "。")
+            assert model._last_generation == {"steps": 9, "eos": True, "segment_steps": (2, 3, 4)}
+        assert len(set(draws)) == 1
+        assert torch.equal(torch.random.get_rng_state(), expected_rng)
+        assert model._lock.acquire(blocking=False)
+        model._lock.release()
+    finally:
+        model._closed = True
 
 
 @pytest.mark.parametrize("rate,channels,frames", [(16000, 1, 16000), (24000, 2, 24000), (24000, 1, 11999), (24000, 1, 480001)])
@@ -75,9 +177,33 @@ def test_reference_is_real_float32_audio(tmp_path):
         stream.setnchannels(1)
         stream.setsampwidth(2)
         stream.setframerate(24000)
-        stream.writeframes(np.zeros(12000, dtype="<i2").tobytes())
+        stream.writeframes(np.ones(12000, dtype="<i2").tobytes())
     samples, rate = tts._read_reference(path)
     assert rate == 24000 and samples.shape == (12000,) and samples.dtype == np.float32
+
+
+def test_silent_reference_rejected(tmp_path):
+    import soundfile
+
+    path = tmp_path / "silence.wav"
+    soundfile.write(path, np.zeros(12000), 24000)
+    with pytest.raises(ValueError, match="silent"):
+        tts._read_reference(path)
+
+
+@pytest.mark.parametrize("ids,finished", [([1, 2, 2150], True), ([1, 2, 3], False), ([], False)])
+def test_generation_requires_eos_before_codec(ids, finished):
+    model = Qwen3TTSModel()
+    result = SimpleNamespace(sequences=torch.tensor([ids], dtype=torch.long))
+    model._restore_talker_generate = (None, lambda **kw: result)
+    model._wrapper = SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace(
+        talker_config=SimpleNamespace(codec_eos_token_id=2150))))
+    if finished:
+        assert model._generate_talker() is result
+    else:
+        with pytest.raises(RuntimeError, match="without EOS"):
+            model._generate_talker()
+    assert model._last_generation == {"steps": len(ids), "eos": finished}
 
 
 def test_dtype_rejected_before_loading(monkeypatch):
@@ -127,8 +253,11 @@ def test_close_restores_predictor_generation(monkeypatch):
     model = Qwen3TTSModel()
     model._closed = False
     model._restore_generate = (predictor, original)
+    talker = SimpleNamespace(generate=object())
+    model._restore_talker_generate = (talker, original)
     model.close()
     assert predictor.generate is original and model._restore_generate is None
+    assert talker.generate is original and model._restore_talker_generate is None
 
 
 def test_decoder_rejects_bad_shapes_and_nonfinite_without_device_work():
@@ -231,15 +360,18 @@ def test_install_failure_preserves_original_error_when_cleanup_also_fails(monkey
     assert "cleanup failure" in captured.value.__notes__[0]
 
 
-@pytest.mark.parametrize("token_count", [32, 33])
-def test_text_token_limit_precedes_reference_work_and_returns_owned_output(monkeypatch, token_count):
-    source_wave = np.zeros(24, dtype=np.float32)
+@pytest.mark.parametrize("token_count,silent", [(32, False), (33, False), (32, True)])
+def test_text_token_limit_precedes_reference_work_and_returns_owned_output(monkeypatch, token_count, silent):
+    source_wave = np.full(24, 0 if silent else 0.5, dtype=np.float32)
     calls = []
     def reference(path):
         calls.append("reference")
         return np.zeros(12000, dtype=np.float32), 24000
     def generate(**kwargs):
         calls.append("generate")
+        model._last_generation = {"steps": 2, "eos": True}
+        assert kwargs["do_sample"] and kwargs["subtalker_dosample"]
+        assert kwargs["max_new_tokens"] == 256
         return [source_wave], 24000
     def speaker(**kwargs):
         calls.append("speaker")
@@ -254,14 +386,18 @@ def test_text_token_limit_precedes_reference_work_and_returns_owned_output(monke
     monkeypatch.setattr(tts, "_read_reference", reference)
     try:
         if token_count == 33:
-            with pytest.raises(ValueError, match="32 tokenizer tokens"):
+            with pytest.raises(ValueError, match="12 tokenizer tokens"):
                 model.synthesize("hello", reference_audio="unused")
             assert calls == []
+        elif silent:
+            with pytest.raises(FloatingPointError, match="silent"):
+                model.synthesize("hello", reference_audio="unused")
+            assert calls == ["reference", "speaker", "generate"]
         else:
             result, rate = model.synthesize("hello", reference_audio="unused")
             source_wave[:] = 1
             assert calls == ["reference", "speaker", "generate"]
-            assert rate == 24000 and np.array_equal(result, np.zeros(24))
+            assert rate == 24000 and np.array_equal(result, np.full(24, 0.5))
     finally:
         # This host fixture has no claimed owner or native resources.
         model._closed = True
@@ -281,7 +417,8 @@ def test_speaker_cache_tracks_audio_content_and_never_runs_reference_codec(monke
         assert prompt["ref_code"] == [None] and prompt["icl_mode"] == [False]
         assert prompt["x_vector_only_mode"] == [True]
         prompts.append(prompt)
-        return [np.zeros(24, dtype=np.float32)], 24000
+        model._last_generation = {"steps": 2, "eos": True}
+        return [np.ones(24, dtype=np.float32)], 24000
     model = Qwen3TTSModel()
     model._closed = False
     model._components = {"talker": {}}
@@ -302,7 +439,8 @@ def test_speaker_cache_tracks_audio_content_and_never_runs_reference_codec(monke
         model._closed = True
 
 
-def test_predictor_reuses_kv_with_fresh_positions_inputs_and_owned_outputs(monkeypatch):
+@pytest.mark.parametrize("head_only,hidden_states", [(False, False), (True, True), (True, False)])
+def test_predictor_reuses_kv_with_fresh_positions_inputs_and_owned_outputs(monkeypatch, head_only, hidden_states):
     from contextlib import nullcontext
     from rpu_backend.api import cache as cache_module
 
@@ -329,11 +467,20 @@ def test_predictor_reuses_kv_with_fresh_positions_inputs_and_owned_outputs(monke
         return output.copy_(hidden)
     monkeypatch.setattr(torch.ops.rpu, "causal_decoder_forward", forward, raising=False)
     part = dict(layers=5, capacity=32, name="predictor", handle=1, descriptor=[],
-                signature=None, graph=SimpleNamespace(capture=lambda sig: nullcontext()), calls=0, tokens=0)
-    first = tts._decoder_forward(part, torch.ones(1, 2, 1024), None, None, None, None, False)
-    second = tts._decoder_forward(part, torch.zeros(1, 1, 1024), None, None, None, None, False)
+                signature=None, graph=SimpleNamespace(capture=lambda sig: nullcontext()), calls=0, tokens=0,
+                device_head_only=head_only)
+    borrowed = head_only and not hidden_states
+    if borrowed:
+        monkeypatch.setattr(torch.Tensor, "cpu", lambda tensor: pytest.fail("Predictor hidden copied to CPU"))
+    first = tts._decoder_forward(part, torch.ones(1, 2, 1024), None, None, None, None, hidden_states)
+    if borrowed:
+        assert first.last_hidden_state.shape == (1, 1, 1024)
+        first_head = tts._take_head_input(part, first.last_hidden_state).clone()
+    else:
+        first_head = first.last_hidden_state
+    second = tts._decoder_forward(part, torch.zeros(1, 1, 1024), None, None, None, None, hidden_states)
     assert len(allocations) == 1 and positions == [0, 1, 0]
-    assert first.last_hidden_state.eq(1).all() and second.last_hidden_state.eq(0).all()
+    assert first_head.eq(1).all() and second.last_hidden_state.eq(0).all()
 
 
 def test_head_reuses_only_current_single_token_device_output():
