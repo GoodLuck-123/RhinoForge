@@ -3,7 +3,7 @@ import os
 import pytest
 import torch
 from rpu_backend.tests.conformance._numeric import format_metrics, numeric_metrics, require_same_semantic
-pytestmark = pytest.mark.skipif(os.environ.get('RPU_HW_AVAILABLE') != '1', reason='requires RPU hardware (set RPU_HW_AVAILABLE=1 and run with sudo)')
+pytestmark = pytest.mark.skipif(os.environ.get('RPU_HW_AVAILABLE') != '1', reason='requires device hardware (set RPU_HW_AVAILABLE=1 and run with sudo)')
 COSINE_MIN = 0.99999
 RELATIVE_L2_MAX = 0.002
 ROW_RELATIVE_L2_MAX = 0.002

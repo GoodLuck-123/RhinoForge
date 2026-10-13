@@ -2,7 +2,7 @@ import os
 import pytest
 import torch
 
-@pytest.mark.skipif(os.environ.get('RPU_HW_AVAILABLE') != '1', reason='requires RPU hardware (set RPU_HW_AVAILABLE=1)')
+@pytest.mark.skipif(os.environ.get('RPU_HW_AVAILABLE') != '1', reason='requires device hardware (set RPU_HW_AVAILABLE=1)')
 def test_layernorm_eager_nonzero_matches_cpu(record_property):
     import rpu_backend
     from rpu_backend.tests.conformance._numeric import require_same_semantic
@@ -21,7 +21,7 @@ def test_layernorm_eager_nonzero_matches_cpu(record_property):
         assert cos > 0.99, f'device eager layer_norm C={C} cos={cos:.5f} vs CPU (expected >0.99)'
         print(f'[PASS] eager layer_norm C={C}: nonzero + cos={cos:.6f} vs CPU fp32')
 
-@pytest.mark.skipif(os.environ.get('RPU_HW_AVAILABLE') != '1', reason='requires RPU hardware (set RPU_HW_AVAILABLE=1)')
+@pytest.mark.skipif(os.environ.get('RPU_HW_AVAILABLE') != '1', reason='requires device hardware (set RPU_HW_AVAILABLE=1)')
 def test_eager_mean_last_dim_matches_fp32(record_property):
     import rpu_backend
     from rpu_backend.tests._seed import input_generator

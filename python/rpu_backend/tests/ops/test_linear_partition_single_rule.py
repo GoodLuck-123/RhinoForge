@@ -41,7 +41,7 @@ def test_diverging_linear_gets_a_guard():
     convert_linear_weights_inplace(mod)
     assert 'forward' in vars(mod.o_proj)
 
-@pytest.mark.skipif(os.environ.get('RPU_HW_AVAILABLE') != '1', reason='requires RPU hardware (set RPU_HW_AVAILABLE=1 and run with sudo)')
+@pytest.mark.skipif(os.environ.get('RPU_HW_AVAILABLE') != '1', reason='requires device hardware (set RPU_HW_AVAILABLE=1 and run with sudo)')
 def test_attn_num_cores_divergence_uses_explicit_recorded_layout():
     mod = _container('q_proj', HIDDEN, Q_DIM)
     x = torch.randn(1, SEQ, HIDDEN, dtype=torch.float16)
