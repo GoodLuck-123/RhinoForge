@@ -90,7 +90,7 @@ def resolve_row_config(config, catalog_path=None):
            "precision": base + "_" + options["linear_accumulation"],
            "text_length": config["input"].get("text_tokens")}
     path = Path(catalog_path) if catalog_path is not None else (
-        Path(__file__).resolve().parents[3] / "configs/g05/selected_profiles.json")
+        Path(__file__).resolve().parents[3] / "examples/configs/g05/selected_profiles.json")
     selection = {"key": key, "catalog": str(path), "matched": False,
                  "requested_math_precision": options["math_precision"],
                  "schedule_source_math_precision": "base",

@@ -12,3 +12,8 @@ host-runtime:
   script:
     # NavDP RNG contracts import diffusers directly; device-only checks report skips.
     - bash scripts/ci/run_host_tests.sh
+  artifacts:
+    when: always
+    expire_in: 14 days
+    reports:
+      junit: test-results/host-runtime.xml

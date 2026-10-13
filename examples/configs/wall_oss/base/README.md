@@ -144,3 +144,7 @@ batch 包含六项：uint8 `images [N,H,W,3]`（face/left/right 的前 N 路）�
 | `run.warmup/runs/seed` | 2 / 5 / 0 | 预热 1–10；采样 1–30；seed 非负 | seed 不替换 batch 中已有 noise |
 
 公共字段见[参数说明](../../PARAMETERS.md)。运行使用[正式 main/DDR 两份 REF](../../../../docs/runtime_assets.md)，`[runtime]` 可指定库路径；更换冷配置后用新进程。
+
+## 输出
+
+`run.output_dir` 保存 `report.json` 和 `outputs.pt`，分别记录有效配置、输入身份和动作。

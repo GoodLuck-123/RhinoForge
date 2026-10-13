@@ -1158,12 +1158,8 @@ void HostCallbackCapture::adopt_returns(torch::jit::Stack& stack) {
             e && *e && *e != '0') {
             const at::Tensor& iv_t = iv.toTensor();
             std::cerr << "[ADOPT-RET] r=" << r
-                      << " stable.data_ptr=0x" << std::hex
-                      << reinterpret_cast<uintptr_t>(stable.data_ptr())
-                      << " stable.dev=0x" << dev
-                      << " iv.data_ptr=0x"
-                      << reinterpret_cast<uintptr_t>(iv_t.data_ptr())
-                      << std::dec << "\n";
+                      << " stable_bytes=" << stable.nbytes()
+                      << " input_bytes=" << iv_t.nbytes() << "\n";
         }
     }
 }

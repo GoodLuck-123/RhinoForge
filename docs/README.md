@@ -23,6 +23,7 @@
 |---|---|---|
 | Runtime、Graph、SPM、多核和 DMA | [架构](architecture.zh.md) | [Architecture](architecture.md) |
 | Python、Graph、policy 和 device API | [API 参考](api_reference.zh.md) | [API reference](api_reference.md) |
+| 冷态核数、组件拓扑与缓存布局 | [计算核拓扑](planner_core_topology.zh.md) | [Compute-core topology](planner_core_topology.md) |
 | 完整模型移植流程 | [模型移植](model_porting.zh.md) | [Model porting](model_porting.md) |
 | 写代码前的六阶段能力评审 | [模型移植能力评审](model_porting_capability_review.zh.md) | [Capability review](model_porting_capability_review.md) |
 | Adapter-only decoder 清单 | [新模型逐步指南](new_model_step_by_step.zh.md) | [New decoder step by step](new_model_step_by_step.md) |

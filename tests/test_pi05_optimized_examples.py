@@ -137,6 +137,7 @@ profile_id = 'pi05-libero-finetuned.fp16.vla'
 catalog['profiles'] = [row for row in catalog['profiles'] if row['id'] != profile_id]
 path.write_text(json.dumps(catalog))
 common.planner_profiles.cache_clear()
+common.example_profiles.cache_clear()
 before = len(seen)
 try:
     runner.run_example_config(common.load_config(Path('examples/configs/pi05/3cam/fp16.toml')))

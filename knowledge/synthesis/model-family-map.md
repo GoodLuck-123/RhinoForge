@@ -6,7 +6,7 @@ main RhinoForge model families. Select the checkpoint, precision and input confi
 | Family | Public entry | Implementation owner | Reused execution contracts |
 |---|---|---|---|
 | Qwen3 and Llama CausalLM | [`RPUModelForCausalLM`](../../docs/api_reference.md#causal-language-models) | [Qwen3 adapter](../../python/rpu_backend/adapters/qwen3.py) and [Llama adapter](../../python/rpu_backend/adapters/llama.py) | [KV cache](../concepts/kv-cache.md), [weight swizzle](../concepts/weight-swizzle.md), and [Graph capture](../concepts/graphcache-capture.md) |
-| Qwen3.5 text and Source-only vision profiles | Qwen3.5 adapter plus [`Qwen3_5Cache`](../../docs/api_reference.md#rpucache) | [Qwen3.5 adapter package](../../python/rpu_backend/adapters/qwen3_5/__init__.py) | Separate text/vision admission, profile-specific Graph ownership, and fail-closed numeric-blocked evaluation |
+| Qwen3.5 dense and MoE | [`RPUModelForConditionalGeneration`](../../docs/api_reference.md#image-text-models), `Qwen3_5Cache` / `Qwen3_5MoeCache` | [Dense adapter](../../python/rpu_backend/adapters/qwen3_5/__init__.py), [MoE adapter](../../python/rpu_backend/adapters/qwen3_5_moe/__init__.py) | Separate text/vision and checkpoint admission, profile-specific Graph and recurrent-state ownership |
 | Qwen3-VL | [`RPUModelForConditionalGeneration`](../../docs/api_reference.md#image-text-models) | [Qwen3-VL adapter package](../../python/rpu_backend/adapters/qwen3_vl/__init__.py) | Vision/text orchestration, [multimodal positions](../concepts/mrope.md), Graph signatures, and logical cache position |
 | DINOv3 ViT-B | [`DINOv3Adapter`](../../python/rpu_backend/adapters/dinov3.py) | [DINOv3 adapter](../../python/rpu_backend/adapters/dinov3.py) | Vision planning, patch-embedding ownership, [SPM allocation](../concepts/spm-allocation.md), and Graph capture |
 | SigLIP | [`patch_siglip_model_for_rpu_all_layers_once`](../../python/rpu_backend/adapters/siglip.py) | [SigLIP adapter](../../python/rpu_backend/adapters/siglip.py) | Vision-component weight conversion, Graph ownership, and independent output lifetime |
@@ -41,9 +41,9 @@ to change allocator mode. [Runtime configuration](../../docs/runtime_config.md#m
   cross-layer intermediates in SPM, and owns generation state through
   `RPUCache`. Use the public loader and cache factory instead of constructing a
   native handle or cache layout directly. [CausalLM API](../../docs/api_reference.md#causal-language-models)
-- `rpu_execution.prefill` is cold, per-handle configuration. Finalize it before
-  device installation, create the cache after the model profile is fixed, and
-  size the cache for prompt plus decode. [Qwen3 example](../../examples/run.py)
+- Set `rpu_execution` before device installation and size the model's cache for
+  prompt plus decode. Core count and precision are cold; supported chunk/padding
+  changes use the execution API between requests. [Execution API](../../docs/api_reference.md#execution-configuration-and-updates)
 - Weight conversion is irreversible and exactly once. If construction fails
   after conversion starts, reload a clean model instance rather than retrying
   the partially transformed object. [Weight swizzle](../concepts/weight-swizzle.md)
@@ -108,8 +108,8 @@ to change allocator mode. [Runtime configuration](../../docs/runtime_config.md#m
   prepare only the finite graph envelope owned by that policy. Directly mixing
   individual runtime switches from other VLA profiles is not a supported
   configuration. [Policy API](../../docs/api_reference.md#policy-apis)
-- `WallOssPolicy` is the only public full-model entry. The public adapter
-  package exposes component paths only; its full-model orchestrator is private.
+- Applications can use `WallOssPolicy`; direct integrations can use the exported
+  `build_wall_oss_vla` builder and component builders.
 - Images, instruction, proprioception, masks, precision, prefix envelope, and
   action settings are part of the request/profile contract. The facade
   validates them before execution; a source-level adapter path is not a bypass
@@ -118,12 +118,11 @@ to change allocator mode. [Runtime configuration](../../docs/runtime_config.md#m
   `use_embodied_system_prompt_ratio=0.0`: the normal path uses the exact plain
   `You are a helpful assistant.` system message. Diagnostic prompt selectors
   define different inputs and cannot inherit public-profile evidence.
-- The Source-only public image envelope is exactly two `[1,32,32]` grids.
-  Packed Vision stays disabled: each image uses the shared `768+256` KV-first
-  plan sequentially, preserving image boundaries and merger row order.
-- Text prefill uses the shared bounded planner. Its configured chunk cap is a
-  ceiling, not an equal-partition requirement; kernel validity and the final
-  SPM dry resolver choose every physical multi-chunk plan.
+- Camera names and action geometry bind at construction. The request supplies
+  one image per camera; compatible grids may use packed Vision within the
+  configured capacity. RTC uses its separately admitted fixed profile.
+- Text prefill uses the shared bounded planner. An integer `chunk_size` is an
+  exact request; native shape and SPM checks must admit the complete plan.
 - Vision, prefix/text, cache, and action stages retain independent ownership
   and correctness evidence. When changing batching, replay, fusion, or
   quantization, treat the result as a new runtime profile until semantic and

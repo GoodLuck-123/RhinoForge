@@ -11,7 +11,7 @@ architecture = "Qwen3_5ForConditionalGeneration"
 QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED = "1"
 
 [input]
-images = ["python/rpu_backend/tests/model/wall_oss/assets/test_frame.png"]
+images = ["assets/test_frame.png"]
 image_size = 448
 prompt = "Describe the image in detail. A compiler translates source code into executable instructions. Explain the stages of compilation and give examples. "
 prefill_filler_prompt = "A compiler translates source code into executable instructions. Explain the stages of compilation and give examples. "

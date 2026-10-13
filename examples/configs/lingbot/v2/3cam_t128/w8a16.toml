@@ -27,4 +27,4 @@ num_cores = 8
 
 # AUTO chooses an admitted physical layout; padding never adds valid tokens.
 [rpu_execution.prefill]
-padding_budget = 64
+padding_budget = 63

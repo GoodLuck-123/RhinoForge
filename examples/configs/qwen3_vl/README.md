@@ -63,7 +63,7 @@ W2/R3 表示预热 2 次、正式测量 3 次，TP 表示配置的根核数。P 
 
 <a id="quantization"></a>
 
-下载和离线转换可在 CPU 机器完成，`examples/run.py` 在 设备板卡执行。以下命令从仓库根目录运行，使用已安装项目依赖的 Python 环境。
+下载和离线转换可在 CPU 机器完成，`examples/run.py` 在设备板卡执行。以下命令从仓库根目录运行，使用已安装项目依赖的 Python 环境。
 
 先设置缓存根目录：
 
@@ -260,3 +260,5 @@ stop_on_eos = false
 ```
 
 文件含INT64的 `input_ids/attention_mask/image_grid_thw/position_ids` 和FP32的 `pixel_values`，仅支持B1、单图单帧、全1 mask。入口在模型安装前校验文件、五张量和正常M-RoPE位置；不添加chat或补齐，正常decode delta保持。相对路径按配置文件目录解析，输出的 `generation.prepared_input` 记录全部哈希。
+
+转换实现：[完整 W8/W4](../../../python/rpu_backend/quant/convert_qwen3_vl.py)、[Text-W8](../../../python/rpu_backend/quant/convert_qwen3.py)、[Text-AWQ](../../../python/rpu_backend/quant/load_qwen3_vl_awq.py)、[Vision 安装](../../../python/rpu_backend/adapters/qwen3_vl/vision.py)。运行库见[运行资产](../../../docs/runtime_assets.md)。

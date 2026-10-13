@@ -2824,7 +2824,12 @@ def test_direct_dma_contract_is_required_in_the_same_host_ci_invocation():
     assert "bash scripts/ci/run_host_tests.sh" in ci
     runner = _read("scripts/ci/run_host_tests.sh")
     assert "set -- tests python/rpu_backend/tests/acceptance" in runner
-    assert '-m pytest -q -ra "$@"' in runner
+    for directory in ("core", "graph", "library", "model", "quant"):
+        assert f"python/rpu_backend/tests/{directory}" in runner
+    assert "python/rpu_backend/tests/ops/test_siglip_pre_embedded_rows.py" in runner
+    invocation = runner.replace("\\\n", " ").splitlines()[-1]
+    assert '-m pytest -q -ra ' in invocation
+    assert invocation.endswith(' "$@"')
 
 
 def test_host_contracts_imports_package_from_current_checkout():

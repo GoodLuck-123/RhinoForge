@@ -128,6 +128,8 @@ def _factory(runner):
     factory_config = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(factory_config, dict):
         raise ValueError("RhinoVLA factory_config must contain a JSON object")
+    if inputs["runtime_factory"] == "rpu_backend.adapters.rhinovla.factory:v3_runtime_factory":
+        factory_config["qin"] = _load_mapping(factory_config, "qin")
     quantization = _bind_rhinovla_quantization(config, factory_config)
     if inputs["runtime_factory"].startswith("your_package."):
         raise ValueError("set [input].runtime_factory to your trusted model integration's module:callable")

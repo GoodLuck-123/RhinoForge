@@ -35,7 +35,7 @@ def test_config_rejects_semantic_and_ambiguous_controls(tmp_path, section, key, 
     with pytest.raises(ValueError): runner.validate_example_config(value_config)
 
 
-@pytest.mark.parametrize("warmup", [0, 2])
+@pytest.mark.parametrize("warmup", [1, 2])
 def test_validation_stays_cpu_safe_and_does_not_relabel_z2(tmp_path, monkeypatch, warmup):
     runner = load(); value = config(tmp_path)
     value["run"]["warmup"] = warmup
@@ -164,7 +164,7 @@ def test_real_flow_counts_clean_calls_and_separates_diagnostics(tmp_path, monkey
     assert torch.equal(torch.load(tmp_path / "actions.pt", weights_only=True), torch.ones(1, 50, 55))
 
 
-def test_zero_warmup_saves_an_independent_first_output(tmp_path, monkeypatch):
+def test_first_warmup_saves_an_independent_output(tmp_path, monkeypatch):
     runner = load(); policy = FakePolicy(); mock_runtime(monkeypatch, runner, policy)
     shared = torch.ones(1, 50, 55)
     original = policy.get_action
@@ -179,20 +179,20 @@ def test_zero_warmup_saves_an_independent_first_output(tmp_path, monkeypatch):
         report["diagnostic_calls"] = 0
     monkeypatch.setattr(runner, "_diagnostics", diagnostics)
     value = config(tmp_path)
-    value["run"].update(warmup=0, runs=1)
+    value["run"].update(warmup=1, runs=1)
     assert runner.run_example_config(value) == 0
     report = json.loads((tmp_path / "report.json").read_text())
-    assert policy.calls == 1 and policy.closed == 1
+    assert policy.calls == 2 and policy.closed == 1
     assert policy.prepared == {"prefix_length_range": (217, 217)}
     assert report["graph_prepare"]["ready_replay_validated"] is True
-    assert report["runtime_calls"] == {"prepare": 5, "warmup": 0, "measured": 1,
-                                        "diagnostic": 0, "total": 6}
+    assert report["runtime_calls"] == {"prepare": 5, "warmup": 1, "measured": 1,
+                                        "diagnostic": 0, "total": 7}
     assert torch.equal(torch.load(tmp_path / "actions.pt", weights_only=True),
                        torch.ones(1, 50, 55))
 
 
 @pytest.mark.parametrize("warmup,runs,changed_call,message", [
-    (0, 2, 2, "measured replay changed actions"),
+    (1, 2, 3, "measured replay changed actions"),
     (2, 1, 2, "warm replay changed actions"),
     (1, 1, 2, "measured replay changed actions"),
 ])
@@ -229,10 +229,10 @@ def test_default_warmup_remains_two(tmp_path, monkeypatch):
     {"phase": "READY", "ready_replay_validated": False},
     {"phase": "BUILD", "ready_replay_validated": True},
 ])
-def test_zero_warmup_still_requires_ready_validation(tmp_path, monkeypatch, prepared):
+def test_execution_requires_ready_validation(tmp_path, monkeypatch, prepared):
     runner = load(); policy = FakePolicy(); mock_runtime(monkeypatch, runner, policy)
     monkeypatch.setattr(policy, "prepare_graphs", lambda *a, **kw: prepared)
-    value = config(tmp_path); value["run"].update(warmup=0, runs=1)
+    value = config(tmp_path); value["run"].update(warmup=1, runs=1)
     with pytest.raises(RuntimeError, match="adapter prepare did not validate"):
         runner.run_example_config(value)
     assert policy.calls == 0 and policy.closed == 1
@@ -318,6 +318,10 @@ def test_text_matrix_templates_cpu_validation_and_unified_entry(monkeypatch, cap
         assert cli.main(["--config", str(path)]) == 0
     assert observed == targets | {(3, 3, precision) for precision in ("fp16", "w8a16")}
     assert len(seen) == 22 and {v["lingbot2"]["precision"] for v in seen} == {"fp16", "w8a16"}
+    from scripts import check_examples
+    index = check_examples.render_config_index({path: common.load_config(path) for path in paths})
+    assert index.count("未登记；模型专用模板") == 22 and "有效T=16" in index
+    assert "CONTROLLED_EVALUATION" not in index
     # An isolated interpreter catches accidental module-level Torch/native imports.
     code = '''import builtins, sys
 original = builtins.__import__
@@ -505,3 +509,11 @@ def test_long_instruction_preserves_all_tokens_and_requires_explicit_cap(tmp_pat
     load().validate_example_config(value)
     assert all(text == instruction for text, _ in calls)
     assert calls[0][1]["max_length"] == 72  # Existing default remains unchanged.
+
+
+def test_zero_warmup_is_rejected_before_loading(tmp_path):
+    runner = load()
+    value = config(tmp_path)
+    value["run"]["warmup"] = 0
+    with pytest.raises(ValueError, match="warmup.*>= 1"):
+        runner.validate_example_config(value)

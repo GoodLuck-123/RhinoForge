@@ -970,9 +970,10 @@ class Qwen3_5Adapter:
                     # the separate FP16 arena plan or direct tensor allocations.
                     torch.rpu.set_caching_allocator(True)
                 elif arena_required:
-                    # Dense 9B reuses transient tensors for FP16 and W8 alike;
-                    # its cold graph arenas have an independent lifecycle.
-                    torch.rpu.set_caching_allocator(True)
+                    # FP16 9B needs the same transient tensor reuse as the
+                    # smaller dense owners, independently of its cold arenas.
+                    if not getattr(model.config, "quant_config", None):
+                        torch.rpu.set_caching_allocator(True)
                     if not graph_policy.prepare_arenas():
                         raise RPUBackendError(
                             "Qwen3.5 9B text requires accessible device hardware to prepare "

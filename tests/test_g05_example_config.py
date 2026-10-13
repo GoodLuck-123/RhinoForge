@@ -571,3 +571,13 @@ def test_auto_group_selection_requires_exact_mode_and_retains_explicit_library_b
     path.write_text(json.dumps({'schema_version': 2, 'profiles': [dict(profile, vision_camera_batch=5 - cameras)]}))
     with pytest.raises(ValueError, match='selected camera count'):
         EX.resolve_row_config(cfg, path)
+
+
+def test_default_catalog_applies_the_repository_schedule():
+    cfg = tomllib.loads((ROOT / "examples/configs/g05/3cam/fp16.toml").read_text())
+    cfg["input"].pop("text_lengths")
+    cfg["input"]["text_tokens"] = 32
+    result, selection = EX.resolve_row_config(cfg)
+    assert selection["matched"] is True
+    assert Path(selection["catalog"]).is_file()
+    assert result["rpu_execution"]["components"]["language_model"]["prefill"]["chunk_size"] == 256

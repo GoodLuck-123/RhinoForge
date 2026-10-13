@@ -220,7 +220,7 @@ void rpu_reset_profile_accumulators();
 // =============================================================================
 struct HwPerfConfig {
     bool enabled = false;
-    std::string output_dir = ".rpu-hw-perf";
+    std::string output_dir = ".";
     int64_t max_dumps = 32;
 };
 

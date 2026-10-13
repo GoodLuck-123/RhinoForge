@@ -1851,10 +1851,6 @@ uint32_t RpuKernelGraph::prepare_segment_queue(
             validate_graph_dma_channel(nodes_[i].as_dma().channel,
                                        seg.core_ids.size(),
                                        "prepare_segment_queue");
-        } else if (nodes_[i].kind == GraphNodeKind::Kernel) {
-            TORCH_CHECK(validated_kernel_core_extent(runtime_policy_, nodes_[i].as_kernel().core_ids) <=
-                            seg.core_ids.size(),
-                        "Graph kernel exceeds the segment queue's core prefix");
         }
     }
     // P2 改造:
@@ -2567,16 +2563,13 @@ uint32_t RpuKernelGraph::launch_segment_sync_only(
     const bool may_skip_param_sync =
         runtime_policy_.fast_replay_skip_sync &&
         !kernel_params_dirty_this_replay_;
-    if (!may_skip_param_sync) {
-        prepared_slot.pending_kernel_register_tokens.clear();
-    }
-    // This path is admitted only for the same prepared segment and immutable
-    // BUILT topology. Its committed snapshot already enumerates every kernel;
-    // do not rediscover that list by walking all DMA/barrier/metadata nodes on
-    // every replay. Still query every live register token, including writes
-    // made outside the Graph's coarse dirty witness.
-    bool tokens_unchanged = prepared_slot.kernel_register_tokens_valid;
-    const bool current_tokens_valid = may_skip_param_sync && [&] {
+    bool tokens_unchanged = may_skip_param_sync &&
+                            prepared_slot.kernel_register_tokens_valid;
+    const bool current_tokens_valid = [&] {
+        if (!may_skip_param_sync) {
+            prepared_slot.pending_kernel_register_tokens.clear();
+            return false;
+        }
         if (!prepared_slot.kernel_register_tokens_valid) {
             return capture_segment_kernel_register_tokens(
                 seg, prepared_slot.pending_kernel_register_tokens);
@@ -2959,6 +2952,51 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
                     "should not reach REPLAYING executor (scope must have been "
                     "marked non-replayable). op=",
                     hc.op_handle->operator_name().name);
+        // Optional tensor diagnostics for host copies.
+        static const bool hcb_checksum = []() {
+            const char* e = std::getenv("RPU_GRAPH_HCB_CHECKSUM");
+            return e && *e && *e != '0';
+        }();
+        const std::string hcb_op_name = hc.op_handle->operator_name().name;
+        const bool hcb_log = hcb_checksum && hcb_op_name == "aten::_to_copy";
+        auto hcb_checksum_str = [](const at::Tensor& t) -> std::string {
+            if (!t.defined()) return "<undef>";
+            std::ostringstream o;
+            o << "shape=" << t.sizes() << " dtype=" << t.dtype();
+            try {
+                at::Tensor cpu = t.is_cpu() ? t : t.cpu();
+                auto stype = cpu.scalar_type();
+                if (stype == c10::kHalf || stype == c10::kFloat ||
+                    stype == c10::kDouble) {
+                    o << " sum=" << cpu.to(at::kDouble).sum().item<double>();
+                } else if (stype == c10::kLong) {
+                    o << " sum=" << cpu.sum().item<int64_t>();
+                } else if (stype == c10::kInt) {
+                    o << " sum=" << cpu.sum().item<int32_t>();
+                } else if (stype == c10::kBool) {
+                    o << " any=" << cpu.any().item<bool>();
+                }
+                if (cpu.numel() > 0 && cpu.numel() <= 4) {
+                    o << " val=" << cpu;
+                }
+            } catch (const std::exception& e) {
+                o << " sum=<err:" << e.what() << ">";
+            }
+            return o.str();
+        };
+        const char* hcb_state = state_ == State::RECORDING ? "REC"
+                              : state_ == State::REPLAYING ? "REP"
+                              : "OS"; /* oneshot */
+        if (hcb_log) {
+            std::cerr << "[HCB-CK] " << hcb_op_name << " state=" << hcb_state
+                      << " node=" << (&node - nodes_.data())
+                      << " stage=in:";
+            for (size_t k = 0; k < hc.live_tensor_args.size(); ++k) {
+                std::cerr << "\n  live[" << k << "]: "
+                          << hcb_checksum_str(hc.live_tensor_args[k]);
+            }
+            std::cerr << "\n";
+        }
         // (1) pre-flush: 让 host 看到 device 之前写入的 DDR
         flush_boundary_ptrs();
         // (2) 重建 stack: live_tensor_args 提供本轮 tensor,args_template
@@ -3015,12 +3053,24 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
                             "HostCallback executor: output_pool[", r,
                             "] not defined (RECORDING 期 adopt_returns 应已分配); op=",
                             hc.op_handle->operator_name().name);
+                if (hcb_log) {
+                    std::cerr << "[HCB-CK] " << hcb_op_name << " state="
+                              << hcb_state << " stage=fresh_out["
+                              << r << "]: " << hcb_checksum_str(fresh_out)
+                              << "\n";
+                }
                 // copy CPU or device fresh tensor → stable device buffer
                 stable.copy_(fresh_out);
                 // 替换 stack slot,下游(若有)直接读 stable
                 ret = stable;
                 // 登记 post-CPU boundary flush:host 写入对后续 device 可见
                 record_boundary_flush(stable.data_ptr());
+                if (hcb_log) {
+                    std::cerr << "[HCB-CK] " << hcb_op_name << " state="
+                              << hcb_state << " stage=stable_post_copy["
+                              << r << "]: " << hcb_checksum_str(stable)
+                              << "\n";
+                }
                 // sanity check:stable 地址应当与 RECORDING 期录的一致
                 if (r < hc.output_pool_dev_addrs.size()) {
                     uint64_t dev = rhino_lkn::RpuGetDevAddr(stable.data_ptr());
@@ -3036,6 +3086,10 @@ void RpuKernelGraph::execute_data_node(const GraphNode& node) {
         }
         // (5) post-flush: host 写入对后续 device kernel 可见
         flush_boundary_ptrs();
+        if (hcb_log) {
+            std::cerr << "[HCB-CK] " << hcb_op_name << " state=" << hcb_state
+                      << " stage=post_flush_done\n";
+        }
         // 注:不清 live_tensor_args —— REPLAYING 期 op stream 重 dispatch
         // 时 capture_host_callback_replay_args 会覆写;RECORDING-collapse
         // 路径(execute_graph_for_recording / oneshot)是一次性消费,清不清
@@ -3150,6 +3204,8 @@ const char* kernel_id_short_name(KernelId id) {
     case KernelId::RMS_NORM_BF16:           return "RMSNORM";
     case KernelId::RMS_NORM_BF16_SPM:       return "RMSNORM_SPM";
     case KernelId::RMS_NORM_NEWTON_SPM:     return "RMSNORM_NEWTON_SPM";
+    case KernelId::RMS_NORM_BF16IN_FP16OUT_V32:
+                                            return "RMSNORM_BF16IN";
     // RoPE family
     case KernelId::ROPE:                    return "ROPE";
     case KernelId::ROPE_DDR:                return "ROPE_DDR";
@@ -3165,6 +3221,9 @@ const char* kernel_id_short_name(KernelId id) {
     case KernelId::PL_AT_FP16_ACC32_M416N48:
     case KernelId::PL_AT_FP16_ACC32_M496N32:
                                             return "LINEAR_ACC32";
+    case KernelId::PL_ACC32_OUT_BF16_M416N48:
+    case KernelId::PL_ACC32_OUT_BF16_M496N32:
+                                            return "LINEAR_ACC32_BF16";
     // SDPA family
     case KernelId::SDPA_FLASH_ATTN_SPM:     return "SDPA_SPM";
     case KernelId::SDPA_FLASH_ATTN_SPM_VCTXLEN:
@@ -3216,6 +3275,14 @@ const char* kernel_id_short_name(KernelId id) {
                                             return "ALLREDUCE_RING_NOPACE";
     case KernelId::LLM_ALL_REDUCE_RESIDUAL_RING_LOCAL_SPM:
                                             return "ALLREDUCE_RING_LOCAL_SPM";
+    case KernelId::LLM_ALL_REDUCE_BF16_PARTIAL_FP16_RESIDUAL:
+    case KernelId::LLM_ALL_REDUCE_FP16_PARTIAL_BF16_RESIDUAL:
+                                            return "ALLREDUCE_MIXED_PACED";
+    case KernelId::LLM_ALL_REDUCE_BF16_PARTIAL_FP16_RESIDUAL_NOPACE:
+    case KernelId::LLM_ALL_REDUCE_FP16_PARTIAL_BF16_RESIDUAL_NOPACE:
+                                            return "ALLREDUCE_MIXED_NOPACE";
+    case KernelId::LLM_ALL_REDUCE_FP16_PARTIAL_BF16_RESIDUAL_LOCAL_SPM:
+                                            return "ALLREDUCE_MIXED_LOCAL_SPM";
     case KernelId::ALL_GATHER_MULTI_CORE:              return "ALL_GATHER";
     default:                                return nullptr;  // numeric fallback
     }

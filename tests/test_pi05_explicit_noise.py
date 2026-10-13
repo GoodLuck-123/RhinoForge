@@ -11,7 +11,6 @@ def make_policy():
     calls = []
     policy = object.__new__(Pi05Policy)
     policy._rpu_ready = True
-    policy._optimized_profile = None
     policy._rpu_execution = None
     def record(batch, **kwargs):
         calls.append(kwargs)

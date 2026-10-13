@@ -76,7 +76,7 @@ python -m rpu_backend.quant.convert_qwen3 \
 # Pi0.5 W8A16
 python -m rpu_backend.quant.convert_pi05 --src SOURCE_DIR --dst OUTPUT_DIR
 
-# Pi0.5 mixed W4A16-G32-KV8 评估配置（不是纯 W4）
+# Pi0.5 mixed W4A16-KV8 评估配置（不是纯 W4）
 python -m rpu_backend.quant.convert_pi05 \
   --src SOURCE_DIR --dst OUTPUT_DIR --fake-w4 --real-w4
 

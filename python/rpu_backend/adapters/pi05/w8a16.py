@@ -62,8 +62,7 @@ def detect_and_validate_gemma_decoder_w8a16(
         scale = getattr(module, "weight_scale", None)
         fq_name = f"{label}.layers[{layer_idx}].{parent_name}.{proj_name}"
         nvfp4 = getattr(module, "_pi05_nvfp4_abi", None) == "striped_v2"
-        group_size = getattr(module, "_pi05_int4_group_size", None)
-        grouped = group_size in (32, 64, 128)
+        grouped = getattr(module, "_pi05_int4_group_size", None) == 128
         if scale is None or scale.dtype != (torch.uint8 if nvfp4 else torch.float16):
             raise RPUBackendError(
                 f"Pi05 quant validation failed: quantized {fq_name}.weight "
@@ -77,7 +76,7 @@ def detect_and_validate_gemma_decoder_w8a16(
                 raise RPUBackendError(f"{fq_name}: missing FP32 NVFP4 tensor_scale")
             expected = "FP8 [K/16,N] with FP32 tensor_scale"
         elif module.weight.dtype == torch.int8 and grouped:
-            scale_shape_ok = tuple(scale.shape) == (module.in_features // group_size, module.out_features)
+            scale_shape_ok = tuple(scale.shape) == (module.in_features // 128, module.out_features)
             expected = "logical K128 group scales [K/128,N]"
         elif module.weight.dtype == torch.int8:
             scale_shape_ok = (

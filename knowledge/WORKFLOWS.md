@@ -43,19 +43,14 @@ license or redistribution basis, and cite it from a maintained page.
 ## Resolve conflicts
 
 For runnable examples, consult the [configuration index](../examples/configs/README.md)
-and validate the selected file with `examples/run.py --check-config`.
-Keep one canonical template per model/version/component/precision/workload.
-When reorganizing paths, retain documented compatibility aliases where semantics
-match; otherwise give explicit migration steps. Update defaults, documentation
-and tests together. Keep aliases in the command-line path resolver, without
-duplicate TOML files; existing caller files take precedence. New examples and
-file-copy commands use canonical paths. See the [v1.2.0 upgrade guide](../docs/upgrading_1_2.md).
-Record canonical renames in [config_names.json](../examples/configs/config_names.json)
-and keep older aliases pointing directly to existing templates. Model TOML files
-belong in their family directories.
+and validate the selected file with `python -m examples.run --config <TOML> --check-config`.
+Keep one template per model/version/component/precision/workload. Put TOML files
+in their model-family directories and runner implementations in `examples/runners/`.
+Update the template, documentation and configuration checks together. Use the
+current paths from the index in commands and file-copy instructions.
 Keep persistent model construction outside inference mode; apply the selected mode to inference only. Warm a new Graph with BUILD and REPLAY. With `warmup >= 2`, omit `warmup_decode_steps` or match `input.decode_steps`; fixed-length runs use `stop_on_eos=false`.
 The [LingBot v2 runner](../examples/configs/lingbot/v2/README.md) permits `warmup=0` after its A/B/A and READY preparation; retain an independent first output and compare subsequent replays against it.
-The [archived exact-Z2 entry](../examples/configs/lingbot/legacy/exact_z2/README.md) requires explicit `input.training_config` and `input.qwen3vl_base`; pass both to the policy before graph preparation.
+The [exact-Z2 entry](../examples/configs/lingbot/legacy/exact_z2/README.md) uses its checkpoint processor and its own input template; keep it separate from the v2 replay runner.
 The [HALO example](../examples/configs/halo/README.md) resolves `halo_action_expert`
 directly to `HALO/action_expert.safetensors` under the model cache. Check the
 paired single-step fixture before weight loading; do not append checkpoint directories.
@@ -103,13 +98,25 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   Enable `causal_decoder_set_tts_codec_mode` only on the installed codec handle;
   its default-off state preserves other decoders' RoPE parameters and layout hash.
   Keep original CPU FP32 codec weights; fold LayerScale into new frontend copies
-  before FP16 conversion and preserve FP32 rotary frequencies. Admit only 1–63
-  codec frames. Missing setter selects CPU; other failures propagate.
+  before FP16 conversion and preserve FP32 rotary frequencies. Use the device
+  frontend for 1–63 codec frames and the original CPU FP32 sliding attention for
+  64–255 frames. Missing setter selects CPU; report the route and propagate errors.
 - Reset logical KV position per sequence. Talker keeps EOS and repetition penalties;
-  Predictor uses a fixed 15-step greedy loop and resets KV per frame. Bind output-head
-  reuse to the exact current hidden object and consume it once. Speaker caching is
-  bounded to the latest decoded audio content, not a path or modification time.
-- Talker reuses the 28-layer/1024 prefill envelope within its 128-position cache.
+  Predictor uses a fixed 15-step sampling loop and resets KV per frame. Both use
+  top-k 50, temperature 0.9 and top-p 1.0. Require EOS before waveform decoding;
+  each segment allows up to 256 steps. Compare deterministic outputs after
+  resetting the same seed when changing sampling.
+- Accept up to 1024 characters. Keep requests within 128 characters and 32 tokens
+  on their single-segment path. Split longer text at punctuation with a 12-token
+  target and 128-character bound; retain tiny sentence endings up to 16 tokens.
+  Use sentence stops and the request-initial CPU RNG state for each segment.
+  Later segments restore the caller RNG state left by the first; return owned
+  concatenated audio only after every segment succeeds.
+- Bind output-head reuse to the exact current hidden object and consume it once.
+  Predictor borrows the final device row for its immediate head; requests for
+  hidden states retain owned CPU outputs. Never retain a borrowed row across
+  another replay. Cache only the latest decoded reference speaker embedding.
+- Talker reuses the 28-layer/1024 prefill envelope within its 512-position cache.
   Exclude physical padding from logical KV position; replace only the old prefill
   Graph when prompt length changes. Predictor keeps one decode Graph; codec keeps
   one current-frame Graph. Retire Graphs before handles and weights.

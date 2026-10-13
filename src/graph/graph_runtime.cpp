@@ -3665,9 +3665,7 @@ void RpuKernelGraph::register_host_callback_persistent_stable(
     if (v.host_base == 0 || v.nbytes == 0) return;
     push_unique_owner(host_callback_persistent_owners_, v);
     if (to_copy_log_enabled()) {
-        std::cerr << "[STABLE-REG persist] host=0x" << std::hex << v.host_base
-                  << " dev=0x" << v.dev_base << std::dec
-                  << " nbytes=" << v.nbytes
+        std::cerr << "[STABLE-REG persist] nbytes=" << v.nbytes
                   << " dtype=" << stable.scalar_type()
                   << " sizes=" << stable.sizes() << "\n";
     }
@@ -3679,9 +3677,7 @@ void RpuKernelGraph::register_host_callback_live_tier1_out(
     if (v.host_base == 0 || v.nbytes == 0) return;
     push_unique_range(host_callback_live_tier1_out_ranges_, v);
     if (to_copy_log_enabled()) {
-        std::cerr << "[STABLE-REG live] host=0x" << std::hex << v.host_base
-                  << " dev=0x" << v.dev_base << std::dec
-                  << " nbytes=" << v.nbytes
+        std::cerr << "[STABLE-REG live] nbytes=" << v.nbytes
                   << " dtype=" << fresh_out_arg.scalar_type()
                   << " sizes=" << fresh_out_arg.sizes() << "\n";
     }

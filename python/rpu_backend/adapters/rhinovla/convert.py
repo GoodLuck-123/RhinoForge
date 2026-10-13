@@ -801,7 +801,7 @@ def _plan_rhino_prefix_kv_geometry(*, num_layers, num_kv_heads, logical_rows,
             "RhinoVLA prefix planner returned a non-canonical KV route"
         )
     route_argument_digest = sha256(
-        ("device-RHINOVLA-PREFIX-KV-V1\0" + ",".join(
+        ("RPU-RHINOVLA-PREFIX-KV-V1\0" + ",".join(
             str(value) for value in route_arguments
         )).encode("ascii")
     ).hexdigest()

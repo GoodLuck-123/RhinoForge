@@ -63,16 +63,15 @@ Rhino Launch 和算子资产。请按[当前源码构建说明](docs/development
 3. 确认板卡空闲后检查安装和模型配置，再运行推理：
 
 ```bash
-python examples/verify_install.py --check-config
-python examples/verify_install.py
+python -m pip check
 cp examples/configs/qwen3/text/0_6b/fp16.toml qwen3.local.toml
 cat >> qwen3.local.toml <<'TOML'
 
 [logging]
 level = "INFO"
 TOML
-python examples/run.py --config qwen3.local.toml --check-config
-python examples/run.py --config qwen3.local.toml
+python -m examples.run --config qwen3.local.toml --check-config
+python -m examples.run --config qwen3.local.toml
 ```
 
 示例显式设置 `logging.level="INFO"`，以显示生成文本；默认 `ERROR` 仅显示错误及独立摘要。
@@ -84,7 +83,7 @@ python examples/run.py --config qwen3.local.toml
 
 | 主题 | 文档 |
 |---|---|
-| v1.2.0rc1 更新与迁移 | [发行说明](CHANGELOG.md) · [升级指南](docs/upgrading_1_2.zh.md) |
+| v1.2.0rc1 更新与安装 | [发行说明](CHANGELOG.md) · [升级指南](docs/upgrading_1_2.zh.md) |
 | 完整文档导航 | [文档索引](docs/README.md) |
 | 当前源码安装 | [源码构建](docs/development_build.md) |
 | 安装与首次运行 | [入门指南](docs/getting_started.zh.md) |

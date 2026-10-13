@@ -38,7 +38,7 @@ T 表示 `lang_masks` 中有效语言 token 的数量。所有模板使用 TP8�
 
 | 阶段 | 主要执行设置 |
 |---|---|
-| Vision | 多相机 batch；patch embedding 在 设备；融合 merger、SPM RoPE；图像特征直接写入前缀缓冲 |
+| Vision | 多相机 batch；patch embedding 在设备；融合 merger、SPM RoPE；图像特征直接写入前缀缓冲 |
 | Prefill | 复用前缀准备缓冲；Vision/Prefill fast replay；VLM replay；K/V 使用对齐后的写入路径 |
 | Action | 稀疏 Top4 专家执行；十步去噪图内展开；专家 replay 与 AdaRMS 广播融合；FP16 Top4 路由 |
 | Graph | 保留 Vision/Prefill/Action Graph；`instruction_residency="auto"` 按 SDK 和程序条件选择快照重放 |
@@ -139,7 +139,7 @@ vi /tmp/lingbot2_2cam_t16_w8.toml
 python examples/run.py --config /tmp/lingbot2_2cam_t16_w8.toml
 ```
 
-其他输入选择配置表中的模板，并导出其中 `input.observation` 对应的变量。运行所需的 main/expansion 两份 REF 由项目 manifest 绑定；源码目录读取 `src/*_current.ref`，Release 包读取匹配 wheel 内的两份 REF。准备方法见[算子库说明](../../../../docs/runtime_assets.md)。
+其他输入选择配置表中的模板，并导出其中 `input.observation` 对应的变量。运行所需的 main/expansion 两份 REF 由 `release/runtime-dependencies.json` 绑定。安装独立 runtime 包后，设置 `RPU_KERNEL_LIB_PATH` 与 `RPU_KERNEL_LIB_PATH_EXPANSION` 指向配套文件；示例会校验两份文件的 SHA-256。准备方法见[算子库说明](../../../../docs/runtime_assets.md)。
 
 <a id="input-modes"></a>
 <a id="输入方式"></a>
@@ -185,16 +185,16 @@ cameras = 2
 | `input.cameras` | 2 或 3 | 从实际输入取得 | 填写时校验相机数，所有相机 mask 有效 |
 | `input.expected_language_tokens` | 目录中的 T 值 | 只要求至少一个有效 token | 填写时校验 `lang_masks` 的有效数量 |
 | `input.max_language_tokens` | T128/T160 为 160，其余未配置 | 72 | 1–160，限制语言存储宽度 |
-| `rpu_execution.prefill.padding_budget` | 三相机 T128 为 64，其他 T128/T160 和三相机 T64 为 63，其余未配置 | 15 | 非负整数；AUTO 在预算内选物理前缀 |
+| `rpu_execution.prefill.padding_budget` | T128/T160 和三相机 T64 为 63，其余未配置 | 15 | 非负整数；AUTO 在预算内选物理前缀 |
 | `rpu_execution.model.num_cores` | 8 | 8 | 固定 TP8 |
 | `cpu.threads` | 1 | 1 | 正整数，CPU 线程数 |
-| `run.warmup/runs/seed` | 2 / 5 / 0 | 2 / 5 / 0 | warmup≥0、runs≥1、seed≥0 |
+| `run.warmup/runs/seed` | 2 / 5 / 0 | 2 / 5 / 0 | warmup≥1、runs≥1、seed≥0 |
 | `run.output_dir` | 模板对应结果目录 | 必填 | 每次运行使用独立目录 |
 
 语言存储上限、有效 token 数和物理前缀分别控制存储、语义与执行布局。超出语言上限的指令会报错；增加物理填充不增加有效 token，也不改变 mask。两种精度的同输入模板使用相同填充设置。日志、诊断和公共执行字段见[公共参数说明](../../PARAMETERS.md)。
 
 ## 输出与重放
 
-`run.output_dir` 保存 `actions.pt`、执行计划和 Graph 状态。默认预热 2 次、正式运行 5 次；准备阶段另有五次调用。`warmup=0` 仍执行 A/B/A 与 READY 准备，以首个输出为重放基线。准备后 Graph 身份保持稳定，重放及提交计数递增；OFF 或回退路径的 prepared miss 可递增。`--profile` 在常规运行后增加一次诊断调用。
+`run.output_dir` 保存 `actions.pt`、执行计划和 Graph 状态。默认预热 2 次、正式运行 5 次；准备阶段另有五次调用。准备后 Graph 身份保持稳定，重放及提交计数递增；OFF 或回退路径的 prepared miss 可递增。`--profile` 和 `--hwperf` 各在常规运行后增加一次诊断调用；跟踪文件另存。`--check-config` 只检查 TOML，不读取模型或输入资产。
 
 实验性 Prefill KV 配对、QK-norm/RoPE 融合、稀疏 KV 镜像和路由替换保持关闭。

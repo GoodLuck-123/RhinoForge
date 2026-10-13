@@ -1,5 +1,7 @@
 """Asset identity, quantization input and cached-mask regression checks."""
 import hashlib
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -65,26 +67,53 @@ def test_factory_entrypoints_preserve_separate_asset_selection(monkeypatch):
     assert factory.OFFICIAL_CHECKPOINT_SHA256 != factory.V3_CHECKPOINT_SHA256
 
 
-def test_v3_factory_loads_tensor_inputs_from_file_before_assets(monkeypatch, tmp_path):
+@pytest.mark.parametrize("runtime_factory", [
+    "rpu_backend.adapters.rhinovla.factory:v3_runtime_factory",
+    "caller.integration:create_runtime",
+])
+def test_v3_example_loads_qin_only_for_explicit_builtin_factory(
+        monkeypatch, tmp_path, runtime_factory):
+    from examples.common.config import load_config
+    from examples.runners.rhinovla import runner as example
+    import rpu_backend.api as api
+
     path = tmp_path / "qin.pt"
     torch.save({"input_ids": torch.ones(1, 2, dtype=torch.long),
                 "attention_mask": torch.ones(1, 2, dtype=torch.long),
                 "pixel_values": torch.ones(1, 4),
                 "image_grid_thw": torch.tensor([[1, 1, 1]])}, path)
+    request = tmp_path / "request.pt"
+    torch.save({"state": torch.zeros(1, 96)}, request)
+    factory_config = tmp_path / "factory.json"
+    factory_config.write_text(json.dumps({"qin": str(path), "model_root": str(tmp_path)}))
+    config = load_config(Path(__file__).resolve().parents[1]
+                         / "examples/configs/rhinovla/v3/fp16.toml")
+    config["input"].update(runtime_factory=runtime_factory, checkpoint=str(path),
+                           request=str(request), factory_config=str(factory_config))
     load = torch.load
     calls = []
     def record(*args, **kwargs):
-        calls.append(kwargs)
+        calls.append((args[0], kwargs))
         return load(*args, **kwargs)
     monkeypatch.setattr(torch, "load", record)
     monkeypatch.setattr(factory, "_reject_unsafe_diagnostics", lambda: None)
     def stop_before_assets(*args, **kwargs):
         raise RuntimeError("asset boundary reached")
     monkeypatch.setattr(factory, "_validate_official_assets", stop_before_assets)
+    builtin = runtime_factory.endswith(":v3_runtime_factory")
+    def invoke(name, supplied, **kwargs):
+        assert name == runtime_factory
+        if builtin:
+            return factory.v3_runtime_factory(supplied, **kwargs)
+        assert supplied["qin"] == str(path)
+        raise RuntimeError("asset boundary reached")
+    monkeypatch.setattr(api, "RhinoVLAPolicy", SimpleNamespace(from_factory=invoke))
+    if not builtin:
+        path.unlink()  # A custom factory owns its file resolution and schema.
     with pytest.raises(RuntimeError, match="asset boundary reached"):
-        factory.v3_runtime_factory({"qin": str(path), "model_root": str(tmp_path),
-                                    "checkpoint": str(path), "trust_model_code": True})
-    assert calls == [{"map_location": "cpu", "weights_only": True}]
+        example.prepare(SimpleNamespace(source_config=config))
+    expected = [request, path] if builtin else [request]
+    assert calls == [(file, {"map_location": "cpu", "weights_only": True}) for file in expected]
 
 
 def test_shared_attention_mask_preserves_padding_and_mutated_inputs():

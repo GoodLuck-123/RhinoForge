@@ -132,18 +132,19 @@ python scripts/validate_rhinovla_v3.py prepare \
   --fixture /tmp/rhinovla_v3_inputs.pt --example-dir /tmp/rhinovla_v3_example
 ```
 
-准备命令在 CPU 上使用同版本 processor 和 `datasets/example_lerobot_v3/videos/` 的三个相机视频生成输入，state/noise 使用固定种子。输出 fixture 供[独立运行配置](controlled/README.md)使用，`--example-dir` 另生成统一入口所需的 `qin.pt`、`request.pt` 和 `factory.json`。
+准备环境需要 `qwen-vl-utils==0.0.14`（包含在 `vla` 安装选项中）。准备命令在 CPU 上使用同版本 processor 和 `datasets/example_lerobot_v3/videos/` 的三个相机视频生成输入，state/noise 使用固定种子。输出 fixture 供[独立运行配置](controlled/README.md)使用，`--example-dir` 另生成统一入口所需的 `qin.pt`、`request.pt` 和 `factory.json`。
 
 <a id="fp16-loading"></a>
 <a id="使用"></a>
 
 ### 统一入口
 
-内置 `rpu_backend.adapters.rhinovla.factory:v3_runtime_factory` 加载固定源码与 checkpoint，并按所选 TOML 安装运行配置；W8 在加载时转换。
+模板中的 `your_package.rhinovla_v3:create_runtime` 由调用者填写。使用上述公开源码与准备工具时，显式选择内置 `rpu_backend.adapters.rhinovla.factory:v3_runtime_factory`；它按所选 TOML 安装运行配置，W8 在加载时转换。
 
 ```bash
 cp examples/configs/rhinovla/v3/fp16.toml /tmp/rhinovla_v3.toml
 # input.checkpoint = RHINOVLA_V3_CKPT 的实际路径。
+# input.runtime_factory = "rpu_backend.adapters.rhinovla.factory:v3_runtime_factory"
 # input.factory_config = /tmp/rhinovla_v3_example/factory.json
 # input.request = /tmp/rhinovla_v3_example/request.pt
 # run.output_dir = 本次结果目录。
@@ -152,7 +153,17 @@ python examples/run.py --config /tmp/rhinovla_v3.toml --check-config
 python examples/run.py --config /tmp/rhinovla_v3.toml
 ```
 
-其他档位替换复制的 TOML，继续使用同一套原始权重与输入。`factory.json` 的 `model_root` 指向源码，`qin` 指向保存的 CPU 输入；`request.pt` 包含状态、噪声和掩码。`trust_model_code=true` 允许执行固定模型源码。已有自定义集成仍可填写自己的 `module:callable` 和配对文件。
+其他档位替换复制的 TOML，继续使用同一套原始权重与输入。`factory.json` 的 `model_root` 指向源码，`qin` 指向保存的 CPU 输入；统一入口读取后交给内置 factory。`request.pt` 包含状态、噪声和掩码。`trust_model_code=true` 允许执行固定模型源码。已有自定义集成仍可填写自己的 `module:callable` 和配对文件，其 factory 配置原样传入。
+
+| 输入字段 | 内容与绑定 |
+|---|---|
+| `input.checkpoint` | 同一套 v3 / 96D 浮点 checkpoint，五份配置共用 |
+| `input.runtime_factory` | 调用者提供的 `module:callable`；公开资产可选上述内置 factory |
+| `input.factory_config` | 准备工具生成的 JSON，含源码与输入位置；同名量化布尔值必须与 TOML 一致 |
+| `input.request` | 配对的状态、噪声和掩码，传给 `policy.predict(**request)` |
+| `run.output_dir` | 本次产物目录 |
+
+自定义 factory 返回与所选配置匹配的 `RhinoVLAOnRPU`。
 
 factory 接收 checkpoint、steps、量化选择和组件配置。修改安装参数后使用新进程；缓存复用时仍需刷新图像、状态及噪声。
 
@@ -173,3 +184,11 @@ factory 接收 checkpoint、steps、量化选择和组件配置。修改安装�
 公共字段见[参数说明](../../PARAMETERS.md)。
 
 Text/Vision 的 ACC 字段不控制 action、patch embedding 和冷 AdaRMS 投影，也不写入 action 表。现有优化要求完整 18 层专家、96D 动作和上述十步输入结构。
+
+### 实现参考
+
+- [runner](../../../runners/rhinovla/runner.py)：绑定 factory 参数并核对实际量化范围。
+- [convert.py](../../../../python/rpu_backend/adapters/rhinovla/convert.py)：专家投影量化、AdaRMS 预计算及动作 IO 安装。
+- [precision.py](../../../../python/rpu_backend/adapters/rhinovla/precision.py)：Text 量化、Linear 累加与全流水线权重检查。
+- [pipeline.py](../../../../python/rpu_backend/adapters/rhinovla/pipeline.py)：组件构造、缓存和执行。
+- [运行参数](../../../../docs/runtime_config.md)与[两份运行库](../../../../docs/runtime_assets.md)。

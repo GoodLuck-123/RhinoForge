@@ -1,33 +1,35 @@
-from __future__ import annotations
-
 from types import SimpleNamespace
 
 import pytest
+import torch
 
-from rpu_backend.adapters.dinov3 import _dinov3_layers
-from rpu_backend.api.errors import RPUBackendError
-
-
-def test_dinov3_layers_accepts_direct_and_wrapped_hf_layouts_without_eager_fallback() -> None:
-    direct = SimpleNamespace(layer=["direct"])
-    assert _dinov3_layers(direct) == ["direct"]
-
-    class Wrapped:
-        model = SimpleNamespace(layer=["wrapped"])
-
-        @property
-        def layer(self):
-            raise AssertionError("direct fallback must not be evaluated eagerly")
-
-    assert _dinov3_layers(Wrapped()) == ["wrapped"]
-
-    # A diagnostic/self-referential compatibility alias must still resolve the
-    # real direct layer rather than recursing through ``model.model``.
-    self_alias = SimpleNamespace(layer=["direct"])
-    self_alias.model = self_alias
-    assert _dinov3_layers(self_alias) == ["direct"]
+from rpu_backend.adapters.dinov3 import _pad_attn_heads_to_multiple_of_cores
 
 
-def test_dinov3_layers_rejects_an_unknown_layout() -> None:
-    with pytest.raises(RPUBackendError, match="encoder layers"):
-        _dinov3_layers(SimpleNamespace())
+def _direct_model():
+    attention = torch.nn.Module()
+    for name in ("q_proj", "k_proj", "v_proj", "o_proj"):
+        setattr(attention, name, torch.nn.Linear(24, 24, bias=name != "k_proj"))
+    return SimpleNamespace(config=SimpleNamespace(hidden_size=24, num_attention_heads=3),
+                           layer=[SimpleNamespace(attention=attention)])
+
+
+def test_dinov3_direct_encoder_padding_preserves_existing_weights():
+    model = _direct_model()
+    attention = model.layer[0].attention
+    original = {name: layer.weight.detach().clone() for name, layer in attention.named_children()}
+    _pad_attn_heads_to_multiple_of_cores(model)
+    for name in ("q_proj", "k_proj", "v_proj"):
+        weight = getattr(attention, name).weight
+        assert tuple(weight.shape) == (64, 24)
+        assert torch.equal(weight[:24], original[name])
+        assert not weight[24:].count_nonzero()
+    assert torch.equal(attention.o_proj.weight[:, :24], original["o_proj"])
+    assert not attention.o_proj.weight[:, 24:].count_nonzero()
+
+
+def test_dinov3_requires_the_direct_encoder_layer_layout():
+    direct = _direct_model()
+    wrapped = SimpleNamespace(config=direct.config, model=direct)
+    with pytest.raises(AttributeError, match="layer"):
+        _pad_attn_heads_to_multiple_of_cores(wrapped)

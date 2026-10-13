@@ -1805,6 +1805,10 @@ def install_mrope_text_decoder_for_rpu(
             already be int8 (swizzled dwidth=1) and the install routes to
             `causal_decoder_set_weights_w8a16`. None → fp16 (default).
 
+        topology: cold decoder ownership. Reduced budgets require the complete
+            FP16 Qwen3-VL 2B/4B/8B profile, M-RoPE [24,20,20], and DeepStack
+            consumers [0,1,2].
+
     Returns the C++ handle (also stashed at `text_model._rpu_decoder_handle`).
     """
     import rpu_backend

@@ -89,19 +89,17 @@ python -m rpu_backend.quant.convert_pi05 \
   --dst /path/to/pi05-fake-W4 \
   --fake-w4
 
-# Runtime mixed W4A16-G32-KV8 评估格式（不是纯 W4）。
+# Runtime mixed W4A16-KV8 评估格式（不是纯 W4）。
 python -m rpu_backend.quant.convert_pi05 \
   --src /path/to/pi05-source \
-  --dst /path/to/pi05-mixed-W4A16-G32-KV8 \
+  --dst /path/to/pi05-mixed-W4A16-KV8 \
   --fake-w4 --real-w4
 ```
 
-该 runtime profile 使用 mixed W4A16-G32-KV8。仅量化声明的 Gemma
-VLM/action-expert Linear projection 权重：q/o/gate/up/down 沿 K 使用 symmetric
-W4 group-size-32，K/V projection 权重保持 W8；activation 与 KV cache 均保持
-FP16。Checkpoint 中逻辑 FP16 scale shape 为 `[K/32, N]`，加载时再转成 packed
-pgrp ABI 的 controller-striped 布局。SigLIP、AdaRMS dense、action projection
-和 processor sidecar 保持 FP16 或不变。
+该格式对 q/o/gate/up/down 使用 per-channel signed INT4，K/V projection
+保持 W8。权重以 INT8 tensor 保存，FP16 scale shape 为 `[N]`，加载时转换为
+运行库要求的 packed 布局。Activation、KV cache、SigLIP、AdaRMS dense 和
+Action projection 保持 FP16，processor sidecar 不变。
 
 `--keep-int8` 接受逗号分隔 projection name，用于受控 W4 mixed-precision 实验。
 `--real-w4` 是该 mixed profile 的遗留 CLI 名称，会自动让 K/V projection 权重
@@ -116,9 +114,27 @@ python -m rpu_backend.quant.convert_pi05 --src SOURCE_DIR --dst NVFP4_DIR --acti
 
 `--action-w4` 默认使用 NVFP4 `striped_v2` ABI、block16；Action Q/O/Gate/Up/Down
 使用 NVFP4，K/V 和 VLM 保持 W8。元数据写入 `rpu_quant_config.json`。
-这是 `optimized_profile.precision=w8_action_nvfp4` 的输入格式；两相机或三相机的
-`w8_prefill_a8_action_nvfp4` 在安装时另选 Prefill GateUp A8。
-它与上述 `--real-w4` INT4 G32/KV8 格式不可互换。
+选择两相机或三相机的
+[`w8a16_action_nvfp4` 模板](../examples/configs/pi05/README.md)。
+`w8a16_prefill_w8a8_action_nvfp4` 模板在安装时另选 Prefill GateUp A8。
+Checkpoint 配方须与模板配套；`--real-w4` 生成上文所述的逐通道 INT4/KV8 格式。
+
+Action 专用转换还接受以下显式格式：
+
+| `--action-w4-format` | Action 权重与 scale 存储 |
+|---|---|
+| `nvfp4`（默认） | E2M1 编码、K16 FP8 scale 和独立 FP32 tensor scale；`striped_v2` ABI |
+| `int4_g128` | INT8 `[N,K]` 保存 signed INT4，每个 K128 分组有独立 FP16 scale `[K/128,N]` |
+| `legacy_int4` | 逐输出通道 signed INT4；打包时重复通道 scale |
+
+从原始浮点权重转换到新目录时，同时传 `--action-w4` 和所需格式。
+三者均写入 `int4_components=["expert"]`，Action K/V 和全部 VLM projection 保持 W8。
+格式之间需要重新转换，不能只重命名目录或修改 metadata。
+
+当前优化模板在安装前固定相机数、文本桶和累加模式。`input.text_tokens` 只选择物理桶，
+不会分词、截断或填充输入。提供匹配的 `[1,T]` 整数 token、非空且只在右侧 padding 的 bool
+mask，再用该 batch 准备 Graph。两相机输入需要两路真实图像；改变图数或文本桶应重建 policy。
+FP16 模板要求浮点权重且无量化 metadata，并关闭 Vision、AdaRMS 动态量化。
 
 ## Wall-OSS
 
@@ -156,6 +172,90 @@ W4A16 runtime 只接受 packed group representation。输入宽度为 `K`、grou
 controller-striped layout；不要添加模型专用 packing 或 tile override。FP16/W8/W4
 Linear 都使用共享 generated auto-tiling，见
 [Linear 自动分块](../knowledge/concepts/linear-autotiling.md)。
+
+[Wall-OSS 分拣](../examples/configs/wall_oss/sorting/README.md)同时保留原始 FP16 和 W8
+目录。Action-W4 模板通过 `input.action_w4_checkpoint` 增加单独转换的 G32 目录，只替换
+Action expert1；Vision、Language 继续使用 W8。该选择在创建子模型前绑定，需要配对的 RTC
+资产；原始目录仍提供浮点预处理与输出权重。相机和动作输入按分拣模板填写，先运行
+`python -m examples.run --config <TOML> --check-config` 检查配置，再执行模型。
+
+## Qwen3.5 Dense
+
+离线入口为 `python -m rpu_backend.quant.convert_qwen3_5 --src SOURCE_DIR --dst OUTPUT_DIR`。
+统一文本投影使用 `--method w8a16` 或 `--method w4a16_pgrp`，混合配置使用 `--profile`：
+
+| Profile | 文本投影 |
+|---|---|
+| `w4_main_w8_gdn` | 主投影 W4/G32；GDN QKV/Z/out W8；GDN B/A FP16 |
+| `w8_main_w8_gdn` | 主投影和 GDN QKV/Z/out W8；GDN B/A FP16 |
+| `w4_mlp_only` | MLP Gate/Up/Down W4/G32；Attention、GDN FP16 |
+| `w4_mlp_w8_attn_gdn` | MLP Gate/Up/Down W4/G32；Attention、GDN W8 |
+
+混合配置在 `config.json` 写入 `quant_config.format_version=2`。后两项覆盖每层 MLP，
+固定 `--group-size 32`。Vision、embedding、LM head、norm 和 GDN convolution 保持 FP16。
+源浮点张量直接转 FP16；旧转换产物需要从原始 checkpoint 重新生成，以消除此前的 BF16 中间转换。
+
+```sh
+python -m rpu_backend.quant.convert_qwen3_5 --src SOURCE_DIR --dst MIXED_DIR --profile w4_mlp_w8_attn_gdn
+```
+
+使用 `RPUModelForConditionalGeneration` 加载，以保留整数权重和 scale。
+选择匹配的[文本或图像模板](../examples/configs/qwen3_5/README.md)，runner 会在权重加载前
+检查量化元数据。量化图像模板要求同时设置 `QWEN3_5_QUANT_ALLOW_UNCERTIFIED=1` 和
+`QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED=1`。
+
+独立的 QuantTrio AWQ G128 来源保持第零层 MLP、Attention、GDN、Vision、LM head 为 FP16，
+后续层 MLP 保留 AWQ 权重。用对应 AWQ 模板加载原始 checkpoint；上述 RTN converter 不生成此格式。
+
+## Qwen3.5 MoE routed INT4
+
+35B-A3B 的 RTN 和官方 GPTQ 配置只量化 routed Gate/Up/Down expert，格式为 UINT4/G128。
+Attention、GDN、router、shared expert、embedding、norm 和 LM head 使用 FP16。
+两者均要求 batch=1、八核、Text ACC16；拒绝 `prefill.linear_acc32=true`。
+Vision 的累加选项独立设置。
+
+| 来源 | Checkpoint 要求 |
+|---|---|
+| RTN | 精确 `rtn_metadata`、indexed safetensors、完整 `derivation_manifest.json`；不使用校准 |
+| 官方 GPTQ | `Qwen/Qwen3.5-35B-A3B-GPTQ-Int4`，对称四位 G128、无 act-order、仅 routed expert 量化 |
+
+RTN 的 zero-minus-one 为 `0x77777777`，官方 GPTQ 的 zero8 为 `0x88888888`。
+两个 loader 分别校验其约定，再进入共享 UINT4 路径；GPTQ 保留原始整数 codes 和 FP16 scales。
+存在但不合法的 `rtn_metadata` 不会回退到 GPTQ。这两个入口不接受任意 GPTQ 格式或 mixed-E4M3。
+
+RTN 先将源分组提升为 FP32，计算 `s=max(abs(group))*(2/15)`，全零组使用 `2/15`；
+随后 `q=clamp(round_even(w/s)+8,0,15)`。先确定编码，再把 scale 转成 FP16，保留下溢后的零。
+反量化为 `(q-8)*s`。源文件使用 INT32 `qweight[K/8,N]`、FP16 `scales[K/128,N]` 和
+`g_idx[k]=k//128`，RTN/GPTQ 的零点约定各自校验。TP8 下 Gate/Up 保持 G128；Down 将
+每个原 G128 scale 重复成两个物理 G64 分组，编码与反量化结果不变。安装时按配套的两份算子库打包。
+
+文本别名为 `RPU_MODEL_CACHE` 下的 `qwen3_5-35b-a3b-rtn-w4a16` 和
+`qwen3_5-35b-a3b-gptq-w4a16`，也可用 `--model` 指定 checkpoint。
+GPTQ 读取原始 indexed checkpoint，不接受 RTN derivation metadata；RTN 拒绝未完成的 staging
+目录。`input_ids` 为 CPU `int64 [1,T]`；安装后通过 `Qwen3_5MoeCache.from_model` 为完整请求分配 cache。
+
+使用条件生成 loader 和 `Qwen3_5MoeCache`。安装时逐层读取专家权重，不把全部专家展开为 FP16。
+indexed reader 校验 shard 路径、header、shape、dtype 和 tensor 清单；完整文件 hash 在资产准备时
+验证。运行时 checkpoint identity 记录元数据与文件状态，不代替完整 payload 校验和。
+
+```sh
+python -m examples.run --config examples/configs/qwen3_5/text/35b_a3b/w4a16_experts_rtn_g128.toml --model RTN_DIR
+python -m examples.run --config examples/configs/qwen3_5/text/35b_a3b/w4a16_experts_gptq_g128.toml --model GPTQ_DIR
+```
+
+对应 `vl/35b_a3b/` 模板支持图像：在 cache position=0 同时传入 `input_ids`、`pixel_values`、
+`image_grid_thw`、`mm_token_type_ids`，且不超过已安装 Vision KV 和 RoPE 边界。不支持视频。
+模型安装一次，请求间调用 `cache.reset()`；prefill 使用有界 one-shot，decode 复用 Graph。
+FP16 计算后的 logits 以 CPU FP32 返回。
+
+## RhinoVLA v3 expert
+
+[v3 模板](../examples/configs/rhinovla/v3/README.md) 默认使用内置
+`rpu_backend.adapters.rhinovla.factory:v3_runtime_factory`，读取固定 v3 源码、checkpoint
+和预处理 CPU 输入。`w8a16_action.toml` 量化 action Q/K/V/O、Gate/Up/Down；
+`w8a16_action_adarms.toml` 还量化 AdaRMS condition 投影。两者均使用 INT8 权重、FP16 scale
+和 activation，Vision、prefix language、action IO 保持所选浮点格式。自定义可信 factory
+需满足相同输入与生命周期合同；runner 检查实际 expert 存储。
 
 ## 运行时转换 helper
 

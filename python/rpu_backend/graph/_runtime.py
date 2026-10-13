@@ -86,7 +86,11 @@ def _lkn_load_snapshot() -> tuple[int, int, int]:
 
 @dataclass(frozen=True)
 class GraphRuntimePolicy:
-    """Cold, typed policy shared by a GraphCache and every Graph it creates."""
+    """Cold policy shared by a GraphCache and each Graph it creates.
+
+    ``execution_core_count`` bounds queue, kernel and DMA core prefixes. It does
+    not select model tensor parallelism or change the eight-stripe memory layout.
+    Bind the policy before capture."""
 
     fast_replay_skip_sync: bool = True
     force_oneshot_on_replay: bool = False
@@ -215,10 +219,10 @@ class GraphRuntimePolicy:
         )
 
     def prepare_arenas(self) -> bool:
-        """Reserve the legacy 27B process plan before weights or instructions.
+        """Reserve the owner's process plan before weights or graph capture.
 
-        Three SDK-sized arenas cover one decode entry, bounded raw prefill,
-        and a serialized immediate launch. The successful SDK plan is frozen
+        The legacy owner reserves three SDK-sized arenas; other owners declare
+        their retained and transient graphs. The successful SDK plan is frozen
         for the process; this is not a general multi-model arena planner.
         A host without an accessible device returns False without allocation.
         """

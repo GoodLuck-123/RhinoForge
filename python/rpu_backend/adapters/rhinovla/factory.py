@@ -130,7 +130,11 @@ def official_runtime_factory(config, *, rpu_execution=None):
 
 
 def v3_runtime_factory(config, *, rpu_execution=None):
-    """Load the pinned v3 96D, 30-step horizon, non-RTC profile."""
+    """Load the pinned v3 96D, horizon-30, depth-18 non-RTC profile.
+
+    Use the v3 checkpoint remapping, descending flow and prefix RoPE continuation;
+    training-only OAT/LoRA tensors are ignored. Configuration and prepared CPU
+    inputs follow ``official_runtime_factory``. The v1 asset contract is separate."""
     return _runtime_factory(config, rpu_execution=rpu_execution, v3=True)
 
 
@@ -157,8 +161,6 @@ def _runtime_factory(config, *, rpu_execution=None, v3=False):
     steps = config.get("steps", 10)
     denoise_schedule(steps, "official_descending")
     qin = config["qin"]
-    if v3 and isinstance(qin, (str, os.PathLike)):
-        qin = torch.load(_path_argument("qin", qin), map_location="cpu", weights_only=True)
     if not isinstance(qin, Mapping):
         raise TypeError("RhinoVLA qin must contain preprocessed CPU tensors")
     required = {"input_ids", "attention_mask", "pixel_values", "image_grid_thw"}

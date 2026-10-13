@@ -19,6 +19,22 @@ export PIP_REQUIRE_VIRTUALENV=true PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 if (( $# == 0 )); then
     "$rf_job_venv/bin/python" scripts/check_release_version.py
     "$rf_job_venv/bin/python" scripts/check_examples.py
-    set -- tests python/rpu_backend/tests/acceptance
+    set -- tests python/rpu_backend/tests/acceptance python/rpu_backend/tests/core/test_pi05_denoise_buffers.py \
+        python/rpu_backend/tests/core/test_pi05_denoise_build_layer_compiles.py \
+        python/rpu_backend/tests/core/test_rpu_warmup_binding.py python/rpu_backend/tests/graph \
+        python/rpu_backend/tests/library python/rpu_backend/tests/model python/rpu_backend/tests/quant \
+        python/rpu_backend/tests/ops/test_siglip_pre_embedded_rows.py
+    # Device cases are retained in source and run separately from the host job.
+    while IFS= read -r rf_device_test; do
+        case "$rf_device_test" in ''|\#*) continue ;; esac
+        test -f "$rf_device_test"
+        set -- "$@" "--ignore=$rf_device_test"
+    done < scripts/ci/device_test_paths.txt
+    while IFS= read -r rf_device_node; do
+        case "$rf_device_node" in ''|\#*) continue ;; esac
+        test -f "${rf_device_node%%::*}"
+        set -- "$@" "--deselect=$rf_device_node"
+    done < scripts/ci/device_test_nodes.txt
 fi
-exec "$rf_job_venv/bin/python" -m pytest -q -ra "$@"
+exec "$rf_job_venv/bin/python" -m pytest -q -ra --durations=20 \
+    --junitxml=test-results/host-runtime.xml "$@"

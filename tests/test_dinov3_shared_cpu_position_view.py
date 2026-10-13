@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 SOURCE = Path(__file__).resolve().parents[1] / "python/rpu_backend/adapters/dinov3.py"
 FUNCTIONS = {
-    "_dinov3_layers", "_padded_num_heads", "_clear_dinov3_handle_install",
+    "_padded_num_heads", "_clear_dinov3_handle_install",
     "install_dinov3_vision_for_rpu", "_make_dummy_dinov3_kv_caches",
     "_install_dinov3_vision_for_rpu_impl", "_validate_dinov3_input_bounds",
     "_dinov3_single_chunk_size", "build_position_idx",

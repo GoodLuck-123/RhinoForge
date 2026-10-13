@@ -1,4 +1,10 @@
-"""Model execution and tensor layout contracts."""
+"""HALO text-prompt prefill using the shared causal decoder and text weights.
+
+An explicit additive causal-prefix mask covers both an empty prefix and a
+supplied image prefix. KV insertion starts at the prefix length; semantic
+RoPE positions may start elsewhere. Embeddings follow the checkpoint's
+FP32-to-BF16-to-FP16 path. Prefix writes reuse owned cache storage; changed
+storage invalidates captured graphs."""
 from __future__ import annotations
 
 import dataclasses
@@ -41,7 +47,10 @@ def _to_rpu_half(t: torch.Tensor) -> torch.Tensor:
 
 
 def _dynamic_layer_kv(dc: object, layer: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Model execution and tensor layout contracts."""
+    """Return layer K/V in ``[batch, heads, sequence, head_dim]`` format.
+
+    Accept Transformers caches with ``layers[i].keys/values`` or the older
+    ``key_cache[i]/value_cache[i]`` interface."""
     layers = getattr(dc, "layers", None)
     if layers is not None:
         return layers[layer].keys, layers[layer].values
@@ -212,11 +221,18 @@ class HaloTextCacheUpdate:
     def _inject_prefix(
         self, prefix_k: List[torch.Tensor], prefix_v: List[torch.Tensor], prefix_len: int
     ) -> None:
-        """Model execution and tensor layout contracts."""
+        """Copy per-layer prefix K/V into stable owned cache tensors.
+
+        Inputs have shape ``[prefix, heads, head_dim]``. Reuse storage when its shape
+        and device match; otherwise replace it and advance the prefix epoch so the
+        graph is rebuilt. Set the cache position to the supplied prefix length."""
         _inject_text_prefix(self, prefix_k, prefix_v, prefix_len)
 
     def _rope_base(self, packed_text_position_ids: torch.Tensor, seq: int) -> int:
-        """Model execution and tensor layout contracts."""
+        """Return the first semantic text position, independent of KV insertion.
+
+        Require consecutive positions so a scalar RoPE offset represents the whole
+        text segment. Nonconsecutive positions are unsupported."""
         pos = packed_text_position_ids.to(torch.long).cpu()
         if tuple(pos.shape) != (seq,):
             raise ValueError(f"packed_text_position_ids shape {tuple(pos.shape)} != ({seq},)")
@@ -264,7 +280,13 @@ class HaloTextCacheUpdate:
         packed_text_position_ids: torch.Tensor,
         prefix_kv: Optional[Tuple[List[torch.Tensor], List[torch.Tensor]]] = None,
     ) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
-        """Model execution and tensor layout contracts."""
+        """Prefill text and return CPU K/V for only the new text segment.
+
+        Token IDs and semantic position IDs are one-dimensional integer tensors.
+        ``prefix_kv`` supplies per-layer ``[prefix, heads, head_dim]`` K/V, or None
+        for an empty prefix. Each returned layer has ``[sequence, heads, head_dim]``
+        K/V. An explicit causal-prefix mask governs visibility; KV insertion starts
+        at the prefix length and RoPE starts at the first supplied position ID."""
         cfg = self.cfg
         seq = int(packed_text_ids.shape[0])
         if prefix_kv is not None:

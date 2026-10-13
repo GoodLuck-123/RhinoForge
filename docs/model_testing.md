@@ -7,9 +7,9 @@ Select a TOML from [model examples](../examples/README.md). Runners live in `exa
 ## Run
 
 ```sh
-python examples/run.py --config examples/configs/qwen3/text/0_6b/fp16.toml --check-config
-python examples/run.py --config examples/configs/qwen3_vl/vl/4b/w8a16_text_head_vision.toml
-python examples/run.py --config examples/configs/pi05/2cam/w8a16_action_nvfp4.toml
+python -m examples.run --config examples/configs/qwen3/text/0_6b/fp16.toml --check-config
+python -m examples.run --config examples/configs/qwen3_vl/vl/4b/w8a16_text_head_vision.toml
+python -m examples.run --config examples/configs/pi05/2cam/w8a16_action_nvfp4.toml
 ```
 
 Replace placeholder paths and supply the checkpoint and inputs required by the model guide. Relative `input.prompt_file` and `input.prepared_input_safetensors` paths resolve from the configuration file's directory. Other asset paths follow the model guide. `--check-config` validates configuration without loading weights or accessing a device. Quantized checkpoints require the loader's metadata; see [quantization](quantization.md).
@@ -31,7 +31,27 @@ The public runner rejects `hwperf=true`. For a device-specific issue, use the in
 
 ## Qwen3 speech
 
-Use `examples/qwen3_asr.py` and `examples/qwen3_tts.py` with the `audio` extra.
+Install the `audio` extra and call `Qwen3ASRModel` or `Qwen3TTSModel`.
 The [speech guide](qwen3_audio.md) provides checkpoint downloads, TTS source
-preparation and complete commands. These dedicated scripts run independently
-of the text/vision TOML runner.
+preparation and complete Python examples.
+
+## Repository checks
+
+Run the host suite with `make ci-local-core PYTHON=python`. It uses the same
+host paths and device exclusions as CI. `make ci-local-quickstart` checks
+example configurations and the adapter registry.
+
+After configuring a source build with the [public SDK](getting_started.md),
+enable the optional C++ contracts in that build directory:
+
+```sh
+cmake -S . -B build -DRHINOFORGE_BUILD_HOST_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+cmake -S . -B build -DRHINOFORGE_BUILD_DEVICE_TESTS=ON
+cmake --build build --target rhino_device_tests
+```
+
+Device executables are in `build/tests/`; run them on an idle device with the
+configured runtime assets. Both options default to OFF. Device tests are
+separate from the host CI suite.

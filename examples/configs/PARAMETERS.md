@@ -1,6 +1,6 @@
 # 通用配置参数
 
-[模型目录](README.md) · [权重准备](WEIGHTS.md) · [命名规则](NAMING.md) · [日志与结果](../README.zh.md#日志与输出)
+[模型目录](README.md) · [权重准备](WEIGHTS.md) · [命名规则](NAMING.md) · [日志与结果](../RESULTS.md#日志设置)
 
 复制对应模型的完整 TOML，再填写路径和输入。模型页列出该模板的实际设置及可选范围；本页解释公共字段。模板中省略的字段由运行器或环境补全，因此“模板未写”和“关闭”分别理解。
 
@@ -59,7 +59,7 @@ CPU 线程与设备核数分别设置。权重精度、累加精度和非线性�
 
 ## 日志与配置检查
 
-`logging.level` 默认为 `ERROR`，`logging.summary` 默认为 `true`。取值、终端显示和日志文件见[日志与结果](../README.zh.md#日志与输出)。
+`logging.level` 默认为 `ERROR`，`logging.summary` 默认为 `true`。取值、终端显示和日志文件见[日志与结果](../RESULTS.md#日志设置)。
 
 ```bash
 python examples/run.py --config /path/to/filled-config.toml --check-config

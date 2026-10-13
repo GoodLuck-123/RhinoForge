@@ -453,7 +453,10 @@ def _declare_qwen3_5_chunk_envelope(
         raise UnsupportedModelError(
             f"Qwen3.5: no declared chunk envelope for (num_hidden_layers, "
             f"hidden_size)={key}. This profile has no implemented/qualified "
-            f"hardware envelope; this profile is not enabled."
+            f"hardware envelope; running it on the auto chunk planner risks "
+            f"busting SPM and WEDGING the board. Measure it on a resettable "
+            f"board, then add "
+            f"a row here AND to docs/roadmap/chunk_certified_envelope.md."
         )
     _torch.ops.rpu.qwen3_5_set_chunk_envelope(handle, env[0], env[1])
     return env
@@ -1122,13 +1125,6 @@ def _install_qwen3_5_text_for_rpu_impl(
             "Qwen3.5 adaptive_mode='adaLN' currently requires all layers to "
             "use full_attention."
         )
-    if not all(is_full):
-        dk = int(tc.linear_key_head_dim)
-        dv = int(tc.linear_value_head_dim)
-        if dk != 128 or dv != 128:
-            raise UnsupportedModelError(
-                f"Qwen3.5 GDN requires key/value head dimensions 128/128, got {dk}/{dv}"
-            )
     quant_config = resolve_quant_config(config) or {}
     projection_specs = _validate_projection_specs(
         inner, is_full, quant_config or None)

@@ -37,7 +37,6 @@ import in downstream control/data tooling.
 
 from __future__ import annotations
 
-from pathlib import Path
 import dataclasses
 import functools
 import os
@@ -357,39 +356,6 @@ def _runtime_policy_complete(policy) -> bool:
     )
 
 
-def _resolve_use_qwen3_chat_template(
-    checkpoint: str | os.PathLike[str],
-    training_config: str | os.PathLike[str] | None,
-) -> bool:
-    """Resolve the public prompt format before any weight materialization."""
-    config_path = None if training_config is None else Path(training_config)
-    if config_path is None:
-        candidates = sorted(Path(checkpoint).glob("lingbotvla_cli*.y*ml"))
-        config_path = candidates[0] if candidates else None
-    if config_path is None:
-        # LingbotVLAV2Config owns this exact public-profile default upstream.
-        return True
-
-    import yaml
-
-    with config_path.open("r", encoding="utf-8") as stream:
-        document = yaml.safe_load(stream) or {}
-    if not isinstance(document, Mapping):
-        raise ValueError("LingBot-VLA-V2 training config must be a mapping")
-    merged: dict[str, Any] = {}
-    for section_name in ("model", "train"):
-        section = document.get(section_name, {}) or {}
-        if not isinstance(section, Mapping):
-            raise ValueError(
-                f"LingBot-VLA-V2 training config [{section_name}] must be a mapping"
-            )
-        merged.update(section)
-    enabled = merged.get("use_qwen3_chat_template", True)
-    if not isinstance(enabled, bool):
-        raise ValueError("use_qwen3_chat_template must be true or false")
-    return enabled
-
-
 @dataclasses.dataclass(frozen=True)
 class Lingbot2ActionOutput:
     """One LingBot-VLA-V2 action-chunk result.
@@ -568,9 +534,6 @@ class Lingbot2Policy:
         inst._max_lang_tokens = int(max_lang_tokens)
         inst._robot_norm_path = None if robot_norm_path is None else os.fspath(robot_norm_path)
         inst._training_config_path = None if training_config_path is None else os.fspath(training_config_path)
-        inst._use_qwen3_chat_template = _resolve_use_qwen3_chat_template(
-            ckpt_dir, training_config_path
-        )
         inst._robot_config_path = None if robot_config_path is None else os.fspath(robot_config_path)
         inst._action_norm_spec = action_norm_spec
         inst._denorm = None
@@ -596,7 +559,6 @@ class Lingbot2Policy:
         inst._policy = None
         inst._policy_finalizer = None
         inst._env_snapshot = None
-        inst._processor_source = inst._ckpt_dir
         inst._processor = None
         inst._prepare_ms = {}
         inst._graph_profile = None
@@ -1028,20 +990,6 @@ class Lingbot2Policy:
             if qv:
                 qv = os.path.abspath(os.path.expanduser(str(qv)))
 
-            if self._use_qwen3_chat_template and not qv:
-                from rpu_backend.api.errors import RPUBackendError
-
-                raise RPUBackendError(
-                    "LingBot-VLA-V2 public chat-template preprocessing requires "
-                    "qwen3vl_base (or RPU_LINGBOT2_QWEN3VL_BASE) to name a "
-                    "complete local public Qwen3-VL processor asset."
-                )
-            processor_source = qv or self._ckpt_dir
-            if processor_source != self._processor_source:
-                self._processor = None
-            self._processor_source = processor_source
-            self._preflight_processor_contract()
-
             # Robot-action config is CPU-only preflight. Resolve it before any
             # swizzle or native handle is created so a bad/mismatched stats file
             # cannot leave a partially materialized process behind.
@@ -1202,10 +1150,7 @@ class Lingbot2Policy:
         if self._processor is None:
             from transformers import AutoProcessor
 
-            self._processor = AutoProcessor.from_pretrained(
-                self._processor_source,
-                local_files_only=True,
-            )
+            self._processor = AutoProcessor.from_pretrained(self._ckpt_dir)
         return self._processor
 
     @staticmethod
@@ -1251,37 +1196,6 @@ class Lingbot2Policy:
                 f"expected an HWC uint8 RGB frame, got dtype {arr.dtype}"
             )
         return np.ascontiguousarray(arr)
-
-    def _preflight_processor_contract(self) -> None:
-        """Validate public prompt ownership before runtime/weight mutation."""
-        if not self._use_qwen3_chat_template:
-            return
-        from rpu_backend.api.errors import RPUBackendError
-
-        try:
-            processor = self._get_processor()
-            tokenizer = processor.tokenizer
-            image_processor = processor.image_processor
-            prompt = tokenizer.apply_chat_template(
-                [{"role": "user", "content": "probe"}],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-        except Exception:
-            raise RPUBackendError(
-                "LingBot-VLA-V2 could not load the required public Qwen3-VL "
-                "processor and chat template; runtime construction was not started."
-            ) from None
-        if not callable(tokenizer) or not callable(image_processor):
-            raise RPUBackendError(
-                "LingBot-VLA-V2 requires callable public Qwen3-VL tokenizer and "
-                "image-processor assets; runtime construction was not started."
-            )
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise RPUBackendError(
-                "LingBot-VLA-V2 public Qwen3-VL chat template returned an invalid "
-                "prompt; runtime construction was not started."
-            )
 
     def _encode_images(self, images: Sequence[Any]) -> tuple[torch.Tensor, torch.Tensor]:
         """Camera frames -> (pixel_values [N, P, D], image_grid_thw [N, 3]).
@@ -1331,17 +1245,16 @@ class Lingbot2Policy:
             # image-processor call. A uint8 HWC round-trip changes pixel values.
             from torchvision.transforms.v2 import Resize
 
-            resize = Resize((sz, sz), antialias=True)
-            pixel_values = []
-            grids = []
+            resize = Resize((sz, sz))
+            arrs = []
             for im in images:
                 t = torch.as_tensor(self._as_rgb_uint8_array(im)).permute(2, 0, 1).contiguous()
-                enc = ip(resize(t.to(torch.float32)))
-                pixel_values.append(enc["pixel_values"])
-                grids.append(torch.as_tensor(enc["image_grid_thw"]).reshape(-1, 3)[0])
-            packed = torch.cat(pixel_values, dim=0)
-            return packed.reshape(n, -1, packed.shape[-1]).contiguous().float(),\
-                torch.stack(grids, dim=0).long()
+                t = resize(t.to(torch.float32))
+                arrs.append(t.permute(1, 2, 0).clamp(0, 255).to(torch.uint8).numpy())
+            enc = ip(images=arrs, return_tensors="pt")
+            pixel_values = enc["pixel_values"]
+            return pixel_values.reshape(n, -1, pixel_values.shape[-1]).contiguous().float(), \
+                enc["image_grid_thw"].reshape(n, 3).long()
 
         # Compatibility preprocessing mode.
         from PIL import Image as _Image
@@ -1363,18 +1276,10 @@ class Lingbot2Policy:
     def _encode_instruction(self, instruction: str) -> tuple[torch.Tensor, torch.Tensor]:
         """Tokenize to the admission cap; ``attention_mask`` defines REAL rows."""
         proc = self._get_processor()
-        prompt = instruction
-        if self._use_qwen3_chat_template:
-            prompt = proc.tokenizer.apply_chat_template(
-                [{"role": "user", "content": instruction}],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
         tok = proc.tokenizer(
-            prompt,
+            instruction,
             return_tensors="pt",
             padding="max_length",
-            padding_side="right",
             truncation=True,
             max_length=self._max_lang_tokens,
         )

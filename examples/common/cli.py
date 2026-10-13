@@ -11,14 +11,9 @@ from examples.common.config import (
 )
 
 
-def main(argv=None, *, keep_logging_until_exit=False, default_config=None,
-         legacy_entry=None) -> int:
+def main(argv=None, *, keep_logging_until_exit=False) -> int:
     parser = argparse.ArgumentParser(description="Run one RhinoForge model configuration.")
-    parser.add_argument("--config", type=Path, default=default_config,
-                        required=default_config is None and legacy_entry is None)
-    if legacy_entry == "run_model":
-        parser.add_argument("--list-targets", action="store_true",
-                            help="List the previous public model entry points.")
+    parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--check-config", action="store_true",
                         help="Check syntax/profile without importing Torch or the device backend.")
     parser.add_argument("--hwperf", "--hw-perf", dest="hwperf", action="store_true",
@@ -29,32 +24,7 @@ def main(argv=None, *, keep_logging_until_exit=False, default_config=None,
                         help="Override a Qwen3.5 MoE checkpoint path; its profile remains validated.")
     args = parser.parse_args(argv)
     try:
-        from examples.common.legacy import (
-            G05_INTEGRATION, LIST_TARGETS, MIGRATIONS, TARGET_ALIASES, is_runner_config,
-            resolve_config_path,
-        )
-        if getattr(args, "list_targets", False):
-            print("\n".join(LIST_TARGETS))
-            return 0
-        if args.config is None:
-            raise ConfigError(MIGRATIONS[legacy_entry])
-        args.config = resolve_config_path(args.config)
-        config = load_config(args.config.resolve())
-        if legacy_entry and legacy_entry != "run_model":
-            from examples.common.config import config_target
-
-            target = config["runner"]["target"] if is_runner_config(config) else config_target(config)
-            if target not in TARGET_ALIASES.get(legacy_entry, {legacy_entry}):
-                raise ConfigError(f"{legacy_entry}.py does not run target {target!r}; use examples/run.py")
-        if is_runner_config(config):
-            if args.model is not None or args.hwperf:
-                raise ConfigError("G0.5 source integration does not accept --model/--hwperf")
-            if not args.check_config:
-                raise ConfigError(G05_INTEGRATION)
-            from examples.common.logging import configuration_checked
-
-            configuration_checked(f"configuration OK: {args.config} (G0.5 source integration only)")
-            return 0
+        config = load_config(args.config.expanduser().resolve())
         if args.model is not None:
             profile = example_profiles().get(config.get("example", {}).get("profile_id"), {})
             if (config.get("example", {}).get("target") not in {"qwen3_5", "qwen3_5_vision"}
@@ -62,12 +32,6 @@ def main(argv=None, *, keep_logging_until_exit=False, default_config=None,
                 raise ConfigError("--model is currently supported only by Qwen3.5 MoE text/image profiles")
             config["_model_override"] = str(args.model.expanduser().resolve())
         if "env" in config:
-            if args.check_config:
-                from examples.common.logging import configuration_checked
-
-                configuration_checked(
-                    f"configuration OK: {args.config} (RhinoVLA v3 runtime fragment; syntax only)")
-                return 0
             raise ConfigError(
                 "Run this RhinoVLA v3 configuration with "
                 "scripts/validate_rhinovla_v3.py run")

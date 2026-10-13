@@ -901,7 +901,11 @@ class WallOssAction:
 
     def _denoise_bias_inputs(self, dof_mask: torch.Tensor, times: torch.Tensor,
                              num_steps: int):
-        """Inference runtime helpers and execution contracts."""
+        """Cache ``(row_constant, b_all, te_all)`` by step count and mask contents.
+
+        For a row-constant mask, return the conditioning vector and per-step time
+        table. Otherwise return the full per-step bias and no time table. Compare
+        the entire mask before reuse and retain stable device inputs for replay."""
         c = self._bias_cache
         if self._host_cache and c is not None and c[0] == num_steps and torch.equal(c[1], dof_mask):
             return c[2], c[3], c[4]

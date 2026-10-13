@@ -3,6 +3,16 @@
 // not an independently compiled registration component.
 
 TORCH_LIBRARY(rpu, m) {
+  m.def("lingbot_v2_moe_debug_packed", &rpu_lingbot_v2_moe_debug_packed);
+  m.def("lingbot_v2_moe_debug_sparse_route_stage", &rpu_lingbot_v2_moe_debug_sparse_route_stage);
+  m.def("lingbot_v2_moe_debug_ccap", &rpu_lingbot_v2_moe_debug_ccap);
+  m.def("lingbot_v2_moe_debug_scap", &rpu_lingbot_v2_moe_debug_scap);
+  m.def("lingbot_v2_moe_debug_acap", &rpu_lingbot_v2_moe_debug_acap);
+  m.def("lingbot_v2_moe_debug_gcap", &rpu_lingbot_v2_moe_debug_gcap);
+  m.def("lingbot_v2_moe_debug_wtm_stage", &rpu_lingbot_v2_moe_debug_wtm_stage);
+  m.def("lingbot_v2_moe_debug_rw_stage", &rpu_lingbot_v2_moe_debug_rw_stage);
+  m.def("rhino_vla_debug_flush_dumps", TORCH_FN(rpu_rhino_vla_debug_flush_dumps));
+  m.def("qwenpi05_debug_flush_dumps", TORCH_FN(rpu_qwenpi05_debug_flush_dumps));
   m.def("spm_alloc_dump", [](const std::string& label) { SPM_ALLOC.dump(label.c_str()); });
 
   m.def("qwen25vl_vision_set_wall_sorting_routes",
@@ -1639,6 +1649,8 @@ TORCH_LIBRARY(rpu, m) {
 
 // Implementation for device
 TORCH_LIBRARY_IMPL(rpu, PrivateUse1, m) {
+  m.impl("rhino_vla_debug_flush_dumps", TORCH_FN(rpu_rhino_vla_debug_flush_dumps));
+  m.impl("qwenpi05_debug_flush_dumps", TORCH_FN(rpu_qwenpi05_debug_flush_dumps));
 
   m.impl("wall_oss_action_step_set_weight_residency", TORCH_FN(rpu_wall_oss_action_step_set_weight_residency));
 
@@ -1873,6 +1885,8 @@ TORCH_LIBRARY_IMPL(rpu, CPU, m) {
 // shim,Dynamo / FakeTensorMode 路径上 dispatcher 命中 Python 调 shim 返回
 // torch.empty_like(...)。
 TORCH_LIBRARY_IMPL(rpu, AutogradPrivateUse1, m) {
+  m.impl("rhino_vla_debug_flush_dumps", torch::CppFunction::makeFallthrough());
+  m.impl("qwenpi05_debug_flush_dumps", torch::CppFunction::makeFallthrough());
   m.impl("wall_oss_action_step_set_weight_residency", torch::CppFunction::makeFallthrough());
 
   m.impl("zero_contiguous_tensor_blocks_sized", torch::CppFunction::makeFallthrough());

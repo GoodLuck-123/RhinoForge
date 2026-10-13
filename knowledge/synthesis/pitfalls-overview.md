@@ -12,7 +12,7 @@ a shared contract in RhinoForge.
 | Fixed DMA captures a tensor that moves between forwards | Use a mutable wrapper and update the live address | [DMA ownership](../concepts/ddr-dma-wrappers.md) |
 | A graph signature omits a semantic input | Add it to the signature or update it through the mutable-data contract | [Graph invariants](../concepts/graphcache-capture.md) |
 | A setter changes layout or bound weights without invalidation | End the setter with `invalidate_model_state()` | [Fused subsystem guide](../../docs/model_porting.md#4-add-a-fused-subsystem-only-when-required) |
-| A cold execution option changes after model construction | Create a new model handle with the final `rpu_execution` mapping | [Runtime controls](../../docs/runtime_config.md#cold-per-handle-rpu_execution) |
+| A cold execution option changes after model construction | Create a new model handle with the final `rpu_execution` mapping | [Runtime controls](../../docs/runtime_config.md#per-handle-rpu_execution) |
 
 When the first check fails to explain a numerical mismatch, compare the CPU
 reference and device result at the smallest public model boundary, then widen one

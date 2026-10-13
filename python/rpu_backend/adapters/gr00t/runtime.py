@@ -9,7 +9,6 @@ subsets have independent prepared native slots. The standalone runtime does
 not require importing the upstream GR00T package."""
 from __future__ import annotations
 import os, math, glob
-import inspect
 from contextlib import nullcontext
 from types import SimpleNamespace
 import torch
@@ -81,26 +80,6 @@ _EXECUTION_COMPONENTS = {
     _VL_COMPONENT: {"prefill": ("chunk_size",)},
     _ACTION_COMPONENT: {"action": ("chunk_size",)},
 }
-
-
-def _get_gr00t_rope_index(
-    get_rope_index,
-    *,
-    input_ids,
-    mm_token_type_ids,
-    image_grid_thw,
-    attention_mask,
-):
-    """Call the Qwen3-VL 4.57/5.x M-RoPE API without masking real errors."""
-    kwargs = {
-        "input_ids": input_ids.cpu(),
-        "image_grid_thw": image_grid_thw.cpu(),
-        "video_grid_thw": None,
-        "attention_mask": attention_mask.cpu(),
-    }
-    if "mm_token_type_ids" in inspect.signature(get_rope_index).parameters:
-        kwargs["mm_token_type_ids"] = mm_token_type_ids.cpu()
-    return get_rope_index(**kwargs)
 
 
 def _resolve_gr00t_execution(
@@ -1771,10 +1750,11 @@ class Gr00tN1d7VLA:
         )
         if rope_changed:
             mmtt = (input_ids == self._img_tok).to(torch.int32)
-            self._rope_ids, _ = _get_gr00t_rope_index(
-                m.model.get_rope_index, input_ids=input_ids,
+            self._rope_ids, _ = m.model.get_rope_index(
+                input_ids.cpu(),
                 mm_token_type_ids=mmtt.cpu(),
                 image_grid_thw=grid.cpu(),
+                video_grid_thw=None,
                 attention_mask=attention_mask.cpu(),
             )
             self._rope_key = input_ids.detach().clone()
@@ -2031,8 +2011,8 @@ class Gr00tN1d7VLA:
             # A failed preparation stays a miss without freeing that source.
             self._pos_native_ready = False
             mmtt = (input_ids == img_tok).to(torch.int32)
-            self._rope_ids, _ = _get_gr00t_rope_index(m.model.get_rope_index, input_ids=input_ids, mm_token_type_ids=mmtt,
-                                                       image_grid_thw=grid,
+            self._rope_ids, _ = m.model.get_rope_index(input_ids.cpu(), mm_token_type_ids=mmtt.cpu(),
+                                                       image_grid_thw=grid.cpu(), video_grid_thw=None,
                                                        attention_mask=attn.cpu())
             self._rope_key = input_ids.clone()
             self._rope_grid_key = grid.clone()

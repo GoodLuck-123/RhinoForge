@@ -69,7 +69,15 @@ def build_native_prefix_banks(
     rpu_execution=None,
     execution_controller=None,
 ):
-    """Model execution and tensor layout contracts."""
+    """Build the unconditional-image prefix bank with one text-cache owner.
+
+    ``img_uncond_text_pack`` supplies one-dimensional integer token and position
+    arrays. Return ``{"cfg_img": bank}``, where each layer maps to CPU K/V tensors
+    shaped ``[sequence, num_kv_heads, head_dim]``. A supplied ``text_cache`` is
+    reused; otherwise this function constructs it from ``ckpt_path``.
+    ``frames`` must be None: image-conditioned banks require separate vision/text
+    stages to avoid retaining both owners' storage. They are rejected before
+    creating either handle. ``cond_text_pack`` and ``vit_cache`` are reserved."""
     validate_halo_core_layout(cfg)
     if frames is not None:
         # 单进程同时建 vit_cache + text_cache 两 handle 的全 3 银行路

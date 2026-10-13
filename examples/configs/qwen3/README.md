@@ -48,7 +48,7 @@
 
 <a id="quantization"></a>
 
-下载和离线转换可在 CPU 机器完成，`examples/run.py` 在 设备板卡执行。命令从仓库根目录运行，使用已安装项目依赖的 Python 环境。
+下载和离线转换可在 CPU 机器完成，`examples/run.py` 在设备板卡执行。命令从仓库根目录运行，使用已安装项目依赖的 Python 环境。
 
 先设置缓存根目录：
 
@@ -142,7 +142,7 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 python/rpu_backend/quant/convert_qwen3.p
 
 ### 关键配置项
 
-公共字段见[参数说明](../PARAMETERS.md)，输出字段见[日志与结果](../../README.zh.md#日志与输出)。本模型需要一起检查以下几组值：
+公共字段见[参数说明](../PARAMETERS.md)，输出字段见[日志与结果](../../RESULTS.md#日志设置)。本模型需要一起检查以下几组值：
 
 | 层次 / 字段 | 模板值与省略后的有效值 | 范围与关联 |
 |---|---|---|
@@ -169,3 +169,5 @@ python3 examples/run.py --config "$CONFIG"
 ```
 
 `--check-config` 检查字段和登记关系；正式运行时读取权重，并写出 `report.json` 与生成结果。精度、核数、ACC 等安装参数改变后，用新进程运行。
+
+转换实现：[W8](../../../python/rpu_backend/quant/convert_qwen3.py)、[W4 加载时量化](../../../python/rpu_backend/quant/convert_qwen3_w4a16.py)、[32B 分层加载](../../../python/rpu_backend/quant/load_qwen3_quantized.py)。运行库见[运行资产](../../../docs/runtime_assets.md)。

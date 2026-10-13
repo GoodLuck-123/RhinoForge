@@ -61,6 +61,7 @@ def test_gs128_packing_is_idempotent_and_leaves_kv_unchanged():
         module = torch.nn.Linear(1024, 256, bias=False)
         module.weight = torch.nn.Parameter(torch.randint(-8, 8, (256, 1024), dtype=torch.int8), requires_grad=False)
         module.register_buffer("weight_scale", torch.ones(8, 256, dtype=torch.float16))
+        module._pi05_int4_group_size = 128
         setattr(attn, name, module)
     decoder = SimpleNamespace(layers=[SimpleNamespace(self_attn=attn)])
     kv = {name: getattr(attn, name).weight.clone() for name in ("k_proj", "v_proj")}
@@ -493,3 +494,37 @@ def test_extended_text_cli_rejects_unadmitted_geometry_before_checkpoint_loading
         RUNNER["main"]()
     assert error.value.code == 2
     assert message in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+def test_per_channel_packing_honors_explicit_group_size(group_size):
+    from rpu_backend.quant.int4_pgrp_pack import pack_int4_per_channel_as_pgrp
+
+    module = torch.nn.Linear(1024, 256, bias=False)
+    codes = torch.arange(256 * 1024).reshape(256, 1024).remainder(16).to(torch.int8) - 8
+    scale = torch.ones(256, dtype=torch.float16)
+    module.weight = torch.nn.Parameter(codes, requires_grad=False)
+    module.register_buffer("weight_scale", scale)
+    decoder = SimpleNamespace(layers=[SimpleNamespace(self_attn=torch.nn.Module())])
+    decoder.layers[0].self_attn.q_proj = module
+    expected, expected_scale = pack_int4_per_channel_as_pgrp(codes, scale, 1, 8,
+                                                            group_size=group_size)
+    assert pack_int4_projections_inplace(decoder, {"q_proj"}, attn_num_cores=8,
+                                         group_size=group_size) == 1
+    assert torch.equal(module.weight, expected.reshape(256, 512))
+    assert torch.equal(module.weight_scale, expected_scale)
+    assert module.weight_scale.shape[0] == group_size
+    assert pack_int4_projections_inplace(decoder, {"q_proj"}, attn_num_cores=8,
+                                         group_size=group_size) == 0
+
+
+def test_grouped_packing_rejects_a_different_requested_group_size():
+    module = torch.nn.Linear(1024, 256, bias=False)
+    module.weight = torch.nn.Parameter(torch.zeros(256, 1024, dtype=torch.int8), requires_grad=False)
+    module.register_buffer("weight_scale", torch.ones(8, 256, dtype=torch.float16))
+    attn = torch.nn.Module()
+    attn.q_proj = module
+    decoder = SimpleNamespace(layers=[SimpleNamespace(self_attn=attn)])
+    with pytest.raises(RuntimeError, match="logical group scales/metadata mismatch"):
+        pack_int4_projections_inplace(decoder, {"q_proj"}, attn_num_cores=8, group_size=32)
+    assert module.weight.dtype == torch.int8

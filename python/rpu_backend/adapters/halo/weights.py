@@ -1,4 +1,11 @@
-"""Model execution and tensor layout contracts."""
+"""Load HALO text/action branches from an EMA safetensors checkpoint.
+
+Text parameters use the base names; action parameters use ``_moe_act``.
+Cast weights to FP16 before layout conversion. Q/K/V/Gate/Up use column
+partitioning; O/Down use row partitioning. Attention uses two cores and MLP
+eight. Norms and biases keep their logical layout. RoPE tables use half-width
+``[rows, head_dim/2]`` cos/sin values. The runner retains returned tensors for
+the native handle's lifetime."""
 from __future__ import annotations
 
 import dataclasses
@@ -267,7 +274,12 @@ def load_halo_branches(
 def build_rope_tables(
     cfg: HaloConfig, rope_position: int, rows: "int | None" = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Model execution and tensor layout contracts."""
+    """Return constant-position FP16 cos/sin tables shaped ``[rows, head_dim/2]``.
+
+    ``rows`` defaults to ``cfg.total_len`` and must cover prefix plus query rows.
+    All query tokens share the supplied semantic position. Prefix keys already
+    carry their own rotary positions; these tables apply only to the new query
+    and key rows."""
     if rope_position < 0:
         raise ValueError(f"rope_position must be >= 0, got {rope_position}")
     half = cfg.head_dim // 2

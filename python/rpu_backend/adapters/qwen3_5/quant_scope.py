@@ -221,10 +221,6 @@ def resolve_quant_config(config):
     if awq is not None:
         return awq
     quant = _config_value(config, "quant_config")
-    # A few lifecycle fixtures use the pre-profile shorthand ``format``.
-    # Keep it readable while full checkpoints use the validated method fields.
-    if isinstance(quant, Mapping) and "format" in quant and "method" not in quant:
-        return {"method": quant["format"]}
     tc = _config_value(config, "text_config", config)
     is_full = is_full_from_layer_types(_config_value(tc, "layer_types", ()))
     quant = normalize_quant_config(is_full, quant)

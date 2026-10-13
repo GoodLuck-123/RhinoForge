@@ -38,8 +38,9 @@ void rpu_launch_pi05_down_pair_spm_kernel(
                 scale.scalar_type()==at::kHalf && scale.is_contiguous() &&
                 scale.sizes()==at::IntArrayRef({N})),
                 "Pi Down pair requires FP16 scale [2048]");
-    // Each named paired payload owns its fixed tile schedule (C400 uses M160).
-    // Generic single-input AUTO selection does not describe this two-slab ABI.
+    const auto tile=rpu_pl_tiling::select_tile_acc16(M,N,K,false);
+    TORCH_CHECK(rows != 400 || fp16 || (tile.m_tile==400 && tile.n_tile==80),
+                "Pi Down pair original M400/N80 tile identity drift");
     const KernelId id = rows == 432
         ? (fp16 ? KernelId::PI05_DOWN_WEIGHT_OUTER_FP16_C432X2_M112N80K128
                 : KernelId::PI05_DOWN_WEIGHT_OUTER_W8A16_C432X2_M112N80K128) :

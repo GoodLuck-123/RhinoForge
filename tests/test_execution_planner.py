@@ -723,13 +723,15 @@ def test_request_validation(value, match):
 
 
 @pytest.mark.parametrize("precision", ["fp16", "w8a16"])
-def test_lingbot_three_camera_t128_budget_reaches_admitted_layout(precision):
+def test_lingbot_three_camera_t128_budget_bounds_layout_search(precision):
     import tomllib
 
     template = _ROOT / f"examples/configs/lingbot/v2/3cam_t128/{precision}.toml"
     config = tomllib.loads(template.read_text())
     assert config["input"]["cameras"] == 3
     assert config["input"]["expected_language_tokens"] == 128
+    budget = config["rpu_execution"]["prefill"]["padding_budget"]
+    assert budget == 63
     logical_len = 326
     queried = []
 
@@ -741,14 +743,14 @@ def test_lingbot_three_camera_t128_budget_reaches_admitted_layout(precision):
 
     with pytest.raises(_MODULE.PlannerRejectError, match="NO_FEASIBLE"):
         _MODULE.plan_prefill(
-            logical_len, 973, 63, alignment=16,
+            logical_len, 973, budget, alignment=16,
             resolve_stage_domain=resolve,
         )
     assert queried == [336, 352, 368, 384]
 
     queried.clear()
     result = _MODULE.plan_prefill(
-        logical_len, 973, config["rpu_execution"]["prefill"]["padding_budget"],
+        logical_len, 973, budget + 1,
         alignment=16, resolve_stage_domain=resolve,
     )
     assert set(queried) == {336, 352, 368, 384, 400}
@@ -1848,3 +1850,18 @@ def test_fixed_component_identity_covers_physical_metadata_and_owner():
             stage="action",
             physical_metadata=(("position", 1),),
         )
+
+
+def test_plan_and_cost_identities_preserve_protocol_vectors():
+    # Stable interchange vectors: changing display names must not alter digests.
+    plan = _MODULE.plan_a6(15, request={"padding_budget": 1},
+                           tuple_domain=lambda _n: [(16, 16, 16)])
+    assert plan.plan_digest == "c16467ef9267ba7043260e343452d53586b289a90cabd3bbf39735935f7e8f68"
+    assert plan.physical_plan_digest == "3d84affc9b3bf1c3251729ad64de9d179751bad36c18252a3d5d0a40cf33fc36"
+    assert plan.domain_digest == "069170c2b02b79a93db455dcbd8dabcb122e7f4701a709dd754331ffac8518ca"
+    domain, keys = _MODULE.planner_cost_domain(
+        {16: [_MODULE.StageTuple(16, 16, 16)]},
+        scope=_MODULE.PlannerCostScope("1" * 64, "2" * 64, "3" * 64),
+        logical_len=15, position=0, graph_mode=_MODULE.GRAPH_RETAINED_CACHE)
+    assert domain == "7494c119fdde1cfa2a87e15bd953b14f543c4923dd5dbd0abc033564a82fc655"
+    assert list(keys.values()) == ["af17b7c2b7a1a7b7bb5c4e13c483189eb1d5b4212b290fccadc163c0c897b66e"]

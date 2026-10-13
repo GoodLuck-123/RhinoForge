@@ -82,38 +82,9 @@ def _load_pi05_rpu_quant_config(model_path: str) -> dict:
                 "_load_and_fp16_cast: method=w4a16 requires storage=int8 "
                 "(int4 values stored in int8 on disk) and value_bits=4"
             )
-        group_size = int(cfg.get("group_size", 0))
-        group_wise = (
-            group_size != 0
-            or cfg.get("mode") == "group_wise_symmetric"
-            or cfg.get("scale") == "per_group_GxN"
-        )
-        if group_wise and not (
-            group_size in (32, 64, 128)
-            and cfg.get("mode") == "group_wise_symmetric"
-            and cfg.get("scale") == "per_group_GxN"
-        ):
-            raise RPUBackendError(
-                "_load_and_fp16_cast: group-wise method=w4a16 requires "
-                "group_size in {32,64,128}, mode=group_wise_symmetric, "
-                "and scale=per_group_GxN"
-            )
-        mixed_int8 = {
-            (suffix[: -len(".weight")] if suffix.endswith(".weight") else suffix)
-            .rsplit(".", 1)[-1]
-            for suffix in cfg.get("mixed_int8_suffixes", ())
-            if isinstance(suffix, str)
-        }
-        if group_wise and not {"k_proj", "v_proj"}.issubset(mixed_int8):
-            raise RPUBackendError(
-                "_load_and_fp16_cast: group-wise method=w4a16 requires "
-                "mixed_int8_suffixes to include k_proj and v_proj"
-            )
         _LOG.info(
-            "Pi0.5 mixed W4A16-KV8 checkpoint detected: method=w4a16, "
-            "storage=int8, value_bits=4, kernel=wINT4a16_pgrp, group_size=%s; "
-            "activations and KV cache remain FP16",
-            group_size or "legacy-per-channel",
+            "Pi0.5 real-W4 checkpoint detected: method=w4a16, storage=int8, "
+            "value_bits=4, kernel=wINT4a16 (runtime packs to uint8 [N,K/2])"
         )
     if method == "nvfp4a16":
         if (cfg.get("storage") != "uint8_codes" or cfg.get("nvfp4_abi") != "striped_v2"
@@ -181,10 +152,9 @@ def _pop_pi05_w8a16_tensors(policy, state_dict: dict[str, torch.Tensor], quant_c
                 raise RPUBackendError(f"{weight_name}: logical quantized weight shape mismatch")
             is_w4 = module_name.rsplit(".", 1)[-1] in w4_children
             nvfp4 = is_w4 and quant_config.get("method") == "nvfp4a16"
-            grouped = is_w4 and quant_config.get("mode") in ("group_symmetric", "group_wise_symmetric")
-            group_size = quant_config.get("group_size", quant_config.get("int4_group_size", 128))
+            grouped = is_w4 and quant_config.get("mode") == "group_symmetric"
             n, k = weight.shape
-            expected = (k // 16, n) if nvfp4 else ((k // group_size, n) if grouped else (n,))
+            expected = (k // 16, n) if nvfp4 else ((k // 128, n) if grouped else (n,))
             expected_dtype = torch.uint8 if nvfp4 else torch.float16
             if scale.dtype != expected_dtype or tuple(scale.shape) != expected:
                 raise RPUBackendError(f"{scale_name} must be {expected_dtype} {expected}; got {scale.dtype} {tuple(scale.shape)}")
@@ -229,7 +199,7 @@ def _install_pi05_w8a16_tensors(policy, consumed) -> None:
             module.register_buffer("tensor_scale", values[2])
             module._pi05_nvfp4_abi = "striped_v2"
         elif weight.dtype == torch.int8 and scale.dim() == 2:
-            module._pi05_int4_group_size = weight.size(1) // scale.size(0)
+            module._pi05_int4_group_size = 128
 
 
 def _pi05_consumed_keys(consumed) -> set[str]:
@@ -267,18 +237,13 @@ def _cache_is_stale(source_paths: list, cache_path: str) -> bool:
         return True
     cache_stat = os.stat(cache_path)
     cache_mtime_ns = cache_stat.st_mtime_ns
-    cache_ctime_ns = cache_stat.st_ctime_ns
     for src in source_paths:
         if not os.path.exists(src):
             continue
-        source_stat = os.stat(src)
-        # ``ctime_ns`` catches content replacement with a preserved mtime.
+        # mtime_ns is the sole authoritative signal.
         # Callers exclude `model_remapped.safetensors` itself from source_paths
         # (enforced at call-site in _load_and_fp16_cast).
-        if (
-            source_stat.st_mtime_ns > cache_mtime_ns
-            or source_stat.st_ctime_ns > cache_ctime_ns
-        ):
+        if os.stat(src).st_mtime_ns > cache_mtime_ns:
             return True
     return False
 
@@ -548,7 +513,11 @@ def load_and_construct_pi05_policy(
             "Pi05Policy.from_pretrained() got duplicate keyword argument "
             "'trust_remote_code' (pass it ONCE as the explicit kwarg).")
     if trust_remote_code:
-        raise ValueError("RhinoForge requires trust_remote_code=False")
+        warnings.warn(
+            "trust_remote_code=True allows arbitrary code execution from "
+            "the checkpoint. Only enable for trusted sources.",
+            stacklevel=2,
+        )
     lerobot_kwargs["trust_remote_code"] = trust_remote_code
     lerobot_policy = _load_and_fp16_cast(pretrained_name_or_path, dtype, **lerobot_kwargs)
     # v5-02 D-12: Pi05Policy lives in api/policy.py (was transformers/pi05/policy.py

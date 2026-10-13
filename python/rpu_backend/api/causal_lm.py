@@ -193,8 +193,6 @@ class RPUModelForCausalLM:
         quantization: str | None = None,
         **hf_kwargs,
     ):
-        if hf_kwargs.get("trust_remote_code", False) is not False:
-            raise ValueError("RhinoForge requires trust_remote_code=False")
         if quantization not in (None, "w4a16", "w4a16_lm_head"):
             raise UnsupportedModelError(
                 "quantization must be None, 'w4a16' or 'w4a16_lm_head' (dense Qwen3, G32, TP8)"

@@ -146,7 +146,7 @@ def test_operator_kernel_manifest_is_strict_and_asset_stays_opaque(
 
 
 @pytest.mark.parametrize("dims", [(64, 128), (128, 64)])
-def test_qwen3_5_gdn_head_dims_fail_before_mutation(dims) -> None:
+def test_qwen3_5_gdn_projection_validation_precedes_mutation(dims, monkeypatch) -> None:
     model = SimpleNamespace(
         norm=SimpleNamespace(weight=torch.ones(1, dtype=torch.float16))
     )
@@ -157,7 +157,15 @@ def test_qwen3_5_gdn_head_dims_fail_before_mutation(dims) -> None:
         linear_value_head_dim=dims[1],
     )
 
-    with pytest.raises(UnsupportedModelError, match="GDN requires"):
+    def reject_projection(inner, is_full, quant_config):
+        assert inner is model
+        assert is_full == [False]
+        assert quant_config is None
+        assert not hasattr(model, "_rpu_qwen3_5_text_install_started")
+        raise UnsupportedModelError("invalid projection fixture")
+
+    monkeypatch.setattr(qwen3_5_text, "_validate_projection_specs", reject_projection)
+    with pytest.raises(UnsupportedModelError, match="invalid projection fixture"):
         qwen3_5_text._install_qwen3_5_text_for_rpu_impl(
             model,
             config,
@@ -212,39 +220,30 @@ def test_qwen3_5_vision_gate_precedes_handle_and_weight_mutation() -> None:
 
 
 
-def test_qwen3_14b_requires_exact_lm_head_quantization_metadata() -> None:
+def test_qwen3_14b_admits_w8a16_and_validates_int8_head_scale() -> None:
     profile = {
         "hidden_size": 5120,
         "intermediate_size": 17408,
         "num_hidden_layers": 40,
         "num_key_value_heads": 8,
     }
-    incomplete = SimpleNamespace(
-        **profile,
-        quant_config={"method": "w8a16"},
-    )
-    with pytest.raises(UnsupportedModelError, match="untied INT8 lm_head"):
-        qwen3._check_profile(incomplete)
-
-    exact = SimpleNamespace(
-        **profile,
-        quant_config={
-            "method": "w8a16",
-            "quantized_lm_head": True,
-            "lm_head_untied": True,
-            "quantized_embed_tokens": False,
-        },
-    )
-    qwen3._check_profile(exact)
+    with pytest.raises(UnsupportedModelError, match="no certified device execution"):
+        qwen3._check_profile(SimpleNamespace(**profile))
+    quantized = SimpleNamespace(**profile, quant_config={"method": "w8a16"})
+    qwen3._check_profile(quantized)
 
     model = torch.nn.Module()
-    model.config = exact
+    model.config = quantized
     model.model = torch.nn.Module()
     model.model.layers = torch.nn.ModuleList()
     model.model.embed_tokens = torch.nn.Embedding(2, 2).half()
     model.lm_head = torch.nn.Linear(2, 2).half()
-    with pytest.raises(RPUBackendError, match="checkpoint tensors do not match"):
+    model.lm_head.weight = torch.nn.Parameter(
+        torch.ones(2, 2, dtype=torch.int8), requires_grad=False)
+    original_to = model.to
+    with pytest.raises(RPUBackendError, match="requires fp16 lm_head.weight_scale"):
         qwen3.Qwen3Adapter(model)
+    assert model.to == original_to
 
 
 def test_qwen3_32b_requires_exact_quantized_metadata_before_admission() -> None:
@@ -326,8 +325,10 @@ def test_public_release_limits_debug_exports_to_tensors() -> None:
     assert "void set_debug_export(" in runtime_state
     runtime_header = (ROOT / "src/core/rpu_runtime_state.h").read_text()
     assert "bool                      get_debug_export();" in runtime_header
-    assert "RPU_GRAPH_HCB_CHECKSUM" not in graph_execute
-    assert "[HCB-CK]" not in graph_execute
+    assert 'std::getenv("RPU_GRAPH_HCB_CHECKSUM")' in graph_execute
+    checksum = graph_execute.split("auto hcb_checksum_str =", 1)[1].split("const char* hcb_state", 1)[0]
+    assert "data_ptr" not in checksum
+    assert '" dev=' not in checksum
     assert "RPU_PI05_PROBE_DIR" in pi05
     assert "torch.save(" in pi05
     # Logical Tensor getters are public; raw memory and program inspection are not.
@@ -335,14 +336,18 @@ def test_public_release_limits_debug_exports_to_tensors() -> None:
     for name in re.findall(r'm\.(?:def|impl)\("([^"(]+)', bindings):
         allowed = {"internvla_nextdit_set_debug_export",
                    "qwen3_5_vision_get_dbg_hidden", "qwen3_5_vision_get_dbg_q",
+                   "qwenpi05_debug_flush_dumps", "rhino_vla_debug_flush_dumps",
                    *("lingbot_v2_moe_debug_" + suffix for suffix in (
-                       "l0_out", "innorm", "router_h", "layer_in", "attn_resid"))}
+                       "l0_out", "innorm", "router_h", "layer_in", "attn_resid",
+                       "rw_stage", "wtm_stage", "gcap", "acap", "scap", "ccap",
+                       "sparse_route_stage", "packed"))}
         assert name in allowed or not any(part in name for part in ("debug_", "_dbg_", "flush_dumps"))
     native_lingbot = (ROOT / "src/fused/rpu_lingbot_v2_moe_model.cpp").read_text()
     tensor_capture = {"RPU_LINGBOT2_DEBUG_DUMP_ROUTER_H", "RPU_L2_CAP_RESID",
-                      "RPU_L2_CAPTURE_L0", "RPU_L2_CAPTURE_INNORM"}
+                      "RPU_L2_CAPTURE_L0", "RPU_L2_CAPTURE_INNORM", "RPU_L2_STAGES",
+                      "RPU_L2_CAPTURE_GATE", "RPU_L2_DBG_PACKED"}
     controls = set(re.findall(r'getenv\("((?:RPU_L2_|RPU_LINGBOT2_DEBUG)[^"]+)"', native_lingbot))
-    assert controls <= tensor_capture
+    assert controls == tensor_capture
 
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     for pattern in ("*.pth", "*.ckpt", "*.safetensors", "*.npz", "*.onnx"):

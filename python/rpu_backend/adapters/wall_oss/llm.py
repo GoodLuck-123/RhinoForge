@@ -430,7 +430,11 @@ def _int8_to_int4_perchannel(w_int8: torch.Tensor, scale_1d: torch.Tensor):
 
 
 def _expert0_down_int4() -> bool:
-    """Inference runtime helpers and execution contracts."""
+    """Select packed INT4 for expert-0 Down; enabled by default.
+
+    Per-channel W4 weights are packed losslessly. Legacy group-wise checkpoints
+    may store this projection as INT8; that path requantizes it to INT4. Set
+    ``RPU_WALL_OSS_EXPERT0_DOWN_INT4=0`` to keep that legacy projection as INT8."""
     return rpu_env_bool("RPU_WALL_OSS_EXPERT0_DOWN_INT4", default=True)
 
 

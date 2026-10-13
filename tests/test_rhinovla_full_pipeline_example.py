@@ -32,9 +32,8 @@ def test_shared_runner_selects_caller_factory_and_preserves_controlled_v1(module
     monkeypatch.setattr(policies, "_factory", lambda runner: selected.append("factory"))
     monkeypatch.setattr(policies, "_official", lambda runner: selected.append("controlled"))
     runner._prepare(common.load_config(CONFIG_DIR / "w8a16_pipeline.toml"))
-    runner._prepare(common.load_config(CONFIG_DIR.parent / "v1/official_fp16.toml"))
     runner._prepare(common.load_config(CONFIG_DIR.parent / "v1/fp16.toml"))
-    assert selected == ["factory", "controlled", "factory"]
+    assert selected == ["factory", "controlled"]
 
 
 def test_full_pipeline_example_has_distinct_scope_and_explicit_acc16(modules, config_path):

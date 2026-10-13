@@ -1,6 +1,6 @@
 """Pi05 four-bit weight preparation, applied once before generic swizzle.
 
-INT4 uses int8 [N,K] codes with per-channel or genuine K128 group scales and
+INT4 uses int8 [N,K] codes with per-channel or G32/G64/G128 group scales and
 packs to the controller-striped pgrp ABI. NVFP4 uses uint8 E2M1 codes and a
 separate striped_v2 weight/FP8-scale ABI. K/V remains W8 in Action-only profiles.
 """
@@ -9,11 +9,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from rpu_backend.quant.int4_pgrp_pack import (
-    pack_int4_per_channel_as_pgrp,
-    swizzle_int4_pgrp_scale,
-    swizzle_pack_int4_pgrp,
-)
+from rpu_backend.quant.int4_pgrp_pack import (pack_int4_per_channel_as_pgrp, swizzle_pack_int4_pgrp, swizzle_int4_pgrp_scale)
 from rpu_backend.runtime.weights import ROW_PARTITION_NAMES
 
 # All Pi05/Gemma projection child names.
@@ -121,25 +117,16 @@ def pack_int4_projections_inplace(decoder, int4_children: set[str], *, attn_num_
                     raise RuntimeError(
                         f"pack_int4: {parent_name}.{proj_name} has no weight_scale"
                     )
-                cpu_scale = scale.detach().cpu().to(torch.float16)
-                if cpu_scale.dim() == 2:
-                    groups, channels = cpu_scale.shape
-                    if channels != N or groups == 0 or K % groups:
-                        raise RuntimeError(
-                            f"pack_int4: {parent_name}.{proj_name} logical pgrp scale "
-                            f"must be [G,N] with G dividing K={K}, N={N}; got "
-                            f"{tuple(cpu_scale.shape)}"
-                        )
-                    group_size = K // groups
-                    packed = swizzle_pack_int4_pgrp(
-                        w.detach().cpu(), partition, num_cores
-                    )
-                    packed_scale = swizzle_int4_pgrp_scale(
-                        cpu_scale.contiguous(), group_size, partition, num_cores
-                    )
+                if scale.dim() == 2:
+                    if (getattr(module, "_pi05_int4_group_size", None) != group_size
+                            or tuple(scale.shape) != (K // group_size, N)):
+                        raise RuntimeError("pack_int4: logical group scales/metadata mismatch")
+                    packed = swizzle_pack_int4_pgrp(w.detach().cpu(), partition, num_cores)
+                    packed_scale = swizzle_int4_pgrp_scale(scale.detach().cpu(), group_size, partition, num_cores)
                 else:
                     packed, packed_scale = pack_int4_per_channel_as_pgrp(
-                        w.detach().cpu(), cpu_scale, partition, num_cores,
+                        w.detach().cpu(), scale.detach().cpu(),
+                        partition, num_cores, group_size=group_size,
                     )
                 packed = packed.reshape(N, K // 2).contiguous().to(w.device)
                 module.weight = nn.Parameter(packed, requires_grad=False)

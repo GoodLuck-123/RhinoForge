@@ -22,6 +22,11 @@ Choose the checkpoint, precision and input profile from [examples](model_support
 The API compatibility level is available as `rpu_backend.api.API_VERSION` and
 currently reports `5.0.0`; it is independent of the distribution version.
 
+The top-level package also lazily exposes `set_debug_level(0..5)`,
+`get_debug_level()` and `TRACE`, mirrored on `torch.rpu`. These names are outside
+`__all__`; other diagnostics use `torch.rpu`. Levels are SILENT, ERROR, WARN,
+INFO, DEBUG and TRACE, with INFO as the default.
+
 ### Tensor diagnostics
 
 `torch.rpu.set_debug_export(True)` enables supported intermediate tensor
@@ -90,18 +95,16 @@ quantized checkpoint carries its own checked metadata.
   `padding_rows` value.
 
 For Qwen3, `prefill.linear_acc32` selects ACC16 (`false`, default) or ACC32
-(`true`). The cold root `model.num_cores` budget is `4`, `6` or `8`; plain FP16
-batch-one profiles admit reduced budgets, while quantized profiles retain eight
-cores. Other CausalLM adapters declare their own accepted fields. The adapter
-may narrow these values to the exact profile envelope. Create a new model to
-change them after device installation. Qwen3-VL, Qwen3.5 and Pi0.5 expose their
+(`true`). The cold root `model.num_cores` budget is `4`, `6` or `8`;
+the selected checkpoint recipe determines which budgets are accepted.
+Cold fields require a fresh model; supported planning fields use the execution
+update API below. Qwen3-VL, Qwen3.5 and Pi0.5 expose their
 component precision and topology controls through the same mapping; see the
 [target-specific configuration catalog](runtime_config.md#configuration-and-execution).
 
-The generic CausalLM and image-text loaders, and `Pi05Policy.from_pretrained`,
-support only built-in model code. `trust_remote_code` must be exactly `False`;
-custom Hugging Face model code is rejected before configuration or weight
-loading.
+`trust_remote_code` defaults to `False` and is forwarded to Hugging Face
+loaders. `Pi05Policy.from_pretrained` warns when it is enabled. Adapter model
+and checkpoint checks still apply.
 
 ### `RPUCache`
 
@@ -132,6 +135,32 @@ require equal real-token lengths across rows.
 `rpu_backend.api.Qwen3_5Cache.from_config(text_config, max_seq_len, ...)` adds
 the recurrent and convolution state used by Qwen3.5 text. It may reset fully to
 position zero but cannot reconstruct a non-zero recurrent state by rewinding.
+For a loaded or reduced-core model, prefer
+`Qwen3_5Cache.from_model(model, max_seq_len=...)` so KV and convolution storage
+match its installed topology. A cache created from configuration alone must
+use the same core budget as its model.
+
+### Greedy token selection
+
+```python
+from rpu_backend.api import greedy_token_ids
+
+out = model(**inputs, past_key_values=cache, use_cache=True, logits_to_keep=1)
+next_ids = greedy_token_ids(out.logits)
+```
+
+`greedy_token_ids` accepts `[batch, vocab]` or `[batch, sequence, vocab]`, using
+the last sequence row. It returns independent CPU `int64 [batch, 1]` storage
+and leaves logits unchanged. CPU FP16/BF16/FP32/FP64 retain their precision;
+device logits must be FP16. Equal maxima select the first index, and a row
+with NaNs selects the first NaN, matching `torch.argmax`. Empty batches are
+accepted; empty sequence/vocabulary dimensions and other ranks or dtypes fail.
+The caller handles cache positions, EOS and sampling policy; this helper does
+not change Hugging Face `generate()`.
+
+Qwen3 RoPE capacity comes from the installed tables or the model's declared
+`max_position_embeddings`. A request must fit both the cache and those tables;
+increasing cache capacity alone does not extend the model context.
 
 ## Execution configuration and updates
 
@@ -149,12 +178,13 @@ reconfigure_rpu_execution(model, {
 after = rpu_execution_stats(model)
 ```
 
-Updates replace each supplied stage, including stages nested under `components`; omitted stages stay unchanged. `{"prefill": {}}` clears that stage's override. A successful change advances `generation`, retires affected graphs, and builds them again on the next execution. Call between requests. Missing sessions, active forwards, fixed/unsupported controls and closed or failed sessions reject updates. Core count, precision and other cold installation settings still require a fresh model. A retirement failure requires a fresh process.
+Updates replace the hot fields of each supplied stage, including stages nested under `components`; omitted stages stay unchanged. `{"prefill": {}}` clears its planning overrides while preserving bound cold fields such as `linear_acc32`. An unchanged configuration is a no-op. A committed change advances `generation`, retires affected graphs, and rebuilds them on the next execution. Call between requests. Missing sessions, active forwards, fixed/unsupported controls and closed or failed sessions reject updates. Core count, precision and other cold installation settings require a fresh model. Failed retirement or rollback requires a fresh process. See [configuration lifecycle](../knowledge/concepts/runtime-profiles.md#safe-profile-changes).
 
 ## Image-text models
 
 `rpu_backend.api.RPUModelForConditionalGeneration` is the Hugging Face-style
-loader for Qwen3-VL and Qwen3.5 MoE. A Qwen3-VL example:
+loader for Qwen3-VL, Qwen3.5 Dense and the exact Qwen3.5 MoE profiles.
+A Qwen3-VL example:
 
 ```python
 from rpu_backend.api import RPUModelForConditionalGeneration
@@ -175,7 +205,9 @@ CausalLM loader. The `vision` stage accepts `chunk_size`; the `prefill` stage
 accepts the fields described above. Video and profiles outside
 [Examples](model_support.md) are not implied by this class.
 
-Qwen3.5 text/vision and Gemma4 use their model-specific adapters.
+Qwen3.5 Dense uses this loader for text-only and image-text requests; its
+adapter is selected from checkpoint metadata. Gemma4 has a separate adapter
+entry. See [model entries](model_support.md) and [compute topology](planner_core_topology.md).
 
 ### Qwen3.5 27B
 
@@ -218,13 +250,11 @@ The following classes are exported from `rpu_backend.api`:
 | `Lingbot2Policy` | `from_checkpoint(...)`; `to("rpu")`; `prepare_graphs(...)`; `infer(...)`; `predict_action_chunk(...)`; `close()` |
 | `HyEmbodiedPolicy` | `from_checkpoint(...)`; `to("rpu")`; `infer(...)`; `predict_action_chunk(...)`; `close()` |
 
-Public LIBERO optimized profiles use
-`Pi05Policy.from_pretrained(..., optimized_profile=...)` with `precision`
-(`fp16`, `w8a16`, `w8_action_nvfp4`, or `w8_prefill_a8_action_nvfp4`),
-`num_cameras` (2 or 3), and `text_tokens` (32, 64, 96, or 128).
-Precision must match checkpoint metadata and the required operator capabilities.
-`prepare_graphs(...)` precomputes AdaRMS by default for these profiles. See
-[`examples/configs/pi05/`](../examples/configs/pi05/).
+Pi0.5 [templates](../examples/configs/pi05/README.md) select precision,
+camera count and language length. The runner binds cold settings before loading
+weights and passes `rpu_execution` to `Pi05Policy.from_pretrained(...)`.
+Checkpoint metadata must match the selected precision. Use
+`prepare_graphs(..., precompute_adarms=...)` to select AdaRMS preparation explicitly.
 
 `Pi05Policy.prepare_graphs(batch, noise=...)` and
 `Pi05Policy.predict_action_chunk(batch, noise=...)` accept an optional initial
@@ -290,6 +320,7 @@ All user-facing errors are available from `rpu_backend.api`:
 ```text
 RPUBackendError
 ├── RPUConfigError
+├── PlannerRejectError
 ├── UnsupportedModelError
 ├── RPUUnsupportedDtypeError
 ├── RPUSingleHandleError
@@ -298,8 +329,10 @@ RPUBackendError
 ```
 
 Catch `RPUBackendError` for backend-level failures, or a subclass when the
-caller has a specific recovery action. Standard `TypeError` and `ValueError`
-remain in use for malformed Python arguments.
+caller has a specific recovery action. `PlannerRejectError` exposes `.code`
+(`EXACT_MISMATCH`, `CAPABILITY`, `NO_FEASIBLE` or `SEARCH_LIMIT`) and `.stage`
+for a rejected execution plan; it also remains catchable as `RuntimeError`.
+Standard `TypeError` and `ValueError` remain in use for malformed Python arguments.
 
 ## Graph API
 
@@ -342,7 +375,12 @@ counters for the most recent graph submission. These methods are useful for
 lifecycle diagnosis, but their output is not numerical or support evidence.
 `Graph.dump_replay_plan()` returns a pointer-free linear node/segment summary;
 `Graph.dump_tree()` presents the same execution structure grouped by segment.
-Neither includes launch argument words, device instructions, or raw addresses.
+`Graph.dump_resources()` lists resource owners, byte counts, lifetimes, and pool slots.
+`Graph.dump_kernel_args_jsonl()` returns kernel capacity metadata from the Release runtime; raw state is unavailable.
+`Graph.debug_nodes()` and `Graph.debug_segments()` return lists of dictionaries;
+`Graph.debug_segments_jsonl()` returns segment records as JSONL. Records contain
+node kinds and dependencies, logical tensor metadata, transfer lengths and
+segment structure. All these views omit raw addresses and launch argument words.
 
 `Graph` is the lower-level capture object and `get_default_graph_cache()`
 returns a thread-local cache. New adapters should normally use a dedicated
@@ -367,7 +405,8 @@ Built-in architecture bindings are declared in
 - `LlamaForCausalLM`;
 - `DINOv3ViTModel`;
 - `Gemma4ForConditionalGeneration`;
-- `Qwen3_5ForConditionalGeneration`; and
+- `Qwen3_5ForConditionalGeneration`;
+- `Qwen3_5MoeForConditionalGeneration`; and
 - `Qwen3VLForConditionalGeneration`.
 
 An external distribution may declare an entry point in the
@@ -474,13 +513,25 @@ from rpu_backend.api import Qwen3ASRModel, Qwen3TTSModel
 | `Qwen3ASRModel.from_pretrained(checkpoint, dtype=torch.float16)` | Local pinned Qwen3-ASR-0.6B checkpoint |
 | `model.transcribe(audio, sample_rate=16000, max_new_tokens=64)` | One finite CPU floating-point waveform, mono 16 kHz, 0.5–8 seconds; token limit 1–64. Returns `ASRTranscription(text, raw_text, token_ids)` |
 | `Qwen3TTSModel.from_pretrained(checkpoint, source=prepared_package, dtype=torch.float16)` | Local pinned Qwen3-TTS-12Hz-0.6B-Base checkpoint and prepared `qwen_tts/` source directory |
-| `model.synthesize(text, reference_audio=local_file, language="Chinese", max_new_tokens=64)` | Text of 1–128 characters and at most 32 tokenizer tokens; `Chinese` or `English`; finite mono 24 kHz reference audio, 0.5–20 seconds; token limit 2–64. Returns an independent float32 mono waveform and sample rate 24000 |
+| `model.synthesize(text, reference_audio=local_file, language="Chinese", max_new_tokens=256)` | Text of 1–1024 characters; `Chinese` or `English`; finite, nonzero mono 24 kHz reference audio, 0.5–20 seconds; token limit 2–256 per segment. Returns an independent float32 mono waveform and sample rate 24000 |
 
 ASR uses greedy generation without context prompts, timestamps or streaming.
-TTS uses non-streaming greedy speaker-embedding-only voice cloning. Its Talker
-prompt plus generation limit must fit 128 positions; the token cap can truncate
-speech. Downloads, preparation, CPU/device precision boundaries and commands are
-in the [speech guide](qwen3_audio.md).
+TTS uses non-streaming speaker-embedding-only voice cloning with the pinned
+checkpoint sampling recipe: top-k 50, temperature 0.9 and top-p 1.0. Set
+`torch.manual_seed` after loading and before a request to repeat sampling on the
+same execution profile. Talker prompt plus generation must fit 512 positions
+per segment; reaching the token cap without EOS raises before waveform decoding.
+Empty, non-finite and exactly zero waveforms are rejected.
+
+Inputs within 128 characters and 32 tokenizer tokens use one segment. Longer
+text splits at punctuation with a 128-character bound and a 12-token target;
+a short sentence ending may join its preceding clause up to 16 tokens. Adding
+sentence stops can change token counts, pauses and intonation. Each segment
+starts with the request's initial CPU RNG state; later segments restore the
+caller RNG state left by the first. Each waveform is copied independently;
+concatenation waits for all segments to succeed. A failed request returns no
+partial audio. Downloads,
+preparation and runnable API examples are in the [speech guide](qwen3_audio.md).
 
 Both APIs support `with`, idempotent `close()` and `execution_stats()`. Serialize
 requests, statistics and close, with one live device model/policy per process.
@@ -491,7 +542,9 @@ if the process has an incompatible frozen allocator or arena plan.
 ASR requires `siglip_set_audio_mode`, `siglip_set_audio_projection` and
 `assemble_inputs_embeds` in the rebuilt native extension. TTS codec uses the
 explicit `causal_decoder_set_tts_codec_mode`; without it, the frontend stays on
-CPU. Other execution errors propagate. Codec input is limited to 1–63 frames.
+CPU. With the setter, 1–63 codec frames use the device; 64–255 frames use the
+original CPU FP32 frontend and its 72-frame sliding attention. Other execution
+errors propagate.
 
 `execution_stats()` exposes call and cache state:
 
@@ -501,13 +554,17 @@ CPU. Other execution errors propagate. Codec input is limited to 1–63 frames.
   `graph_size`, `graph_replays` and `graph_invariant_ok` describe the text cache.
   Replay totals reset when cached signatures are replaced. `audio_linear_calls`
   counts logical projections.
-- TTS reports `codec_frontend.device` and `fallback_reason`, output-head calls,
-  and each component's calls, tokens and Graph state. Talker replaces its prefill
-  Graph on a prompt-length change while retaining decode; Predictor retains one
+- TTS reports `generation.steps`, `generation.eos` and `generation.segment_steps`;
+  `codec_frontend.device` and `fallback_reason` describe the last segment. It also
+  reports output-head calls and each component's calls, tokens and Graph state.
+  Talker replaces its prefill Graph on a prompt-length change while retaining
+  decode; Predictor retains one
   decode Graph; codec replaces its Graph on a frame-count change.
 
 Each sequence resets logical KV position while retaining private storage. TTS
 caches only the latest reference speaker embedding by decoded audio content;
 every request still reads and validates the file. Output storage is independent
-of replay. Retire Graphs before native handles and weights. CPU thread count is
-caller-controlled; both CLIs expose `--threads`, defaulting to 4.
+of replay. Predictor keeps its final device hidden row only until its immediate
+output head consumes it; requests for hidden states retain independent CPU
+outputs. Retire Graphs before native handles and weights. Set CPU thread count
+with `torch.set_num_threads` before loading; the API leaves it unchanged.

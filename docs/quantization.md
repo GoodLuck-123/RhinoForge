@@ -101,20 +101,18 @@ python -m rpu_backend.quant.convert_pi05 \
   --dst /path/to/pi05-fake-W4 \
   --fake-w4
 
-# Runtime mixed W4A16-G32-KV8 evaluation format (not pure W4).
+# Runtime mixed W4A16-KV8 evaluation format (not pure W4).
 python -m rpu_backend.quant.convert_pi05 \
   --src /path/to/pi05-source \
-  --dst /path/to/pi05-mixed-W4A16-G32-KV8 \
+  --dst /path/to/pi05-mixed-W4A16-KV8 \
   --fake-w4 --real-w4
 ```
 
-The runtime profile is mixed W4A16-G32-KV8, not pure W4. Only the declared
-Gemma VLM/action-expert Linear projection weights are quantized:
-q/o/gate/up/down use symmetric W4 group-size-32 weights along K, while K/V
-projection weights remain W8. Activations and the KV cache remain FP16. The
-checkpoint stores logical FP16 scales as `[K/32, N]`; loading stripes them into
-the packed pgrp ABI. SigLIP, AdaRMS dense, action projection, and processor
-sidecars remain FP16 or unchanged.
+The runtime format uses per-channel signed INT4 for q/o/gate/up/down and W8
+for K/V projections. Checkpoints store weights in INT8 tensors with FP16 scales
+of shape `[N]`; loading converts them to the runtime packed layout. Activations,
+KV cache, SigLIP, AdaRMS dense, and action projection remain FP16. Processor
+sidecars are unchanged.
 
 `--keep-int8` accepts a comma-separated list of projection names for a
 controlled mixed-precision W4 experiment. `--real-w4` is the legacy CLI name
@@ -132,11 +130,33 @@ python -m rpu_backend.quant.convert_pi05 --src SOURCE_DIR --dst NVFP4_DIR --acti
 
 `--action-w4` defaults to NVFP4 with `striped_v2` ABI and block16. Action
 Q/O/Gate/Up/Down use NVFP4; K/V and VLM remain W8. The converter writes
-`rpu_quant_config.json`. Use this format with
-`optimized_profile.precision=w8_action_nvfp4`; the two- or three-camera
-`w8_prefill_a8_action_nvfp4` variant additionally selects Prefill GateUp A8 at
-installation. It is not interchangeable with the legacy `--real-w4` INT4
-G32/KV8 format described above.
+`rpu_quant_config.json`. Select a two- or three-camera
+[`w8a16_action_nvfp4` template](../examples/configs/pi05/README.md).
+The `w8a16_prefill_w8a8_action_nvfp4` variant also selects Prefill GateUp A8
+at installation. Keep the checkpoint recipe paired with the selected template;
+`--real-w4` produces the separate per-channel INT4/KV8 format described above.
+
+The same Action-only converter also accepts these explicit formats:
+
+| `--action-w4-format` | Action weight and scale storage |
+|---|---|
+| `nvfp4` (default) | E2M1 codes, K16 FP8 scales and a separate FP32 tensor scale; `striped_v2` ABI |
+| `int4_g128` | Signed INT4 codes stored as INT8 `[N,K]`, independent FP16 scales `[K/128,N]` |
+| `legacy_int4` | Per-output-channel signed INT4; channel scales are repeated when packed |
+
+Pass `--action-w4` and the selected format when converting original floating
+weights to a new directory. All three mark `int4_components=["expert"]` and
+keep Action K/V and all VLM projections at W8. These are distinct recipes;
+renaming a directory or editing its metadata does not convert weights.
+
+The current optimized templates fix the camera count, text bucket and
+accumulation mode before installation. `input.text_tokens` selects a physical
+bucket; it does not tokenize, truncate or pad the input. Supply matching
+`[1,T]` integer tokens and a nonempty, right-padded boolean mask, then prepare
+Graphs with that batch. Two-camera input has two real image slots. Changing
+camera count or text bucket requires a new policy. The FP16 template requires
+floating weights without quantization metadata and disables dynamic Vision
+and AdaRMS quantization.
 
 ## Wall-OSS
 
@@ -178,33 +198,115 @@ controller-striped layout. Do not add a model-specific packing or tile
 override. FP16, W8A16, and W4A16 Linear paths all use the shared generated auto-tiler described in
 [Generated Linear auto-tiling](../knowledge/concepts/linear-autotiling.md).
 
-## Qwen3.5 Dense image-text examples
+For [Wall-OSS sorting](../examples/configs/wall_oss/sorting/README.md), retain the
+original FP16 directory alongside the W8 directory. The Action-W4 template
+adds a separately converted G32 directory through `input.action_w4_checkpoint`:
+only Action expert1 is replaced, while Vision and Language retain W8. The
+constructor binds this choice before creating child models; it requires the
+paired RTC assets. The original directory still supplies floating processing
+and output weights. Use the sorting templates for the fixed camera/action
+input contract and `python -m examples.run --config <TOML> --check-config`
+before device execution.
 
-The [Dense VL configurations](../examples/configs/qwen3_5/README.md) select
-checkpoint-declared text projection quantization with an FP16 vision tower.
-Use `rpu_backend.quant.convert_qwen3_5` to produce the complete conditional
-generation checkpoint and `RPUModelForConditionalGeneration` to load it;
-ordinary Hugging Face loading can lose integer storage and scale metadata.
-Embedding, LM head, norms and GDN convolution remain floating point.
-The example checks the declared precision before processor or weight loading.
+## Qwen3.5 Dense
 
-Quantized image evaluation requires both
-`QWEN3_5_QUANT_ALLOW_UNCERTIFIED=1` and
-`QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED=1`. These are separate admission controls;
-neither declares numerical or task-quality certification. See the configuration
-index for the exact sizes, quantization methods and core counts. MoE mixed-E4M3
-and legacy text bundles keep their separate formats.
+Convert with `python -m rpu_backend.quant.convert_qwen3_5 --src SOURCE_DIR --dst OUTPUT_DIR`.
+Choose `--method w8a16` or `--method w4a16_pgrp` for uniform text projection
+quantization, or one of the mixed `--profile` recipes:
+
+| Profile | Text projections |
+|---|---|
+| `w4_main_w8_gdn` | Main projections W4/G32; GDN QKV/Z/out W8; GDN B/A FP16 |
+| `w8_main_w8_gdn` | Main and GDN QKV/Z/out W8; GDN B/A FP16 |
+| `w4_mlp_only` | MLP Gate/Up/Down W4/G32; Attention and GDN FP16 |
+| `w4_mlp_w8_attn_gdn` | MLP Gate/Up/Down W4/G32; Attention and GDN W8 |
+
+The mixed recipes use `quant_config.format_version=2` in `config.json`.
+The last two recipes include MLP projections in every layer and require
+`--group-size 32`. Vision, embeddings, LM head, norms and GDN convolution
+remain FP16. Floating source values are cast directly to FP16; existing
+converted checkpoints must be regenerated to remove an earlier BF16
+intermediate cast.
+
+```sh
+python -m rpu_backend.quant.convert_qwen3_5 --src SOURCE_DIR --dst MIXED_DIR --profile w4_mlp_w8_attn_gdn
+```
+
+Load converted checkpoints through `RPUModelForConditionalGeneration` so
+integer weights and scales retain their declared storage. Select the matching
+[text or image configuration](../examples/configs/qwen3_5/README.md); the runner
+checks quantization metadata before loading weights. Quantized image profiles
+require `QWEN3_5_QUANT_ALLOW_UNCERTIFIED=1` and
+`QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED=1` as shown in their templates.
+
+The separate QuantTrio AWQ G128 source profile keeps layer-zero MLP,
+Attention, GDN, Vision and LM head in FP16; later MLP projections retain
+AWQ weights. Load its original checkpoint with the matching AWQ template;
+these RTN converter recipes do not produce that format.
+
+## Qwen3.5 MoE routed INT4
+
+The 35B-A3B RTN and official GPTQ profiles quantize routed Gate/Up/Down experts
+to UINT4/G128. Attention, GDN, router, shared expert, embeddings, norms and LM
+head use FP16. Both profiles require batch one, eight cores and Text ACC16;
+`prefill.linear_acc32=true` is rejected. Vision has its own accumulation flag.
+
+| Source | Required checkpoint declaration |
+|---|---|
+| RTN | Exact `rtn_metadata`, indexed safetensors, completed `derivation_manifest.json`; no calibration |
+| Official GPTQ | `Qwen/Qwen3.5-35B-A3B-GPTQ-Int4`, symmetric four-bit G128, no act-order, routed-only exclusions |
+
+RTN stores zero-minus-one words `0x77777777`; official GPTQ stores zero8 words
+`0x88888888`. Their loaders validate these distinct conventions before using
+the shared UINT4 runtime. Original integer codes and FP16 scales are preserved
+for GPTQ. A present but invalid `rtn_metadata` field cannot fall back to GPTQ.
+Neither entry accepts arbitrary GPTQ metadata or the mixed-E4M3 format.
+
+For RTN, promote source groups to FP32 and compute
+`s=max(abs(group))*(2/15)` (use `2/15` for an all-zero group), then
+`q=clamp(round_even(w/s)+8,0,15)`. Cast the scale to FP16 only after selecting
+codes; preserve scales that underflow to zero. Dequantization is `(q-8)*s`.
+The source stores INT32 `qweight[K/8,N]`, FP16 `scales[K/128,N]`, and
+`g_idx[k]=k//128`. RTN and GPTQ retain their separate zero-point conventions.
+At TP8, Gate/Up retain G128; Down repeats each original G128 scale into two
+physical G64 groups without changing codes or dequantized values. Packing
+happens during installation and must match the release's operator pair.
+
+The text aliases are `qwen3_5-35b-a3b-rtn-w4a16` and
+`qwen3_5-35b-a3b-gptq-w4a16` under `RPU_MODEL_CACHE`; `--model` selects an explicit
+checkpoint. GPTQ requires the stock indexed checkpoint and no RTN derivation
+metadata. Incomplete RTN staging directories are rejected. Input IDs are CPU
+`int64` tensors with shape `[1,T]`; create `Qwen3_5MoeCache.from_model` after
+installation with capacity for the complete request.
+
+Use the normal conditional-generation loader and `Qwen3_5MoeCache`. Installation
+streams per-layer expert sources without materializing all experts as FP16.
+The indexed reader validates shard paths, headers, shapes, dtypes and inventory;
+verify full file hashes when preparing the checkpoint. The runtime checkpoint
+identity records metadata and file state, not a full payload checksum.
+
+```sh
+python -m examples.run --config examples/configs/qwen3_5/text/35b_a3b/w4a16_experts_rtn_g128.toml --model RTN_DIR
+python -m examples.run --config examples/configs/qwen3_5/text/35b_a3b/w4a16_experts_gptq_g128.toml --model GPTQ_DIR
+```
+
+The corresponding `vl/35b_a3b/` templates add images. Supply `input_ids`,
+`pixel_values`, `image_grid_thw` and `mm_token_type_ids` together at cache
+position zero, within the installed Vision KV and RoPE bounds. Video is
+unsupported. Install once and call `cache.reset()` between requests. Prefill
+uses bounded one-shot execution; decode retains a replay graph. Logits are
+returned as CPU FP32 after FP16 computation.
 
 ## RhinoVLA v3 expert examples
 
-The [v3 W8 configurations](../examples/configs/rhinovla/v3/README.md) pass
-`expert_w8a16` and `full_w8a16` to a caller-owned, trusted runtime factory.
-`w8a16_action.toml` quantizes the action expert's Q/K/V/O and gate/up/down projections.
-`w8a16_action_adarms.toml` also selects its AdaRMS condition projections.
-Both use INT8 weights with FP16 scales and activations; neither template selects
-vision, prefix-language or action-IO quantization. The runner verifies actual
-installed expert storage rather than accepting a precision label from the
-factory. Checkpoint composition and preprocessing remain owned by that factory.
+The [v3 configurations](../examples/configs/rhinovla/v3/README.md) use the built-in
+`rpu_backend.adapters.rhinovla.factory:v3_runtime_factory` with the pinned v3
+source, checkpoint and prepared CPU inputs. `w8a16_action.toml` selects action
+Q/K/V/O and Gate/Up/Down; `w8a16_action_adarms.toml` also selects AdaRMS condition
+projections. Both use INT8 weights and FP16 scales/activations. Vision, prefix
+language and action IO keep their selected floating format. A custom trusted
+factory may implement the same input and lifecycle contract; the runner checks
+installed expert storage rather than relying on its precision label.
 
 ## Runtime conversion helpers
 

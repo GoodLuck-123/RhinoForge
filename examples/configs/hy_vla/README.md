@@ -119,7 +119,7 @@ python scripts/prepare_hyvla_text_batches.py \
 | `hy_vla.rmsnorm_vwarp` | auto | auto / "16" | 自动选择或固定为 16 |
 | `cpu.threads` | 模板省略，入口默认 12 | 正整数 | CPU 线程 |
 | `run.warmup/runs/seed` | 3 / 6 / 0 | 预热至少 3，采样至少 1，seed 非负 | 影响输入生成和测量次数 |
-| `input.reference` | 省略 | 同输入的已保存设备reference | 记录动作输出的比较 |
+| `input.reference` | 省略 | 同输入的已保存设备 reference | 记录动作输出的比较 |
 
 T16/32/48/64 时，两图 P144/160/176/192，三图 P192/208/224/240。公共字段见[参数说明](../PARAMETERS.md)。更换冷配置使用新进程和独立输出目录。
 

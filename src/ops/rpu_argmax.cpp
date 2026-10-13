@@ -4,6 +4,7 @@
 #include "rhino_launch_program.h"
 #include "rhino_launch_queue.h"
 #include "rpu_ops.h"
+#include "rpu_spm_allocator.h"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -12,6 +13,37 @@
 #include <vector>
 
 using namespace ::rhino_lkn;
+
+namespace {
+
+// Reuse the process allocator's reservation once an SPM operator has initialized
+// it. The launcher's ScopedTemporary restores only this call's scratch region.
+class ArgReduceSpmBuffer {
+public:
+    explicit ArgReduceSpmBuffer(uint64_t bytes) {
+        if (SPM_ALLOC.is_initialized()) {
+            const uint32_t offset = SPM_ALLOC.alloc_temporary(bytes);
+            cpu_ptr_ = SPM_ALLOC.cpu_ptr(0, offset);
+            // These payloads take core-local offsets, as LocalSPM_t does.
+            device_addr_ = offset;
+        } else {
+            local_.emplace(bytes, read_write, kStride32B, 2, 0);
+            RPU_CHECK_SPM(*local_, bytes);
+            cpu_ptr_ = local_->get_cpu_ptr();
+            device_addr_ = local_->get_rpu_addr();
+        }
+    }
+
+    void* get_cpu_ptr() const { return cpu_ptr_; }
+    uint32_t get_rpu_addr() const { return device_addr_; }
+
+private:
+    std::optional<LocalSPM_t> local_;
+    void* cpu_ptr_ = nullptr;
+    uint32_t device_addr_ = 0;
+};
+
+} // namespace
 
 // =============================================================================
 // Helper: Select kernel ID based on parameters
@@ -55,6 +87,7 @@ static KernelId get_argmin_kernel_id(int64_t reduce_dim, int64_t C, bool select_
 static void rpu_launch_argmax_reduceC_kernel(const at::Tensor &input, at::Tensor &output,
                                              bool select_last_index) {
     TORCH_CHECK(input.dim() == 3, "argmax reduceC expects 3D input [B, N, C]");
+    SpmAllocator::ScopedTemporary scratch;
 
     int64_t B = input.size(0);
     int64_t N = input.size(1);
@@ -76,15 +109,15 @@ static void rpu_launch_argmax_reduceC_kernel(const at::Tensor &input, at::Tensor
 
     // Allocate SPM buffers.
     // Only the *_C128 variants require workspace in reg22/23.
-    std::optional<LocalSPM_t> spm_workspace;
+    std::optional<ArgReduceSpmBuffer> spm_workspace;
     if (is_C128) {
         const uint64_t workspace_bytes = Align(Align(C, 16) * 256 * 2, 32);
-        spm_workspace.emplace(workspace_bytes, read_write, kStride32B, 2, 0);
+        spm_workspace.emplace(workspace_bytes);
         RPU_CHECK_SPM(*spm_workspace, workspace_bytes);
     }
-    LocalSPM_t spm_input(Align(x_bytes, 32), read_write, kStride32B, 2, 0);
+    ArgReduceSpmBuffer spm_input(Align(x_bytes, 32));
     RPU_CHECK_SPM(spm_input, Align(x_bytes, 32));
-    LocalSPM_t spm_output(Align(r_bytes, 32), read_write, kStride32B, 2, 0);
+    ArgReduceSpmBuffer spm_output(Align(r_bytes, 32));
     RPU_CHECK_SPM(spm_output, Align(r_bytes, 32));
 
     // Copy input to SPM
@@ -166,6 +199,7 @@ static void rpu_launch_argmax_reduceC_kernel(const at::Tensor &input, at::Tensor
 static void rpu_launch_argmax_reduceN_kernel(const at::Tensor &input, at::Tensor &output,
                                              bool select_last_index) {
     TORCH_CHECK(input.dim() == 3, "argmax reduceN expects 3D input [B, N, C]");
+    SpmAllocator::ScopedTemporary scratch;
 
     int64_t B = input.size(0);
     int64_t N = input.size(1);
@@ -187,9 +221,9 @@ static void rpu_launch_argmax_reduceN_kernel(const at::Tensor &input, at::Tensor
     uint64_t x_base = 0;
     uint64_t r_base = Align(x_bytes, 32);
 
-    LocalSPM_t spm_input(Align(x_bytes, 32), read_write, kStride32B, 2, 0);
+    ArgReduceSpmBuffer spm_input(Align(x_bytes, 32));
     RPU_CHECK_SPM(spm_input, Align(x_bytes, 32));
-    LocalSPM_t spm_output(Align(r_bytes, 32), read_write, kStride32B, 2, 0);
+    ArgReduceSpmBuffer spm_output(Align(r_bytes, 32));
     RPU_CHECK_SPM(spm_output, Align(r_bytes, 32));
 
     // Copy input to SPM
@@ -264,6 +298,7 @@ static void rpu_launch_argmax_reduceN_kernel(const at::Tensor &input, at::Tensor
 static void rpu_launch_argmin_reduceC_kernel(const at::Tensor &input, at::Tensor &output,
                                              bool select_last_index) {
     TORCH_CHECK(input.dim() == 3, "argmin reduceC expects 3D input [B, N, C]");
+    SpmAllocator::ScopedTemporary scratch;
 
     int64_t B = input.size(0);
     int64_t N = input.size(1);
@@ -287,15 +322,15 @@ static void rpu_launch_argmin_reduceC_kernel(const at::Tensor &input, at::Tensor
     // in rpu_launch_argmax_reduceC_kernel above. This is the launcher the
     // [1,32000] argmin actually reached, and the 16 MB it asked for is what
     // killed it in a cold process.
-    std::optional<LocalSPM_t> spm_workspace;
+    std::optional<ArgReduceSpmBuffer> spm_workspace;
     if (is_C128) {
         const uint64_t workspace_bytes = Align(Align(C, 16) * 256 * 2, 32);
-        spm_workspace.emplace(workspace_bytes, read_write, kStride32B, 2, 0);
+        spm_workspace.emplace(workspace_bytes);
         RPU_CHECK_SPM(*spm_workspace, workspace_bytes);
     }
-    LocalSPM_t spm_input(Align(x_bytes, 32), read_write, kStride32B, 2, 0);
+    ArgReduceSpmBuffer spm_input(Align(x_bytes, 32));
     RPU_CHECK_SPM(spm_input, Align(x_bytes, 32));
-    LocalSPM_t spm_output(Align(r_bytes, 32), read_write, kStride32B, 2, 0);
+    ArgReduceSpmBuffer spm_output(Align(r_bytes, 32));
     RPU_CHECK_SPM(spm_output, Align(r_bytes, 32));
 
     // Copy input to SPM
@@ -373,6 +408,7 @@ static void rpu_launch_argmin_reduceC_kernel(const at::Tensor &input, at::Tensor
 static void rpu_launch_argmin_reduceN_kernel(const at::Tensor &input, at::Tensor &output,
                                              bool select_last_index) {
     TORCH_CHECK(input.dim() == 3, "argmin reduceN expects 3D input [B, N, C]");
+    SpmAllocator::ScopedTemporary scratch;
 
     int64_t B = input.size(0);
     int64_t N = input.size(1);
@@ -388,9 +424,9 @@ static void rpu_launch_argmin_reduceN_kernel(const at::Tensor &input, at::Tensor
     uint64_t x_bytes = B * N * C * x_dwidth;
     uint64_t r_bytes = B * C * r_dwidth;
 
-    LocalSPM_t spm_input(Align(x_bytes, 32), read_write, kStride32B, 2, 0);
+    ArgReduceSpmBuffer spm_input(Align(x_bytes, 32));
     RPU_CHECK_SPM(spm_input, Align(x_bytes, 32));
-    LocalSPM_t spm_output(Align(r_bytes, 32), read_write, kStride32B, 2, 0);
+    ArgReduceSpmBuffer spm_output(Align(r_bytes, 32));
     RPU_CHECK_SPM(spm_output, Align(r_bytes, 32));
 
     const c10::Half* in_ptr = input.data_ptr<c10::Half>();
@@ -458,6 +494,9 @@ static void rpu_launch_argmin_reduceN_kernel(const at::Tensor &input, at::Tensor
 // =============================================================================
 void rpu_launch_argmax_kernel(const at::Tensor &input, at::Tensor &output,
                               int64_t reduce_dim, bool select_last_index) {
+    TORCH_CHECK(
+        RpuKernelGraph::active().state() == RpuKernelGraph::State::PASSTHROUGH,
+        "argmax requires PASSTHROUGH outside Graph");
     if (reduce_dim == 1) {
         rpu_launch_argmax_reduceC_kernel(input, output, select_last_index);
     } else {
@@ -470,6 +509,9 @@ void rpu_launch_argmax_kernel(const at::Tensor &input, at::Tensor &output,
 // =============================================================================
 void rpu_launch_argmin_kernel(const at::Tensor &input, at::Tensor &output,
                               int64_t reduce_dim, bool select_last_index) {
+    TORCH_CHECK(
+        RpuKernelGraph::active().state() == RpuKernelGraph::State::PASSTHROUGH,
+        "argmin requires PASSTHROUGH outside Graph");
     if (reduce_dim == 1) {
         rpu_launch_argmin_reduceC_kernel(input, output, select_last_index);
     } else {

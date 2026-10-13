@@ -81,8 +81,8 @@ class AlignConfig:
     use_future_video_cls: bool = False                # align_params.video.use_cls_loss
     future_video_share_future_depth_query: bool = True   # align_params.video.share_future_depth_query
     use_shared_future_task_proj: bool = True          # align_params.video.use_shared_future_task_proj
-    block_future_depth_to_action: bool = False         # align_params.depth.block_future_depth_to_action
-    block_suffix_to_future_video: bool = False         # align_params.video.block_suffix_to_future_video
+    block_future_depth_to_action: bool = True         # align_params.depth.block_future_depth_to_action
+    block_suffix_to_future_video: bool = True         # align_params.video.block_suffix_to_future_video
     qwen3vl_use_vision_boundaries: bool = True        # config.qwen3vl_use_vision_boundaries (default True, :541)
     vlm_causal: bool = True                           # vlm_causal (YAML:261)
 

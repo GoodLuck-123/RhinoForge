@@ -40,6 +40,7 @@
 | `qwen3/text/4b/w4a16_text_rtn_g32.toml` | 4B 纯文本，文本主干 RTN W4/G32，输出头精度见配方 |
 | `qwen3/text/4b/w4a16_text_head_rtn_g32.toml` | 同时量化文本主干与输出头 |
 | `qwen3_5/text/2b/w4a16_mlp_awq_g128.toml` | 2B 纯文本，指定 MLP 范围使用 AWQ/G128 |
+| `qwen3_5/text/2b/w4a16_mlp_rtn_g32_attn_gdn_w8a16.toml` | MLP使用RTN W4/G32，Attention/GDN使用逐输出通道W8；G32只属于MLP |
 | `qwen3_5/text/35b_a3b/w4a16_experts_gptq_g128.toml` | MoE 路由专家使用 GPTQ/G128 |
 | `qwen3_5/vl/27b/w8a16_text_acc32_text.toml` | 文本投影使用 W8，文本 Linear 使用 ACC32；Vision 仍为 ACC16 |
 | `qwen3_vl/vl/4b/w4a16_text_awq_head_rtn_g32_vision_w8a16.toml` | 文本主干 AWQ、输出头 RTN，均为 W4/G32；Vision W8 |
@@ -48,8 +49,8 @@
 
 文件名用于选择，配置内容绑定实际模型与资产。权重目录、registry alias 和 profile ID 按加载接口保留自己的名称，不能从 TOML 文件名直接推导路径。
 
-`generic/` 表示通用执行方式，例如 Pi0.5 TP4/6；`legacy/` 表示保留独立资产、输入或调用约定的配置。
+`generic/` 表示通用执行方式，例如 Pi0.5 TP4/6；`controlled/` 表示使用专用命令的独立配置；`legacy/` 表示保留独立资产、输入或调用约定的配置。
 
 ## 定位已有配置记录
 
-[路径对照](config_names.json)按仓库根目录列出原路径到当前路径的对应关系。命令行兼容旧路径；复制和编辑模板时使用当前路径。
+[路径对照](config_names.json)按仓库根目录列出原路径到当前路径的对应关系。命令行、复制和编辑模板均使用当前路径。

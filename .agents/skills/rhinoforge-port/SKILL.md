@@ -78,6 +78,9 @@ For a decoder-only CausalLM, start from
    `python/rpu_backend/adapters/_manifest.py` and through
    `register_adapter`. Use the `rpu_backend.plugins` entry point for an external
    package; never replace a built-in binding.
+8. Add the exact-profile TOML under `examples/configs/` and reuse its model-family
+   runner under `examples/runners/`. Validate it with
+   `python -m examples.run --config <TOML> --check-config` before device execution.
 
 Do not duplicate a public wrapper, broaden a support family from one passing
 size, transform one model instance twice, or approximate missing model math.

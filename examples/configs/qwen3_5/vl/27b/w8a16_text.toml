@@ -11,7 +11,7 @@ QWEN3_5_QUANT_ALLOW_UNCERTIFIED = "1"
 QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED = "1"
 
 [input]
-images = ["python/rpu_backend/tests/model/wall_oss/assets/test_frame.png"]
+images = ["assets/test_frame.png"]
 prompt = "Describe the image."
 decode_steps = 32
 stop_on_eos = false

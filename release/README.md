@@ -15,7 +15,7 @@ the [provider paths](../docs/runtime_assets.md#configure-paths).
 
 Keep model evaluation data and reports outside source releases, package artifacts and release notes.
 
-For version changes and migration steps, see the [changelog](../CHANGELOG.md)
+For version changes and installation steps, see the [changelog](../CHANGELOG.md)
 and [upgrade guide](../docs/upgrading_1_2.md). Request separately distributed
 assets through the [runtime asset guide](../docs/runtime_assets.md#request-runtime-assets).
 

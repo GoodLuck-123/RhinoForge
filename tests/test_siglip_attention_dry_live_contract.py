@@ -735,8 +735,8 @@ int main() {
             assert(rejects(owner)); // Wrong live physical extent never inherits a plan.
             owner.seq_len_=owner.state.seq_len;
             owner.state.seq_len+=16;
-            // Dry eligibility is bound to the complete candidate, not prior live shape.
-            assert(owner.subclass_spm_kv_by_mha_eligible(owner.state.stage_plan,layout,0));
+            // A candidate must match the current inference context.
+            assert(!owner.subclass_spm_kv_by_mha_eligible(owner.state.stage_plan,layout,0));
             owner.state.seq_len-=16;
             for (int kind : {0,1}) {
                 auto partial=owner.state.stage_plan;
@@ -1414,3 +1414,113 @@ int main() {
 '''
     result = _run_native(tmp_path, cpp, torch)
     assert "Actual SigLIP fresh allocation/mutable output and retained raw ABA: PASS" in result
+
+
+def test_hyvit2_projector_uses_matrix_metadata_without_copying_output(tmp_path, monkeypatch):
+    """Execute HYViT2's output view/call and the DDR launcher's actual gates."""
+    monkeypatch.setenv("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+    import torch
+
+    owner = (ROOT / "src/fused/rpu_hyvit2_vision_model.cpp").read_text()
+    linear = (ROOT / "src/ops/rpu_linear.cpp").read_text()
+    start = owner.index("            at::Tensor proj_out_chunk =")
+    end = owner.index("&projector_bias_live_base_);", start) + len("&projector_bias_live_base_);")
+    consumer = owner[start:end] + "\n            }"
+    geometry = _function(linear, "void validate_parallel_linear_geometry(")
+    w4_operands = _function(linear, "static void check_linear_w4a16_operands(")
+    launcher = _function(linear, "void rpu_launch_linear_ddr_kernel(")
+    gates = launcher[launcher.index("  TORCH_CHECK(input.dim()"):launcher.index("  const bool in_graph")]
+    rank_start = launcher.index("  TORCH_CHECK(input.dim()")
+    rank_guard = launcher[rank_start:launcher.index(";", rank_start) + 1]
+    source = r'''
+#include <ATen/ATen.h>
+#include <ATen/Parallel.h>
+#include <cassert>
+#include <cstdint>
+#include <iostream>
+#include <string>
+using at::Tensor;
+constexpr int NUM_CORES=8;
+namespace graph_dma { bool active() { return false; } }
+''' + geometry + '\n' + w4_operands + r'''
+void rank_gate(const Tensor& input,const Tensor& weight,const Tensor& output) {
+''' + rank_guard + r'''
+}
+float value=0;
+int linear_calls=0,dma_calls=0;
+void rpu_launch_linear_ddr_kernel(const Tensor& input,const Tensor& weight,
+    Tensor& output,const Tensor& bias,bool has_bias,int partition,
+    const uint64_t* live_dst_base,int64_t dst_offset_bytes,
+    const uint64_t* live_bias_base) {
+    const int num_cores=8;
+    const Tensor weight_scale;
+    const c10::optional<bool> linear_acc32=c10::nullopt;
+''' + gates + r'''
+    assert(use_acc32 && has_bias && live_dst_base && live_bias_base);
+    assert(reinterpret_cast<uintptr_t>(output.data_ptr())==*live_dst_base+dst_offset_bytes);
+    assert(reinterpret_cast<uintptr_t>(bias.data_ptr())==*live_bias_base);
+    output.fill_(value);++linear_calls;
+}
+void rpu_launch_spm_copy_ddr_dma_mutable(uint32_t,const uint64_t*,int64_t,int64_t) {
+    ++dma_calls;
+}
+enum class FmbRouteFamily { MUTABLE_DMA,LINEAR };
+enum class HyViT2DmaRoute { SPM_TO_DDR_MUTABLE };
+enum class FmbLinearRouteSelector { AUTO_TILE };
+constexpr int HYVIT2_TAIL_OUTPUT_DMA_SITE=1,HYVIT2_PROJECTOR_LINEAR_SITE=2;
+struct Context {
+    bool has_complete_physical_manifest() { return false; }
+    void consume_physical_route(FmbRouteFamily,int,int64_t,int64_t,
+                                std::initializer_list<int64_t>,int64_t) { assert(false); }
+};
+struct Chunk { int64_t offset,len,idx=0; };
+struct Owner {
+    Tensor projector_output_,proj_w_,proj_b_;
+    int64_t seq_len_=64,projection_dim_=128;
+    bool proj1_in_merger_=false,merger_member_major_=false;
+    uint64_t projector_out_live_base_=0,projector_bias_live_base_=0;
+    Context context;
+    Context& ctx() { return context; }
+    Owner():projector_output_(at::zeros({1,64,128},at::kHalf)),
+            proj_w_(at::zeros({128,64},at::kHalf)),proj_b_(at::zeros({128},at::kHalf)) {
+        projector_out_live_base_=reinterpret_cast<uintptr_t>(projector_output_.data_ptr());
+        projector_bias_live_base_=reinterpret_cast<uintptr_t>(proj_b_.data_ptr());
+    }
+    void project(const Chunk& chunk,bool p1m=false) {
+        const int64_t seq_len=chunk.len,out_dim=projection_dim_,h=64,DWIDTH=2;
+        const uint32_t tail_src=0;
+        auto slot=at::zeros({seq_len,h},at::kHalf);
+''' + consumer + r'''
+    }
+};
+int main() {
+    at::set_num_threads(1);
+    Owner owner;
+    const auto original=owner.projector_output_.data_ptr();
+    // Before the fix, both whole-output and row-slice tensors are rank three.
+    for (Chunk chunk : {Chunk{0,64},Chunk{0,16},Chunk{16,48}}) {
+        auto old_output=owner.projector_output_.slice(1,chunk.offset,chunk.offset+chunk.len);
+        auto input=at::zeros({chunk.len,64},at::kHalf);
+        bool rejected=false;
+        try {rank_gate(input,owner.proj_w_,old_output);}
+        catch(const c10::Error& error) {
+            rejected=std::string(error.what_without_backtrace()).find("rank-2")!=std::string::npos;
+        }
+        assert(rejected);
+    }
+    value=3;owner.project({0,16});
+    assert(owner.projector_output_.slice(1,0,16).eq(3).all().item<bool>());
+    assert(owner.projector_output_.slice(1,16,64).eq(0).all().item<bool>());
+    value=5;owner.project({16,48});
+    assert(owner.projector_output_.slice(1,0,16).eq(3).all().item<bool>());
+    assert(owner.projector_output_.slice(1,16,64).eq(5).all().item<bool>());
+    value=7;owner.project({0,64});
+    assert(owner.projector_output_.eq(7).all().item<bool>());
+    assert(owner.projector_output_.data_ptr()==original);
+    assert(linear_calls==3 && dma_calls==0);
+    owner.project({0,64},true);
+    assert(linear_calls==3 && dma_calls==1);
+    std::cout << "HYViT2 rank-2 projector and output alias: PASS\n";
+}
+'''
+    assert "HYViT2 rank-2 projector and output alias: PASS" in _run_native(tmp_path, source, torch)

@@ -40,7 +40,7 @@ source default applies to direct adapter use.
 
 ## Configuration and execution
 
-Use `examples/run.py --config PATH`. [Model examples](../examples/README.md) describes the model directories, formats and required inputs. General models use `[example]/[input]/[run]`; specialized policies use the model table shown in their templates. `example.opt_in` binds permitted controls before Torch import and rejects inherited conflicts. `[cpu].threads` applies before the first Torch import; thread aliases must agree.
+Use `python -m examples.run --config PATH`. [Model examples](../examples/README.md) describes the model directories, formats and required inputs. General models use `[example]/[input]/[run]`; specialized policies use the model table shown in their templates. `example.opt_in` binds permitted controls before Torch import and rejects inherited conflicts. `[cpu].threads` applies before the first Torch import; thread aliases must agree.
 
 Select main and expansion assets with `RPU_KERNEL_LIB_PATH` and `RPU_KERNEL_LIB_PATH_EXPANSION`. Keep asset paths and credentials in the deployment environment. `rpu_execution` configures model and component settings. Cold settings require a fresh model/process; supported stage updates use the [execution API](api_reference.md#execution-configuration-and-updates) between requests.
 
@@ -66,8 +66,7 @@ These settings belong to the application process and its installed CPU runtime,
 not to the device planner. The canonical `[pi05]` examples bind the allocator values
 below before importing Torch, through `run.py`.
 `run.torch_num_threads` defaults to eight. Library inference does not change
-these process settings. Use a fresh process when changing them; older direct
-example formats do not apply `[runner.env]` on behalf of the common runner.
+these process settings. Use a fresh process when changing them.
 
 | Variable | Recommended Pi value | Read / change | Scope, effect, and risk |
 |---|---:|---|---|
@@ -97,6 +96,7 @@ Keep model switches scoped to that model's configuration or launch process. Expl
 
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |
 |---|---|---|---|
+| `RPU_BACKEND_SO` | Unset; explicit native-extension file path | Extension resolution / **IMPORT** | Takes precedence over packaged and source-build candidates. The file must exist and match this Python/PyTorch ABI. Set only to a trusted build. |
 | `RPU_KERNEL_LIB_PATH` | Path to `rhinoOpLib_current.ref` and its adjacent `.kernels` | First asset use / **IMPORT** | Select the main asset matching this source. |
 | `RPU_KERNEL_LIB_PATH_EXPANSION` | Expansion path; defaults to `rhinoExpansionOpLib_current.ref` beside main | First asset use / **IMPORT** | Select the matching expansion asset and adjacent `.kernels`. |
 | `RPU_MODEL_CACHE` | `~/.cache/rhinoforge/models`; directory path | Package bootstrap for HF defaults / **IMPORT**, alias resolution / **CALL** | Root for RhinoForge model aliases. An explicit value also supplies HF cache defaults; a post-import change affects later aliases but does not reliably reconfigure already imported HF components. |
@@ -106,11 +106,17 @@ Keep model switches scoped to that model's configuration or launch process. Expl
 | `LKN_MAX_BATCH_ENTRIES` | `65536`; positive decimal, invalid/empty/zero uses default, cap `4194304` | Launch initialization and Graph planning / **IMPORT** | Process capacity for batched submissions. Too small rejects a Graph; excessive values reserve more host memory. |
 | `LKN_KD_BUF_MB` | `8`; positive MiB, invalid/empty/zero uses default, cap `256` | Launch initialization and Graph planning / **IMPORT** | Process command-buffer capacity. Too small rejects a Graph; excessive values increase memory use. |
 | `LKN_INSTR_BUF_MB` | `64`; positive MiB, invalid/empty/zero uses default, cap `1024` | Launch initialization and Graph planning / **IMPORT** | Process execution-buffer capacity. Too small rejects a Graph; excessive values increase memory use. |
-| `HF_HOME` | Hugging Face default; directory path | Package bootstrap and HF initialization / **IMPORT** | Standard HF cache root. `RPU_MODEL_CACHE` supplies it only with `setdefault`; caller values win. |
-| `HF_HUB_CACHE` | Hugging Face default; directory path | Package bootstrap and HF initialization / **IMPORT** | Standard Hub cache. An explicit `RPU_MODEL_CACHE` supplies `<HF_HOME>/hub` only when unset. |
+| `HF_HOME` | `<model-cache>/.hf`; directory path | Package bootstrap and HF initialization / **IMPORT** | HF cache root; explicit values are preserved. |
+| `HF_HUB_CACHE` | Hugging Face default; directory path | Package bootstrap and HF initialization / **IMPORT** | Standard Hub cache; defaults to `<HF_HOME>/hub` when unset. |
 | `HUGGINGFACE_HUB_CACHE` | Hugging Face default; directory path | Package bootstrap and HF initialization / **IMPORT** | Compatibility Hub cache variable, handled like `HF_HUB_CACHE`; keep both consistent. |
 
-Set all three `LKN_*` values before importing the backend. A facade may choose
+`RPU_LOG_LEVEL` controls backend logging at import; `LKN_LOG_LEVEL` separately
+controls Launch logging. Set both before import to control startup output.
+Runtime `set_debug_level()` changes backend logging only. Forked children inherit
+the current level; spawned children inherit `RPU_LOG_LEVEL` from the environment,
+so update it before spawning when propagating a runtime change.
+
+Set all three `LKN_*` capacity values before importing the backend. A facade may choose
 larger defaults before its first adapter import, but it cannot resize a Launch
 runtime that is already loaded. Larger capacities do not make an unsupported
 model profile supported.
@@ -155,9 +161,10 @@ contracts.
 ### Collective execution
 
 Residual reduction has no public route, chunk, ring, or two-stage selector.
-The shared wrapper always uses the generated eight-core ring and chooses its
-schedule from validated geometry. Partial producers clear inactive shards
-before reduction. See
+The ordinary FP16 ring uses the installed consumer core count, with eight as the
+default. Admitted reduced profiles use their bound topology; local-SPM,
+mixed-precision and fixed-layout routes retain eight-core bounds. Partial
+producers clear every consumer shard before writing the active prefix. See
 [Automatic residual reduction](../knowledge/concepts/allreduce-routing.md).
 
 ### Graph and replay
@@ -166,7 +173,6 @@ before reduction. See
 |---|---|---|---|
 | `RPU_DEEP_FAST_REPLAY` | Off; any non-empty value whose first character is not `0` enables | Fused-handle construction / **MODEL** | Skips audited setup work on full-body replay. A profile must prove every skipped input/layout remains valid. |
 | `RPU_FASTREPLAY_SKIP_SYNC` | On; empty, `0`/`false`/`off` disables | Graph BUILD / **BUILD** | Allows the common Graph executor to omit the mutable-kernel scan only when the replay did not touch Graph-owned kernel parameters and every Launch register-state token still matches the prepared batch. Mutable DMA endpoints are resolved and patched independently on every replay, and all command writes are published before submission. A dirty witness, token change, or token-query failure conservatively performs the full scan. This is a diagnostic opt-out, not a model route. |
-| `RPU_FUSED_COEXIST_KEEP_PERSISTENT_GEN` | Off; exact `1`, `true`, `True`, or `on` enables | First native coexistence use / **NATIVE** | Retains a persistent SPM generation across profile-owned subsystem handoff. Wrong ownership can corrupt later execution. |
 | `RPU_GRAPH_DEFER_TO_COPY` | No independent default; legacy alias accepts `auto`/empty, `0`/`off`/`false`, or any other non-empty value for forced on | First host-op gate use / **NATIVE** | Consulted only when `RPU_GRAPH_HOST_OP_DEFER_GATE` is unset. Avoid setting both. |
 | `RPU_GRAPH_HOST_OP_DEFER_GATE` | `auto`; `auto`/empty, `0`/`off`/`false`, or any other non-empty value for forced on | First host-op gate use / **NATIVE** | Controls deferral of stable host inputs during capture. Forced-on with unstable storage risks stale data. |
 | `RPU_SKIP_IDLE_RECORD_FUNCTION` | On; `0`/`off`/`false` disable | First Python graph scope / **MODEL** | Omits idle profiler scopes only while the profiler is off. It preserves scopes when profiling and otherwise reduces host overhead. |
@@ -180,9 +186,15 @@ before reduction. See
 | `RPU_KVINSERT_HYBRID_V16` | Off; non-empty except `0`/`false`/`False` | Each KV insertion / **CALL**; rebuild Graph | Selects an aligned bulk/tail schedule. Facades may own it; arbitrary enablement changes graph topology. |
 | `RPU_KVINSERT_V16` | On; exact `0` or `false` disables, all other values enable | First native use / **NATIVE** | Selects the aligned KV-insert route when admitted. Disabling changes scheduling and performance, not logical cache length. |
 | `RPU_KVINSERT_V16_ANY_TP` | Off; non-empty except `0`/`false`/`False` | First native use / **NATIVE** | Allows the aligned route for additional whole-head parallel factors. Unsupported geometry can fail admission. |
-| `RPU_LINEAR_ACC32` | Off; strict `0`/`1`, `false`/`true`, or `off`/`on` with listed case variants; invalid fails | First native use / **NATIVE** | Chooses FP32 accumulation for tiled linear families. It changes tiles, memory use, performance, and numerics. |
-| `RPU_RMSNORM_NEWTON` | Off; strict `0`/`1`, `false`/`true`, or `off`/`on` with listed case variants; invalid fails | First native use / **NATIVE** | Selects refined normalization. It changes numerics and can change available schedules. |
+| `RPU_LINEAR_ACC32` | Retired | Not read by production launchers | Set component `linear_acc32` in `rpu_execution`; Wall-OSS rejects the old name in `runtime_env`. |
+| `RPU_RMSNORM_NEWTON` | Retired | Not read by production launchers | Wall-OSS rejects this name in `runtime_env`; remove it from production configurations. |
 | `RPU_RMSNORM_VWARP` | Compatibility input; Hy-VLA strictly accepts empty/`0`/`off`/`false`, `16`, `32`, or `auto`, while Wall-OSS rejects this variable | Owner cold-plan admission / **NATIVE** | The owning adapter translates it into a frozen per-handle capability. Invalid Hy-VLA text fails before process claim; native handles do not re-read it. |
+
+Ordinary direct-SPM RMSNorm freezes available payloads per handle and uses a
+common `(rows, cols)` resolver: V32 for divisible-by-32 rows, then V16 for
+divisible-by-16 rows, otherwise BASE. Canonical V16/V32 routes use grid 8.
+`RPU_RMSNORM_VWARP` is a Hy-VLA VLM cold compatibility translator only; an explicit
+unavailable route fails at installation. Mixed RMSNorm reads BF16 and emits FP16.
 
 <a id="qwen35-vision-selectors"></a>
 ### Qwen3.5 Vision selectors
@@ -213,7 +225,6 @@ pass.
 
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |
 |---|---|---|---|
-| `RPU_GR00T_KVPAD16` | Raw off; facade `1`; native `1` or a value beginning with `t`/`T` enables | First native KV setup / **NATIVE** | Pads and masks KV rows for the GR00T expert. It changes cache layout and Graph signatures. |
 | `RPU_GR00T_PARTIAL_MROPE` | Raw **PB(false)**; facade **PB(true)** | GR00T construction / **MODEL** | Uses precomputed partial multimodal position tables. |
 | `RPU_GR00T_W8A16` | **PB(false)** | GR00T weight installation / **MODEL** | Quantizes the admitted backbone and action projections and changes numerics. |
 
@@ -415,20 +426,18 @@ performance-only switches. With every selector unset, the pinned public
 checkpoint follows `use_embodied_system_prompt_ratio=0.0` and uses the exact
 plain `You are a helpful assistant.` system prompt from public `wall-x`.
 
-The Source-only facade pins Vision `chunk_size=768`, disables packed Vision,
-and requires `preflight_images(images)` before checkpoint weight loading. The
-CPU processor's frozen grid must be exactly two `[1,32,32]` images. Each image
-is executed independently with the shared `768+256` KV-first plan; `auto`, any
-other grid, and later grid changes fail before the process-wide claim or before
-any Vision work, respectively. This is an admission contract, not board
-validation evidence.
+Bind `camera_names` at construction and pass one image for each name on every
+request. Vision chunking is selected through `rpu_execution.vision`; packed
+Vision groups compatible image grids within `RPU_WALL_OSS_BATCH_MAX_SEQ`.
+The RTC constructor binds its fixed camera/action profile and rejects component
+`linear_acc32=true`; ordinary profiles use their explicit stage settings.
 
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |
 |---|---|---|---|
 | `RPU_WALL_OSS_ACTION_FP32_TAIL` | **PB(false)** | Each denoise call / **CALL**; rebuild prepared Graph profile | Uses host FP32 for the Euler tail. It changes action numerics and conflicts with fused/unrolled execution. |
 | `RPU_WALL_OSS_ATTN_TP8` | Raw **PB(false)**; facade `1` | Weight installation / **MODEL** | Replicates KV heads for eight-core attention. Rebuild weights, caches, and Graphs. |
 | `RPU_WALL_OSS_BATCH_MAX_SEQ` | `768`; decimal integer | Vision grouping / **CALL**; rebuild Graph | Caps packed vision sequence length. Too large can exceed memory; the selected public profile may further constrain it. |
-| `RPU_WALL_OSS_BATCH_VISION` | Raw **PB(true)**; Source-only facade `0` | Vision forward / **CALL**; rebuild Graph | Direct builders may pack equal-grid images up to the cap. The public facade fixes per-image preflight and rejects enabling this selector. |
+| `RPU_WALL_OSS_BATCH_VISION` | **PB(true)** | Vision forward / **CALL**; rebuild Graph | Groups equal-grid images within the configured capacity; `0` uses per-image execution. |
 | `RPU_WALL_OSS_DENOISE_UNROLL` | **PB(true)** | Action construction and calls / **MODEL** | Uses the fused denoise loop. `0` selects the host loop and changes topology and timing. |
 | `RPU_WALL_OSS_DEVICE_PATCH_EMBED` | **PB(true)** | Vision construction / **MODEL** | Runs folded patch embedding on device. `0` uses CPU projection and changes boundary/performance. |
 | `RPU_WALL_OSS_EXPERT0_DOWN_INT4` | **PB(true)** | Quantized LLM weight installation / **MODEL** | Uses the admitted compact expert-0 down projection. Some W4 profiles force it off; mismatches fail validation. |
@@ -460,7 +469,6 @@ sharing it.
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |
 |---|---|---|---|
 | `QWEN3_5_VISION_GRAPH_DISABLE` | `0`; any value other than exact `0` disables | Vision forward / **CALL**; rebuild/clear Graph | Bypasses Qwen3.5 Vision GraphCache for controlled comparison. Replay and latency conclusions no longer apply. |
-| `RPU_ALL_GATHER_FORCE_MULTI_CORE` | Off; **N1** | First native use / **NATIVE** | Forces the multi-core schedule for A/B comparison. It is not a generally supported performance selector. |
 | `RPU_CHUNK_FORCE_UNSAFE` | Off; **N1** | First applicable native planner/launcher use / **NATIVE** | Bypasses a planner safety check. It can exceed execution constraints and must never produce deployable output. |
 | `RPU_DYNAMO_MATERIALIZE_BREAKS` | **PB(false)** | Dynamo partitioning / **CALL**; recompile | Materializes partition breaks. It changes graph boundaries and adds transfers, so it is only a compiler diagnostic. |
 | `RPU_GRAPH_DDR_SPM_LOG` | Off; non-empty whose first character is not `0` | First data-node execution / **NATIVE** | Logs node indexes, byte counts, and a bounded source checksum. Output is model-data-derived and logging changes timing. |
@@ -575,3 +583,93 @@ name. A new reader or facade preset must add a row in the correct tier; removing
 the final reader/preset requires removing its row. Automated documentation
 checks should compare the row set bidirectionally with source readers and keep
 diagnostic variables below the stable `Diagnostic-only inventory` heading.
+
+## Additional model and diagnostic settings
+
+Set model switches before constructing the model; changing them requires a new
+model instance. Defaults below apply when unset; templates can select different
+values. Shape restrictions are enforced by the selected model and its
+[configuration](../examples/configs/CONFIGURATIONS.md). Diagnostic outputs contain
+values from the current invocation and stay in the caller's output directory.
+
+| Variable | Unset/default | Accepted values | Effect |
+|---|---|---|---|
+| `HALO_CHUNK_DIAG` | unset | unset off; any set value enables | Log candidate SPM fit and the selected chunk in the shared planner; checked on each plan. |
+| `HALO_NODE_HIST` | unset | unset off; any set value enables | Log captured node and kernel counts before enqueue; checked for each prepared batch. |
+| `HALO_PROFILE` | 0 | only literal `1` enables | Profile HALO forwards with torch.profiler; read for each profiling context. |
+| `HALO_PROFILE_DIR` | output/halo_profile | directory path | Write profiler tables and Chrome traces here when HALO_PROFILE is enabled. |
+| `QWEN3_5_VISION_DBG_Q` | 0 | `1` or `true` enables | Capture each layer's rotated Q tensor when debug export is enabled; read on first use. |
+| `QWEN3_VL_DELIVERY_ALLOW_NUMERIC_BLOCKED` | 0 | only literal `1` enables | Allow the fixed Qwen3-VL delivery profile through its admission gate; checkpoint and geometry checks still apply. |
+| `RHINO_CHUNK` | 0 | integer | RhinoVLA prefill chunk fallback when rpu_execution is absent; positive values request an exact chunk, non-positive values leave automatic planning. |
+| `RHINO_SMOKE_PREFIX_PADDING_ROWS` | 0 | integer | Diagnostic prefix-visibility truncation. The official descending-flow pipeline requires 0. |
+| `RHINO_SPM` | unset | unset/empty off; any other value enables | Print SPM allocation summaries at RhinoVLA pipeline checkpoints; read per call. |
+| `RHINO_TRACE` | unset | unset/empty off; any other value enables | Print RhinoVLA pipeline stage messages; read per call. |
+| `RPU_GR00T_CROSS_KV_REUSE` | 0 | `0`/`1`; empty is off; other values rejected | Reuse cross-attention K/V across ordinary B1/Q41 four- or ten-step TP8 denoise bodies. Refresh the first body each inference; source geometry, cache capacity and full SPM admission apply. |
+| `RPU_GR00T_CROSS_V_TRANSPOSE_REUSE` | 0 | `0`/`1`; empty is off; other values rejected | With cross-KV reuse and its raw-SPM route, transpose V once in the first body and reuse that bank in later denoise bodies. |
+| `RPU_GR00T_FF1_RESIDENT_W8` | 0 | `0`/`1`; empty is off; other values rejected | Keep layer-0 FF1 W8 weights in SPM for the admitted ordinary B1/Q41 TP8 denoise loop. Requires its expansion kernel and full SPM admission; source-weight changes invalidate the owned copy. |
+| `RPU_GR00T_KV_SPM_ONLY` | 0 | `0`/`1`; empty is off; other values rejected | Omit unused DiT DDR KV mirrors only where the ordinary four- or ten-step TP8 plan consumes raw SPM K/V; DDR, single-step and Z2 routes retain mirrors. |
+| `RPU_GR00T_NATIVE_POSITION_CACHE` | 0 | `0`/`1`; empty is off; other values rejected | Cache versioned, content-keyed int32 position tables for ordinary unpadded VL calls. Padding and Z1 use their original position path. |
+| `RPU_GR00T_PRECOMPUTE_ADALN` | 0 | `0`/`1`; empty is off; other values rejected | After weight installation, precompute the fixed four- or ten-step AdaLN tables for ordinary B1/Q41 TP8 unroll. Requires unchanged source owners and no prior forward or Z2 preparation. |
+| `RPU_GR00T_PRECOMPUTE_TIME_GLUE` | 0 | `0`/`1`; empty is off; other values rejected | Precompute fixed timestep/output-modulation tables for the same ordinary TP8 denoise profile, independently of AdaLN precomputation. |
+| `RPU_GR00T_QWEN3VL_SPM_Z1` | 0 | `1` or `true` enables | Select the exact FP16 one-image Vision→Text SPM path; rejects W8, partial rotary and host-FP32 patching. |
+| `RPU_GR00T_RING_XOR3` | 0 | `0`/`1`; empty is off; other values rejected | Select the optional residual collective for admitted ordinary B1/Q41 TP8 FP16 or W8 O/FF2 producers; retains FP32 accumulation and final FP16 rounding. |
+| `RPU_GR00T_SELF_QKV_MULTIBASE` | 0 | `0`/`1`; empty is off; other values rejected | Combine the ordinary W8 TP8 self-attention Q/K/V projections when the exact geometry and expansion kernel are available; cross-attention retains separate projections. |
+| `RPU_GR00T_VL_KV_SPM_ONLY` | 0 | `0`/`1`; empty is off; other values rejected | Omit unused VL DDR KV mirrors for admitted ordinary B1 TP8 raw-SPM attention; DDR and prepared Z2 routes retain them. |
+| `RPU_GRAPH_HCB_CHECKSUM` | 0 | unset/empty/leading `0` off; other values enable | Log shape, dtype, sums and small tensor values around aten::_to_copy callbacks; sampled on first callback execution, without addresses. |
+| `RPU_GRAPH_TO_COPY_LOG` | 0 | unset/empty/leading `0` off; other values enable | Log stable-output registration and adopted-return byte counts; registration samples the flag on first use, capture reads it per call. |
+| `RPU_INTERNVLA_NEXTDIT_FOLD_NORM_MOD` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Fold per-step AdaRMS modulation into fixed norm weights for fused unroll; per-step diagnostic execution keeps its original math. |
+| `RPU_INTERNVLA_NEXTDIT_FUSED_QKQ` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Combine each NextDiT layer's self-Q, self-K and cross-Q projections; requires the exact admitted flow geometry. |
+| `RPU_INTERNVLA_NEXTDIT_STEP_PREP_RPU` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | With folded norm modulation, move timestep projection, bias/tanh, folding and staging into the device denoise graph; SiLU remains on CPU. |
+| `RPU_L2_CAPTURE_GATE` | 0 | only literal `1` enables | Capture LingBot2 gate and accumulator tensors; adds capture buffers at weight installation. |
+| `RPU_L2_CAPTURE_INNORM` | 0 | only literal `1` enables | Capture LingBot2 layer-0 post-AdaRMS input; allocated at weight installation. |
+| `RPU_L2_CAPTURE_L0` | 0 | only literal `1` enables | Capture LingBot2 layer-0 output; allocated at weight installation. |
+| `RPU_L2_CAP_RESID` | 0 | only literal `1` enables | Capture LingBot2 per-layer inputs and attention residuals; allocated at weight installation. |
+| `RPU_L2_DBG_PACKED` | 0 | only literal `1` enables | Enable the LingBot2 packed-weight diagnostic getter; checked on each getter call. |
+| `RPU_L2_STAGES` | 0 | only literal `1` enables | Capture LingBot2 grouped intermediate stages; allocated at weight installation. |
+| `RPU_LINGBOT2_DEBUG_DUMP_ROUTER_H` | 0 | only literal `1` enables | Capture the LingBot2 router input tensor; allocated at weight installation. |
+| `RPU_LINGBOT2_MULTIVIEW_SPM_Z2` | 0 | only literal `1` enables | Select the exact three-camera 256×256 Z2 profile; requires RPU_LINGBOT2_ALLOW_UNVALIDATED=1 and the matching template selectors. |
+| `RPU_LINGBOT_DENOISE_UNROLL` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Capture the ten-step LingBot Euler denoise loop as one graph. |
+| `RPU_LINGBOT_ENCODER_1THREAD` | 1 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Use one CPU thread within the denoise loop and restore the previous count afterwards; vision keeps its existing thread setting. |
+| `RPU_LINGBOT_EXPERT_REPLAY` | 1 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Reuse the action-expert graph across denoise steps with stable inputs and refreshed modulation; 0 rebuilds per step. |
+| `RPU_LINGBOT_FUSED_ENCODER` | 1 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Precombine action/time encoder projections and per-step time bias; 0 retains the separate projection path. |
+| `RPU_LINGBOT_ONDEVICE_ENCODER` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Run the fused suffix encoder, output projection and Euler update on the device. |
+| `RPU_LINGBOT_VLM_REPLAY` | 1 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Reuse the VLM prefill graph across calls with the same prefix shape and a stable input buffer. |
+| `RPU_P7_SPLIT_KERNELS` | empty | comma-separated names | Isolate matching kernel/operator names into separate Graph segments for diagnosis; read while preparing segments. |
+| `RPU_PI05_DENOISE_GATEUP_RESIDENT_LAYERS` | 0 | literal `0`, `1` or `5` | Bundle the first one or five action layers' W8 Gate/Up weights for the exact P800/M50 TP8 ten-step loop. Requires prepared AdaRMS and body streaming; the separate GateUp-resident switch must be off. |
+| `RPU_PI05_PREFILL_KV_ONLY` | 0 | `0`/`1`; empty is off; other values rejected | For the admitted paired TP8 Pi0.5 prefill profile, the final layer produces only K/V and omits unused hidden output. Requires the dedicated KV-only entry and ACC16 prefill; selected templates enable it. |
+| `RPU_PI05_PREFILL_MASK_FP16` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Prepare and cache prefix additive masks in CPU FP16; dtype participates in the cache key. Selected paired TP8 templates enable it. |
+| `RPU_PI05_PREFILL_ROPE_CACHE` | 0 | `0`/`1`; empty is off; other values rejected | Cache one position-indexed RoPE upload using source identity/version and positions. Native stable slots still refresh; paired Down/KV-direct/KV-only profiles require this off. |
+| `RPU_PI05_PROBE_DIR` | unset | directory path | Write named Pi0.5 intermediate tensors and KV snapshots to the supplied directory; read per export, unset means no files. |
+| `RPU_RHINOVLA_ADARMS_RESIDENT` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | For the exact v3 ten-step expert, preload precomputed AdaRMS tables into SPM each graph execution. Requires precomputed tables and rejects SKIP_ADARMS_GEMV. |
+| `RPU_RHINOVLA_ALIGNED_KV` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Pad the exact v3 expert's physical prefix and KV writes while preserving logical masks and RoPE positions; checks capacity and clears padding. |
+| `RPU_RHINOVLA_EXPERT_DEPTH_LIMIT` | unset | integer within checkpoint depth | Diagnostic expert depth in 1..checkpoint depth; adjusts prefix-layer selection. Official and exact W8 profiles reject reduced depth. |
+| `RPU_RHINOVLA_EXPERT_FUSIONS` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Use norm/shift and gated-residual fusion in the exact v3 expert; requires precomputed AdaRMS, GATED_NO_SUB and both kernels. |
+| `RPU_RHINOVLA_EXPERT_MLP_DIM_LIMIT` | unset | integer within checkpoint width | Diagnostic expert MLP width in 1..checkpoint width; official and exact W8 profiles reject a reduced width. |
+| `RPU_RHINOVLA_EXPERT_W8A16` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Quantize only exact ordinary v3 expert Q/K/V/O and MLP weights with per-channel FP16 scales. Rejects reduced geometry and PACKED_QKV; full-pipeline W8 also enables expert W8. |
+| `RPU_RHINOVLA_HIGH_PRECISION` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Select Newton RMSNorm and higher-precision activations for exact full-W8 v3 with resident precomputed AdaRMS. Requires matching optional kernels before capture. |
+| `RPU_RHINOVLA_HIGH_PRECISION_FUSIONS` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | With HIGH_PRECISION, fuse action norm/shift and text/action SiLU×up using the corresponding higher-precision kernels. |
+| `RPU_RHINOVLA_PACKED_QKV` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Combine immutable Q/K/V weights for the exact FP16 v3 expert, retaining original output planes. Requires new weight installation after changing this setting. |
+| `RPU_RHINOVLA_PARTIAL_ROPE` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | With HIGH_PRECISION in exact full-W8 v3, select the existing partial-RoPE route over the full head while leaving the aligned padding row untouched. |
+| `RPU_RHINOVLA_PRECOMPUTE_GATE_TANH` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | For full-W8 v3 with resident precomputed AdaRMS, evaluate fixed gate TANH while constructing timestep tables and reuse it in replay. |
+| `RPU_RHINOVLA_VECTOR_K_NORM` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Use vector K normalization in exact full-W8 v3; requires HIGH_PRECISION and ALIGNED_KV, with tail clearing before normalization. |
+| `RPU_RHINOVLA_VECTOR_Q_NORM` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | With HIGH_PRECISION in exact full-W8 v3, pad Q normalization to its vector shape and clear the added rows each layer/replay. |
+| `RPU_RHINOVLA_VISION_INPUT_CACHE` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Reuse vision cast, patch-input and versioned position buffers; refresh pixels every call. Bound to the installed vision owner, with at most four entries. |
+| `RPU_WALL_OSS_ACTION_KV_OWNER_FANOUT` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | For the exact non-resident action route, produce K/V once and distribute through SPM; M32 does not admit this route. |
+| `RPU_WALL_OSS_ACTION_WEIGHT_RESIDENCY` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Preload eligible action weights once per graph: W8 layers1–4 or FP16 layers1–2. Base H32 requires sorting SiLU and FP16 transfer bit4 when using FP16. |
+| `RPU_WALL_OSS_FP16_MLP_M224` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Split FP16 M640 Gate/Up into224+224+192 rows; M320 boundary calls retain their route. |
+| `RPU_WALL_OSS_FP16_TRANSFER_MASK` | 0 | decimal `0..7` | Bits1/2/4 select exact FP16 Vision/Prefill/Action schedules; weights remain FP16. |
+| `RPU_WALL_OSS_PREFILL_MIXED_PRECISION` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Select the RTC prefill FP16/BF16 boundary for the exact TP8 H2048/I11008/L36 profile; enable with Vision mixed precision. RTC templates set their explicit values. |
+| `RPU_WALL_OSS_PREFILL_OWNER_DIRECT_KV` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Write K/V directly from the exact mixed, staged P640 owner-QKV route after partial RoPE. |
+| `RPU_WALL_OSS_PREFILL_STAGED_MLP` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Select layer-major W8 P640/C320×2 MLP scheduling; requires mixed prefill, TP8, causal position0 and the exact RTC checkpoint. P672 retains its own schedule. |
+| `RPU_WALL_OSS_RTC_ALLOW_NUMERIC_BLOCKED` | 0 | only literal `1` enables | Allow the named RTC FP16/W8A16 configurations through admission; W4 and unmatched profiles remain rejected. Does not set the other profile switches. |
+| `RPU_WALL_OSS_RTC_EMBODIMENT` | X2 ex001_desktop | non-empty string | Robot name inserted into the RTC prompt; non-RTC calls use the dataset name. Supply the name matching the caller's robot mapping. |
+| `RPU_WALL_OSS_SORTING_SILU_MUL` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Fuse SiLU×Mul for admitted sorting/base paths; exact FP16 routes also require their transfer bit. Paired small-image Vision can retain its dense mask across layers. |
+| `RPU_WALL_OSS_VISION_LAYER_GROUP` | 0 | `0` or `32` | For exact three-image576-patch batched vision, keep each image through all vision layers. Mutually exclusive with weight-outer scheduling; process-pinned at construction. |
+| `RPU_WALL_OSS_VISION_MIXED_PRECISION` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Select the RTC vision FP16/BF16 boundary with fused merger and576 patches per image; pair with prefill mixed precision. RTC templates set their explicit values. |
+| `RPU_WALL_OSS_VISION_NATIVE_WINDOW_SDPA` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Use native window attention for the admitted W8 weight-outer profile or base two/three224 images with row reuse and SiLU; FP16 also requires transfer bit1. |
+| `RPU_WALL_OSS_VISION_PAIR_252` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | For exactly three252 images, pair the first two vision inputs and retain the third separately. Requires generic window vision, fused merger, sorting SiLU and batch capacity>=672. |
+| `RPU_WALL_OSS_VISION_ROW_WEIGHT_OUTER` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Reuse complete local weight slabs across vision row tiles for admitted compact/base shapes. FP16 requires transfer bit1; small-image mixed precision stays off. |
+| `RPU_WALL_OSS_VISION_WEIGHT_OUTER` | 0; RTC W8 default1 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Select the exact three-image576-patch schedule with batched vision, mixed precision and fused merger. FP16/W4 RTC force it off; incompatible with layer-group32 and pinned per process. |
+| `RPU_WALL_OSS_W16_NEXT3_MASK` | 0 | `0` or `1` | Select the M160×4/N96 row schedule for prefill O projection. |
+| `RPU_WALL_OSS_W16_NEXT4_MASK` | 0 | decimal `0..3` | Bit1 selects W8 M640 Gate/Up row scheduling; bit2 selects paired ring/postnorm. |
+| `RPU_WALL_OSS_W16_REUSE_MASK` | 0 | `0` or `8` | Enable A16 reuse for resident action Gate/Up; other bit patterns are rejected. |

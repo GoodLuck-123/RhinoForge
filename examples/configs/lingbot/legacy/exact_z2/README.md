@@ -58,12 +58,11 @@ BF16 配方使用原 BF16 交付文件。
 
 ### 输入与运行
 
-在已安装项目及模型依赖的 设备环境、仓库根目录运行：
+在已安装项目及模型依赖的设备环境、仓库根目录运行：
 
 ```bash
 cp examples/configs/lingbot/legacy/exact_z2/6b/w8a16.toml /tmp/lingbot2_exact_z2_w8.toml
 # input.observation 填匹配 exact-Z2 的 CPU 张量文件。
-# input.training_config 填配套训练 YAML；input.qwen3vl_base 填 Qwen3-VL-4B-Instruct 配套目录。
 # 在 [run] 中添加 output_dir。
 vi /tmp/lingbot2_exact_z2_w8.toml
 python examples/run.py --config /tmp/lingbot2_exact_z2_w8.toml --check-config
@@ -78,7 +77,6 @@ python examples/run.py --config /tmp/lingbot2_exact_z2_w8.toml
 
 | 字段 | 模板值 | 省略时 | 范围与关联 |
 |---|---|---|---|
-| `input.training_config/qwen3vl_base` | 配套 YAML / Qwen3-VL 基础目录 | 必填 | 与 checkpoint 和 observation 配套 |
 | `input.observation` | 文件占位路径 | 必填 | 配对 CPU observation，含初始噪声，使用 true/true 掩码 |
 | `input.prefix_length_range` | `[215,225]` | `[215,225]` | 有效前缀范围，物理执行为 P225 |
 | `input.seed` | 0 | 0 | observation 已提供显式初始噪声 |
@@ -88,3 +86,7 @@ python examples/run.py --config /tmp/lingbot2_exact_z2_w8.toml
 模板 `run.warmup/runs/seed=2/3/0`，`cpu.threads` 未配置。通用字段的省略值、输出与诊断选项见[公共参数说明](../../../PARAMETERS.md)。
 
 加载与调用见[runner](../../../../runners/lingbot2/runner.py)，量化实现见 [runtime.py](../../../../../python/rpu_backend/adapters/lingbot_vla_v2/runtime.py) 和 [convert.py](../../../../../python/rpu_backend/adapters/lingbot_vla_v2/convert.py)。
+
+## 输出
+
+`run.output_dir` 保存 `report.json` 和完整 55 维归一化动作快照。

@@ -1663,9 +1663,7 @@ protected:
         }
         const ChunkInfo& chunk = plan.compute.chunks.front();
         const int64_t seq = chunk.len;
-        // The candidate describes its complete packed sequence. Live seq_len_
-        // may still be zero or describe a prior shape during dry planning.
-        if (seq <= 0 || seq % image_batch_count_ != 0 ||
+        if (seq <= 0 || seq != ctx().seq_len || seq % image_batch_count_ != 0 ||
             chunk.offset != 0 || chunk.kv_seq_len != seq ||
             plan.qkv.chunks.front().offset != 0 ||
             plan.qkv.chunks.front().len != seq) {

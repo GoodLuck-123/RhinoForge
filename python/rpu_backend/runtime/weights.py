@@ -625,8 +625,7 @@ def _validate_bounded_linear_move(module, force_col_partition, attn_num_cores,
         weight = child.weight
         if (weight.device.type != "cpu" or weight.dtype != torch.float16
                 or not weight.is_contiguous()
-                or tuple(weight.shape) != (child.out_features, child.in_features)
-                or hasattr(child, "_rpu_linear_partition")):
+                or tuple(weight.shape) != (child.out_features, child.in_features)):
             raise ValueError(f"bounded weight migration requires a contiguous CPU FP16 Linear: {path!r}")
         partition, cores = _linear_conversion_layout(child, name, force_col_partition,
             attn_num_cores, mlp_num_cores, lm_head_num_cores)
@@ -667,7 +666,8 @@ def convert_linear_weights_inplace(module: nn.Module, prefix: str = "", _embeddi
         force_col_partition: If True, always use col partition (for DDR linear without fused decoder)
         attn_num_cores: Number of cores for attention layers (q/k/v/o_proj).
                         Use min(NUM_CORES, num_kv_heads) for models with fewer KV heads than cores.
-                        MLP layers (gate/up/down_proj) always use NUM_CORES.
+        mlp_num_cores: Number of cores for gate/up/down projections.
+        lm_head_num_cores: Number of cores for the output vocabulary projection.
         skip_names: Additional Linear child names to skip (merged with built-in {'dense'}).
                     Use skip_names={'cond'} for QwenPI05 AdaRMS conditioning Linears.
                     A skipped Linear keeps its row-major weight and is recorded
@@ -944,42 +944,3 @@ def print_rpu_compatibility_report(model: nn.Module) -> None:
     num_col = sum(1 for d in info.values() if d['partition'] == 1)
     _LOG.info("Compatibility: %d Linear layers (accelerated: %d, col: %d, row: %d, fallback: %d)",
               len(info), num_converted, num_col, num_row, num_fallback)
-
-
-def validate_qwen3_vl_text_semantics(text_model) -> None:
-    """Validate live text math before installing a prepacked VL profile."""
-    from transformers.activations import SiLUActivation
-
-    config = text_model.config
-    for index, layer in enumerate(text_model.layers):
-        activation = getattr(layer.mlp, "act_fn", None)
-        if not (type(activation) is SiLUActivation or (
-                type(activation) is nn.SiLU and activation.inplace is False)):
-            raise ValueError(f"Qwen3-VL layer {index} requires exact SiLU activation")
-        for owner, name in ((layer.self_attn, "q_norm"), (layer.self_attn, "k_norm"),
-                            (layer, "input_layernorm"), (layer, "post_attention_layernorm")):
-            if getattr(getattr(owner, name, None), "variance_epsilon", None) != 1e-6:
-                raise ValueError(f"Qwen3-VL layer {index} {name} requires epsilon 1e-6")
-    if getattr(text_model.norm, "variance_epsilon", None) != 1e-6:
-        raise ValueError("Qwen3-VL final norm requires epsilon 1e-6")
-
-    rotary = getattr(text_model, "rotary_emb", None)
-    section = getattr(rotary, "mrope_section", None)
-    rotary_config = getattr(rotary, "config", None)
-    geometry = ("model_type", "hidden_size", "intermediate_size", "num_hidden_layers",
-                "num_attention_heads", "num_key_value_heads", "head_dim", "vocab_size")
-    rope = (getattr(config, "rope_parameters", None)
-            or getattr(config, "rope_scaling", None) or {})
-    rotary_rope = (getattr(rotary_config, "rope_parameters", None)
-                   or getattr(rotary_config, "rope_scaling", None) or {})
-    if (getattr(rotary, "rope_type", None) != "default"
-            or getattr(rotary, "attention_scaling", None) != 1.0
-            or not isinstance(section, (list, tuple))
-            or tuple(section) != (24, 20, 20)
-            or any(isinstance(item, bool) or not isinstance(item, Integral) for item in section)
-            or rotary_config is None
-            or any(getattr(rotary_config, field, None) != getattr(config, field, None)
-                   for field in geometry)
-            or not isinstance(rope, Mapping) or not isinstance(rotary_rope, Mapping)
-            or rotary_rope != rope):
-        raise ValueError("Qwen3-VL requires exact live default interleaved M-RoPE semantics")

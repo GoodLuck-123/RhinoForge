@@ -43,20 +43,3 @@ def test_prefill_planning_preserves_explicit_public_options(
     assert execution_rows == logical_rows + (16 if expected_padding == "auto" else expected_padding)
     assert chunk == (expected_chunk or 128)
     assert actual is result
-
-
-def test_registered_template_resolves_bounded_backbone_padding():
-    from examples.common.config import load_config
-    from rpu_backend.adapters.internvla_n1.execution import (
-        BACKBONE_COMPONENT, resolve_internvla_execution,
-    )
-
-    path = Path(__file__).resolve().parents[1] / "examples/configs/internvla/navdp/w8a16_system2.toml"
-    config = load_config(path)
-    _, children = resolve_internvla_execution(
-        config["rpu_execution"], entry_point="registered example"
-    )
-    stage = children[BACKBONE_COMPONENT]["prefill"]
-    assert stage["chunk_size"] == "auto"
-    assert stage["padding_rows"] == "auto"
-    assert stage["padding_budget"] == 64

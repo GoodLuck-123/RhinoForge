@@ -1,8 +1,8 @@
 # Automatic residual reduction
 
 Residual all-reduce has one shared production route. Model call sites provide
-the validated tensor geometry and residual ownership; the common wrapper emits
-the generated eight-core ring schedule. There is no public environment or
+the validated tensor geometry, residual ownership and installed core topology;
+the common FP16 wrapper uses the consumer core count, with eight as the default. There is no public environment or
 per-model selector for choosing another route.
 
 ## Contract
@@ -10,9 +10,9 @@ per-model selector for choosing another route.
 - Inputs use the declared FP16 or model-approved mixed-precision boundary.
 - The output geometry, source shards, residual storage, and participating
   producer cores are validated before launch.
-- A producer using fewer than all cores clears inactive shards before writing
-  its active shards, so the same eight-core reduction consumes a complete
-  logical input.
+- The ordinary FP16 route requires `1 <= producer cores <= consumer cores <= 8`;
+  each model profile determines the admitted pair. A partial producer clears
+  every consumer shard before writing its active prefix.
 - The wrapper selects the generated scheduling variant from the per-core data
   size. Callers do not duplicate that choice.
 - Immediate multi-core launch still requires broadcast mode; Graph and batch
@@ -20,8 +20,9 @@ per-model selector for choosing another route.
 - BUILD and REPLAY must use the same admitted geometry and live residual
   ownership.
 
-Mixed-precision model boundaries may use a dedicated checked wrapper, but that
-does not restore a global route switch or authorize another model profile.
+Local-SPM, mixed-precision and fixed-layout collective wrappers retain their
+eight-core bounds. They do not add a global route switch or admit another
+model profile.
 
 ## Porting consequence
 

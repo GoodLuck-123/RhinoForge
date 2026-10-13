@@ -20,10 +20,10 @@
 | 阶段 | 精度与执行方式 |
 |---|---|
 | 输入 embedding 与 PLE 侧输入 | 源权重保留在 CPU；按前向逻辑转换为 FP32 参与计算，再生成 decoder 所需的 FP16 输入。PLE 是模型逐层使用的附加 embedding |
-| Decoder | decoder 与图内 PLE 投影使用设备FP16；使用 KV cache 和保留的 Graph 重放 |
+| Decoder | decoder 与图内 PLE 投影使用设备 FP16；使用 KV cache 和保留的 Graph 重放 |
 | 输出 head | CPU 使用共享 embedding 权重计算 FP32 logits，并应用 softcap |
 
-因此，`fp16` 描述设备decoder 的精度，完整请求还包含 CPU embedding、PLE 和输出 head 的工作。加载与执行见 [runner](../../runners/gemma4/runner.py) 和 [Gemma4 adapter](../../../python/rpu_backend/adapters/gemma4/__init__.py)。
+因此，`fp16` 描述设备 decoder 的精度，完整请求还包含 CPU embedding、PLE 和输出 head 的工作。加载与执行见 [runner](../../runners/gemma4/runner.py) 和 [Gemma4 adapter](../../../python/rpu_backend/adapters/gemma4/__init__.py)。
 
 ## 准备与运行
 
@@ -50,7 +50,7 @@ hf download google/gemma-4-E4B-it \
 
 ### 输入与运行
 
-在已安装项目依赖的 设备环境中，复制模板并修改文本和输出目录：
+在已安装项目依赖的设备环境中，复制模板并修改文本和输出目录：
 
 ```bash
 cp examples/configs/gemma4/e4b/fp16.toml /tmp/gemma4_fp16.toml

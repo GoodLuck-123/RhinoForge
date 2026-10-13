@@ -1,3 +1,6 @@
+# All executed Linear weights use INT8 with FP16 scales/activations, including
+# patch, mergers, prefix, expert, action IO and cold AdaRMS table generation.
+# Norms, biases, embeddings and positional tensors retain floating point.
 # Pipeline W8; use scripts/validate_rhinovla_v3.py run.
 [rpu_execution.vision]
 rpu_patch_embed = true

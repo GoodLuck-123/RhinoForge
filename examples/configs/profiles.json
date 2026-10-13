@@ -6391,8 +6391,7 @@
           "value": "0"
         }
       ],
-      "example_only": true,
-      "support": {}
+      "example_only": true
     },
     {
       "id": "rhinovla.v3.w8a16.expert.trusted-factory",
@@ -6475,8 +6474,7 @@
           "value": "0"
         }
       ],
-      "example_only": true,
-      "support": {}
+      "example_only": true
     },
     {
       "id": "rhinovla.v3.w8a16.full-expert.trusted-factory",
@@ -6559,8 +6557,7 @@
           "value": "0"
         }
       ],
-      "example_only": true,
-      "support": {}
+      "example_only": true
     },
     {
       "id": "rhinovla.v3.w8a16.full-pipeline-high.trusted-factory",
@@ -6678,8 +6675,7 @@
           "value": "0"
         }
       ],
-      "example_only": true,
-      "support": {}
+      "example_only": true
     },
     {
       "id": "rhinovla.v3.w8a16.full-pipeline.trusted-factory",
@@ -6797,26 +6793,7 @@
           "value": "0"
         }
       ],
-      "example_only": true,
-      "support": {}
-    },
-    {
-      "id": "rhinovla.v1.fp16.trusted-factory",
-      "family": "rhinovla",
-      "asset_alias": "rhinovla-controlled",
-      "precision": "fp16",
-      "component": "vla",
-      "variant": "v1-trusted-factory",
-      "example": {
-        "runner_target": "rhinovla",
-        "eligible": true
-      },
-      "input_envelope": {
-        "limits": {}
-      },
-      "controlled_gates": [],
-      "example_only": true,
-      "support": {}
+      "example_only": true
     },
     {
       "asset_alias": "qwen3_5-2b-w4-mlp-only-g32",
@@ -6851,9 +6828,46 @@
       "precision": "w4a16",
       "support": {
         "status": "CONTROLLED_EVALUATION",
-        "reason_code": "QWEN35_QUANT_RECIPE_CONTROLLED"
+        "reason_code": "QWEN35_QUANT_IMPLEMENTED_UNVERIFIED_HW"
       },
-      "variant": "default"
+      "variant": "w4_mlp_only_g32"
+    },
+    {
+      "asset_alias": "qwen3_5-2b-w4-mlp-w8-attn-gdn-g32",
+      "authority": "fmb-qwen35-text",
+      "component": "text",
+      "controlled_gates": [
+        {
+          "kind": "env",
+          "name": "QWEN3_5_QUANT_ALLOW_UNCERTIFIED",
+          "value": "1"
+        }
+      ],
+      "example": {
+        "eligible": true,
+        "runner_target": "qwen3_5"
+      },
+      "family": "qwen3-5",
+      "hw_status": "IMPLEMENTED_UNVERIFIED_HW",
+      "id": "qwen3_5-2b.w4-mlp-w8-attn-gdn-g32.text-controlled",
+      "input_envelope": {
+        "kind": "BOUNDED",
+        "limits": {
+          "checkpoint_format": "qwen3_5_2b_w4_mlp_w8_attn_gdn_g32",
+          "batch_size": 1,
+          "num_cores": 8,
+          "max_kv_len": 8192,
+          "chunk_alignment": 64,
+          "chunk_policy": "native-exact-spm-and-kernel-oracle"
+        }
+      },
+      "owner": "fmb-qwen35-text",
+      "precision": "w4a16",
+      "support": {
+        "status": "CONTROLLED_EVALUATION",
+        "reason_code": "QWEN35_QUANT_IMPLEMENTED_UNVERIFIED_HW"
+      },
+      "variant": "w4_mlp_w8_attn_gdn_g32"
     },
     {
       "asset_alias": "qwen3_5-2b-quanttrio-awq-g128",
@@ -6888,9 +6902,9 @@
       "precision": "w4a16",
       "support": {
         "status": "CONTROLLED_EVALUATION",
-        "reason_code": "QWEN35_QUANT_RECIPE_CONTROLLED"
+        "reason_code": "QWEN35_QUANT_IMPLEMENTED_UNVERIFIED_HW"
       },
-      "variant": "default"
+      "variant": "quanttrio_awq_g128"
     },
     {
       "asset_alias": "qwen3_5-4b-quanttrio-awq-g128",
@@ -6925,9 +6939,9 @@
       "precision": "w4a16",
       "support": {
         "status": "CONTROLLED_EVALUATION",
-        "reason_code": "QWEN35_QUANT_RECIPE_CONTROLLED"
+        "reason_code": "QWEN35_QUANT_IMPLEMENTED_UNVERIFIED_HW"
       },
-      "variant": "default"
+      "variant": "quanttrio_awq_g128"
     },
     {
       "asset_alias": "qwen3_5-9b-quanttrio-awq-g128",
@@ -6962,9 +6976,9 @@
       "precision": "w4a16",
       "support": {
         "status": "CONTROLLED_EVALUATION",
-        "reason_code": "QWEN35_QUANT_RECIPE_CONTROLLED"
+        "reason_code": "QWEN35_QUANT_IMPLEMENTED_UNVERIFIED_HW"
       },
-      "variant": "default"
+      "variant": "quanttrio_awq_g128"
     }
   ]
 }

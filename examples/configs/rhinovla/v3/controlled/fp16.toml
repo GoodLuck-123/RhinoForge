@@ -1,3 +1,4 @@
+# Ten denoise steps and full 18-layer FP16 weights are retained.
 # FP16; use scripts/validate_rhinovla_v3.py run.
 [rpu_execution.vision]
 rpu_patch_embed = true

@@ -46,36 +46,19 @@ def _build_kwargs(profile: str, inputs) -> dict:
     }
 
 
-def test_gr00t_rope_index_supports_transformers_457_and_5x_signatures() -> None:
-    tensors = {
-        "input_ids": torch.tensor([[1, 2]], dtype=torch.long),
-        "mm_token_type_ids": torch.tensor([[0, 1]], dtype=torch.int32),
-        "image_grid_thw": torch.tensor([[1, 16, 16]], dtype=torch.long),
-        "attention_mask": torch.ones((1, 2), dtype=torch.long),
-    }
+def test_gr00t_rope_index_receives_multimodal_token_types(monkeypatch):
+    from test_gr00t_native_position_cache import _backbone_case
+
+    case = _backbone_case(monkeypatch)
+    owner = case.owner
+    original = owner._bb.model.get_rope_index
     calls = []
 
-    def legacy(input_ids, image_grid_thw, video_grid_thw, attention_mask):
-        calls.append(("4.57", locals()))
-        return "legacy-position-ids", None
+    def current(input_ids, *, mm_token_type_ids, **kwargs):
+        calls.append(mm_token_type_ids.clone())
+        assert torch.equal(mm_token_type_ids, input_ids.eq(owner._bb.config.image_token_id).int())
+        return original(input_ids, **kwargs)
 
-    def current(
-        input_ids,
-        image_grid_thw,
-        video_grid_thw,
-        attention_mask,
-        mm_token_type_ids,
-    ):
-        calls.append(("5.x", locals()))
-        return "current-position-ids", None
-
-    assert gr00t_runtime._get_gr00t_rope_index(legacy, **tensors) == (
-        "legacy-position-ids",
-        None,
-    )
-    assert "mm_token_type_ids" not in calls[-1][1]
-    assert gr00t_runtime._get_gr00t_rope_index(current, **tensors) == (
-        "current-position-ids",
-        None,
-    )
-    assert torch.equal(calls[-1][1]["mm_token_type_ids"], tensors["mm_token_type_ids"])
+    owner._bb.model.get_rope_index = current
+    case.run()
+    assert len(calls) == 1

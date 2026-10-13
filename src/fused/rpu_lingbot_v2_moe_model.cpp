@@ -982,7 +982,7 @@ void LingbotV2MoeExpertModel::set_moe_weights(
     {
         const char* e = std::getenv("RPU_L2_CAPTURE_L0");
         debug_capture_l0_ = (e != nullptr && e[0] == '1' && e[1] == '\0');
-        const char* est = nullptr /* activation capture is disabled */;
+        const char* est = std::getenv("RPU_L2_STAGES");
         debug_stages_ = (est != nullptr && est[0] == '1' && est[1] == '\0');
         if (debug_stages_) {
             int64_t gw = num_experts_ * (routed_inter_ / NUM_CORES);
@@ -999,7 +999,7 @@ void LingbotV2MoeExpertModel::set_moe_weights(
         if (debug_capture_innorm_)
             innorm_ = at::zeros({tp_rows_, hidden_size()},
                 at::TensorOptions().dtype(at::kHalf).device(at::kPrivateUse1));
-        const char* eg = nullptr /* activation capture is disabled */;
+        const char* eg = std::getenv("RPU_L2_CAPTURE_GATE");
         debug_capture_gate_ = (eg != nullptr && eg[0] == '1' && eg[1] == '\0');
         if (debug_capture_gate_) {
             gcap_ = at::zeros({tp_rows_, num_experts_ * (routed_inter_ / NUM_CORES)},
@@ -4301,7 +4301,7 @@ at::Tensor rpu_lingbot_v2_moe_debug_packed(int64_t handle, int64_t which, int64_
 {
     // Default-OFF gate: without the flag this op throws, so it is unreachable from
     // the default path and cannot perturb it.
-    const char* f = nullptr /* no public activation capture */;
+    const char* f = std::getenv("RPU_L2_DBG_PACKED");
     TORCH_CHECK(f != nullptr && f[0] == '1' && f[1] == '\0',
                 "rpu_lingbot_v2_moe_debug_packed is DEBUG-ONLY: set RPU_L2_DBG_PACKED=1");
     return LingbotV2MoeRegistry::get(handle, "rpu_lingbot_v2_moe_debug_packed")

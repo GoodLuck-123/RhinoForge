@@ -6,6 +6,7 @@ import glob
 import os
 import sys
 import types
+from collections.abc import Mapping
 
 
 _PACKAGE_METADATA = ("__file__", "__loader__", "__package__", "__path__", "__spec__")
@@ -57,20 +58,52 @@ def device_nodes_accessible(
 def find_shared_object(
     *,
     package_dir: str | None = None,
+    executable: str | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> str | None:
-    """Return the packaged backend shared object, if installed."""
+    """Resolve an explicit extension, an installed package, or a source build.
+
+    ``RPU_BACKEND_SO`` overrides discovery. Editable installs retain their
+    registered extension. Source lookup is limited to ``build_<environment>``
+    and ``build``; unrelated build directories are never scanned.
+    """
     explicit_directory = package_dir is not None
     package_dir = package_dir or os.path.dirname(__file__)
+    executable = executable or sys.executable
+    environ = os.environ if environ is None else environ
+    repo_root = os.path.abspath(os.path.join(package_dir, "../.."))
+    env_name = os.path.basename(os.path.dirname(os.path.dirname(executable)))
+
+    explicit = environ.get("RPU_BACKEND_SO", "")
+    if explicit:
+        explicit = os.path.abspath(os.path.expanduser(explicit))
+        if not os.path.isfile(explicit):
+            raise FileNotFoundError(f"RPU_BACKEND_SO does not name a file: {explicit}")
+        return explicit
     packaged = os.path.join(package_dir, "rpu_backend.so")
     if os.path.isfile(packaged):
         return packaged
+
     if not explicit_directory:
-        # A scikit-build editable install keeps Python sources in the worktree
-        # and registers the installed extension as a submodule of this package.
+        # Editable builds register the extension outside the package directory.
         spec = importlib.util.find_spec(f"{__package__}.rpu_backend")
         if spec is not None and spec.origin is not None:
             if os.path.basename(spec.origin) == "rpu_backend.so" and os.path.isfile(spec.origin):
                 return spec.origin
+
+    search_roots = [
+        os.path.join(repo_root, f"build_{env_name}"),
+        os.path.join(repo_root, "build"),
+    ]
+    for root_dir in search_roots:
+        if not os.path.isdir(root_dir):
+            continue
+        matches = []
+        for subdir, _, files in os.walk(root_dir):
+            if "rpu_backend.so" in files:
+                matches.append(os.path.join(subdir, "rpu_backend.so"))
+        if matches:
+            return sorted(matches)[0]
     return None
 
 
@@ -105,7 +138,14 @@ def load_cpp_extension(
     """Load the backend and install its public symbols in ``package._cpp_ext``."""
     path = find_shared_object()
     extension = None
-    if path is not None and device_nodes_accessible():
+    if path is None:
+        print("[RhinoForge] warning: C++ backend (.so) not found. native backend not loaded.")
+    elif not device_nodes_accessible():
+        print(
+            "[RhinoForge] warning: device nodes are unavailable to this "
+            "process; native backend not loaded."
+        )
+    else:
         extension = _load_extension(path, package_name)
 
     cpp_ext = types.ModuleType(f"{package_name}._cpp_ext")

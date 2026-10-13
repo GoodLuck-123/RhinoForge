@@ -46,7 +46,7 @@ hf download meta-llama/Llama-3.2-1B \
 
 ### 输入与运行
 
-在已安装项目依赖的 设备环境中，复制模板并填写文本和输出目录：
+在已安装项目依赖的设备环境中，复制模板并填写文本和输出目录：
 
 ```bash
 cp examples/configs/llama/3_2_1b/fp16.toml /tmp/llama_fp16.toml

@@ -11,7 +11,7 @@
 | HyVLA | [hy_vla](hy_vla/README.md) | 2/3cam × 三精度；当前优化入口为 TP8 |
 | Wall-OSS | [wall_oss](wall_oss/README.md) | base 按相机/分辨率/精度；RTC 与分拣为不同负载 |
 | GR00T | [gr00t](gr00t/README.md) | 224/256 × FP16/W8，text 在文件内修改 |
-| RhinoVLA | [rhinovla](rhinovla/README.md) | v1 官方/调用者 factory、v3 factory |
+| RhinoVLA | [rhinovla](rhinovla/README.md) | v1 官方/调用者 factory、v3 factory 与九种独立配置 |
 | Qwen3 | [qwen3](qwen3/README.md) | 模型大小、精度、Instruct / lm_head recipe |
 | Qwen3.5 | [qwen3_5](qwen3_5/README.md) | text/VL、Dense/MoE、精度、固定 P/D 输入 |
 | Qwen3-VL | [qwen3_vl](qwen3_vl/README.md) | text/VL、模型大小、精度、固定 P/D 输入 |
@@ -29,12 +29,12 @@
 
 FP16、W8、W4 等文件名描述运行配方；实际量化范围由名称中的模块限定和模型页共同说明。固定 P/D、TP、ACC 变体的含义见[命名规则](NAMING.md)，所有路径见[配置索引](CONFIGURATIONS.md)。
 
-公共运行入口的 TOML 为完整模板；G0.5 的 `base/fp16.toml` 仅保留为资产元数据。改变精度配方时直接复制对应文件，再按其获取步骤准备权重；输入路径、线程和采样次数等常调项按模型页填写。
+公共运行入口的 TOML 为完整模板；RhinoVLA `controlled/` 使用对应页面的独立命令。改变精度配方时直接复制对应文件，再按其获取步骤准备权重；输入路径、线程和采样次数等常调项按模型页填写。
 
 <a id="配置日志输出"></a>
 
-日志级别与产物说明见[日志与结果](../README.zh.md#日志与输出)，公共字段见[通用参数](PARAMETERS.md)。
+日志级别与产物说明见[日志与结果](../RESULTS.md#日志设置)，公共字段见[通用参数](PARAMETERS.md)。
 
 <a id="本轮路径迁移"></a>
 
-旧配置路径对应关系见[路径对照](config_names.json)。命令行仍接受旧路径，复制或编辑模板时使用当前路径。
+文件改名记录见[路径对照](config_names.json)；命令行使用当前配置路径。

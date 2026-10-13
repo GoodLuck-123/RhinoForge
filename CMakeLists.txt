@@ -125,6 +125,11 @@ include_directories(
 rhinoforge_generate_runtime_identity("${CMAKE_BINARY_DIR}/generated")
 include_directories("${CMAKE_BINARY_DIR}/generated")
 
+option(RHINOFORGE_BUILD_DEVICE_TESTS "Build device contract test executables" OFF)
+option(RHINOFORGE_BUILD_HOST_TESTS "Build standalone host contract tests" OFF)
+if(RHINOFORGE_BUILD_HOST_TESTS)
+    enable_testing()
+endif()
 add_subdirectory(src)
 set_target_properties(rpu_backend PROPERTIES PREFIX "")
 

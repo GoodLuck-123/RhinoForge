@@ -297,19 +297,6 @@ def _check_profile(config) -> None:
     direct instantiation paths that bypass `RPUModelForCausalLM.from_pretrained`).
     """
     profile = _config_profile(config)
-    if profile in _W8A16_ONLY_PROFILES:
-        quant_config = getattr(config, "quant_config", None)
-        exact_w8a16 = (
-            _config_is_w8a16(config)
-            and quant_config.get("quantized_lm_head") is True
-            and quant_config.get("lm_head_untied") is True
-            and quant_config.get("quantized_embed_tokens") is False
-        )
-        if not exact_w8a16:
-            raise UnsupportedModelError(
-                "Qwen3-14B requires the release W8A16 profile with an "
-                "untied INT8 lm_head and FP16 embeddings."
-            )
     supported = profile in _SUPPORTED_PROFILES or (
         _config_is_w8a16(config) and profile in _W8A16_ONLY_PROFILES
     ) or is_qwen3_32b_w8a16_config(config)
@@ -530,21 +517,6 @@ class Qwen3Adapter:
                 raise UnsupportedModelError("fixed-core Qwen3 requires plain FP16 model weights")
         if quantization is None and not self._large_quant:
             _validate_reduced_model_structure(model, self._topology)
-        if quantization is None and _config_profile(model.config) in _W8A16_ONLY_PROFILES:
-            lm_head = getattr(model, "lm_head", None)
-            embed_tokens = getattr(getattr(model, "model", None), "embed_tokens", None)
-            if (
-                not self._is_w8a16
-                or not isinstance(lm_head, torch.nn.Linear)
-                or lm_head.weight.dtype != torch.int8
-                or not isinstance(embed_tokens, torch.nn.Embedding)
-                or embed_tokens.weight.dtype != torch.float16
-            ):
-                raise RPUBackendError(
-                    "Qwen3-14B checkpoint tensors do not match the release "
-                    "W8A16 profile: decoder projections and lm_head must be "
-                    "INT8, and embeddings must remain FP16."
-                )
         # Round-2 P1 hardening: readiness MUST live on the model, not the
         # adapter. Otherwise a second `Qwen3Adapter(model)` construction on
         # an already-swizzled model creates a fresh adapter with

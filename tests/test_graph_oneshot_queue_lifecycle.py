@@ -82,9 +82,13 @@ class RpuKernelGraph {public:
  void execute_data_node(Node& node){TORCH_CHECK(node.id!=fail_data);}
  uint32_t prepare_segment_queue(Segment&,rhino_lkn::Queue_t& q,bool,
                                RpuDmaSubmissionLease&,bool retain_replay_state){
-  assert(!retain_replay_state);if(!q.retained)++dirty;q.retained=true;q.built=false;++prepares;
+  assert(!retain_replay_state);++prepares;
   if(prepares==2){if(fail_prepare==1)return 1;TORCH_CHECK(fail_prepare!=2);}
-  q.built=true;return 0;}
+  if(!q.retained)++dirty;q.retained=true;q.built=false;
+  if(prepares==2){if(fail_prepare==3)return 1;TORCH_CHECK(fail_prepare!=4);}
+  q.built=true;
+  if(prepares==2){if(fail_prepare==5)return 1;TORCH_CHECK(fail_prepare!=6);}
+  return 0;}
  void record_segment_execution(Segment&,rhino_lkn::Queue_t&,const char*,
                                const std::string&,bool,bool,const std::string&){
   TORCH_CHECK(submits!=fail_record);}
@@ -109,14 +113,14 @@ int main(){
  }
  // Preparation (status/exception), submission, host work and bookkeeping failures
  // must retire every retained batch before the caller handles the exception.
- for(int failure=0;failure<5;++failure){
+ for(int failure=0;failure<9;++failure){
   auto graph=setup();if(failure==0)fail_submit=2;else if(failure==1)fail_data=3;else if(failure==2)fail_record=2;else fail_prepare=failure-2;
   bool rejected=false;try{graph.execute_graph_oneshot();}catch(const std::runtime_error&){rejected=true;}
   assert(rejected);empty_batches();
-  assert(destroyed[1]==1);
-  if(failure==1)assert(destroyed[3]==0); // Already retired after its last use.
-  else assert(destroyed[3]==1);
-  const int before=created;QueueCache::instance().get(2);assert(created==before+1);
+  // The caller can retry against the same cache without stale pending work.
+  fail_submit=0;fail_data=-1;fail_record=0;fail_prepare=0;submits=0;prepares=0;
+  graph.execute_graph_oneshot();
+  assert(submits==3&&graph.segments_.empty());empty_batches();
  }
  // Validate every segment before acquiring a queue or executing a data node.
  for(size_t bad:{size_t(0),size_t(9)}){

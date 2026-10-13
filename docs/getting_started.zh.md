@@ -27,11 +27,7 @@ python -m pip install . --no-build-isolation \
   -Ccmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch" \
   -Cbuild.tool-args=-j2
 python -m pip check
-python examples/verify_install.py --check-config
 ```
-
-`--check-config` 只检查安装元数据和模块位置，不导入 Torch 或 RhinoForge，
-不加载原生运行时，也不访问设备。原生库和设备检查在实际运行时完成。
 
 项目依赖以 [pyproject.toml](../pyproject.toml) 为准。视觉模型安装命令中的 `.` 改为
 `'.[vision]'`，策略模型改为 `'.[vla]'`，[语音模型](qwen3_audio.zh.md)改为 `'.[audio]'`。
@@ -54,7 +50,7 @@ cat >> qwen3.local.toml <<'TOML'
 [logging]
 level = "INFO"
 TOML
-python examples/run.py --config qwen3.local.toml --check-config
+python -m examples.run --config qwen3.local.toml --check-config
 ```
 
 已有同一 checkpoint 的完整副本时，可直接放入该目录。模型许可和访问条款与
@@ -67,19 +63,14 @@ RhinoForge 源码许可分别适用。所有示例配置均在
 然后执行：
 
 ```bash
-python examples/run.py --config qwen3.local.toml
+python -m examples.run --config qwen3.local.toml
 ```
 
 上面的 `INFO` 设置用于显示生成文本。默认 `ERROR` 会隐藏普通输出，模型摘要
-由 `[logging].summary` 单独控制，见[日志输出](../examples/README.zh.md#logging-and-output)。
-需要诊断基础设备配置时，可用
-`python examples/verify_install.py` 做一次小规模 host/设备拷贝；模型已运行成功时
-无需额外执行。复用本次成功结果，不展开模型矩阵。
-
-若导入了其他 checkout，激活目标环境并查看
-`python examples/verify_install.py --check-config` 输出的模块位置。模型别名无法
-解析时，检查 `RPU_MODEL_CACHE/Qwen3-0.6B`；运行时资产问题见
-[运行时资产](runtime_assets.zh.md)。
+由 `[logging].summary` 单独控制，见[日志输出](../examples/RESULTS.md)。
+若导入了其他 checkout，激活目标环境并用 `python -m pip show rhinoforge`
+检查安装位置。模型别名无法解析时，检查 `RPU_MODEL_CACHE/Qwen3-0.6B`；
+运行时资产问题见[运行时资产](runtime_assets.zh.md)。
 
 后续参考[模型资产](model_assets.zh.md)、[运行时配置](runtime_config.zh.md)和
 [模型运行与调试](model_testing.zh.md)。

@@ -99,7 +99,7 @@ def main():
         instruction = custom_instruction if custom_instruction is not None else DEFAULT_INSTRUCTIONS[length]
         batch = make_text_batch(source, tokenizer, instruction, length)
         batch["source"] = {"files": source_files, "images": image_source, "text_tokens": length,
-                           "instruction_source": instruction}
+                           "instruction_source": instruction, "cpu_reference": "not_generated"}
         path = args.output / f"hyvla_3cam_t{length}_batch.pt"
         torch.save(batch, path)
         records.append({"path": str(path), "text_tokens": length, "prefix_rows": 176+length,

@@ -48,19 +48,6 @@ _NAVDP_DDR_ROUTE_REASONS = {
 }
 
 
-def _initial_action_noise(sample_num, seed, init_noise):
-    """Return init plus one stream; explicit init leaves it at the seed start."""
-    generator = torch.Generator().manual_seed(seed)
-    initial = (
-        init_noise.clone()
-        if init_noise is not None
-        else torch.randn(
-            sample_num, PREDICT_SIZE, ACTION_DIM, generator=generator
-        )
-    )
-    return initial, generator
-
-
 def _resolve_navdp_execution(value, *, entry_point: str):
     local = normalize_rpu_execution(
         value,
@@ -313,7 +300,11 @@ class NavdpRuntime:
         sched = DDPMScheduler(num_train_timesteps=DDPM_STEPS, beta_schedule="squaredcos_cap_v2",
                               clip_sample=True, prediction_type="epsilon")
         sched.set_timesteps(DDPM_STEPS)
-        naction, step_gen = _initial_action_noise(sample_num, seed, init_noise)
+        step_gen = torch.Generator().manual_seed(seed)  # deterministic DDPM step noise
+        if init_noise is not None:
+            naction = init_noise.clone()
+        else:
+            naction = torch.randn(sample_num, PREDICT_SIZE, ACTION_DIM, generator=torch.Generator().manual_seed(seed))
         # This owner is local to one action. The next call fully republishes
         # conditioning; non-CPU inputs retain the fresh-input path.
         input_bank = [None] if all(
@@ -379,7 +370,7 @@ class NavdpRuntime:
                               clip_sample=True, prediction_type="epsilon")
         sched.set_timesteps(DDPM_STEPS)
         ac = sched.alphas_cumprod
-        init, zg = _initial_action_noise(sample_num, seed, init_noise)
+        zg = torch.Generator().manual_seed(seed)
         coeff = torch.zeros(DDPM_STEPS, 4)                                   # A,B,C,D (CPU fp32, baked at BUILD)
         sigz = torch.zeros(sample_num, DDPM_STEPS, PREDICT_SIZE, AD16)       # padded action_dim
         mems = []
@@ -396,6 +387,8 @@ class NavdpRuntime:
             mems.append(torch.cat([te, goal_embed[0:1], rgbd_embed[0:1]], 1) + g["cond_pos"][:, :MEMORY_LEN, :])
         mem_all = torch.cat(mems, 0).to(torch.float16).to("rpu").contiguous()  # [N,34,384]
         coeff = coeff.contiguous()
+        init = (init_noise.clone() if init_noise is not None
+                else torch.randn(sample_num, PREDICT_SIZE, ACTION_DIM, generator=torch.Generator().manual_seed(seed)))
         init = F.pad(init, (0, AD16 - ACTION_DIM))                          # [sample_num,32,16]
         # batch=B trajectory batching (default on): fold the B trajectories into one unrolled graph.
         # C++ runs M=B*PS batched for every row-wise op; only the two attentions loop per-trajectory

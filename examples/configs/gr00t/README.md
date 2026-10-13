@@ -97,7 +97,7 @@ Qwen 目录只用于配置和预处理；策略的 `backbone.model.*` 与 Action
 
 ### 输入与运行
 
-在已安装项目及模型依赖的 设备环境中，以 224 W8 为例：
+在已安装项目及模型依赖的设备环境中，以 224 W8 为例：
 
 ```bash
 cp examples/configs/gr00t/n1_7_droid/224/w8a16.toml /tmp/gr00t_w8.toml
@@ -144,4 +144,4 @@ T 是纯 instruction token 数，不含图像和消息模板；P 是完整前缀
 
 ## 输出
 
-输出动作张量与运行摘要，产物保存在 `run.output_dir`。
+`run.output_dir` 保存 `report.json` 与 `output.pt`，动作为 `[1,40,132]`。

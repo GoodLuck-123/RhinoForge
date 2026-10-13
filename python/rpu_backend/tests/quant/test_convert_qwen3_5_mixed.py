@@ -151,12 +151,12 @@ def test_uniform_v1_converter_remains_supported(tmp_path):
         assert stats["n_quantized"] == 15
 
 
-def test_mlp_only_cli_preserves_uniform_mlp_codes_and_runtime_float_cast(tmp_path):
+def test_mlp_only_cli_preserves_uniform_mlp_codes_and_source_float_precision(tmp_path):
     torch.manual_seed(4)
     src, dst, uniform = tmp_path / "source", tmp_path / "mlp", tmp_path / "uniform"
     is_full = _mini_checkpoint(src)
     source = {key: value.clone() for key, value in load_file(src / "model.safetensors").items()}
-    # A direct FP32->FP16 cast must not replace the established BF16->FP16 route.
+    # FP32 non-quantized weights must not lose precision through BF16.
     norm_key = "model.language_model.layers.0.linear_attn.norm.weight"
     source[norm_key] = torch.full((64,), 1.003, dtype=torch.float32)
     save_file(source, src / "model.safetensors", metadata={"format": "pt"})
@@ -180,7 +180,7 @@ def test_mlp_only_cli_preserves_uniform_mlp_codes_and_runtime_float_cast(tmp_pat
             assert torch.equal(tensors[scale], uniform_tensors[scale]), scale
         else:
             assert tensors[key].dtype == torch.float16
-            assert torch.equal(tensors[key], original.bfloat16().half()), key
+            assert torch.equal(tensors[key], original.half()), key
             assert scale not in tensors
     assert set(tensors) == set(source) | {
         convert.scale_key(key) for key in source if ".mlp." in key}
@@ -197,4 +197,49 @@ def test_mlp_only_2b_scope_and_nondefault_group_rejection(tmp_path):
     _mini_checkpoint(src)
     with pytest.raises(ValueError, match="requires the default --group-size=32"):
         convert.convert_checkpoint(src, dst, profile="w4_mlp_only", group_size=64)
+    assert not dst.exists()
+
+
+def test_mlp_w4_attention_gdn_w8_preserves_each_quantizer_output(tmp_path):
+    """The mixed recipe must match uniform W4/W8, including small GDN b/a."""
+    torch.manual_seed(5)
+    src = tmp_path / "source"
+    is_full = _mini_checkpoint(src)
+    source = {key: value.clone() for key, value in load_file(src / "model.safetensors").items()}
+    for role in ("in_proj_b", "in_proj_a"):
+        key = f"{convert.TEXT_PREFIX}layers.0.linear_attn.{role}.weight"
+        source[key] = source[key][:16].contiguous()
+    save_file(source, src / "model.safetensors", metadata={"format": "pt"})
+    mixed, w4, w8 = (tmp_path / name for name in ("mixed", "w4", "w8"))
+    assert convert.main(["--src", str(src), "--dst", str(mixed),
+                         "--profile", "w4_mlp_w8_attn_gdn"]) == 0
+    convert.convert_checkpoint(src, w4, method=convert.W4A16_PGRP)
+    convert.convert_checkpoint(src, w8, method=convert.W8A16)
+    quant = json.loads((mixed / "config.json").read_text())["quant_config"]
+    specs = convert.resolve_quant_specs(is_full, quant)
+    assert quant["format_version"] == 2
+    assert quant["projection_counts"] == {convert.FP16: 0, convert.W8A16: 9,
+                                           convert.W4A16_PGRP: 6}
+    got = load_file(mixed / "model.safetensors")
+    references = {convert.W4A16_PGRP: load_file(w4 / "model.safetensors"),
+                  convert.W8A16: load_file(w8 / "model.safetensors")}
+    for path, spec in specs.items():
+        assert spec.method == (convert.W4A16_PGRP if ".mlp." in path else convert.W8A16)
+        key = f"{convert.TEXT_PREFIX}{path}.weight"
+        for name in (key, convert.scale_key(key)):
+            assert torch.equal(got[name], references[spec.method][name]), name
+    assert torch.equal(got["model.visual.patch_embed.proj.weight"],
+                       source["model.visual.patch_embed.proj.weight"].half())
+
+
+def test_mlp_w4_attention_gdn_w8_2b_scope_and_group_rejection(tmp_path):
+    is_full = convert.is_full_from_layer_types(
+        [convert.LINEAR_ATTENTION] * 3 + [convert.FULL_ATTENTION]) * 6
+    quant = convert._quant_config(is_full, None, 32, "w4_mlp_w8_attn_gdn")
+    assert quant["projection_counts"] == {convert.FP16: 0, convert.W8A16: 114,
+                                           convert.W4A16_PGRP: 72}
+    src, dst = tmp_path / "source", tmp_path / "rejected"
+    _mini_checkpoint(src)
+    with pytest.raises(ValueError, match="requires the default --group-size=32"):
+        convert.convert_checkpoint(src, dst, profile="w4_mlp_w8_attn_gdn", group_size=64)
     assert not dst.exists()

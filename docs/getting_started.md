@@ -29,12 +29,7 @@ python -m pip install . --no-build-isolation \
   -Ccmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch" \
   -Cbuild.tool-args=-j2
 python -m pip check
-python examples/verify_install.py --check-config
 ```
-
-`--check-config` checks installed package metadata and module locations without
-importing Torch or RhinoForge, loading the native runtime, or accessing the device.
-It does not validate native-library compatibility or device availability.
 
 Project dependencies come from [pyproject.toml](../pyproject.toml). Use
 `'.[vision]'` for vision, `'.[vla]'` for policies, or `'.[audio]'` for
@@ -57,7 +52,7 @@ cat >> qwen3.local.toml <<'TOML'
 [logging]
 level = "INFO"
 TOML
-python examples/run.py --config qwen3.local.toml --check-config
+python -m examples.run --config qwen3.local.toml --check-config
 ```
 
 An existing complete copy of that checkpoint can be placed at the same location.
@@ -71,20 +66,16 @@ Check that the local device is idle and acquire the platform's device lock befor
 running. On a shared host, coordinate with the board's other users. Then run:
 
 ```bash
-python examples/run.py --config qwen3.local.toml
+python -m examples.run --config qwen3.local.toml
 ```
 
 The `INFO` setting above displays generated text. Without it, the default
 `ERROR` level hides ordinary output; `[logging].summary` controls the model
-summary. See [example logging](../examples/README.md#logging-and-output).
-For a basic device setup diagnosis, `python examples/verify_install.py` performs a small host/device
-copy; it is optional when model inference already succeeds. Reuse the successful
-run instead of launching a model matrix.
-
+summary. See [example logging](../examples/RESULTS.md).
 If imports come from another checkout, activate the intended environment and
-check the location printed by `python examples/verify_install.py --check-config`. If the model
-alias cannot resolve, check `RPU_MODEL_CACHE/Qwen3-0.6B`; runtime asset errors are
-covered in [Runtime assets](runtime_assets.md).
+run `python -m pip show rhinoforge` to check the installation location. If the
+model alias cannot resolve, check `RPU_MODEL_CACHE/Qwen3-0.6B`; runtime asset
+errors are covered in [Runtime assets](runtime_assets.md).
 
 Continue with [Model assets](model_assets.md),
 [Runtime configuration](runtime_config.md), and

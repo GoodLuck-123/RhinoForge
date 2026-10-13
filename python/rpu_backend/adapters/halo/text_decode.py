@@ -1,4 +1,9 @@
-"""Model execution and tensor layout contracts."""
+"""HALO autoregressive text decoding through the shared causal decoder.
+
+Each call consumes one token and attends to the supplied prefix. Its semantic
+RoPE position is separate from the KV insertion offset. Read post-norm hidden
+states after graph execution, then apply the vocabulary head and argmax on
+CPU because the checkpoint vocabulary does not match the fused head layout."""
 from __future__ import annotations
 
 import dataclasses
@@ -88,7 +93,10 @@ class HaloTextDecodeStep:
     def _inject_prefix(
         self, prefix_k: List[torch.Tensor], prefix_v: List[torch.Tensor], prefix_len: int
     ) -> None:
-        """Model execution and tensor layout contracts."""
+        """Copy per-layer ``[prefix, heads, head_dim]`` K/V into stable cache storage.
+
+        Set insertion position to the prefix length. A storage change invalidates
+        the graph; an in-place content update preserves its signature."""
         _inject_text_prefix(self, prefix_k, prefix_v, prefix_len)
 
     def _execution_plan(self, position: int):
@@ -140,7 +148,12 @@ class HaloTextDecodeStep:
         query_position_id: torch.Tensor,
         prefix_kv: Tuple[List[torch.Tensor], List[torch.Tensor]],
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        """Model execution and tensor layout contracts."""
+        """Return CPU FP32 hidden ``[hidden]``, logits ``[vocab]``, and an argmax token.
+
+        ``start_token_id`` and ``query_position_id`` are scalar or single-item integer
+        inputs. ``prefix_kv`` contains per-layer ``[prefix, heads, head_dim]`` K/V.
+        The token attends to the full prefix: insert KV at its length and use the
+        independent query position as the RoPE offset."""
         cfg = self.cfg
         prefix_k, prefix_v = prefix_kv
         prefix_len = int(prefix_k[0].shape[0])

@@ -1,87 +1,49 @@
-# Model examples
+# 模型示例
 
-[简体中文](README.zh.md) · [Config index](configs/CONFIGURATIONS.md) · [Parameters](configs/PARAMETERS.md) · [Naming](configs/NAMING.md) · [Conversion commands](configs/WEIGHTS.md#quantization) · [Weight sources](configs/WEIGHTS.md) · [Support matrix](../docs/model_support.md)
+<a id="model-examples"></a>
+<a id="choose-a-model"></a>
 
-Choose a model and recommended TOML, then prepare weights and inputs using its guide. Current model templates use [`run.py`](run.py); `--config` is required.
+从[模型目录](configs/README.md)选择模型，再按模型页的三个部分操作：**配置说明 → 准备与运行 → 结果说明**。配置表同时给出 TOML 入口和对应的权重获取步骤。
 
-Legacy model scripts remain compatibility wrappers. See the [v1.2.0 upgrade guide](../docs/upgrading_1_2.md) for old paths and input migrations; `python examples/migrate_config.py --help` lists the migration CLI.
-
-## Choose a model
-
-| Model and config guide | Recommended config |
+| 要做什么 | 查看哪里 |
 |---|---|
-| [DINOv3](configs/dinov3/README.md) | [ViT-B FP16](configs/dinov3/vit_b/fp16.toml) |
-| [G0.5](configs/g05/README.md) | [3cam FP16](configs/g05/3cam/fp16.toml) |
-| [Gemma4](configs/gemma4/README.md) | [E4B FP16](configs/gemma4/e4b/fp16.toml) |
-| [GR00T](configs/gr00t/README.md) | [224 FP16](configs/gr00t/n1_7_droid/224/fp16.toml) |
-| [HyVLA](configs/hy_vla/README.md) | [3cam FP16](configs/hy_vla/3cam/fp16.toml) |
-| [HY Embodied UMI](configs/hy_embodied/README.md) | [UMI FP16](configs/hy_embodied/umi/fp16.toml) |
-| [Llama](configs/llama/README.md) | [3.2-1B FP16](configs/llama/3_2_1b/fp16.toml) |
-| [Pi0.5](configs/pi05/README.md) | [3cam W8A16](configs/pi05/3cam/w8a16.toml) |
-| [Qwen3](configs/qwen3/README.md) | [0.6B FP16](configs/qwen3/text/0_6b/fp16.toml) |
-| [Qwen3.5 text](configs/qwen3_5/README.md) | [0.8B FP16](configs/qwen3_5/text/0_8b/fp16.toml) |
-| [Qwen3.5 vision](configs/qwen3_5/README.md) | [2B FP16](configs/qwen3_5/vl/2b/fp16.toml) |
-| [Qwen3-VL](configs/qwen3_vl/README.md) | [2B FP16](configs/qwen3_vl/vl/2b/fp16.toml) |
-| [RhinoVLA](configs/rhinovla/README.md) | [v1 FP16](configs/rhinovla/v1/official_fp16.toml) |
-| [Wall-OSS base](configs/wall_oss/README.md) | [3cam 224 FP16](configs/wall_oss/base/3cam/224/fp16.toml) |
-| [Wall-OSS RTC](configs/wall_oss/rtc/README.md) | [FP16](configs/wall_oss/rtc/fp16.toml) |
-| [Wall-OSS sorting](configs/wall_oss/sorting/README.md) | [W8A16](configs/wall_oss/sorting/w8a16.toml) |
-| [InternVLA](configs/internvla/README.md) | [NavDP System2 W8](configs/internvla/navdp/w8a16_system2.toml) |
-| [LingBot v2](configs/lingbot/v2/README.md) | [3cam T3 W8A16](configs/lingbot/v2/3cam_t3/w8a16.toml) |
-| [LingBot v1](configs/lingbot/README.md) | [4B CPU Vision / FP16](configs/lingbot/v1/4b/fp16_cpu_vision.toml) |
-| [HALO](configs/halo/README.md) | [FP16 Expert](configs/halo/action_expert/fp16.toml) |
+| 选择模型、版本和配置 | [模型目录](configs/README.md)、[全部 TOML 索引](configs/CONFIGURATIONS.md) |
+| 理解权重来源、量化与加载的关系 | [权重准备](configs/WEIGHTS.md)；具体下载和转换命令在模型页 |
+| 填写输入、线程、核数和采样参数 | 模型页“准备与运行”、[通用参数](configs/PARAMETERS.md) |
+| 理解文件名和定位原记录中的配置 | [命名规则](configs/NAMING.md)、[路径对照](configs/config_names.json) |
+| 查看日志与输出 | 模型页“结果说明”、[日志与结果](RESULTS.md) |
+| 查看登记范围和运行库要求 | [支持矩阵](../docs/model_support.zh.md)、[运行库准备](../docs/runtime_assets.md) |
 
-Qwen3.5 35B MoE uses its controlled profiles.
+<a id="run"></a>
 
-## Run
+## 运行一个配置
 
-Install the backend, copy the chosen TOML, and fill in asset paths, inputs, and `run.output_dir` as described in the model guide.
+在已安装后端和模型依赖的环境中，从仓库根目录执行。先按模型页准备权重和输入，再复制所选模板：
 
 ```bash
 cp examples/configs/g05/3cam/fp16.toml /tmp/g05.toml
-# Edit paths and parameters as described in the config guide
+# 按模型页填写配套权重、输入和 run.output_dir。
+vi /tmp/g05.toml
 python examples/run.py --config /tmp/g05.toml --check-config
 python examples/run.py --config /tmp/g05.toml
 ```
 
-`--check-config` validates configuration without importing Torch or accessing a device; `--help` lists the unified CLI options. Edit supported ACC, text length, CPU threads, and sample counts in the same TOML; the model guide lists legal values.
+`--check-config` 检查配置结构及登记关系，无需加载 Torch/设备。最后一条命令执行模型加载和推理。RhinoVLA 的 `controlled/` 配置使用模型页给出的独立验证入口。
 
 <a id="logging-and-output"></a>
-## Logging and run output
+<a id="日志与输出"></a>
+<a id="logging-and-performance-output"></a>
+<a id="日志与性能输出"></a>
+<a id="日志等级对照"></a>
+<a id="模型与性能摘要"></a>
+<a id="results"></a>
 
-Add this top-level table beside `[run]`; these are also the defaults:
+## 查看输出
 
-```toml
-[logging]
-level = "ERROR"
-summary = true
-```
+默认终端显示 `[MODEL]` 配置摘要、`[PERF]` 本次运行摘要和错误信息。需要加载过程或生成文本时，在 TOML 中设置 `[logging].level="INFO"`。完整字段、日志文件和结果解读见[日志与结果](RESULTS.md)。
 
-`level` accepts the uppercase values below. It filters diagnostics; `summary=true` keeps the model configuration summary at every level.
+<a id="已归档示例"></a>
 
-| Level | Diagnostics shown |
-|---|---|
-| `CRITICAL` | Fatal errors only; ordinary ERROR messages are hidden |
-| `ERROR` | ERROR and CRITICAL; default |
-| `WARNING` | Warnings, including tagged fallback and Graph messages, plus errors |
-| `INFO` | Loading, ordinary `print()` output and generated text, plus warnings/errors |
-| `DEBUG` | Existing Graph diagnostics and native TRACE output |
+LingBot [exact-Z2](configs/lingbot/legacy/exact_z2/README.md)、各模型的 `legacy/` 和 RhinoVLA 独立验证配置，使用各自页面列出的资产和输入。它们也列在[完整配置索引](configs/CONFIGURATIONS.md)中。
 
-Ordinary `print()` is INFO; recognized tags select their own level. Exceptions propagate. `summary=false` hides the model summary. There is no `logging.file` field. Native output is saved as `native-*.stdout.log` / `native-*.stderr.log` under `run.output_dir` and replayed with the selected filter when the process finishes.
-
-`[MODEL]` lists inputs, device settings, CPU threads and output location.
-
-## Results
-
-`run.output_dir` selects the output location; some profiles create subdirectories. Read the generated files for checks and artifact paths. Multi-length results use one `text_N/` directory per length.
-
-[Runtime setup](../docs/runtime_assets.md)
-
-## Qwen3 speech
-
-- [`qwen3_asr.py`](qwen3_asr.py): local mono 16 kHz PCM16 WAV to transcript.
-- [`qwen3_tts.py`](qwen3_tts.py): short Chinese/English text and mono 24 kHz reference audio to WAV.
-
-Install the `audio` extra and follow the [speech guide](../docs/qwen3_audio.md)
-for pinned weights, source preparation, commands and input limits. These scripts
-use dedicated APIs, separate from the TOML runner.
+版本升级见[升级指南](../docs/upgrading_1_2.zh.md)；语音 API 见[Qwen3 ASR/TTS](../docs/qwen3_audio.zh.md)。

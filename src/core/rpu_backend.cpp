@@ -748,64 +748,6 @@ std::atomic<bool> g_hw_perf_enabled_fast{false};
 std::atomic<int64_t> g_hw_perf_dumps_left{0};
 std::atomic<uint64_t> g_hw_perf_dump_seq{0};
 
-bool secure_hw_perf_output_dir(const std::string& output_dir) {
-  namespace fs = std::filesystem;
-  const fs::path requested(output_dir);
-  if (requested.empty()) return false;
-
-  // Walk one component at a time so a missing path can be created without
-  // following a symlink. Existing parent directories may be shared (e.g.
-  // /tmp); only the final directory is required to be private.
-  std::error_code ec;
-  fs::path current = requested.is_absolute() ? requested.root_path()
-                                             : fs::current_path(ec);
-  if (ec) return false;
-  std::vector<fs::path> created;
-  for (const auto& component : requested.relative_path()) {
-    if (component == ".") continue;
-    // Do not allow the diagnostic path to escape the caller's chosen base.
-    if (component == ".." || component.empty()) return false;
-    const fs::path next = current / component;
-    ec.clear();
-    const fs::file_status status = fs::symlink_status(next, ec);
-    if (!ec) {
-      if (fs::is_symlink(status) || !fs::is_directory(status)) return false;
-      current = next;
-      continue;
-    }
-    if (ec != std::errc::no_such_file_or_directory) return false;
-    ec.clear();
-    if (fs::create_directory(next, ec)) {
-      created.push_back(next);
-    } else if (ec) {
-      return false;
-    }
-    // A concurrent creator may have won the race; verify it is still a real
-    // directory before continuing and never accept a symlink substitution.
-    ec.clear();
-    const fs::file_status made = fs::symlink_status(next, ec);
-    if (ec || fs::is_symlink(made) || !fs::is_directory(made)) return false;
-    current = next;
-  }
-
-  // Newly-created components get private permissions. Never rewrite an
-  // existing directory's mode: callers may intentionally share its parent,
-  // and a diagnostic setter must not mutate unrelated filesystem state.
-  for (const fs::path& path : created) {
-    ec.clear();
-    fs::permissions(path, fs::perms::owner_all, fs::perm_options::replace, ec);
-    if (ec) return false;
-  }
-
-  ec.clear();
-  const fs::file_status status = fs::symlink_status(requested, ec);
-  if (ec || fs::is_symlink(status) || !fs::is_directory(status)) return false;
-  const auto perms = status.permissions();
-  if ((perms & (fs::perms::group_all | fs::perms::others_all)) !=
-      fs::perms::none)
-    return false;
-  return ::access(output_dir.c_str(), W_OK | X_OK) == 0;
-}
 }  // namespace
 
 bool rpu_hw_perf_runtime_compatible() noexcept {
@@ -826,32 +768,34 @@ HwPerfConfig rpu_hw_perf_snapshot() {
   return g_hw_perf_cfg;
 }
 
-void rpu_set_hw_perf_trace(bool enabled, const std::string& output_dir,
+void rpu_set_hw_perf_trace(bool enabled,
+                           const std::string& output_dir,
                            int64_t max_dumps) {
-  TORCH_CHECK(!output_dir.empty(),
-              "set_hw_perf_trace: output_dir must not be empty");
-  TORCH_CHECK(max_dumps >= 0,
-              "set_hw_perf_trace: max_dumps must be non-negative, got ",
-              max_dumps);
-  if (enabled) {
-    TORCH_CHECK(
-        rpu_hw_perf_runtime_compatible(),
-        "set_hw_perf_trace: loaded Rhino Launch is not the sanitized Release "
-        "runtime (identity/capability query unavailable or mismatched)");
-    TORCH_CHECK(
-        secure_hw_perf_output_dir(output_dir),
-        "set_hw_perf_trace: output_dir must be a private, writable directory "
-        "without symlink components: ", output_dir);
-  }
+    if (enabled) {
+        TORCH_CHECK(rpu_hw_perf_runtime_compatible(),
+                    "set_hw_perf_trace: loaded Rhino Launch is not the sanitized Release runtime");
+    }
 
-  // Publish the config and its refreshed budget as one setter transaction.
-  // An execution that snapshots the new config must not observe the old cap.
-  {
-    std::lock_guard<std::mutex> lock(g_hw_perf_mu);
-    g_hw_perf_cfg = {enabled, output_dir, max_dumps};
+    {
+        std::lock_guard<std::mutex> lock(g_hw_perf_mu);
+        g_hw_perf_cfg.enabled = enabled;
+        g_hw_perf_cfg.output_dir = output_dir;
+        g_hw_perf_cfg.max_dumps = max_dumps;
+    }
+    // Reset dump budget so each setter call refreshes the per-process limit.
     g_hw_perf_dumps_left.store(max_dumps, std::memory_order_relaxed);
     g_hw_perf_enabled_fast.store(enabled, std::memory_order_release);
-  }
+
+    // Directory creation is best-effort; the writer reports any failure.
+    if (enabled && !output_dir.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(output_dir, ec);
+        if (ec && log_at(2)) {
+            std::cerr << "[HW_PERF] create_directories('" << output_dir
+                      << "') failed: " << ec.message()
+                      << " — dumps will fail with rc=3 until dir exists\n";
+        }
+    }
 }
 
 bool rpu_hw_perf_enabled_fast() noexcept {

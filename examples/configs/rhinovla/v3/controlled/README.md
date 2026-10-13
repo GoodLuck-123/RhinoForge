@@ -4,25 +4,35 @@
 
 本目录供 `scripts/validate_rhinovla_v3.py run` 使用。配置为 `[env]` 与平铺的 `[rpu_execution]`，不直接交给 `examples/run.py`。
 
-## 配置选择
+<a id="weight-recipes"></a>
 
-| 配置 | 功能 |
-|---|---|
-| [FP16](fp16.toml) | 浮点流水线，包含缓存、融合和图重放 |
-| [Action W8](w8a16_action.toml) | 动作专家 Q/K/V/O、Gate/Up/Down 使用 W8A16，条件投影保持浮点 |
-| [Pipeline W8](w8a16_pipeline.toml) | 已执行的 Vision/Text/Action 线性投影使用 W8A16 |
-| [输入缓存](w8a16_pipeline_input_cache.toml) | Pipeline W8，增加图像输入缓冲复用 |
-| [HIGH](w8a16_pipeline_high.toml) | 输入缓存与 HIGH 非线性、归一化计算 |
-| [HIGH 融合](w8a16_pipeline_high_fused.toml) | HIGH，增加归一化与激活融合、gate tanh 预计算 |
-| [vector K](w8a16_pipeline_high_fused_vector_k.toml) | HIGH 融合，增加向量 K 归一化 |
-| [vector QK](w8a16_pipeline_high_fused_vector_qk.toml) | 增加向量 Q 归一化 |
-| [partial RoPE](w8a16_pipeline_high_fused_vector_qk_partial_rope.toml) | vector QK，增加部分旋转位置编码 |
+## 配置说明
 
-W8 使用 INT8 权重、FP16 scale 和激活；norm、bias、embedding 与位置张量保留浮点。HIGH 控制非线性与归一化，Linear 累加方式由各组件单独设置。
+FP16 基准已开启多视角与 prefix 准备缓存、设备 patch/merger、算子融合、AdaRMS 预计算及驻留、十步去噪展开、共享缓存、对齐 KV 和图重放。各项含义见 [v3 基准说明](../README.md#baseline)。
 
-## 运行
+| 配置 | 比较基准 | 具体增量 |
+|---|---|---|
+| [fp16.toml](fp16.toml) | 浮点基准 | Vision/Text/Action 使用 FP16 投影 |
+| [w8a16_action.toml](w8a16_action.toml) | FP16 | `EXPERT_W8A16=1`，量化动作专家 Q/K/V/O/Gate/Up/Down |
+| [w8a16_pipeline.toml](w8a16_pipeline.toml) | 专家 W8 | 再启用 `FULL_W8A16=1`，覆盖 Vision、Text、动作 IO 和全部 AdaRMS 条件投影 |
+| [w8a16_pipeline_input_cache.toml](w8a16_pipeline_input_cache.toml) | 全流水线 W8 | 开启 gate tanh 预计算和 Vision 输入缓存，prefill 增加 `padding_rows=10` |
+| [w8a16_pipeline_high.toml](w8a16_pipeline_high.toml) | [全流水线 W8 + 输入缓存](w8a16_pipeline_input_cache.toml) | 开启 `HIGH_PRECISION`，使用高精度非线性和归一化 |
+| [w8a16_pipeline_high_fused.toml](w8a16_pipeline_high_fused.toml) | HIGH | 开启 `HIGH_PRECISION_FUSIONS`，融合高精度 norm+shift 和 SiLU×up |
+| [w8a16_pipeline_high_fused_vector_k.toml](w8a16_pipeline_high_fused_vector_k.toml) | HIGH 融合 | 开启 `VECTOR_K_NORM`，K norm 使用已有对齐缓冲上的 Newton V32 |
+| [w8a16_pipeline_high_fused_vector_qk.toml](w8a16_pipeline_high_fused_vector_qk.toml) | vector K | 再开启 `VECTOR_Q_NORM`，Q norm 补齐物理行并使用 Newton V32 |
+| [w8a16_pipeline_high_fused_vector_qk_partial_rope.toml](w8a16_pipeline_high_fused_vector_qk_partial_rope.toml) | vector QK | 再开启 `PARTIAL_ROPE`，使用独立的 RoPE 调度路径 |
 
-按[上级说明](../README.md#quantization)准备固定源码与 checkpoint，随后执行：
+大写开关均带 `RPU_RHINOVLA_` 前缀，取值在文件中为字符串 `"1"`。[w8a16_pipeline.toml](w8a16_pipeline.toml) 表示全流水线量化；factory 的 [w8a16_action_adarms.toml](../w8a16_action_adarms.toml) 在专家 W8 基础上增加 AdaRMS 条件投影量化。
+
+`PARTIAL_ROPE` 路径仍旋转完整的 128 维 head，处理 31 个逻辑 token，并保留对齐填充行。其余 HIGH/vector 开关的算术和缓冲细节见[上级说明](../README.md#全流水线-w8--highvector-qk)。这些选择不改变线性权重的 W8A16 配方。
+
+<a id="weight-sources"></a>
+<a id="weights"></a>
+<a id="quantization"></a>
+
+## 准备与运行
+
+按[上级说明](../README.md#quantization)准备固定源码与 checkpoint。源码还需包含三个相机的示例视频 `datasets/example_lerobot_v3/videos/observation.images.{head_color,hand_left,hand_right}/chunk-000/file-000.mp4`；CPU 环境安装模型依赖和 PyAV。随后执行：
 
 ```bash
 python scripts/validate_rhinovla_v3.py prepare \
@@ -36,3 +46,9 @@ python scripts/validate_rhinovla_v3.py run \
 ```
 
 `prepare` 使用公开示例视频生成两组图像输入，state/noise 使用固定种子。`run` 固定十步去噪，检查输出形状、有限值、未激活动作槽、不同请求的独立输出与图重放，保存动作 tensor。`--runs` 控制重放次数；线程默认 12。修改环境开关或组件配置后使用新进程。
+
+### 参数与输出
+
+`--source`、`--checkpoint` 和 `--fixture` 必须来自同一套配对资产；`--config` 选择上表完整模板，`--output` 保存动作文件。`--runs` 默认 `3`，`--threads` 默认 `12`；去噪固定为十步。fixture 与统一入口的 `request.pt` 分别使用。
+
+实现见[运行脚本](../../../../../scripts/validate_rhinovla_v3.py)、[权重与表准备](../../../../../python/rpu_backend/adapters/rhinovla/convert.py)、[流水线](../../../../../python/rpu_backend/adapters/rhinovla/pipeline.py)。

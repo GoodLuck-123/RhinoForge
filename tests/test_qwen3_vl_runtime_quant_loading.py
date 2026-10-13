@@ -2,6 +2,7 @@
 import copy
 from dataclasses import replace
 import json
+import weakref
 
 import pytest
 import torch
@@ -17,12 +18,21 @@ from test_qwen3_vl_awq_packing import exact_config, inverse_rpu_weight, inverse_
 
 
 def config(size=2, bits=4, *, source=False):
-    result = exact_config(size)
+    result = exact_config(4 if size == 32 else size)
     del result.quantization_config
+    if size == 32:
+        text, vision = result.text_config, result.vision_config
+        text.hidden_size, text.intermediate_size = 5120, 25600
+        text.num_hidden_layers, text.num_attention_heads = 64, 64
+        vision.hidden_size, vision.intermediate_size, vision.depth = 1152, 4304, 27
+        vision.out_hidden_size, vision.deepstack_visual_indexes = 5120, [8, 16, 24]
     result.tie_word_embeddings = source
     result.text_config.tie_word_embeddings = source
+    if size in (8, 32):
+        result.tie_word_embeddings = result.text_config.tie_word_embeddings = False
     if not source:
-        result.quant_config = convert.runtime_quant_config(result.text_config.hidden_size, bits)
+        result.quant_config = convert.runtime_quant_config(result.text_config.hidden_size, bits,
+            source_quantization=convert.AWQ_SOURCE_QUANTIZATION if (size, bits) == (8, 4) else None)
     return result
 
 
@@ -41,16 +51,51 @@ def bounded_threads():
     torch.set_num_threads(previous)
 
 
-@pytest.mark.parametrize('size,bits', [(2,8),(2,4),(4,4)])
+@pytest.mark.parametrize('size,bits', [(2,8),(2,4),(4,4),(8,8),(8,4),(32,8),(32,4)])
 def test_exact_new_profiles_and_legacy_formats_stay_separate(size,bits):
     cfg = config(size,bits)
     assert runtime.is_qwen3_vl_runtime_quant_config(cfg)
     assert runtime.is_qwen3_vl_runtime_quant_config(cfg.to_dict())
     assert not load.is_qwen3_vl_2b_w8a16_config(cfg)
     assert not load.is_qwen3_vl_4b_w8a16_config(cfg)
-    assert not runtime.is_qwen3_vl_runtime_quant_config(exact_config(size))
+    assert not runtime.is_qwen3_vl_runtime_quant_config(exact_config(4 if size == 32 else size))
     assert not runtime.is_qwen3_vl_runtime_quant_config(config(4,8))
     assert convert.runtime_quant_config(2560,8) == convert.QUANT_CONFIG
+
+
+def test_32b_rtn_recipe_and_legacy_head_scope_do_not_alias():
+    cfg = config(32, 4)
+    assert cfg.quant_config['recipe'] == convert.RTN_RUNTIME_RECIPE
+    for recipe in (None, convert.AWQ_RUNTIME_RECIPE):
+        changed = copy.deepcopy(cfg)
+        if recipe is None:
+            changed.quant_config.pop('recipe')
+        else:
+            changed.quant_config['recipe'] = recipe
+        assert not runtime.is_qwen3_vl_runtime_quant_config(changed)
+    with pytest.raises(ValueError, match='RTN/G32'):
+        convert.runtime_quant_config(5120, 4, source_quantization=convert.AWQ_SOURCE_QUANTIZATION)
+    legacy = config(32, 8)
+    legacy.quant_config = copy.deepcopy(load._QWEN3_VL_32B_W8A16_QUANT_CONFIG)
+    assert load.is_qwen3_vl_32b_w8a16_config(legacy)
+    assert not runtime.is_qwen3_vl_runtime_quant_config(legacy)
+    assert not runtime.is_qwen3_vl_runtime_quant_config(config(32, 8, source=True))
+    for owner, field, value in [('text_config', 'num_hidden_layers', 63),
+                                ('text_config', 'num_attention_heads', 40),
+                                ('vision_config', 'intermediate_size', 4352),
+                                ('vision_config', 'deepstack_visual_indexes', [5, 11, 17])]:
+        changed = copy.deepcopy(cfg)
+        setattr(getattr(changed, owner), field, value)
+        assert not runtime.is_qwen3_vl_runtime_quant_config(changed)
+
+
+def test_8b_w4_requires_awq_preserved_text_and_never_dense_rtn():
+    assert runtime.is_qwen3_vl_runtime_quant_config(awq_runtime_config(8))
+    with pytest.raises(ValueError, match='preserved compressed_tensors_awq'):
+        convert.runtime_quant_config(4096, 4)
+    changed = config(8, 4)
+    changed.quant_config.pop('source_quantization')
+    assert not runtime.is_qwen3_vl_runtime_quant_config(changed)
 
 
 @pytest.mark.parametrize('size', [2, 4])
@@ -165,7 +210,7 @@ def write_tiny_source(directory,cfg,*,explicit_head=False):
 
 def write_tiny_awq_source(directory, size=2):
     cfg = exact_config(size)
-    tensors = write_tiny_source(directory, cfg, explicit_head=size == 4)
+    tensors = write_tiny_source(directory, cfg, explicit_head=size != 2)
     tensors = {name: value.bfloat16() for name, value in tensors.items()}
     projections, _ = tiny_schema(cfg.to_dict())
     for index, (name, (n, k)) in enumerate(projections.items()):
@@ -180,7 +225,7 @@ def write_tiny_awq_source(directory, size=2):
     return cfg, tensors
 
 
-@pytest.mark.parametrize('size', [2, 4])
+@pytest.mark.parametrize('size', [2, 4, 8])
 @pytest.mark.parametrize('sharded', [False, True])
 def test_awq_converter_preserves_calibrated_text_floats_and_loader_bytes(tmp_path, monkeypatch, size, sharded):
     from rpu_backend.quant.load_qwen3_vl_awq import _pack_projection
@@ -324,9 +369,15 @@ def test_awq_invalid_payload_cleans_only_its_incomplete_output(tmp_path, monkeyp
     assert (src/'model.safetensors').is_file()
 
 
-@pytest.mark.parametrize('size,bits',[(2,8),(2,4),(4,4)])
+@pytest.mark.parametrize('size,bits',[(2,8),(2,4),(4,4),(8,8),(32,8),(32,4)])
 def test_real_converter_to_cpu_loader_math_inventory_and_independent_head(tmp_path,monkeypatch,size,bits):
-    source=write_tiny_source(tmp_path/'source',config(size,bits,source=True),explicit_head=size==4)
+    source=write_tiny_source(tmp_path/'source',config(size,bits,source=True),explicit_head=size!=2)
+    if size in (8, 32):
+        # Match the actual official source: root untied, TextConfig flag absent.
+        source_config = json.loads((tmp_path/'source/config.json').read_text())
+        source_config['text_config'].pop('tie_word_embeddings')
+        (tmp_path/'source/config.json').write_text(json.dumps(source_config))
+        assert not torch.equal(source[convert.HEAD_NAME], source[convert.EMBED_NAME])
     monkeypatch.setattr(convert,'_checkpoint_tensor_shapes',tiny_schema)
     monkeypatch.setattr(runtime.AutoModelForImageTextToText,'from_config',TinyStorage)
     destination=tmp_path/'converted'
@@ -356,6 +407,17 @@ def test_real_converter_to_cpu_loader_math_inventory_and_independent_head(tmp_pa
             assert module._rpu_linear_partition==partition and module._rpu_linear_num_cores==8
     assert torch.equal(model.model.language_model.embed_tokens.weight,source[convert.EMBED_NAME])
     assert torch.equal(model.model.visual.weight,source['model.visual.weight'])
+
+
+@pytest.mark.parametrize('size,bits', [(8, 8), (32, 4)])
+def test_large_untied_source_requires_real_head_before_payload_read(tmp_path, monkeypatch, size, bits):
+    source = tmp_path/'source'
+    write_tiny_source(source, config(size, bits, source=True))
+    monkeypatch.setattr(convert, '_checkpoint_tensor_shapes', tiny_schema)
+    monkeypatch.setattr(convert, 'load_file', lambda *a, **k: pytest.fail('read missing-head source'))
+    with pytest.raises(KeyError, match='untied source.*lm_head'):
+        convert.convert_checkpoint(source, tmp_path/'converted', bits=bits)
+    assert not (tmp_path/'converted').exists()
 
 
 @pytest.mark.parametrize('fault',[None,'missing_embed','wrong_shard','extra_index',
@@ -421,11 +483,11 @@ def test_headers_rejected_before_unpacking_or_parameter_install(tmp_path,monkeyp
         runtime.load_qwen3_vl_runtime_imagetext(cfg,str(tmp_path),local_files_only=True)
 
 
-def sealed_storage(bits=4,size=2):
+def sealed_storage(bits=4,size=2,layer_count=1):
     # Reduced layer count only for mutation/migration helper tests, not loader admission.
     cfg=config(size,bits)
     model=TinyStorage(cfg)
-    model.model.language_model.layers=nn.ModuleList(list(model.model.language_model.layers)[:1])
+    model.model.language_model.layers=nn.ModuleList(list(model.model.language_model.layers)[:layer_count])
     for _,module,partition in runtime._quantized_modules(model):
         weight,scale=convert.quantize_weight(torch.ones(128,512),bits=bits)
         if bits==4:
@@ -437,6 +499,28 @@ def sealed_storage(bits=4,size=2):
     setattr(model,runtime._PLAN_ATTR,runtime._RuntimeLoadPlan(id(model),runtime._config_signature(cfg),
         runtime._inventory(model),runtime._module_inventory(model)))
     return model
+
+
+def test_w8_checkpoint_copy_owns_bytes_after_source_storage_is_released():
+    from torch.multiprocessing.reductions import StorageWeakRef
+
+    source = torch.arange(-128, 128, dtype=torch.int8).repeat(128).reshape(128, 256)
+    scale = torch.linspace(.01, 1, 128).half()
+    expected, expected_scale = source.clone(), scale.clone()
+    source_storage = StorageWeakRef(source.untyped_storage())
+    copied, copied_scale = runtime._copy_w8_projection(source, scale, n=128, k=256)
+    assert copied.is_contiguous() and copied.dtype == torch.int8
+    source.zero_()
+    scale.zero_()
+    del source, scale
+    assert source_storage.expired()
+    assert torch.equal(copied, expected)
+    assert torch.equal(copied_scale, expected_scale)
+    # The backing owner must outlive the local Tensor used by the loader.
+    parameter = nn.Parameter(copied, requires_grad=False)
+    del copied
+    parameter.add_(1)
+    assert torch.equal(parameter, expected + 1)
 
 
 @pytest.mark.parametrize('fault',['owner','config','head_weight','head_scale','head_layout','last_weight','missing_seal'])
@@ -483,6 +567,65 @@ def test_new_w8_migration_reuses_existing_single_swizzle_bank_path(monkeypatch):
     monkeypatch.setattr(load,'_move_materialized_decoder_for_rpu',lambda m,**k:called.append((m,k)))
     runtime._move_materialized_runtime_decoder_for_rpu(model)
     assert called==[(model,{'dtype':torch.int8})]
+
+
+@pytest.mark.parametrize('size', [8, 32])
+def test_large_w8_migration_selects_existing_per_layer_path(monkeypatch, size):
+    model = sealed_storage(bits=8, size=size)
+    model._rpu_swizzle_started = True
+    called = []
+    monkeypatch.setattr(load, '_move_materialized_decoder_for_rpu', lambda m, **kw: called.append((m, kw)))
+    runtime._move_materialized_runtime_decoder_for_rpu(model)
+    assert called == [(model, {'dtype': torch.int8, 'per_layer': True})]
+
+
+@pytest.mark.parametrize('fail_second', [False, True])
+@pytest.mark.parametrize('size', [8, 32])
+def test_large_w4_migration_releases_cpu_layer_and_poison_survives_failure(monkeypatch, fail_second, size):
+    model = sealed_storage(size=size, layer_count=2)
+    model._rpu_swizzle_started = True
+    modules = runtime._projection_inventory(model)
+    old_weights = [weakref.ref(module.weight) for _, module, _ in modules]
+    old_scales = [weakref.ref(module.weight_scale) for _, module, _ in modules]
+    expected = [(module.weight.clone(), module.weight_scale.clone()) for _, module, _ in modules]
+    head = (model.lm_head.weight, model.lm_head.weight_scale)
+    allocate = load._allocate_decoder_projection_views
+    calls = []
+    def bank(owner, names, **kw):
+        assert len(names) == 1 and len(names[0]) == 7
+        calls.append(names)
+        if len(calls) == 2:
+            assert all(ref() is None for ref in old_weights[:7])
+            assert all(ref() is not None for ref in old_weights[7:])
+            assert all(ref() is None for ref in old_scales[:7])
+            assert all(ref() is not None for ref in old_scales[7:])
+            if fail_second:
+                raise RuntimeError('second layer allocation failed')
+        return allocate(owner, names, **kw)
+    empty = torch.empty
+    def fake_device_empty(*a, **kw):
+        if kw.get('device') == 'rpu':
+            kw['device'] = 'cpu'
+        return empty(*a, **kw)
+    monkeypatch.setattr(load, '_allocate_decoder_projection_views', bank)
+    monkeypatch.setattr(torch, 'empty', fake_device_empty)
+    monkeypatch.setattr(nn.Module, 'to', lambda self, *a, **kw: self)
+    from rpu_backend.runtime import weights
+    monkeypatch.setattr(weights, 'convert_linear_weights_inplace', lambda *a, **kw: pytest.fail('second W4 swizzle'))
+    if fail_second:
+        with pytest.raises(RuntimeError, match='second layer allocation'):
+            runtime._move_materialized_runtime_decoder_for_rpu(model)
+    else:
+        runtime._move_materialized_runtime_decoder_for_rpu(model)
+        assert all(ref() is None for ref in old_weights)
+        assert all(ref() is None for ref in old_scales)
+    assert len(calls) == 2 and model._rpu_swizzle_started is True
+    for (_, module, _), (weight, scale) in zip(modules, expected):
+        assert torch.equal(module.weight, weight) and torch.equal(module.weight_scale, scale)
+    assert model.lm_head.weight is head[0] and model.lm_head.weight_scale is head[1]
+    with pytest.raises(RuntimeError, match='inventory'):
+        runtime._move_materialized_runtime_decoder_for_rpu(model)
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize('size',[2,4])

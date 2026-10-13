@@ -24,14 +24,26 @@ def test_all_example_configs_validate_without_torch_or_native_import(tmp_path):
         )
     env = dict(os.environ, PYTHONPATH=str(guard))
     script = """
+from contextlib import redirect_stderr
+from io import StringIO
 import sys
+import tomllib
 from pathlib import Path
 sys.path.insert(0, str(Path.cwd()))
 from examples.common.cli import main
 configs = sorted(Path('examples/configs').rglob('*.toml'))
 assert configs
 for path in configs:
-    assert main(['--config', str(path), '--check-config']) == 0
+    controlled = 'env' in tomllib.loads(path.read_text())
+    errors = StringIO()
+    try:
+        with redirect_stderr(errors):
+            result = main(['--config', str(path), '--check-config'])
+    except SystemExit as exc:
+        assert controlled and exc.code == 2, (path, exc.code)
+        assert 'Run this RhinoVLA v3 configuration with' in errors.getvalue()
+    else:
+        assert not controlled and result == 0, path
 assert 'torch' not in sys.modules and 'rpu_backend' not in sys.modules
 """
     result = subprocess.run(
@@ -39,8 +51,9 @@ assert 'torch' not in sys.modules and 'rpu_backend' not in sys.modules
         text=True, capture_output=True, timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("configuration OK:") == len(
-        list((ROOT / "examples/configs").rglob("*.toml"))
+    assert result.stdout.count("configuration OK:") == sum(
+        "env" not in tomllib.loads(path.read_text())
+        for path in (ROOT / "examples/configs").rglob("*.toml")
     )
 
 
@@ -215,7 +228,7 @@ def _policy_with_runtime_env(name: str, runtime_env):
     ],
 )
 @pytest.mark.parametrize("value", [True, None, 0, "false"])
-def test_generic_loaders_reject_custom_model_code(loader: str, value) -> None:
+def test_generic_loaders_forward_explicit_model_code_policy(loader: str, value, monkeypatch) -> None:
     if loader == "causal":
         from rpu_backend import RPUModelForCausalLM as model_loader
     else:
@@ -223,19 +236,28 @@ def test_generic_loaders_reject_custom_model_code(loader: str, value) -> None:
             RPUModelForConditionalGeneration as model_loader,
         )
 
-    with pytest.raises(ValueError, match="trust_remote_code=False"):
-        model_loader.from_pretrained(
-            "unused/checkpoint", trust_remote_code=value
-        )
+    import transformers
+    class ReachedConfig(RuntimeError):
+        pass
+    def config_io(path, **kwargs):
+        assert path == "unused/checkpoint"
+        assert kwargs["trust_remote_code"] is value
+        raise ReachedConfig()
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", config_io)
+    with pytest.raises(ReachedConfig):
+        model_loader.from_pretrained("unused/checkpoint", trust_remote_code=value)
 
 
-def test_controlled_config_check_does_not_apply_environment(monkeypatch):
+def test_controlled_config_check_does_not_apply_environment(monkeypatch, capsys):
     from examples.common.cli import main
 
     variable = "RPU_RHINOVLA_EXPERT_W8A16"
     monkeypatch.setenv(variable, "0")
     config = ROOT / "examples/configs/rhinovla/v3/controlled/w8a16_action.toml"
-    assert main(["--config", str(config), "--check-config"]) == 0
+    with pytest.raises(SystemExit) as error:
+        main(["--config", str(config), "--check-config"])
+    assert error.value.code == 2
+    assert "Run this RhinoVLA v3 configuration with" in capsys.readouterr().err
     assert os.environ[variable] == "0"
 
 

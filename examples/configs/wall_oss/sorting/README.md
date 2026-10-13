@@ -112,3 +112,7 @@ batch 为 CPU 字典：uint8 `images [3,252,448,3]`，依次为 face/left/right�
 | `run.warmup/runs` | 2 / 6 | 预热至少 1，采样至少 1 | 按所需运行次数调整 |
 
 公共字段见[参数说明](../../PARAMETERS.md)，运行库见[算子库说明](../../../../docs/runtime_assets.md)。每种冷配置用新进程。
+
+## 输出
+
+`run.output_dir` 保存 `report.json` 和 `actions.pt`，分别记录有效配置与物理动作。

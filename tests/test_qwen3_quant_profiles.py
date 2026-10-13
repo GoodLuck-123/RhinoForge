@@ -1,0 +1,89 @@
+"""Quantized geometry admission must not widen FP16 or accept foreign payloads."""
+from types import SimpleNamespace
+import copy
+import pytest
+import torch
+from transformers import Qwen3Config
+from rpu_backend.quant.qwen3_profiles import qwen3_dense_quant_profile, is_qwen3_32b_w8a16_config
+from rpu_backend.runtime.topology import decoder_geometry_profile, resolve_decoder_topology
+from rpu_backend.runtime.decoder import _validate_decoder_w4_scale_lists
+
+GEOMETRIES = [(1024,3072,28,16), (2048,6144,28,16), (2560,9728,36,32),
+              (4096,12288,36,32), (5120,17408,40,40), (5120,25600,64,64)]
+
+def config(geometry):
+    h,i,l,q=geometry
+    return Qwen3Config(architectures=['Qwen3ForCausalLM'], hidden_size=h,
+        intermediate_size=i,num_hidden_layers=l,num_attention_heads=q,
+        num_key_value_heads=8,head_dim=128,vocab_size=151936,
+        tie_word_embeddings=h<4096,rms_norm_eps=1e-6,max_position_embeddings=40960)
+
+@pytest.mark.parametrize('geometry',GEOMETRIES)
+def test_exact_source_geometry_resolves_only_private_quant_profile(geometry):
+    c=config(geometry)
+    profile=qwen3_dense_quant_profile(c)
+    assert profile.hidden_size==geometry[0] and profile.num_layers==geometry[2]
+    assert resolve_decoder_topology(num_cores=8,**profile.geometry()).num_cores==8
+    if geometry[2] in (40,64):
+        assert decoder_geometry_profile(**profile.geometry()) is None
+    c.num_hidden_layers += 1
+    with pytest.raises(ValueError): qwen3_dense_quant_profile(c)
+
+@pytest.mark.parametrize('change',[
+    {'quant_config':{'method':'w4a16'}}, {'quantization_config':{'quant_method':'gptq'}},
+    {'attention_bias':True}, {'num_attention_heads':True}, {'hidden_act':'gelu'},
+    {'max_position_embeddings':None}, {'tie_word_embeddings':True},
+    {'layer_types':['sliding_attention']*64}, {'rope_parameters':{'rope_type':'yarn'}},
+])
+def test_w4_rejects_foreign_precision_and_semantics(change):
+    c=config(GEOMETRIES[-1])
+    for k,v in change.items(): setattr(c,k,v)
+    with pytest.raises(ValueError): qwen3_dense_quant_profile(c)
+
+def test_w8_32b_requires_actual_converter_recipe_and_never_is_a_w4_source():
+    c=config(GEOMETRIES[-1])
+    c.quant_config={'method':'w8a16','mode':'per_channel_symmetric','qaxis':0,
+        'skip_modules':[],'quantized_lm_head':True,'quantized_embed_tokens':False,
+        'lm_head_untied':True,'embed_tokens_untied':False}
+    assert is_qwen3_32b_w8a16_config(c)
+    with pytest.raises(ValueError): qwen3_dense_quant_profile(c)
+    for key,value in [('qaxis',False),('quantized_lm_head',False),('extra',True)]:
+        wrong=copy.deepcopy(c)
+        wrong.quant_config[key]=value
+        assert not is_qwen3_32b_w8a16_config(wrong)
+
+@pytest.mark.parametrize('geometry',GEOMETRIES)
+def test_packed_payload_validates_shape_scale_identity_and_geometry(geometry):
+    c=config(geometry)
+    p=qwen3_dense_quant_profile(c)
+    h,i=p.hidden_size,p.intermediate_size
+    q,k=p.num_q_heads*128,1024
+    roles=[('self_attn.q_proj',q,h,1),('self_attn.k_proj',k,h,1),
+           ('self_attn.v_proj',k,h,1),('self_attn.o_proj',h,q,0),
+           ('mlp.gate_proj',i,h,1),('mlp.up_proj',i,h,1),('mlp.down_proj',h,i,0)]
+    layer=torch.nn.Module()
+    layer.self_attn=torch.nn.Module()
+    layer.mlp=torch.nn.Module()
+    scales=[]
+    for role,n,k,col in roles:
+        module=torch.nn.Linear(k,n,bias=False,device='meta')
+        module.weight=torch.nn.Parameter(torch.empty(n,k//2,device='meta',dtype=torch.uint8),requires_grad=False)
+        lg,ln=(k//32,n//8) if col else (k//256,n)
+        count=8*((lg+3)//4*4)*((ln+63)//64*64)
+        module.register_buffer('weight_scale',torch.empty(32,count//32,device='meta',dtype=torch.float16))
+        parent,name=role.split('.')
+        setattr(getattr(layer,parent),name,module)
+        scales.append([module.weight_scale]*p.num_layers)
+    model=SimpleNamespace(config=c,layers=[layer]*p.num_layers)
+    topology=resolve_decoder_topology(num_cores=8,**p.geometry())
+    _validate_decoder_w4_scale_lists(model,scales,topology)
+    scales[0]=[s.clone() for s in scales[0]]
+    with pytest.raises(ValueError,match='actual UINT8/G32'):
+        _validate_decoder_w4_scale_lists(model,scales,topology)
+
+def test_installed_b1_profile_rejects_cache_batch_before_allocation():
+    from rpu_backend.api.cache import RPUCache
+    owner=SimpleNamespace(config=config(GEOMETRIES[-1]),
+                          model=SimpleNamespace(_rpu_batch_decode_enabled=False))
+    with pytest.raises(ValueError,match='batch_size=1'):
+        RPUCache.from_model(owner,max_seq_len=128,batch_size=2)

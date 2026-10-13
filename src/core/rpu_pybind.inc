@@ -99,7 +99,7 @@ PYBIND11_MODULE(rpu_backend, m) {
   // HW perf trace — dump Chrome trace JSON for fused-decoder kernels.
   m.def("set_hw_perf_trace", &rpu_set_hw_perf_trace,
         "Enable HW cycle-precision kernel/DMA Chrome trace dump",
-        py::arg("enabled"), py::arg("output_dir") = ".rpu-hw-perf",
+        py::arg("enabled"), py::arg("output_dir") = ".",
         py::arg("max_dumps") = 32);
   m.def("get_hw_perf_trace", &rpu_get_hw_perf_trace, "Get HW perf trace enabled state");
 

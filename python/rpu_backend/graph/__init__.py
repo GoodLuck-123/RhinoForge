@@ -208,10 +208,25 @@ class Graph:
             return self._impl.dump_tree()
         return ""
 
+    def dump_kernel_args_jsonl(self) -> str:
+        """Return Release kernel capacity metadata as JSONL."""
+        return self._impl.dump_kernel_args_jsonl() if self._impl is not None else ""
 
+    def dump_resources(self) -> str:
+        """Return resource ownership, byte counts and lifetimes without addresses."""
+        return self._impl.dump_resources() if self._impl is not None else ""
 
+    def debug_segments_jsonl(self) -> str:
+        """Return address-free replay-segment metadata as JSONL."""
+        return self._impl.debug_segments_jsonl() if self._impl is not None else ""
 
+    def debug_nodes(self) -> list:
+        """Return address-free node kinds, dependencies and tensor metadata."""
+        return self._impl.debug_nodes() if self._impl is not None else []
 
+    def debug_segments(self) -> list:
+        """Return address-free replay-segment structure."""
+        return self._impl.debug_segments() if self._impl is not None else []
 
 
 def layered_from(sig: "GraphSignature"):

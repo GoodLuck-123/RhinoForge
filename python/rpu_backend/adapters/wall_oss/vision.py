@@ -605,7 +605,7 @@ class WallOssVision:
 
     @torch.no_grad()
     def _forward_parts(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor):
-        """Keep separate subgroup outputs for the internal device assembler."""
+        """Keep separate subgroup outputs for the device concatenation path."""
         return self._forward(pixel_values, grid_thw, return_parts=True)
 
     def _forward(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor, *,
@@ -935,7 +935,10 @@ class WallOssVision:
         return boundaries
 
     def _window_layout(self, grid_cpu: torch.Tensor, seq: int):
-        """Cache CPU window and position indices for an image grid."""
+        """Cache CPU position indices, window order, reverse order and additive mask.
+
+        The key includes sequence length and complete image grid; merge and window
+        settings belong to this owner. Returned tensors are read-only for consumers."""
         key = (int(seq),) + tuple(grid_cpu.flatten().tolist())
         if self._host_cache:
             hit = self._layout_cache.get(key)
@@ -967,7 +970,11 @@ class WallOssVision:
         return out
 
     def _group_layout(self, grid_group: torch.Tensor, seq: int, smu: int):
-        """Inference runtime helpers and execution contracts."""
+        """Cache CPU position/window layout for the complete multi-image grid.
+
+        Return position indices, combined window indices, reverse indices, window
+        mask and cumulative window lengths. Consumers must not mutate these shared
+        tensors. ``RPU_WALL_OSS_HOST_CACHE=0`` disables reuse."""
         key = tuple(grid_group.flatten().tolist())
         if self._host_cache:
             hit = self._group_layout_cache.get(key)
@@ -1078,7 +1085,11 @@ class WallOssVision:
 
     def _patch_embed(self, pixel_values: torch.Tensor, window_index, seq: int,
                      smu: int, prepared_pixels: torch.Tensor | None = None) -> torch.Tensor:
-        """Embed raster-order pixels, then gather the device output into window order."""
+        """Map raster-order ``[sequence, features]`` pixels to FP16 device embeddings.
+
+        UINT8 inputs use normalization-folded weights and gather output rows into
+        window order on device. FP32 processor inputs use plain weights and retain
+        the CPU input reorder before projection."""
         pv = pixel_values                                          # raster order
         folded = pv.dtype == torch.uint8
         w_rpu = self._patch_w_fold_rpu if folded else self._patch_w_rpu

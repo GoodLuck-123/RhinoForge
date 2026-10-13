@@ -56,7 +56,7 @@ FP16 模板直接消费这个目录，加载时转换，不产生新的权重文
 
 ### 输入与运行
 
-在已安装项目依赖的 设备环境中，按 head、left wrist、right wrist 的顺序提供三张图片，填写配对指令和状态：
+在已安装项目依赖的设备环境中，按 head、left wrist、right wrist 的顺序提供三张图片，填写配对指令和状态：
 
 ```bash
 cp examples/configs/hy_embodied/umi/fp16.toml /tmp/hy_umi_fp16.toml
@@ -86,4 +86,4 @@ python examples/run.py --config /tmp/hy_umi_fp16.toml
 
 ## 输出
 
-输出归一化动作与运行摘要，产物保存在 `run.output_dir`。
+`run.output_dir` 保存 `report.json` 与 `[50,20]` 归一化动作快照。机器人坐标变换和动作执行由下游处理。

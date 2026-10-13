@@ -46,6 +46,33 @@ just the next function call.
 6. Before returning to an earlier component, repeat its public admission and
    ownership path; do not assume its previous temporary state remains live.
 
+## Shared pipeline ownership
+
+Some admitted composite paths retain data across components in one SPM lease.
+They use the native pipeline owner instead of the independent-component reset
+sequence above. The producer and consumer must agree on dtype, logical shape,
+layout, core distribution and route. A row-slice route also validates its range
+against the full consumer allocation. Casts, permutations and redistribution
+must be explicit operations; a matching element count is insufficient.
+
+Before execution, the owner seals the ordered component plans and handoff
+lifetimes, prepares stable mask/input slots and validates all component
+versions. It acquires the lease before the outer Graph and releases it after
+synchronous completion. Components neither reset the shared allocation nor
+advance the outer Graph's replay cursor independently. Every replay refreshes
+mutable input bindings before consuming the sealed plan.
+
+The Graph identity includes component order, layout generations, route and
+chunk plans. Request values use mutable transfers; changing the topology,
+route or output-export mode needs a distinct plan. A standalone output remains
+an independently owned tensor even when intermediate tensors stay in SPM.
+Use the existing model builder for these paths; individual component caches do
+not confer a shared lease.
+
+See [pipeline implementation](../../src/core/rpu_spm_pipeline.h) and
+[Graph lifetime](graphcache-capture.md).
+
+
 ## HYViT patch inputs
 
 The native patch boundary accepts either one `[B,3,H,W]` tensor with `B=1..8`,

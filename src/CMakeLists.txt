@@ -154,3 +154,92 @@ set_target_properties(rpu_backend PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN YES
 )
+
+if(RHINOFORGE_BUILD_HOST_TESTS)
+    set(RHINOFORGE_TEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tests")
+    get_target_property(RHINOFORGE_LAUNCH_HEADERS
+        rhino_launch::rhino_launch INTERFACE_INCLUDE_DIRECTORIES)
+
+    add_executable(test_fmb_three_stage_chunk_plan
+        ${RHINOFORGE_TEST_DIR}/test_fmb_three_stage_chunk_plan.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/fmb_three_stage_chunk_plan.cpp)
+    add_executable(test_kvinsert_segment_plan
+        ${RHINOFORGE_TEST_DIR}/test_kvinsert_segment_plan.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops/rpu_kvinsert_segment_plan.cpp)
+    add_executable(test_rmsnorm_route
+        ${RHINOFORGE_TEST_DIR}/test_rmsnorm_route.cpp)
+    foreach(host_test IN ITEMS test_fmb_three_stage_chunk_plan
+            test_kvinsert_segment_plan test_rmsnorm_route)
+        target_include_directories(${host_test} PRIVATE
+            ${TORCH_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/core ${CMAKE_CURRENT_SOURCE_DIR}/ops
+            ${RHINOFORGE_LAUNCH_HEADERS})
+        target_link_libraries(${host_test} PRIVATE ${TORCH_LIBRARIES})
+    endforeach()
+
+    add_executable(test_pi05_execution_topology
+        ${RHINOFORGE_TEST_DIR}/test_pi05_execution_topology.cpp)
+    target_include_directories(test_pi05_execution_topology PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/core)
+    add_executable(test_lingbot_v2_moe_select
+        ${RHINOFORGE_TEST_DIR}/test_lingbot_v2_moe_select.cpp)
+    target_include_directories(test_lingbot_v2_moe_select PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/fused)
+    foreach(host_test IN ITEMS test_fmb_three_stage_chunk_plan
+            test_kvinsert_segment_plan test_rmsnorm_route
+            test_pi05_execution_topology test_lingbot_v2_moe_select)
+        target_compile_options(${host_test} PRIVATE -UNDEBUG)
+        set_target_properties(${host_test} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+        add_test(NAME ${host_test} COMMAND ${host_test})
+    endforeach()
+
+    add_library(test_lingbot_v2_moe_cos_sin_offset_static OBJECT
+        ${RHINOFORGE_TEST_DIR}/test_lingbot_v2_moe_cos_sin_offset_static.cpp)
+    target_compile_options(test_lingbot_v2_moe_cos_sin_offset_static PRIVATE -UNDEBUG)
+    target_include_directories(test_lingbot_v2_moe_cos_sin_offset_static PRIVATE
+        ${TORCH_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/core ${CMAKE_CURRENT_SOURCE_DIR}/fused
+        ${CMAKE_CURRENT_SOURCE_DIR}/ops ${CMAKE_CURRENT_SOURCE_DIR}/graph
+        ${RHINOFORGE_LAUNCH_HEADERS})
+endif()
+
+if(RHINOFORGE_BUILD_DEVICE_TESTS)
+    # The installed extension hides native symbols. Link tests from the same
+    # implementation sources without changing the published extension's ABI.
+    add_library(rhinoforge_device_test_backend STATIC EXCLUDE_FROM_ALL
+        ${RPU_CORE_SOURCES} ${RPU_FUSED_SOURCES}
+        ${RPU_OPS_SOURCES} ${RPU_GRAPH_SOURCES})
+    target_include_directories(rhinoforge_device_test_backend PRIVATE
+        ${TORCH_INCLUDE_DIRS} ${Python3_INCLUDE_DIRS}
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/core
+        ${CMAKE_CURRENT_SOURCE_DIR}/fused ${CMAKE_CURRENT_SOURCE_DIR}/ops
+        ${CMAKE_CURRENT_SOURCE_DIR}/graph ${CMAKE_BINARY_DIR}/generated)
+    target_link_libraries(rhinoforge_device_test_backend PUBLIC
+        ${TORCH_LIBRARIES} torch_python rhino_launch::rhino_launch
+        rpu_api Hxil ${CMAKE_DL_LIBS} Python3::Python)
+    set(RHINOFORGE_DEVICE_TESTS
+        test_buffer_scope_contract
+        test_graph_ddr_pingpong
+        test_graph_multi_group
+        test_graph_ops_canary
+        test_graph_replay_dma_ordering
+        test_graph_two_phase_capture
+        test_spm_pipeline_contract)
+    foreach(device_test IN LISTS RHINOFORGE_DEVICE_TESTS)
+        add_executable(${device_test} EXCLUDE_FROM_ALL
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/${device_test}.cpp)
+        target_compile_options(${device_test} PRIVATE -UNDEBUG)
+        target_include_directories(${device_test} PRIVATE
+            ${TORCH_INCLUDE_DIRS} ${CMAKE_CURRENT_SOURCE_DIR}
+            ${CMAKE_CURRENT_SOURCE_DIR}/core ${CMAKE_CURRENT_SOURCE_DIR}/fused
+            ${CMAKE_CURRENT_SOURCE_DIR}/ops ${CMAKE_CURRENT_SOURCE_DIR}/graph
+            ${CMAKE_BINARY_DIR}/generated)
+        target_link_libraries(${device_test} PRIVATE
+            "-Wl,--whole-archive" rhinoforge_device_test_backend
+            "-Wl,--no-whole-archive")
+        set_target_properties(${device_test} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)
+    endforeach()
+    add_custom_target(rhino_device_tests DEPENDS ${RHINOFORGE_DEVICE_TESTS})
+endif()

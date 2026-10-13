@@ -3,7 +3,7 @@
 [简体中文](qwen3_audio.zh.md) | English
 
 `Qwen3ASRModel` transcribes local audio. `Qwen3TTSModel` generates speech from
-short text and reference audio. Both use dedicated Python APIs and CLIs,
+text and reference audio. Both use dedicated Python APIs,
 separate from the text/vision TOML runner and CausalLM/VLM registry.
 
 ## Models and inputs
@@ -18,11 +18,21 @@ separate from the text/vision TOML runner and CausalLM/VLM registry.
 | Model | Inputs | Generation and output |
 |---|---|---|
 | ASR | Batch one; finite mono floating-point samples at 16 kHz, 0.5–8 seconds | Greedy, `max_new_tokens=1..64`; text, raw text with language metadata, and token IDs; no context prompt, timestamps or streaming |
-| TTS Base | Batch one; `Chinese` / `English`; 1–128 text characters and at most 32 tokenizer tokens; mono 24 kHz reference audio, 0.5–20 seconds | Non-streaming greedy, `max_new_tokens=2..64`; independent float32 mono waveform and sample rate 24000 |
+| TTS Base | Batch one; `Chinese` / `English`; 1–1024 text characters; finite, nonzero mono 24 kHz reference audio, 0.5–20 seconds | Non-streaming sampling, `max_new_tokens=2..256` per segment (default 256); independent float32 mono waveform and sample rate 24000 |
 
 TTS uses only the reference speaker embedding. ICL transcripts, CustomVoice and
 VoiceDesign are unavailable. Talker prompt plus the generation limit must fit
-128 positions; reaching the limit can truncate speech.
+512 positions per segment. Sampling follows the pinned checkpoint: top-k 50,
+temperature 0.9 and top-p 1.0. Missing EOS raises before waveform decoding; empty,
+non-finite or exactly zero output is rejected.
+
+Inputs within 128 characters and 32 tokenizer tokens use one segment. Longer
+text splits at punctuation with a 128-character bound and a 12-token target.
+A sentence ending of at most eight characters can join its preceding clause up
+to 16 tokens. Adding sentence stops can change token counts, pauses and
+intonation. Every segment starts from the request's initial CPU RNG state; later
+segments restore the caller state left by the first. All segments must succeed
+before their independently stored waveforms are concatenated.
 
 Loaders check the pinned checkpoint, configuration and tokenizer before weight
 transformation. ASR identities are in
@@ -74,7 +84,7 @@ cp "$QWEN3_TTS_SOURCE/LICENSE" "$QWEN3_TTS_PREPARED/LICENSE"
 Replace `/path/to/...` with local directories. The prepared output directory must
 not exist. Preparation copies 15 hash-pinned source files and applies compatibility
 patches without executing the original source or modifying its checkout. Loading
-checks the prepared manifest and file hashes. The API/CLI `source` argument points
+checks the prepared manifest and file hashes. The API `source` argument points
 to the generated `qwen_tts/` subdirectory. Keep the upstream license with the copy.
 
 ## 3. Run
@@ -82,31 +92,56 @@ to the generated `qwen_tts/` subdirectory. Keep the upstream license with the co
 Use an idle device with the platform's device lock. Run ASR and TTS in separate
 processes.
 
-The ASR CLI reads mono 16 kHz, 16-bit PCM WAV and writes JSON to standard output:
+The ASR API reads mono floating-point samples at 16 kHz. This example reads a
+local WAV and prints the transcription as JSON:
 
-```bash
-python examples/qwen3_asr.py \
-  --checkpoint "$RPU_MODEL_CACHE/Qwen3-ASR-0.6B" \
-  --audio /path/to/mono-16k-pcm16.wav \
-  --max-new-tokens 64 --threads 4
+```python
+import json
+import os
+from dataclasses import asdict
+from pathlib import Path
+
+import soundfile as sf
+import torch
+from rpu_backend.api import Qwen3ASRModel
+
+torch.set_num_threads(4)
+checkpoint = Path(os.environ["RPU_MODEL_CACHE"]) / "Qwen3-ASR-0.6B"
+audio, sample_rate = sf.read("/path/to/mono-16k.wav", dtype="float32")
+with Qwen3ASRModel.from_pretrained(checkpoint, dtype=torch.float16) as model:
+    result = model.transcribe(audio, sample_rate=sample_rate, max_new_tokens=64)
+print(json.dumps(asdict(result), ensure_ascii=False))
 ```
 
-The TTS CLI reads a local reference file and writes FLOAT WAV. The output file
-must not already exist:
+The TTS API accepts a local reference file. This example writes a new FLOAT WAV;
+the output directory must exist:
 
-```bash
-python examples/qwen3_tts.py \
-  --checkpoint "$RPU_MODEL_CACHE/Qwen3-TTS-12Hz-0.6B-Base" \
-  --source "$QWEN3_TTS_PREPARED/qwen_tts" \
-  --reference-audio /path/to/mono-24k.wav \
-  --text 'Hello, welcome.' --language English \
-  --max-new-tokens 64 --threads 4 --output /path/to/output/hello.wav
+```python
+import os
+from pathlib import Path
+
+import soundfile as sf
+import torch
+from rpu_backend.api import Qwen3TTSModel
+
+torch.set_num_threads(16)
+checkpoint = Path(os.environ["RPU_MODEL_CACHE"]) / "Qwen3-TTS-12Hz-0.6B-Base"
+source = Path(os.environ["QWEN3_TTS_PREPARED"]) / "qwen_tts"
+with Qwen3TTSModel.from_pretrained(checkpoint, source=source, dtype=torch.float16) as model:
+    torch.manual_seed(0)
+    waveform, sample_rate = model.synthesize(
+        "Hello, welcome.", reference_audio="/path/to/mono-24k.wav",
+        language="English", max_new_tokens=256,
+    )
+with open("/path/to/output/hello.wav", "xb") as output:
+    sf.write(output, waveform, sample_rate, format="WAV", subtype="FLOAT")
 ```
 
-Both CLIs accept a positive `--threads` value, defaulting to 4. The Python APIs do
-not change the process thread count. The ASR API also accepts a one-dimensional
-CPU floating-point array or Tensor. See [speech APIs](api_reference.md#bounded-speech-apis)
-for signatures and return types.
+Set the process thread count for your host before loading; the APIs leave it
+unchanged. Set the seed after loading and before each request to repeat sampling
+on the same execution profile. Reuse the model context for multiple requests.
+ASR also accepts a one-dimensional CPU floating-point Tensor. See
+[speech APIs](api_reference.md#bounded-speech-apis) for signatures and return types.
 
 ## Execution and resources
 
@@ -119,15 +154,17 @@ ASR convolutions use channels-last storage and FP16-rounded weights in CPU FP32
 computation, then round outputs to FP16. The device audio Graph uses FP32 Linear
 accumulation. TTS CPU components stay FP32; device components use FP16 with FP32
 Linear accumulation. Codec LayerScale is folded into projections in FP32 before
-conversion to FP16, while RoPE retains FP32 frequencies. The codec frontend accepts
-1–63 frames, below its 72-frame sliding window.
+conversion to FP16, while RoPE retains FP32 frequencies. The device codec frontend
+accepts 1–63 frames. Sequences of 64–255 frames use the original CPU FP32 frontend
+and its 72-frame sliding attention.
 
 - ASR requires a rebuilt native extension exposing `siglip_set_audio_mode`,
   `siglip_set_audio_projection` and `assemble_inputs_embeds`; loading fails if
   these interfaces are absent.
 - TTS explicitly enables the device codec path with
   `causal_decoder_set_tts_codec_mode`. Without that setter, the frontend stays on
-  CPU; `execution_stats()` reports the device and reason. Other execution errors
+  CPU. `execution_stats()` reports the last segment's device and fallback reason,
+  total generation steps, EOS and per-segment steps. Other execution errors
   propagate to the caller.
 - Keep one live model/policy per process. Serialize requests, `execution_stats()`
   and `close()`. Both APIs support `with`, idempotent `close()` and outputs with
@@ -139,6 +176,8 @@ conversion to FP16, while RoPE retains FP32 frequencies. The codec frontend acce
   TTS retains Talker prefill/decode, Predictor decode and the current codec frame
   count. Components evict old signatures when their length changes and replay
   matching signatures.
+- Predictor passes its last device hidden row directly to the immediate output
+  head, consumed once; callers requesting hidden states receive owned CPU output.
 - TTS caches only the latest reference audio's speaker embedding by decoded
   content; every request still reads and validates the file. After a failed
   transformation, close the model and reload clean weights. Retire Graphs before

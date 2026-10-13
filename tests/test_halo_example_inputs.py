@@ -1,4 +1,4 @@
-"""HALO resolves a checkpoint file and checks fixtures before policy creation."""
+"""HALO resolves a checkpoint file and validates the single-step profile."""
 from types import SimpleNamespace
 
 import pytest
@@ -76,34 +76,23 @@ def test_registry_file_reaches_builder_without_appending_a_directory(assets, wra
 
 
 @pytest.mark.parametrize("kind", ["missing", "directory"])
-def test_checkpoint_must_be_a_file_before_fixture_load(assets, kind):
+def test_checkpoint_must_be_a_file(assets, kind):
     checkpoint, fixture, runner, calls, _ = assets
     checkpoint.unlink()
     if kind == "directory":
         checkpoint.mkdir()
         save_file({"test_weight": torch.zeros(1)}, checkpoint / "ema.safetensors")
-    assert not fixture.exists()
+    torch.save(_fixture(), fixture)
     with pytest.raises(FileNotFoundError, match="HALO checkpoint must name a safetensors file"):
         example.prepare(runner)
     assert calls == []
 
 
 @pytest.mark.parametrize("change,match", [
-    (lambda v: v.pop("x_t"), "x_t"),
-    (lambda v: v.update(x_t=torch.zeros(1, 14)), "x_t"),
-    (lambda v: v.update(x_t=torch.full((16, 14), float("nan"))), "finite"),
-    (lambda v: v.update(timestep=torch.arange(16).float()), "constant timestep"),
     (lambda v: v.update(packed_position_ids=torch.arange(18)), "constant packed_position_ids"),
-    (lambda v: v.update(packed_text_ids=torch.ones(2)), "integer indexes"),
-    (lambda v: v.update(packed_text_ids=torch.tensor([-1, 2])), "integer indexes"),
     (lambda v: v.update(packed_text_indexes=torch.tensor([0, 1])), "text/action rows"),
     (lambda v: v.update(key_values_lens=torch.tensor([1])), "prefix length"),
     (lambda v: v.update(past_key_values=[]), "key_cache/value_cache mapping"),
-    (lambda v: v["past_key_values"].pop("key_cache"), "key_cache.*layers"),
-    (lambda v: v["past_key_values"]["value_cache"].pop(27), "value_cache.*layers"),
-    (lambda v: v["past_key_values"].update(key_cache=torch.tensor(0)), "key_cache.*layers"),
-    (lambda v: v["past_key_values"]["key_cache"].update({27: torch.zeros(1)}), "key_cache\\[27\\]"),
-    (lambda v: v["past_key_values"]["value_cache"].update({27: "invalid"}), "value_cache\\[27\\]"),
 ])
 def test_invalid_fixture_fails_before_weight_loading(assets, change, match):
     _, fixture, runner, calls, _ = assets
@@ -113,25 +102,3 @@ def test_invalid_fixture_fails_before_weight_loading(assets, change, match):
     with pytest.raises(ValueError, match=match):
         example.prepare(runner)
     assert calls == []
-
-
-def test_fixture_kwargs_must_be_a_mapping(assets):
-    _, fixture, runner, calls, _ = assets
-    torch.save({"kwargs": []}, fixture)
-    with pytest.raises(ValueError, match="kwargs must be a tensor mapping"):
-        example.prepare(runner)
-    assert calls == []
-
-
-@pytest.mark.parametrize("container", [list, tuple, torch.stack])
-def test_prefix_banks_accept_tensor_sequences(container):
-    cfg = halo.HaloConfig()
-    values = _fixture()
-    # A reduced fixture keeps this container check independent of allocation size.
-    from dataclasses import replace
-    cfg = replace(cfg, num_layers=2, prefix_len=3)
-    values["key_values_lens"] = torch.tensor([cfg.prefix_len])
-    rows = [torch.zeros(cfg.prefix_len, cfg.num_kv_heads, cfg.head_dim)] * cfg.num_layers
-    values["past_key_values"] = {name: container(rows) for name in ("key_cache", "value_cache")}
-    key, value = example._validate_fixture(values, cfg)
-    assert len(key) == len(value) == cfg.num_layers

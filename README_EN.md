@@ -74,16 +74,15 @@ entry points.
    then run inference:
 
 ```bash
-python examples/verify_install.py --check-config
-python examples/verify_install.py
+python -m pip check
 cp examples/configs/qwen3/text/0_6b/fp16.toml qwen3.local.toml
 cat >> qwen3.local.toml <<'TOML'
 
 [logging]
 level = "INFO"
 TOML
-python examples/run.py --config qwen3.local.toml --check-config
-python examples/run.py --config qwen3.local.toml
+python -m examples.run --config qwen3.local.toml --check-config
+python -m examples.run --config qwen3.local.toml
 ```
 
 The example sets `logging.level="INFO"` to display generated text. The default
@@ -97,7 +96,7 @@ See [Getting started](docs/getting_started.md) for installation and a first run.
 
 | Topic | Document |
 |---|---|
-| v1.2.0rc1 changes and migration | [Changelog](CHANGELOG.md) · [Upgrade guide](docs/upgrading_1_2.md) |
+| v1.2.0rc1 changes and installation | [Changelog](CHANGELOG.md) · [Upgrade guide](docs/upgrading_1_2.md) |
 | Install current source | [Development build](docs/development_build.md) |
 | Installation and first run | [Getting started](docs/getting_started.md) |
 | Speech recognition and synthesis | [Qwen3 ASR/TTS](docs/qwen3_audio.md) |

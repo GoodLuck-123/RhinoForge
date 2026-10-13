@@ -11,10 +11,10 @@
 
 | 配置 | 输入与执行范围 | 实际精度 | 权重获取 |
 |---|---|---|---|
-| [v2 FP16](v2/README.md) | 两/三相机，T16/32/64/128/160，另有三相机 T3 |设备FP16 | [共用 6B FP32 父权重](v2/README.md#weights) |
+| [v2 FP16](v2/README.md) | 两/三相机，T16/32/64/128/160，另有三相机 T3 |设备 FP16 | [共用 6B FP32 父权重](v2/README.md#weights) |
 | [v2 W8A16](v2/README.md#weight-recipes) | 与对应 FP16 模板配对 | Vision/Text/Action 主要投影 W8A16 | 同一份 [6B 父权重](v2/README.md#weights)，加载时量化 |
 | [exact-Z2 W8A16](legacy/exact_z2/6b/w8a16.toml) | 三相机 256×256，真实前缀 215–225，物理 P225 | W8A16 | [配对的 6B FP32 或 BF16 资产](legacy/exact_z2/README.md#weights) |
-| [v1 4B](v1/4b/fp16_cpu_vision.toml) | v1 observation，十步去噪 | CPU FP32 Vision +设备FP16 Text/Action | [官方 4B FP32 权重](#weights) |
+| [v1 4B](v1/4b/fp16_cpu_vision.toml) | v1 observation，十步去噪 | CPU FP32 Vision +设备 FP16 Text/Action | [官方 4B FP32 权重](#weights) |
 
 T 是有效语言 token 数。各 v2 配置的逐模块量化范围与增量说明放在对应子页。
 
@@ -22,7 +22,7 @@ T 是有效语言 token 数。各 v2 配置的逐模块量化范围与增量说�
 
 ### v1 精度与执行
 
-`v1/4b/fp16_cpu_vision.toml` 的 `example.dtype="cpu-fp32+rpu-fp16"` 选择 CPU FP32 视觉编码与设备FP16 文本/动作计算。前端接收已经分词的 observation，加载时转换浮点类型。前缀和专家使用地址稳定的缓冲与保留的 Graph，跨请求重放。
+`v1/4b/fp16_cpu_vision.toml` 的 `example.dtype="cpu-fp32+rpu-fp16"` 选择 CPU FP32 视觉编码与设备 FP16 文本/动作计算。前端接收已经分词的 observation，加载时转换浮点类型。前缀和专家使用地址稳定的缓冲与保留的 Graph，跨请求重放。
 
 <a id="v2-两种入口的区别"></a>
 
@@ -68,7 +68,7 @@ hf download robbyant/lingbot-vla-4b \
 
 ### v1 输入与运行
 
-CPU observation 字典包含 `images`、`lang_tokens`、`state`、`noise`；可选 `img_masks` 和 `lang_masks` 标识有效输入，省略时对应输入全部有效。在已安装项目依赖的 设备环境中，复制模板并填写路径：
+CPU observation 字典包含 `images`、`lang_tokens`、`state`、`noise`；可选 `img_masks` 和 `lang_masks` 标识有效输入，省略时对应输入全部有效。在已安装项目依赖的设备环境中，复制模板并填写路径：
 
 ```bash
 cp examples/configs/lingbot/v1/4b/fp16_cpu_vision.toml /tmp/lingbot_v1.toml

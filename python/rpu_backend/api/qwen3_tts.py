@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import nullcontext
 import operator
+import re
 from pathlib import Path
 import threading
 import types
@@ -14,19 +16,53 @@ from .errors import RPUUnsupportedDtypeError
 
 
 def _validate_request(text, language, max_new_tokens):
-    if not isinstance(text, str) or not text.strip() or len(text) > 128:
-        raise ValueError("TTS text must contain 1–128 characters")
+    if not isinstance(text, str) or not text.strip() or len(text) > 1024:
+        raise ValueError("TTS text must contain 1–1024 characters")
     if language not in ("Chinese", "English"):
         raise ValueError("TTS profile admits Chinese or English")
     if isinstance(max_new_tokens, bool):
-        raise ValueError("max_new_tokens must be an integer in [2, 64]")
+        raise ValueError("max_new_tokens must be an integer in [2, 256]")
     try:
         count = operator.index(max_new_tokens)
     except TypeError as exc:
-        raise ValueError("max_new_tokens must be an integer in [2, 64]") from exc
-    if not 2 <= count <= 64:
-        raise ValueError("max_new_tokens must be an integer in [2, 64]")
+        raise ValueError("max_new_tokens must be an integer in [2, 256]") from exc
+    if not 2 <= count <= 256:
+        raise ValueError("max_new_tokens must be an integer in [2, 256]")
     return count
+
+
+def _split_text(text, tokenizer):
+    if len(text) <= 128 and len(tokenizer(text)["input_ids"]) <= 32:
+        return [text]
+    # Shorter long-form segments leave room for EOS and avoid long-prefix drift.
+    remaining = text.strip()
+    segments = []
+    while remaining:
+        end = min(len(remaining), 128)
+        while end and len(tokenizer(remaining[:end])["input_ids"]) > 12:
+            end -= 1
+        if not end:
+            raise ValueError("TTS text cannot fit a long-form segment within 12 tokenizer tokens")
+        if end < len(remaining):
+            for pattern in (r"[。！？；\n]|[.!?;](?=\s|$)", r"[,，:：、]|\s"):
+                boundaries = [match for match in re.finditer(pattern, remaining) if match.end() <= end]
+                if boundaries:
+                    boundary = boundaries[-1].end()
+                    if len(tokenizer(remaining[:boundary])["input_ids"]) <= 12:
+                        end = boundary
+                        break
+        segment = remaining[:end].strip()
+        # Keep tiny sentence endings attached to their preceding clause.
+        if (segments and segments[-1].endswith((",", "，", ":", "：", "、"))
+                and segment.endswith(("。", "！", "？", ".", "!", "?"))
+                and len(segment.rstrip("。！？.!?")) <= 8
+                and len(segments[-1] + segment) <= 128
+                and len(tokenizer(segments[-1] + segment)["input_ids"]) <= 16):
+            segments[-1] += segment
+        else:
+            segments.append(segment)
+        remaining = remaining[end:].lstrip()
+    return segments
 
 
 def _read_reference(path):
@@ -39,31 +75,41 @@ def _read_reference(path):
     samples, rate = sf.read(path, dtype="float32")
     if samples.ndim != 1 or not np.isfinite(samples).all():
         raise ValueError("TTS reference must contain finite mono samples")
+    if not np.any(samples):
+        raise ValueError("TTS reference must not be silent")
     return samples, rate
 
 
-def _greedy_predictor_generate(owner, inputs_embeds, *, max_new_tokens, do_sample, **kwargs):
-    # shortcut: the frozen Base profile emits exactly 15 greedy subcodes, revisit for other profiles.
-    if (max_new_tokens != 15 or do_sample is not False
+def _predictor_generate(owner, inputs_embeds, *, max_new_tokens, do_sample,
+                        top_k=50, top_p=1.0, temperature=0.9, **kwargs):
+    # shortcut: only the frozen checkpoint's 15-step sampling recipe is supported.
+    if (max_new_tokens != 15 or do_sample is not True
+            or (top_k, top_p, temperature) != (50, 1.0, 0.9)
             or inputs_embeds.shape != (1, 2, 1024)
             or owner.generation_config.eos_token_id is not None
             or owner.generation_config.repetition_penalty not in (None, 1)):
-        raise ValueError("TTS Predictor requires the fixed 15-step greedy profile")
+        raise ValueError("TTS Predictor requires the fixed 15-step sampling profile")
+    from transformers.generation.logits_process import TemperatureLogitsWarper, TopKLogitsWarper
+
+    warpers = (TemperatureLogitsWarper(temperature), TopKLogitsWarper(top_k))
     cache = None
     ids = None
     tokens = []
     for index in range(15):
         result = owner(inputs_embeds=inputs_embeds if index == 0 else None,
             input_ids=ids, past_key_values=cache, use_cache=True,
-            generation_steps=index, return_dict=True)
-        ids = result.logits[:, -1].argmax(-1, keepdim=True)
+            generation_steps=index, output_hidden_states=False, return_dict=True)
+        scores = result.logits[:, -1].float()
+        for warper in warpers:
+            scores = warper(None, scores)
+        ids = torch.multinomial(scores.softmax(-1), num_samples=1)
         tokens.append(ids)
         cache = result.past_key_values
     return types.SimpleNamespace(sequences=torch.cat(tokens, dim=1))
 
 
 class Qwen3TTSModel:
-    """Frozen 0.6B Base, short non-streaming voice cloning, batch one.
+    """Frozen 0.6B Base, bounded non-streaming voice cloning, batch one.
 
     Talker, Code Predictor and their output heads execute FP16 on device.
     The codec frontend also uses device FP16 when the native RoPE contract is available.
@@ -78,6 +124,8 @@ class Qwen3TTSModel:
         self._components = {}
         self._restore = []
         self._restore_generate = None
+        self._restore_talker_generate = None
+        self._last_generation = None
         self._head_weights = []
         self._head_calls = [0] * 16
         self._retirement_error = None
@@ -120,8 +168,8 @@ class Qwen3TTSModel:
             graph = GraphCache(runtime_policy=self._graph_runtime_policy)
             handle = torch.ops.rpu.causal_decoder_create()
             part = {"handle": handle, "graph": graph, "calls": 0, "tokens": 0,
-                    "capacity": 128 if name == "talker" else 32, "layers": len(core.layers),
-                    "name": name, "generation_limit": 64}
+                    "capacity": 512 if name == "talker" else 32, "layers": len(core.layers),
+                    "name": name, "generation_limit": 256, "device_head_only": name == "predictor"}
             self._components[name] = part
             handle_name = "_native_" + name + "_handle"
             setattr(self, handle_name, handle)
@@ -198,7 +246,9 @@ class Qwen3TTSModel:
             head.forward = types.MethodType(linear, head)
         predictor = talker.code_predictor
         self._restore_generate = (predictor, predictor.generate)
-        predictor.generate = types.MethodType(_greedy_predictor_generate, predictor)
+        predictor.generate = types.MethodType(_predictor_generate, predictor)
+        self._restore_talker_generate = (talker, talker.generate)
+        talker.generate = self._generate_talker
         from rpu_backend.adapters.qwen3_tts.codec import install_codec_convolutions
 
         install_codec_convolutions(self._wrapper.model.speech_tokenizer.model.decoder, self._restore)
@@ -206,11 +256,24 @@ class Qwen3TTSModel:
 
         install_codec_transformer(self, self._wrapper.model.speech_tokenizer.model.decoder.pre_transformer)
 
-    def synthesize(self, text, *, reference_audio, language="Chinese", max_new_tokens=64):
+    def _generate_talker(self, *args, **kwargs):
+        result = self._restore_talker_generate[1](*args, **kwargs)
+        ids = result.sequences
+        eos = self._wrapper.model.config.talker_config.codec_eos_token_id
+        finished = bool(ids.shape[1] and ids[0, -1].item() == eos)
+        self._last_generation = {"steps": ids.shape[1], "eos": finished}
+        if not finished:
+            raise RuntimeError("TTS reached max_new_tokens without EOS; shorten the text or increase the limit (up to 256)")
+        return result
+
+    def synthesize(self, text, *, reference_audio, language="Chinese", max_new_tokens=256):
         """Return an independent float32 mono waveform and sample rate (24 kHz).
 
-        The fixed token cap can truncate speech. Reference audio is a local
-        mono 24 kHz file; this profile uses speaker embedding without a transcript.
+        Sampling follows the frozen checkpoint. Set torch.manual_seed for repeatability.
+        Long text uses 12-token segments, up to 16 tokens to retain short sentence endings.
+        max_new_tokens applies to each segment; no partial waveform is returned on failure.
+        Reaching the cap without EOS raises before waveform decoding. Reference audio
+        is a local mono 24 kHz file; cloning uses speaker embedding without a transcript.
         """
         limit = _validate_request(text, language, max_new_tokens)
         if not self._lock.acquire(blocking=False):
@@ -220,10 +283,10 @@ class Qwen3TTSModel:
                 raise RuntimeError("TTS model is closed")
             if self._retirement_error is not None:
                 raise RuntimeError("TTS retirement failed; restart the process") from self._retirement_error
-            if len(self._wrapper.processor.tokenizer(text)["input_ids"]) > 32:
-                raise ValueError("TTS text exceeds 32 tokenizer tokens")
+            segments = _split_text(text, self._wrapper.processor.tokenizer)
             reference = _read_reference(reference_audio)
             self._components["talker"]["generation_limit"] = limit
+            self._last_generation = None
             with torch.inference_mode():
                 key = hashlib.sha256(reference[0].tobytes()).digest()
                 if key != self._reference_key:
@@ -235,15 +298,39 @@ class Qwen3TTSModel:
                     self._voice_clone_prompt = dict(ref_code=[None], ref_spk_embedding=[embedding],
                         x_vector_only_mode=[True], icl_mode=[False])
                     self._reference_key = key
-                waves, rate = self._wrapper.generate_voice_clone(text=text, language=language,
-                    voice_clone_prompt=self._voice_clone_prompt, non_streaming_mode=True,
-                    do_sample=False, subtalker_dosample=False, max_new_tokens=limit)
-            if len(waves) != 1 or rate != 24000:
-                raise RuntimeError("TTS output shape or sample rate differs from the profile")
-            waveform = np.asarray(waves[0], dtype=np.float32)
-            if waveform.ndim != 1 or not waveform.size or not np.isfinite(waveform).all():
-                raise FloatingPointError("TTS produced empty or non-finite audio")
-            return waveform.copy(), rate
+                outputs = []
+                steps = []
+                segment_rng = torch.random.get_rng_state() if len(segments) > 1 else None
+                for index, segment in enumerate(segments):
+                    self._last_generation = None
+                    utterance = segment
+                    if len(segments) > 1 and not segment.endswith(("。", "！", "？", ".", "!", "?")):
+                        utterance = segment.rstrip(",，;；:：、") + ("。" if language == "Chinese" else ".")
+                    try:
+                        # A segment's sampling must not depend on earlier segments' lengths.
+                        with torch.random.fork_rng(devices=[]) if index else nullcontext():
+                            if index:
+                                torch.random.set_rng_state(segment_rng)
+                            waves, rate = self._wrapper.generate_voice_clone(text=utterance, language=language,
+                                voice_clone_prompt=self._voice_clone_prompt, non_streaming_mode=True,
+                                do_sample=True, subtalker_dosample=True, max_new_tokens=limit)
+                    except RuntimeError as error:
+                        error.add_note(f"TTS segment {index + 1} of {len(segments)} failed; no partial audio returned")
+                        raise
+                    if self._last_generation is None or not self._last_generation["eos"]:
+                        raise RuntimeError("TTS segment did not complete generation")
+                    if len(waves) != 1 or rate != 24000:
+                        raise RuntimeError("TTS output shape or sample rate differs from the profile")
+                    waveform = np.asarray(waves[0], dtype=np.float32)
+                    if waveform.ndim != 1 or not waveform.size or not np.isfinite(waveform).all():
+                        raise FloatingPointError("TTS produced empty or non-finite audio")
+                    if not np.any(waveform):
+                        raise FloatingPointError("TTS produced silent audio")
+                    outputs.append(waveform.copy())
+                    steps.append(self._last_generation["steps"])
+                self._last_generation = {"steps": sum(steps), "eos": True,
+                                         "segment_steps": tuple(steps)}
+            return (outputs[0] if len(outputs) == 1 else np.concatenate(outputs)), rate
         finally:
             self._lock.release()
 
@@ -255,10 +342,13 @@ class Qwen3TTSModel:
                 raise RuntimeError("TTS model is closed")
             if self._retirement_error is not None:
                 raise RuntimeError("TTS retirement failed; restart the process") from self._retirement_error
-            result = {"head_calls": list(self._head_calls), "components": {}}
+            result = {"head_calls": list(self._head_calls), "components": {},
+                      "generation": dict(self._last_generation) if self._last_generation else None}
             codec_rpu = "codec_transformer" in self._components
-            result["codec_frontend"] = {"device": "rpu" if codec_rpu else "cpu",
-                "fallback_reason": None if codec_rpu else "native lacks explicit TTS codec mode"}
+            device = self._components["codec_transformer"].get("last_device", "rpu") if codec_rpu else "cpu"
+            result["codec_frontend"] = {"device": device,
+                "fallback_reason": (None if device == "rpu" else "sequence exceeds 63 device codec frames")
+                    if codec_rpu else "native lacks explicit TTS codec mode"}
             for name, part in self._components.items():
                 graph = part["graph"]
                 result["components"][name] = {"calls": part["calls"], "tokens": part["tokens"],
@@ -299,6 +389,10 @@ class Qwen3TTSModel:
                 predictor, original = self._restore_generate
                 predictor.generate = original
                 self._restore_generate = None
+            if self._restore_talker_generate is not None:
+                talker, original = self._restore_talker_generate
+                talker.generate = original
+                self._restore_talker_generate = None
             self._components.clear()
             self._head_weights.clear()
             self._wrapper = None
@@ -352,7 +446,7 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
     if count < 1 or cache.position + count > part["capacity"]:
         raise ValueError("TTS cache capacity exceeded")
     if part["name"] == "talker" and cache.position == 0 and count + part["generation_limit"] > part["capacity"]:
-        raise ValueError("TTS prompt plus requested generation exceeds 128 positions")
+        raise ValueError("TTS prompt plus requested generation exceeds cache capacity")
     expected = torch.arange(cache.position, cache.position + count)
     if position_ids is not None:
         if position_ids.ndim == 3:
@@ -366,6 +460,7 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
     part.pop("head_hidden", None)
     part.pop("head_device", None)
     chunks = []
+    head_only = part.get("device_head_only", False) and not output_hidden_states
     # shortcut: Predictor keeps decode until its five-layer prefill envelope is measured.
     sizes = [count] if count > 1 and part["name"] == "talker" else [1] * count
     offset = 0
@@ -397,6 +492,12 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
                 planned_stage_descriptor=descriptor)
         if size > 1:
             part["prefill_signature"] = signature
+        if head_only:
+            if raw.shape != (1, size, 1024) or raw.dtype != torch.float16:
+                raise RuntimeError("invalid TTS Predictor device hidden state")
+            cache.update_position(size)
+            offset += size
+            continue
         value = raw[:, :size].cpu().float()
         if value.shape != (1, size, 1024) or not torch.isfinite(value).all():
             raise FloatingPointError("non-finite or invalid TTS device hidden state")
@@ -405,6 +506,12 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
         offset += size
     part["calls"] += 1
     part["tokens"] += count
+    if head_only:
+        # Borrow only until the frozen Predictor immediately consumes its head;
+        # the head publishes independent finite-checked CPU logits.
+        result = raw[:, -1:]
+        part["head_hidden"], part["head_device"] = result, result
+        return BaseModelOutputWithPast(last_hidden_state=result, past_key_values=cache)
     result = torch.cat(chunks, dim=1)
     if count == 1:
         # The head immediately consumes this exact result before another decoder replay.

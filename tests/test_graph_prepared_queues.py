@@ -508,26 +508,13 @@ int main() {
         assert(active_leases == 0);
     }
     {
-        // Kernel domains must fit the cold execution budget even when a
-        // malformed Segment advertises a larger queue prefix.
+        // Segmentation validates the kernel budget before queue preparation.
         RpuKernelGraph graph;
         graph.runtime_policy_.execution_core_count = 4;
         graph.kernels_.push_back(std::make_unique<rhino_lkn::Kernel_t>());
         graph.nodes_.resize(1);
         graph.nodes_[0].kind = GraphNodeKind::Kernel;
-        Segment seg; seg.end_idx = 1; seg.core_ids = {0, 1, 2, 3, 4, 5};
-        for (const auto& ids : std::vector<std::vector<uint8_t>>{
-                 {0, 1, 2, 3, 4}, {4}, {0, 2}, {2, 1}, {}}) {
-            graph.nodes_[0].kernel.core_ids = ids;
-            rhino_lkn::Queue_t queue;
-            RpuDmaSubmissionLease lease;
-            const int before_resolve = resolve_calls;
-            bool rejected = false;
-            try { graph.prepare_segment_queue(seg, queue, false, lease); }
-            catch (const std::runtime_error&) { rejected = true; }
-            assert(rejected && queue.mutations == 0 && !lease);
-            assert(resolve_calls == before_resolve);
-        }
+        Segment seg; seg.end_idx = 1;
         graph.nodes_[0].kernel.core_ids = {2, 3};
         seg.core_ids = {0, 1, 2, 3};
         rhino_lkn::Queue_t queue;

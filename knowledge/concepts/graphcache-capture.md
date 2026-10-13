@@ -30,6 +30,19 @@ passthrough state, and leave retained-cache size unchanged. [Model porting](../.
 
 `GraphRuntimePolicy.batch_snapshot_mode` is cold per-instance configuration. AUTO requires matching Launch capabilities and operator identities; otherwise replay follows the ordinary prepared path. OFF disables snapshots while retaining Graph execution. Pass one frozen policy to related model/component builders. [Snapshot policy](../../docs/runtime_config.md#graph-snapshot-policy).
 
+## Composite and variable-shape owners
+
+A shared execution configuration can control components with different Graph
+lifetimes. Qwen3.5 uses bounded one-shot text prefill, retained text decode and
+a bounded one-entry vision cache that rebuilds on a shape change. A native
+composite can instead own one outer Graph and its shared SPM lease. These modes
+share admission and generation rules, not necessarily one cache instance.
+
+A committed execution update retires the affected plans. The next forward
+builds with the new generation, followed by stable replay. `clear()` preserves
+a cache's frozen state; the owner calls `begin_warmup()` before a required
+rebuild. See [runtime profile updates](runtime-profiles.md#safe-profile-changes).
+
 ## Sources
 
 - [Architecture: graph and batch execution](../../docs/architecture.md#graph-and-batch-execution)

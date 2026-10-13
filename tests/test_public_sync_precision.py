@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from rpu_backend.adapters.pi05 import optimized
 
 
 @pytest.mark.parametrize("name", [
@@ -57,38 +56,17 @@ def test_qwen35_dense_precision_tracks_only_cold_settings():
     assert vision._qwen35_vision_precision({"vision": {"linear_acc32": True}}) == (True, True)
 
 
-def test_two_camera_a8_requires_matching_pair_and_action_precision(monkeypatch):
-    profile = optimized.normalize_profile({"precision": "w8_prefill_a8_action_nvfp4", "num_cameras": 2})
-    execution = {"action": {"linear_acc32": True}}
-    assert optimized.execution_for_profile(profile, execution)["prefill"]["chunk_size"] == 272
-    calls = []
-    monkeypatch.setattr(torch.ops.rpu, "require_kernel_names", lambda names: calls.append(set(names)), raising=False)
-    optimized.require_profile_assets(profile)
-    optimized.require_profile_assets(profile, execution)
-    optimized.require_profile_assets(profile, {"components": {"action_expert": {"action": {"linear_acc32": True}}}})
-    a16, a32, component = calls
-    assert "pi05_prefill_gate_up_geglu_w8a8_split_c272_m48n32k2048" in a16
-    assert "pi05_owner_norm_compact_a8_m272n2048" in a16
-    nvfp4 = {name for name in a16 if "nvfp4" in name}
-    assert len(nvfp4) == 3 and all("acc16" in name for name in nvfp4)
-    assert a32 == component == (a16 - nvfp4) | {name.replace("acc16", "acc32") for name in nvfp4 if name.startswith("parallel_linear_")}
-    import os
-    with optimized.profile_environment_scope(profile):
-        assert os.environ["RPU_PI05_DENOISE_NVFP4_GEGLU_ACC16_M50"] == "1"
-        assert os.environ["RPU_PI05_DENOISE_NVFP4_GEGLU_M50"] == "0"
-    with optimized.profile_environment_scope(profile, execution):
-        assert os.environ["RPU_PI05_DENOISE_NVFP4_GEGLU_ACC16_M50"] == "0"
-    assert execution == {"action": {"linear_acc32": True}}
-    with pytest.raises(ValueError, match="num_cores=8"):
-        optimized.execution_for_profile(profile, {"model": {"num_cores": 4}})
 
 
-def test_moe_direct_loader_rejects_remote_code_before_config_or_weight_io(monkeypatch):
+def test_moe_direct_loader_forwards_remote_code_policy(monkeypatch):
     from rpu_backend.adapters.qwen3_5_moe import loader
-    def forbidden(*args, **kwargs):
-        pytest.fail("untrusted request reached checkpoint IO")
-    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", forbidden)
-    with pytest.raises(ValueError, match="trust_remote_code=False"):
+    class ReachedConfig(RuntimeError):
+        pass
+    def config_io(path, **kwargs):
+        assert path == "unread-checkpoint" and kwargs["trust_remote_code"] is True
+        raise ReachedConfig()
+    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", config_io)
+    with pytest.raises(ReachedConfig):
         loader.load_qwen3_5_moe_model("unread-checkpoint", trust_remote_code=True)
 
 

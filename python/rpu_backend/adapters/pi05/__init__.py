@@ -217,7 +217,7 @@ def _preflight_pi05_cold_model(lerobot_policy: Any, *, attn_tp: int = 8):
     quant_config = getattr(lerobot_policy, "_pi05_quant_config", {}) or {}
     int4_children = (int4_child_names(quant_config, component="vlm")
                      | int4_child_names(quant_config, component="expert"))
-    group_size = quant_config.get("int4_group_size", quant_config.get("group_size", 32))
+    group_size = quant_config.get("int4_group_size", 32)
     if type(group_size) is not int or group_size not in (32, 64, 128):
         raise ValueError("Pi0.5 int4_group_size must be 32, 64, or 128")
     return (
@@ -552,10 +552,10 @@ class Pi05Adapter:
         if cold_pad16 is None:
             cold_pad16 = (
                 bool(model_state["_rpu_legacy_prefix_pad16_request"])
-                if "_rpu_legacy_prefix_pad16_request" in model_state
+                if state is not None
                 else bool(_prefix_pad16_enabled()),
                 bool(model_state["_rpu_legacy_kvinsert_pad16_request"])
-                if "_rpu_legacy_kvinsert_pad16_request" in model_state
+                if state is not None
                 else bool(_kvinsert_pad16_enabled()),
             )
         self._legacy_pad16_requests = cold_pad16
@@ -596,7 +596,6 @@ class Pi05Adapter:
             and existing_session.stats()["state"] in {"CLOSED", "POISONED"}
         )
         _reset_adapter_runtime_state(self)
-        state = _pi05_runtime_state(lerobot_policy)
         if state is not None:
             _sync_adapter_runtime_state(self, state)
             self._rpu_execution = getattr(
@@ -1196,7 +1195,6 @@ class Pi05Adapter:
         from .runtime import (
             _PI05_PREPARED_GRAPH_PROFILES,
             _pi05_graph_runtime_profile,
-            _validate_fused_parity,
         )
 
         if pi05_pytorch in _PI05_PREPARED_GRAPH_PROFILES:
@@ -1321,7 +1319,8 @@ class Pi05Adapter:
 
         try:
             build_value = self._lerobot_policy.predict_action_chunk(
-                batch, num_steps=steps, **({"noise": noise} if noise is not None else {})
+                batch, num_steps=steps,
+                **({"noise": noise} if noise is not None else {}),
             )
             if not isinstance(build_value, torch.Tensor):
                 raise RuntimeError(
@@ -1358,7 +1357,8 @@ class Pi05Adapter:
                 name: _stats(cache) for name, cache in frozen_caches
             }
             warm_value = self._lerobot_policy.predict_action_chunk(
-                batch, num_steps=steps, **({"noise": noise} if noise is not None else {})
+                batch, num_steps=steps,
+                **({"noise": noise} if noise is not None else {}),
             )
             warm_action = warm_value.detach().cpu().clone()
             after_warming_replay = {
@@ -1379,17 +1379,15 @@ class Pi05Adapter:
                     f"after={after_warming_replay}"
                 )
 
-            # Check the public CPU output boundary and record replay differences.
-            # Graph counts, recapture and invariants remain hard requirements.
-            # Floating-point metrics and exact equality are diagnostics.
-            build_replay_bit_equal = bool(torch.equal(build_action, warm_action))
-            build_replay_parity = _validate_fused_parity(
-                warm_action,
-                build_action,
-                where="Pi05 WARMING replay parity",
-                expected_shape=None,
+            build_replay_bit_equal = torch.equal(build_action, warm_action)
+            build_replay_max_abs = float(
+                (build_action.float() - warm_action.float()).abs().max()
             )
-            build_replay_max_abs = build_replay_parity["max_abs"]
+            if not build_replay_bit_equal:
+                raise RuntimeError(
+                    "Pi0.5 WARMING replay differs from the RECORDING action "
+                    f"(max_abs={build_replay_max_abs:.7g})"
+                )
             for _, cache in frozen_caches:
                 cache.freeze()
 
@@ -1397,7 +1395,8 @@ class Pi05Adapter:
                 name: _stats(cache) for name, cache in frozen_caches
             }
             ready_value = self._lerobot_policy.predict_action_chunk(
-                batch, num_steps=steps, **({"noise": noise} if noise is not None else {})
+                batch, num_steps=steps,
+                **({"noise": noise} if noise is not None else {}),
             )
             ready_action = ready_value.detach().cpu().clone()
             after_ready = {
@@ -1438,13 +1437,14 @@ class Pi05Adapter:
                     "Pi0.5 READY graph cache invariant failed: "
                     f"{after_ready}"
                 )
-            ready_replay_bit_equal = bool(torch.equal(warm_action, ready_action))
-            ready_replay_parity = _validate_fused_parity(
-                ready_action,
-                warm_action,
-                where="Pi05 READY replay parity",
-                expected_shape=None,
-            )
+            if not torch.equal(warm_action, ready_action):
+                max_abs = float(
+                    (warm_action.float() - ready_action.float()).abs().max()
+                )
+                raise RuntimeError(
+                    "Pi0.5 READY replay differs from the WARMING action "
+                    f"(max_abs={max_abs:.7g})"
+                )
         except Exception:
             for _, cache in caches:
                 cache.begin_warmup()
@@ -1458,15 +1458,10 @@ class Pi05Adapter:
             "graph_counts": graph_counts,
             "runtime": dict(runtime_profile),
             "ready_replay_validated": True,
-            "action_bit_equal": ready_replay_bit_equal,
+            "numerical_status": "DIAGNOSTIC",
+            "task_quality": "NOT_EVALUATED",
+            "action_bit_equal": True,
             "build_replay_bit_equal": build_replay_bit_equal,
-            "replay_parity": {
-                "build_vs_warming": build_replay_parity,
-                "warming_vs_ready": ready_replay_parity,
-                "contract": "pi05-runtime-boundary-and-numeric-diagnostics-v2",
-                "numerical_status": "DIAGNOSTIC",
-                "task_quality": "NOT_EVALUATED",
-            },
             "build_replay_max_abs": build_replay_max_abs,
             "ready_stats": after_ready,
         }
@@ -1768,7 +1763,7 @@ class Pi05Adapter:
                 "RPU_PI05_KEEP_CPU is a v3.0 bisection scaffold; "
                 "it is not supported under v4.0 fused-decoder path. "
                 "Set RPU_PI05_KEEP_CPU= (empty) to use the canonical v4 path. "
-                "Mixed CPU or device bisection is deferred to v4.1 or later."
+                "Mixed CPU/device bisection is deferred to v4.1 or later."
             )
 
         if not _SWIZZLE_LOCK.acquire(blocking=False):
@@ -1908,7 +1903,7 @@ class Pi05Adapter:
                 _quant_cfg = getattr(self._lerobot_policy, "_pi05_quant_config", {}) or {}
                 _vlm_int4 = int4_child_names(_quant_cfg, component="vlm")
                 _expert_int4 = int4_child_names(_quant_cfg, component="expert")
-                _int4_group_size = _quant_cfg.get("int4_group_size", _quant_cfg.get("group_size", 32))
+                _int4_group_size = _quant_cfg.get("int4_group_size", 32)
 
                 pad_decoder_mlp_inplace(vlm, topology)
                 pad_decoder_mlp_inplace(expert, topology)

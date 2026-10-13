@@ -103,28 +103,6 @@ _NUMERIC_BLOCKED_PROFILES: dict[
 }
 
 
-def _dinov3_layers(model: nn.Module) -> nn.ModuleList:
-    """Return the encoder layers for supported DINOv3 HF layouts.
-
-    Transformers releases have exposed the direct ``DINOv3ViTModel`` layers
-    as either ``model.layer`` or ``model.model.layer`` (the latter is used by
-    wrapper classes).  Do not use an eager ``getattr(..., default)`` here:
-    evaluating the default would touch ``model.layer`` even when a wrapper is
-    present, and a self-referential compatibility alias must not recurse.
-    """
-    wrapped = getattr(model, "model", None)
-    if wrapped is not None and wrapped is not model:
-        layers = getattr(wrapped, "layer", None)
-        if layers is not None:
-            return layers
-    layers = getattr(model, "layer", None)
-    if layers is None:
-        raise RPUBackendError(
-            "DINOv3Adapter: expected encoder layers at `layer` or `model.layer`"
-        )
-    return layers
-
-
 def _profile(config: Any) -> tuple[int, int, int, int, int, int]:
     return (
         int(config.hidden_size),
@@ -244,7 +222,7 @@ def _pad_attn_heads_to_multiple_of_cores(model: nn.Module) -> None:
     pad_rows = (target - num_heads) * head_dim
 
     with torch.no_grad():
-        for layer in _dinov3_layers(model):
+        for layer in model.layer:
             attn = layer.attention
             for name in ("q_proj", "k_proj", "v_proj"):
                 lin = getattr(attn, name)
@@ -335,7 +313,7 @@ def _install_dinov3_rpu_keepalives(model: nn.Module) -> None:
     cfg = model.config
     hidden = int(cfg.hidden_size)
     num_reg = int(cfg.num_register_tokens)
-    num_layers = len(_dinov3_layers(model))
+    num_layers = len(model.layer)
 
     with torch.no_grad():
         cls = model.embeddings.cls_token.data.view(1, hidden)
@@ -352,7 +330,7 @@ def _install_dinov3_rpu_keepalives(model: nn.Module) -> None:
         gamma_mlp = torch.empty(
             (num_layers, hidden), dtype=torch.float16, device="rpu"
         )
-        for layer_idx, layer in enumerate(_dinov3_layers(model)):
+        for layer_idx, layer in enumerate(model.layer):
             gamma_attn[layer_idx].copy_(
                 layer.layer_scale1.lambda1.data.to(torch.float16)
             )
@@ -629,7 +607,7 @@ def _install_dinov3_vision_for_rpu_impl(
     intermediate = int(cfg.intermediate_size)
     head_dim = hidden // int(cfg.num_attention_heads)
     num_heads_padded = _padded_num_heads(int(cfg.num_attention_heads))
-    num_layers = len(_dinov3_layers(vision_model))
+    num_layers = len(vision_model.layer)
     num_register = int(cfg.num_register_tokens)
     num_special_tokens = 1 + num_register
     eps = float(cfg.layer_norm_eps)
@@ -646,7 +624,7 @@ def _install_dinov3_vision_for_rpu_impl(
     # Gather per-layer tensors. Weights are post-swizzle nn.Parameters; we
     # pass `.weight` directly so the C++ side holds the same storage (no copy,
     # P4 lifetime managed by the Python model object).
-    layers = list(_dinov3_layers(vision_model))
+    layers = list(vision_model.layer)
     q_w  = [L.attention.q_proj.weight for L in layers]
     k_w  = [L.attention.k_proj.weight for L in layers]
     v_w  = [L.attention.v_proj.weight for L in layers]

@@ -143,15 +143,18 @@ SPM path fails closed when either condition is false.
 
 ### Cached attention masks
 
-Adapter caches can create an owned contiguous CPU FP16 mask with `rpu_backend.runtime.masks.versioned_cpu_mask(mask)`. Call it when adding a cache entry and reuse the returned tensor. Cache keys include logical/padded lengths, visibility rules and changing window positions. Native preparation checks tensor identity, mutation version and query/key geometry; an in-place change refreshes the retained slot before replay. A stable address alone does not preserve mask contents.
+Adapter caches can create an owned contiguous CPU FP16 mask with `rpu_backend.runtime.masks.versioned_cpu_mask(mask)`. Call it when adding a cache entry and reuse the returned tensor. Cache keys include logical/padded lengths, visibility rules and changing window positions. Native preparation checks tensor identity, mutation version and query/key geometry; an in-place change refreshes the retained slot before replay. A stable address alone does not preserve mask contents. See the
+[mask lifecycle](../knowledge/concepts/sdpa-layout.md#mask-cache-and-replay) for
+inference tensors, request refresh and temporary-storage lifetime.
 
 Shared activation, Linear and mask-reuse paths are selected from the installed profile, geometry, dtype, core topology and operator capabilities. Keep unsupported combinations on their admitted fallback; use the model's configuration instead of adding global optimization switches. Temporary storage belongs to its declared phase, and every replay must refresh request-dependent inputs.
 
 ## SPM design
 
-The current runtime targets eight cores with 8 MiB of SPM per core and plans to
-a conservative usable budget of about 7.5 MiB per core. FP16 is the primary
-execution dtype, and many operator dimensions require 16-element alignment.
+The device has eight cores with 8 MiB of SPM per core. Planning uses
+`SpmAllocator::SPM_PLANNING_BUDGET`; model-specific limits may be smaller.
+FP16 is the primary execution dtype, and many operator dimensions require
+16-element alignment.
 
 `BufferDecl` expresses storage and lifetime:
 
@@ -205,9 +208,11 @@ follows a kernel using fewer cores. For example, kernel cores 0–3 followed by
 DMA channel 5 require a queue covering cores 0–5. This resource bookkeeping
 does not add model-level core-count configuration.
 
-Standard residual reduction uses the shared generated eight-core ring. The
-wrapper selects its schedule from validated geometry, and a partial producer
-clears inactive shards before the ring consumes them. FP16, W8A16, and packed
+Standard FP16 residual reduction uses the shared ring with the installed
+consumer core count; the default profile uses eight. Reduced profiles retain
+their admitted producer/consumer counts. A partial producer first clears every
+consumer shard, then writes its active prefix. Local-SPM, mixed-precision and
+fixed-layout collective routes retain their eight-core bounds. FP16, W8A16, and packed
 W4A16 Linear paths likewise use one generated tile planner. Neither mechanism
 has a model-level route or tile selector. See
 [automatic residual reduction](../knowledge/concepts/allreduce-routing.md) and

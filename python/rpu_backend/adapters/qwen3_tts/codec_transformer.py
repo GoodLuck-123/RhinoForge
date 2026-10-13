@@ -51,7 +51,8 @@ def install_codec_transformer(owner, core):
         return False
     graph = GraphCache(runtime_policy=getattr(owner, "_graph_runtime_policy", None))
     handle = torch.ops.rpu.causal_decoder_create()
-    part = dict(handle=handle, graph=graph, calls=0, tokens=0, planner=core)
+    part = dict(handle=handle, graph=graph, calls=0, tokens=0, planner=core,
+                cpu_forward=core.forward)
     owner._components["codec_transformer"] = part
     owner._native_codec_transformer_handle = handle
     part["resource"] = _InstalledNativeResource(
@@ -107,10 +108,15 @@ def _forward(part, hidden):
     from rpu_backend.runtime.decoder import _text_prefill_execution_plan
 
     if (hidden is None or hidden.ndim != 3 or hidden.shape[0] != 1 or hidden.shape[2] != 1024
-            or not 1 <= hidden.shape[1] <= 63 or hidden.dtype != torch.float32
+            or not 1 <= hidden.shape[1] <= 255 or hidden.dtype != torch.float32
             or hidden.device.type != "cpu" or not torch.isfinite(hidden).all()):
-        raise ValueError("TTS codec frontend requires finite CPU FP32 [1, 1–63, 1024]")
+        raise ValueError("TTS codec frontend requires finite CPU FP32 [1, 1–255, 1024]")
     count = hidden.shape[1]
+    if count > 63:
+        # The original FP32 path preserves the codec's 72-frame sliding attention.
+        part["last_device"] = "cpu"
+        return part["cpu_forward"](inputs_embeds=hidden)
+    part["last_device"] = "rpu"
     cache, graph, handle = part["cache"], part["graph"], part["handle"]
     cache.reset_to_position(0)
     if count == 1:

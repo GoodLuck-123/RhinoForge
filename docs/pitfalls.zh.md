@@ -85,6 +85,7 @@ resolved plan。
 | 检查 | 失败模式 | 必需修正 |
 |---|---|---|
 | 顶层 capture | 每次调用都不进入 retained Graph | 除明确受审查的 bounded one-shot 外，生产 native forward 使用 adapter-owned `GraphCache.capture(signature)` |
+| Tensor view | 跨 inference-mode 上下文创建 view 后丢失 base 状态或报 version-counter 错误 | 使用 PyTorch 原生 view 构造，保留 base 的 inference 状态、别名、storage offset、边界检查和版本计数 |
 | 完整 signature | 同 shape、不同 mask/grid/lookup 数据复用旧结果 | 加入 signature、保持经证明的稳定地址，或用 mutable DMA 更新 |
 | DMA 地址 ownership | BUILD 通过，REPLAY 读写早期 tensor | fixed 仅用于稳定 model storage；caller input/新 output 用 mutable |
 | 多核 broadcast | immediate 多核 operation 只更新一核 | 调用 `set_broadcast_mode(true)`；batch/Graph 已统一处理 |

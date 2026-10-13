@@ -61,6 +61,11 @@ test -r "$RPU_KERNEL_LIB_PATH_EXPANSION.kernels"
 
 `RPU_KERNEL_LIB_PATH` 与 `RPU_KERNEL_LIB_PATH_EXPANSION` 可指向安装目录中的同内容副本。入口核对选中资产与清单，拒绝内容不符、角色互换或冲突的继承路径。GR00T 配置不接受 `example.expansion_ref`。替换任一库后启动新进程。
 
+更新完整 main、expansion 资产时，同步更新相邻清单及源码、大小、SHA256 记录。
+局部构建或本地拼接的 payload 不能替代任何一个角色。新增算子实现归算子仓库，
+本仓库维护模型路由和 host wrapper。复现旧源码时，应配套使用该版本归档的 runtime 和原始
+校验和；不能将当前源码指向旧 payload 却保留当前依赖记录。
+
 ## 算子清单
 
 `.kernels` 必须与资产相邻。首行为 `rhinoforge-kernels-v1`，第二行为

@@ -95,6 +95,29 @@ Immediate 多核 launch 必须 broadcast；优先使用框架 batch/Graph 统一
 transfer 明确选择：稳定地址用 fixed DMA，caller input/新 output 用 mutable DMA，capture
 外 one-shot 用 immediate DMA。
 
+### 接入执行计划 owner
+
+登记稳定 component ID，只开放实际实现的 stage。在权重变更前使用
+`normalize_rpu_execution`、`resolve_component_rpu_execution` 校验配置。
+复用 `plan_bounded_prefill_execution` 或 `plan_native_component_execution`；固定 ABI owner
+使用 `plan_fixed_component_execution`，不创建虚假的搜索域。
+
+Native resolver 在检查形状和 SPM 后提供完整、有序、无重复的候选。传入真实 input spans，
+并用显式 `plan_signature` 绑定相关 mask、RoPE 模式、KV 长度和分组；与实际 Graph owner
+一起缓存不可变的选中计划。Exact 不匹配或搜索达到上限时直接失败，不改成邻近配置。
+
+Forward 接收选中的 physical descriptor，retained Graph signature 包含其
+`graph_key_words()`。`FmbPhysicalManifestConsumer` 逐项消费 route，并以
+`require_all_consumed()` 检查完整性。Python 不重复实现 allocator，forward 不重选路由。
+热更新通过 owner 的 `ExecutionSession` 事务完成验证、提交或回滚，并回收旧计划与 Graph。
+
+Fused subclass 的 `cross_layer_batch_size=0` 使用框架默认分组；`chunk_mode` 默认
+`SEQUENTIAL`，需要先准备 K/V 的 attention 使用 `KV_FIRST`。`inter_layer_io=AUTO`
+由计划决定存储。Preload、KV-first、post callback 均可省略；adapter 统一管理 Graph
+signature 与 capture，包括 callback 发出的操作。Callback 不得创建嵌套 raw batch 或 Graph
+cache。见[分块规划](../knowledge/concepts/chunk-plan-and-envelope.md)和
+[组件交接](../knowledge/concepts/component-handoff.md)。
+
 ## 5. 新增或复用公开 operation
 
 现有 operation 足够时调用其公共 host wrapper，不重复实现。新增 host-side operation

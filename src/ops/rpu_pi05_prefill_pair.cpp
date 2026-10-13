@@ -45,8 +45,9 @@ void rpu_launch_pi05_prefill_pair_spm_kernel(
                 scale.scalar_type()==at::kHalf && scale.is_contiguous() &&
                 scale.sizes()==at::IntArrayRef({2048})),
                 "Pi paired prefill requires original FP16 per-channel scale [2048]");
-    // These named paired payloads have fixed schedules; C400 uses M128 for
-    // both QKV and O, independently of the generic single-input AUTO selector.
+    const auto tile=rpu_pl_tiling::select_tile_acc16(M,N,K,false);
+    TORCH_CHECK(rows != 400 || fp16 || (tile.m_tile==(column?448:400) && tile.n_tile==(column?64:80)),
+                "Pi paired prefill original tile identity drift");
     const auto id = column ? KernelId::PI05_PREFILL_QKV_WEIGHT_OUTER_W8A16_C400X2_M128N64K128 :
         rows == 432 ? (fp16 ? KernelId::PI05_PREFILL_O_WEIGHT_OUTER_FP16_C432X2_M112N80K128
                             : KernelId::PI05_PREFILL_O_WEIGHT_OUTER_W8A16_C432X2_M112N80K128) :

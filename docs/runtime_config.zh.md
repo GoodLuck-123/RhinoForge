@@ -39,7 +39,7 @@ RhinoForge 提供少量面向用户的设置，以及数量更多的精确模型
 
 ## 配置与执行
 
-统一入口为 `examples/run.py --config PATH`。配置结构、模型目录与输入要求见[模型示例](../examples/README.md)。通用模型使用 `[example]/[input]/[run]`，专用策略配置使用对应模板的模型表。`example.opt_in` 在导入 Torch 前绑定配置允许的控制；继承环境冲突会被拒绝。`[cpu].threads` 在首次 Torch 导入前生效，线程别名必须取值一致。
+统一入口为 `python -m examples.run --config PATH`。配置结构、模型目录与输入要求见[模型示例](../examples/README.md)。通用模型使用 `[example]/[input]/[run]`，专用策略配置使用对应模板的模型表。`example.opt_in` 在导入 Torch 前绑定配置允许的控制；继承环境冲突会被拒绝。`[cpu].threads` 在首次 Torch 导入前生效，线程别名必须取值一致。
 
 运行时资产通过 `RPU_KERNEL_LIB_PATH` 与 `RPU_KERNEL_LIB_PATH_EXPANSION` 分别指定主库与扩展库。资产路径、凭据和本机信息只放在部署环境中。`rpu_execution` 管理模型与组件配置。冷态设置需新模型/进程；支持热修改的 stage 在请求之间通过[执行 API](api_reference.zh.md#执行配置与运行中重配)更新。
 
@@ -60,7 +60,7 @@ tensor 对象当作内容未变的证明。
 这些参数属于应用进程及其安装的 CPU runtime，不属于 设备 planner。标准 `[pi05]`
 配置通过 `run.py` 运行时，都会在导入 Torch 前绑定下列 allocator
 值，`run.torch_num_threads` 默认八线程。库内推理不会修改这些进程设置；更改后使用
-新进程。旧版直接 example 格式不会代替统一 runner 应用 `[runner.env]`。
+新进程。
 
 | Variable | Pi 建议值 | 读取 / 更改 | 作用与影响 |
 |---|---:|---|---|
@@ -86,6 +86,7 @@ Qwen3-VL 另接受冷态布尔值 `prefill.fast_replay`，不接受 `vision.fast
 
 | 变量 | 未设置时的默认值与接受值 | 读取 / 更改 | 作用域、效果与风险 |
 |---|---|---|---|
+| `RPU_BACKEND_SO` | 默认未设置；原生扩展文件路径 | 扩展解析 / **IMPORT** | 优先于包内和源码构建候选；文件必须存在并匹配当前 Python/PyTorch ABI，只指定可信构建。 |
 | `RPU_KERNEL_LIB_PATH` | 主库 `rhinoOpLib_current.ref` 路径及相邻 `.kernels` | 首次访问 / **IMPORT** | 选择匹配源码的主算子资产。 |
 | `RPU_KERNEL_LIB_PATH_EXPANSION` | 扩展库路径；省略时取主库旁的 `rhinoExpansionOpLib_current.ref` | 首次访问 / **IMPORT** | 选择配套扩展资产及相邻 `.kernels`。 |
 | `RPU_MODEL_CACHE` | `~/.cache/rhinoforge/models`；目录路径 | 为 HF 默认值执行包 bootstrap / **IMPORT**，alias 解析 / **CALL** | RhinoForge 模型 alias 的根目录。显式值也会提供 HF cache 默认值；导入后修改会影响之后的 alias，但无法可靠地重新配置已导入的 HF 组件。 |
@@ -95,12 +96,17 @@ Qwen3-VL 另接受冷态布尔值 `prefill.fast_replay`，不接受 `vision.fast
 | `LKN_MAX_BATCH_ENTRIES` | `65536`；正十进制数；无效/空/零使用默认值；上限 `4194304` | Launch 初始化与 Graph 规划 / **IMPORT** | batch submission 的进程容量。过小会拒绝 Graph；过大则预留更多 host 内存。 |
 | `LKN_KD_BUF_MB` | `8`；正 MiB；无效/空/零使用默认值；上限 `256` | Launch 初始化与 Graph 规划 / **IMPORT** | 进程 command-buffer 容量。过小会拒绝 Graph；过大则增加内存占用。 |
 | `LKN_INSTR_BUF_MB` | `64`；正 MiB；无效/空/零使用默认值；上限 `1024` | Launch 初始化与 Graph 规划 / **IMPORT** | 进程 execution-buffer 容量。过小会拒绝 Graph；过大则增加内存占用。 |
-| `HF_HOME` | Hugging Face 默认值；目录路径 | 包 bootstrap 与 HF 初始化 / **IMPORT** | 标准 HF cache 根目录。`RPU_MODEL_CACHE` 只通过 `setdefault` 提供它；调用者值优先。 |
-| `HF_HUB_CACHE` | Hugging Face 默认值；目录路径 | 包 bootstrap 与 HF 初始化 / **IMPORT** | 标准 Hub cache。仅在未设置时，显式 `RPU_MODEL_CACHE` 才提供 `<HF_HOME>/hub`。 |
+| `HF_HOME` | `<model-cache>/.hf`；目录路径 | 包 bootstrap 与 HF 初始化 / **IMPORT** | HF cache 根目录；保留显式设置的值。 |
+| `HF_HUB_CACHE` | Hugging Face 默认值；目录路径 | 包 bootstrap 与 HF 初始化 / **IMPORT** | 标准 Hub cache；未设置时默认为 `<HF_HOME>/hub`。 |
 | `HUGGINGFACE_HUB_CACHE` | Hugging Face 默认值；目录路径 | 包 bootstrap 与 HF 初始化 / **IMPORT** | 兼容性 Hub cache 变量，处理方式与 `HF_HUB_CACHE` 相同；两者应保持一致。 |
 
-导入 backend 前应设置全部三个 `LKN_*` 值。facade 可在首次导入 adapter 前选择更大的
+导入 backend 前应设置三个 `LKN_*` 容量值。facade 可在首次导入 adapter 前选择更大的
 默认值，但无法调整已经加载的 Launch runtime。增大容量不会让不支持的模型配置获得支持。
+
+`RPU_LOG_LEVEL` 在导入时控制 backend 日志，`LKN_LOG_LEVEL` 单独控制 Launch 日志；
+启动输出需在导入前配置。运行时 `set_debug_level()` 只改变 backend 日志。
+fork 子进程继承当前级别；spawn 子进程读取环境中的 `RPU_LOG_LEVEL`，传播运行时修改前
+需先更新该变量。
 
 <a id="model-specific-public-settings"></a>
 ## 模型特定公共设置
@@ -140,9 +146,9 @@ Graph、内存或数值契约。
 
 ### Collective 执行
 
-Residual reduction 不再提供公开 route、chunk、ring 或 two-stage selector。共享 wrapper
-统一使用 generated 八核 ring，并根据已验证 geometry 自动选择 schedule。Partial
-producer 在 reduction 前清理 inactive shard。见
+Residual reduction 不提供公开 route、chunk、ring 或 two-stage selector。普通 FP16 ring
+使用已安装的消费核数，默认八核；缩核配置使用绑定的拓扑。Local-SPM、mixed-precision
+和固定布局路线仍限定八核。Partial producer 先清空所有消费分片，再写有效前缀。见
 [自动 residual reduction](../knowledge/concepts/allreduce-routing.md)。
 
 ### Graph 与 replay
@@ -151,7 +157,6 @@ producer 在 reduction 前清理 inactive shard。见
 |---|---|---|---|
 | `RPU_DEEP_FAST_REPLAY` | 关闭；首字符不是 `0` 的任意非空值会启用 | Fused handle 构造 / **MODEL** | full-body replay 时跳过已审计的 setup 工作。配置必须证明每个被跳过的 input/layout 仍有效。 |
 | `RPU_FASTREPLAY_SKIP_SYNC` | 开启；空值、`0`/`false`/`off` 禁用 | Graph BUILD / **BUILD** | 仅当本轮 replay 未触碰 Graph 所有的 kernel 参数，且每个 Launch register-state token 仍与 prepared batch 一致时，通用 Graph executor 才省略 mutable-kernel scan。mutable DMA endpoint 每轮独立解析和更新，提交前会发布全部 command 写入；通用脏标记、token 变化或 token 查询失败都会保守执行完整 scan。该变量只用于诊断退出，不是模型 route。 |
-| `RPU_FUSED_COEXIST_KEEP_PERSISTENT_GEN` | 关闭；精确 `1`、`true`、`True` 或 `on` 会启用 | 首次原生 coexistence 使用 / **NATIVE** | 在配置负责的 subsystem handoff 之间保留 persistent SPM generation。归属错误可能破坏后续执行。 |
 | `RPU_GRAPH_DEFER_TO_COPY` | 没有独立默认值；legacy alias 接受 `auto`/空、`0`/`off`/`false`，其他任意非空值强制开启 | 首次 host-op gate 使用 / **NATIVE** | 仅当未设置 `RPU_GRAPH_HOST_OP_DEFER_GATE` 时查询。避免同时设置两者。 |
 | `RPU_GRAPH_HOST_OP_DEFER_GATE` | `auto`；`auto`/空、`0`/`off`/`false`，其他任意非空值强制开启 | 首次 host-op gate 使用 / **NATIVE** | 控制 capture 期间 stable host input 的 deferral。对不稳定 storage 强制开启会产生过期数据。 |
 | `RPU_SKIP_IDLE_RECORD_FUNCTION` | 开启；`0`/`off`/`false` 会禁用 | 首次 Python graph scope / **MODEL** | 只在 profiler 关闭时省略 idle profiler scope。profiling 时保留 scope，其他情况下减少 host 开销。 |
@@ -165,9 +170,14 @@ producer 在 reduction 前清理 inactive shard。见
 | `RPU_KVINSERT_HYBRID_V16` | 关闭；除 `0`/`false`/`False` 外的非空值 | 每次 KV insertion / **CALL**；重建 Graph | 选择 aligned bulk/tail schedule。facade 可以负责该值；任意启用会改变 Graph 拓扑。 |
 | `RPU_KVINSERT_V16` | 开启；精确 `0` 或 `false` 会禁用，其他所有值会启用 | 首次原生使用 / **NATIVE** | 在允许时选择 aligned KV-insert 路径。禁用会改变 scheduling 和性能，但不改变 logical cache length。 |
 | `RPU_KVINSERT_V16_ANY_TP` | 关闭；除 `0`/`false`/`False` 外的非空值 | 首次原生使用 / **NATIVE** | 允许其他 whole-head parallel factor 使用 aligned 路径。不支持的 geometry 可能无法通过 admission。 |
-| `RPU_LINEAR_ACC32` | 关闭；严格接受 `0`/`1`、`false`/`true` 或 `off`/`on` 及列出的大小写变体；无效值失败 | 首次原生使用 / **NATIVE** | 为 tiled linear 家族选择 FP32 accumulation。它会改变 tile、内存使用、性能和数值。 |
-| `RPU_RMSNORM_NEWTON` | 关闭；严格接受 `0`/`1`、`false`/`true` 或 `off`/`on` 及列出的大小写变体；无效值失败 | 首次原生使用 / **NATIVE** | 选择 refined normalization。它会改变数值，也可能改变可用 schedule。 |
+| `RPU_LINEAR_ACC32` | 已停用 | 生产 launcher 不读取 | 在 `rpu_execution` 中设置组件的 `linear_acc32`；Wall-OSS 的 `runtime_env` 拒绝旧名称。 |
+| `RPU_RMSNORM_NEWTON` | 已停用 | 生产 launcher 不读取 | Wall-OSS 的 `runtime_env` 拒绝此名称；应从生产配置中移除。 |
 | `RPU_RMSNORM_VWARP` | 兼容输入；Hy-VLA 严格接受空/`0`/`off`/`false`、`16`、`32` 或 `auto`，Wall-OSS 拒绝该变量 | owner cold-plan admission / **NATIVE** | 归属 adapter 将其翻译成冻结的 per-handle capability。Hy-VLA 无效文本在进程 claim 前失败；原生 handle 不会重新读取。 |
+
+普通 direct-SPM RMSNorm 按 handle 冻结可用算子，使用统一的 `(rows, cols)` 路由：
+行数能被 32 整除时优先 V32，其次是能被 16 整除的 V16，否则使用 BASE。V16/V32 使用八核 grid。
+`RPU_RMSNORM_VWARP` 仅在 Hy-VLA VLM 冷态配置时转换为能力选择；显式要求但不可用的路由在安装时失败。
+Mixed RMSNorm 读取 BF16、输出 FP16。
 
 <a id="qwen35-vision-selectors"></a>
 ### Qwen3.5 Vision selector
@@ -195,7 +205,6 @@ processor input-oracle 为 S277/S145，KVPAD16 floor 为 288/160，profile-local
 
 | 变量 | 未设置时的默认值与接受值 | 读取 / 更改 | 作用域、效果与风险 |
 |---|---|---|---|
-| `RPU_GR00T_KVPAD16` | 原始默认关闭；facade 为 `1`；原生解析器中 `1` 或以 `t`/`T` 开头的值会启用 | 首次原生 KV setup / **NATIVE** | 为 GR00T expert padding 并 mask KV row。它会改变 cache layout 和 Graph signature。 |
 | `RPU_GR00T_PARTIAL_MROPE` | 原始为 **PB(false)**；facade 为 **PB(true)** | GR00T 构造 / **MODEL** | 使用预计算的 partial multimodal position table。 |
 | `RPU_GR00T_W8A16` | **PB(false)** | GR00T 权重安装 / **MODEL** | 量化允许的 backbone 和 action projection，并改变数值。 |
 
@@ -389,18 +398,17 @@ ACC32 路径。patch embedding、action 与冷 AdaRMS 保持既有累加策略�
 checkpoint 按 `use_embodied_system_prompt_ratio=0.0` 使用公开 `wall-x` 中精确的
 `You are a helpful assistant.` system prompt。
 
-Source-only facade 固定 Vision `chunk_size=768`、关闭 packed Vision，并在 checkpoint
-权重加载前调用 `preflight_images(images)`。CPU processor 冻结的 grid 必须精确为两张
-`[1,32,32]` 图片；每张图独立使用共享的 `768+256` KV-first plan。`auto`、任何其他
-grid 和之后变化的 grid 分别会在进程级 claim 前或任何 Vision 工作前拒绝。这是准入
-契约，不是板上验证证据。
+构造时绑定 `camera_names`，每次请求按名称提供对应图像。Vision 分块通过
+`rpu_execution.vision` 选择；packed Vision 在 `RPU_WALL_OSS_BATCH_MAX_SEQ` 容量内合并
+兼容的图像 grid。RTC 构造器绑定固定相机/动作配置，拒绝组件 `linear_acc32=true`；
+普通配置使用各 stage 显式设置。
 
 | 变量 | 未设置时的默认值与接受值 | 读取 / 更改 | 作用域、效果与风险 |
 |---|---|---|---|
 | `RPU_WALL_OSS_ACTION_FP32_TAIL` | **PB(false)** | 每次 denoise 调用 / **CALL**；重建 prepared Graph 配置 | Euler tail 使用 host FP32。它会改变 action 数值，并与 fused/unrolled 执行冲突。 |
 | `RPU_WALL_OSS_ATTN_TP8` | 原始为 **PB(false)**；facade 为 `1` | 权重安装 / **MODEL** | 为 eight-core attention 复制 KV head。重建权重、cache 和 Graph。 |
 | `RPU_WALL_OSS_BATCH_MAX_SEQ` | `768`；十进制整数 | Vision grouping / **CALL**；重建 Graph | 限制 packed vision sequence length。过大可能超出内存；所选公开配置可能进一步约束。 |
-| `RPU_WALL_OSS_BATCH_VISION` | 原始 **PB(true)**；Source-only facade 为 `0` | Vision forward / **CALL**；重建 Graph | 直接 builder 可在上限内打包 equal-grid image。公开 facade 固定逐图预检，并拒绝启用该 selector。 |
+| `RPU_WALL_OSS_BATCH_VISION` | **PB(true)** | Vision forward / **CALL**；重建 Graph | 在配置容量内合并 equal-grid image；`0` 使用逐图执行。 |
 | `RPU_WALL_OSS_DENOISE_UNROLL` | **PB(true)** | Action 构造和调用 / **MODEL** | 使用 fused denoise loop。`0` 选择 host loop，并改变拓扑和 timing。 |
 | `RPU_WALL_OSS_DEVICE_PATCH_EMBED` | **PB(true)** | Vision 构造 / **MODEL** | 在 设备 上运行 folded patch embedding。`0` 使用 CPU projection，并改变 boundary/性能。 |
 | `RPU_WALL_OSS_EXPERT0_DOWN_INT4` | **PB(true)** | 量化 LLM 权重安装 / **MODEL** | 使用允许的 compact expert-0 down projection。部分 W4 配置强制关闭；不匹配会校验失败。 |
@@ -430,7 +438,6 @@ grid 和之后变化的 grid 分别会在进程级 claim 前或任何 Vision 工
 | 变量 | 未设置时的默认值与接受值 | 读取 / 更改 | 作用域、效果与风险 |
 |---|---|---|---|
 | `QWEN3_5_VISION_GRAPH_DISABLE` | `0`；除精确 `0` 外的任意值都会禁用 | Vision forward / **CALL**；重建/清除 Graph | 绕过 Qwen3.5 Vision GraphCache，用于受控比较。replay 和 latency 结论不再适用。 |
-| `RPU_ALL_GATHER_FORCE_MULTI_CORE` | 关闭；**N1** | 首次原生使用 / **NATIVE** | 强制 multi-core schedule，用于 A/B 比较。它不是普遍支持的性能 selector。 |
 | `RPU_CHUNK_FORCE_UNSAFE` | 关闭；**N1** | 首次适用的原生 planner/launcher 使用 / **NATIVE** | 绕过 planner safety check。可能超过执行约束，绝不能产出可部署输出。 |
 | `RPU_DYNAMO_MATERIALIZE_BREAKS` | **PB(false)** | Dynamo partitioning / **CALL**；重新编译 | materialize partition break。它会改变 Graph boundary 并增加 transfer，仅用于 compiler 诊断。 |
 | `RPU_GRAPH_DDR_SPM_LOG` | 关闭；首字符不是 `0` 的非空值 | 首次 data-node 执行 / **NATIVE** | 记录 node index、byte count 和有界 source checksum。输出由模型数据派生，且日志会改变 timing。 |
@@ -534,3 +541,91 @@ AUTO 校验 Launch 能力以及已加载资产的哈希和程序身份。未知�
 tier 增加一行；删除最后一个 reader/preset 时，必须删除对应行。自动化文档检查应将行
 集合与源码 reader 双向比较，并将诊断变量保持在稳定的 `Diagnostic-only inventory`
 heading 之后。
+
+## 模型与诊断补充设置
+
+模型开关在构建实例前设置，修改后须重新创建模型。下表默认值指未设置时的行为，
+模板可显式选择其他取值。模型及其[配置](../examples/configs/CONFIGURATIONS.md)
+会检查支持的输入形状。诊断输出来自当前调用，保存在调用方指定的输出目录。
+
+| 变量 | 未设置时的默认值 | 接受值 | 作用 |
+|---|---|---|---|
+| `HALO_CHUNK_DIAG` | 未设置 | 未设置关闭；只要设置即开启 | 记录共享规划器的候选 SPM 占用和最终分块，每次规划读取。 |
+| `HALO_NODE_HIST` | 未设置 | 未设置关闭；只要设置即开启 | 提交批次前记录捕获的节点和算子数量，每批读取。 |
+| `HALO_PROFILE` | 0 | 仅字面值 `1` 开启 | 用 torch.profiler 记录 HALO forward，每次进入分析上下文读取。 |
+| `HALO_PROFILE_DIR` | output/halo_profile | 目录路径 | HALO_PROFILE 开启时，表格和 Chrome trace 的输出目录。 |
+| `QWEN3_5_VISION_DBG_Q` | 0 | `1` 或 `true` 开启 | 开启张量导出时捕获各层旋转后的 Q，首次使用读取。 |
+| `QWEN3_VL_DELIVERY_ALLOW_NUMERIC_BLOCKED` | 0 | 仅字面值 `1` 开启 | 允许固定 Qwen3-VL delivery 配置通过入口限制；仍检查权重与模型形状。 |
+| `RHINO_CHUNK` | 0 | 整数 | 未传 rpu_execution 时指定 RhinoVLA prefill 分块；正数请求固定分块，非正数保持自动规划。 |
+| `RHINO_SMOKE_PREFIX_PADDING_ROWS` | 0 | 整数 | 诊断用前缀可见范围截断；官方降序 flow 流程要求为 0。 |
+| `RHINO_SPM` | 未设置 | 未设置或空值关闭；其他值开启 | 在 RhinoVLA 流程检查点打印 SPM 分配摘要，每次调用读取。 |
+| `RHINO_TRACE` | 未设置 | 未设置或空值关闭；其他值开启 | 打印 RhinoVLA 流程阶段日志，每次调用读取。 |
+| `RPU_GR00T_CROSS_KV_REUSE` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 在普通 B1/Q41、TP8、四步或十步降噪中跨步骤复用交叉注意力 K/V；每次推理的首步骤刷新，仍检查模型形状、缓存容量和完整 SPM 需求。 |
+| `RPU_GR00T_CROSS_V_TRANSPOSE_REUSE` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 依赖交叉 K/V 复用及对应 SPM 路径；首步骤转置 V，后续步骤复用。 |
+| `RPU_GR00T_FF1_RESIDENT_W8` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 在支持的普通 B1/Q41、TP8 降噪循环中将第 0 层 FF1 W8 权重驻留 SPM；要求对应扩展算子和完整 SPM 检查，源权重修改会使副本失效。 |
+| `RPU_GR00T_KV_SPM_ONLY` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 普通四步或十步 TP8 计划实际使用 SPM K/V 时省略无用 DDR 镜像；DDR、单步及 Z2 路径保留镜像。 |
+| `RPU_GR00T_NATIVE_POSITION_CACHE` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 为普通未补齐的 VL 调用缓存按内容和版本识别的 int32 位置表；补齐及 Z1 路径保持原位置处理。 |
+| `RPU_GR00T_PRECOMPUTE_ADALN` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 权重安装后，为普通 B1/Q41、TP8 展开循环预计算四步或十步 AdaLN 表；要求源权重未改变且尚未 forward 或准备 Z2。 |
+| `RPU_GR00T_PRECOMPUTE_TIME_GLUE` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 为相同普通 TP8 降噪配置预计算固定时间步和输出调制表，与 AdaLN 预计算独立。 |
+| `RPU_GR00T_QWEN3VL_SPM_Z1` | 0 | `1` 或 `true` 开启 | 选择固定 FP16 单图像 Vision→Text SPM 路径；不接受 W8、部分旋转和主机 FP32 patch 计算。 |
+| `RPU_GR00T_RING_XOR3` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 为支持的普通 B1/Q41、TP8、FP16 或 W8 O/FF2 投影选择可选残差规约路径；保留 FP32 累加及最终 FP16 舍入。 |
+| `RPU_GR00T_SELF_QKV_MULTIBASE` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 模型形状和扩展算子匹配时合并普通 W8、TP8 自注意力 Q/K/V 投影；交叉注意力仍分别投影。 |
+| `RPU_GR00T_VL_KV_SPM_ONLY` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 支持的普通 B1、TP8 VL 注意力采用 SPM 路径时省略无用 DDR K/V 镜像；DDR 和已准备的 Z2 路径保留镜像。 |
+| `RPU_GRAPH_HCB_CHECKSUM` | 0 | 未设置、空值或首字符 `0` 关闭；其他值开启 | 在 aten::_to_copy 回调前后记录形状、类型、求和及小张量值；首次执行回调时读取，不输出地址。 |
+| `RPU_GRAPH_TO_COPY_LOG` | 0 | 未设置、空值或首字符 `0` 关闭；其他值开启 | 记录稳定输出登记和接收返回值的字节数；登记路径首次读取，捕获路径每次读取。 |
+| `RPU_INTERNVLA_NEXTDIT_FOLD_NORM_MOD` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在融合展开循环中将逐步 AdaRMS 调制与固定归一化权重预合并；逐步诊断执行保持原计算。 |
+| `RPU_INTERNVLA_NEXTDIT_FUSED_QKQ` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 合并 NextDiT 每层的 self-Q、self-K 和 cross-Q 投影，要求匹配支持的 flow 形状。 |
+| `RPU_INTERNVLA_NEXTDIT_STEP_PREP_RPU` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 依赖归一化调制预合并，将时间步投影、bias/tanh、合并及输入准备放入设备降噪图；SiLU 保留在 CPU。 |
+| `RPU_L2_CAPTURE_GATE` | 0 | 仅字面值 `1` 开启 | 捕获 LingBot2 gate 和累加器张量，安装权重时增加捕获缓冲区。 |
+| `RPU_L2_CAPTURE_INNORM` | 0 | 仅字面值 `1` 开启 | 捕获 LingBot2 第 0 层 AdaRMS 后的输入，安装权重时分配。 |
+| `RPU_L2_CAPTURE_L0` | 0 | 仅字面值 `1` 开启 | 捕获 LingBot2 第 0 层输出，安装权重时分配。 |
+| `RPU_L2_CAP_RESID` | 0 | 仅字面值 `1` 开启 | 捕获 LingBot2 各层输入和注意力残差，安装权重时分配。 |
+| `RPU_L2_DBG_PACKED` | 0 | 仅字面值 `1` 开启 | 启用 LingBot2 打包权重诊断读取接口，每次读取时检查。 |
+| `RPU_L2_STAGES` | 0 | 仅字面值 `1` 开启 | 捕获 LingBot2 分组中间阶段张量，安装权重时分配。 |
+| `RPU_LINGBOT2_DEBUG_DUMP_ROUTER_H` | 0 | 仅字面值 `1` 开启 | 捕获 LingBot2 路由器输入张量，安装权重时分配。 |
+| `RPU_LINGBOT2_MULTIVIEW_SPM_Z2` | 0 | 仅字面值 `1` 开启 | 选择固定三相机 256×256 Z2 配置；要求 RPU_LINGBOT2_ALLOW_UNVALIDATED=1 及对应模板开关。 |
+| `RPU_LINGBOT_DENOISE_UNROLL` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 将 LingBot 十步 Euler 降噪循环捕获为一张图。 |
+| `RPU_LINGBOT_ENCODER_1THREAD` | 1 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 降噪循环内使用一个 CPU 线程，结束后恢复原线程数；视觉阶段保持原线程设置。 |
+| `RPU_LINGBOT_EXPERT_REPLAY` | 1 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 通过稳定输入和刷新的调制量跨降噪步骤复用动作专家图；0 表示每步重建。 |
+| `RPU_LINGBOT_FUSED_ENCODER` | 1 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 预合并动作/时间编码器投影及逐步时间偏置；0 保留独立投影路径。 |
+| `RPU_LINGBOT_ONDEVICE_ENCODER` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在设备上执行融合后缀编码器、输出投影和 Euler 更新。 |
+| `RPU_LINGBOT_VLM_REPLAY` | 1 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 使用稳定输入缓冲区，在前缀形状相同的调用间复用 VLM prefill 图。 |
+| `RPU_P7_SPLIT_KERNELS` | 空 | 逗号分隔的名称 | 将匹配的算子名称隔离为独立 Graph 分段用于诊断，准备分段时读取。 |
+| `RPU_PI05_DENOISE_GATEUP_RESIDENT_LAYERS` | 0 | 字面值 `0`、`1` 或 `5` | 为固定 P800/M50、TP8、十步循环将首层或前五层动作 W8 Gate/Up 权重组成驻留包；要求已准备 AdaRMS 及 body streaming，独立 GateUp 驻留开关须关闭。 |
+| `RPU_PI05_PREFILL_KV_ONLY` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 在支持的配对 TP8 Pi0.5 prefill 配置中，末层只生成 K/V，省略未使用的 hidden 输出；要求专用 KV-only 入口及 ACC16 prefill，部分模板显式开启。 |
+| `RPU_PI05_PREFILL_MASK_FP16` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在 CPU 上以 FP16 准备并缓存前缀加性 mask，类型纳入缓存键；部分配对 TP8 模板显式开启。 |
+| `RPU_PI05_PREFILL_ROPE_CACHE` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 按源张量身份、版本和位置缓存一次 RoPE 上传；原生稳定槽仍刷新，配对 Down、KV-direct 和 KV-only 配置要求关闭。 |
+| `RPU_PI05_PROBE_DIR` | 未设置 | 目录路径 | 将具名 Pi0.5 中间张量和 K/V 快照写入指定目录；每次导出读取，未设置则不写文件。 |
+| `RPU_RHINOVLA_ADARMS_RESIDENT` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 固定 v3 十步专家每次执行图时将预计算 AdaRMS 表装入 SPM；要求预计算表，并拒绝 SKIP_ADARMS_GEMV。 |
+| `RPU_RHINOVLA_ALIGNED_KV` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 补齐固定 v3 专家的物理前缀与 K/V 写入，保留逻辑 mask 和 RoPE 位置；检查容量并清零补齐部分。 |
+| `RPU_RHINOVLA_EXPERT_DEPTH_LIMIT` | 未设置 | 不超过权重层数的正整数 | 诊断用专家层数，范围为 1 到权重层数，并调整前缀层选择；官方及固定 W8 配置拒绝缩减层数。 |
+| `RPU_RHINOVLA_EXPERT_FUSIONS` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在固定 v3 专家中融合 norm/shift 及门控残差；要求预计算 AdaRMS、GATED_NO_SUB 及两个对应算子。 |
+| `RPU_RHINOVLA_EXPERT_MLP_DIM_LIMIT` | 未设置 | 不超过权重宽度的正整数 | 诊断用专家 MLP 宽度，范围为 1 到权重宽度；官方及固定 W8 配置拒绝缩减宽度。 |
+| `RPU_RHINOVLA_EXPERT_W8A16` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 仅量化固定普通 v3 专家的 Q/K/V/O 和 MLP 权重，使用逐通道 FP16 scale；拒绝缩减形状及 PACKED_QKV，全流程 W8 同时启用专家 W8。 |
+| `RPU_RHINOVLA_HIGH_PRECISION` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 为带驻留预计算 AdaRMS 的固定全 W8 v3 选择 Newton RMSNorm 和高精度激活；捕获前要求对应可选算子齐备。 |
+| `RPU_RHINOVLA_HIGH_PRECISION_FUSIONS` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 依赖 HIGH_PRECISION，使用对应高精度算子融合动作 norm/shift 和文本/动作 SiLU×up。 |
+| `RPU_RHINOVLA_PACKED_QKV` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 为固定 FP16 v3 专家合并不可变 Q/K/V 权重，保留原输出分区；修改后须重新安装权重。 |
+| `RPU_RHINOVLA_PARTIAL_ROPE` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 固定全 W8 v3 开启 HIGH_PRECISION 时，使用现有 partial-RoPE 路径旋转完整 head，保持补齐行不变。 |
+| `RPU_RHINOVLA_PRECOMPUTE_GATE_TANH` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 全 W8 v3 使用驻留预计算 AdaRMS 时，在构造时间步表期间计算固定 gate TANH，回放时复用。 |
+| `RPU_RHINOVLA_VECTOR_K_NORM` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 固定全 W8 v3 使用向量 K 归一化；要求 HIGH_PRECISION 和 ALIGNED_KV，归一化前清零尾部。 |
+| `RPU_RHINOVLA_VECTOR_Q_NORM` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 固定全 W8 v3 开启 HIGH_PRECISION 时，将 Q 归一化补齐到向量形状，并在每层/每次回放清零新增行。 |
+| `RPU_RHINOVLA_VISION_INPUT_CACHE` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 复用视觉类型转换、patch 输入和带版本的位置缓冲区，每次调用刷新像素；绑定已安装视觉实例，最多保留四条缓存。 |
+| `RPU_WALL_OSS_ACTION_KV_OWNER_FANOUT` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 固定非驻留动作路径只生成一次 K/V 并经 SPM 分发；M32 不支持此路径。 |
+| `RPU_WALL_OSS_ACTION_WEIGHT_RESIDENCY` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 每次执行图时预装支持的动作权重：W8 第 1–4 层或 FP16 第 1–2 层；base H32 要求 sorting SiLU，FP16 还要求 transfer bit4。 |
+| `RPU_WALL_OSS_FP16_MLP_M224` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 将 FP16 M640 Gate/Up 拆为 224+224+192 行；M320 边界调用保留原路径。 |
+| `RPU_WALL_OSS_FP16_TRANSFER_MASK` | 0 | 十进制 `0..7` | 位 1/2/4 选择固定 FP16 Vision/Prefill/Action 调度，权重保持 FP16。 |
+| `RPU_WALL_OSS_PREFILL_MIXED_PRECISION` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 为固定 TP8、H2048/I11008/L36 RTC prefill 选择 FP16/BF16 边界，须配合视觉混合精度；RTC 模板显式设置取值。 |
+| `RPU_WALL_OSS_PREFILL_OWNER_DIRECT_KV` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 固定混合精度、分阶段 P640 owner-QKV 路径在部分 RoPE 后直接写 K/V。 |
+| `RPU_WALL_OSS_PREFILL_STAGED_MLP` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 选择层优先的 W8 P640/C320×2 MLP 调度；要求混合 prefill、TP8、因果位置 0 及固定 RTC 权重，P672 保留自身调度。 |
+| `RPU_WALL_OSS_RTC_ALLOW_NUMERIC_BLOCKED` | 0 | 仅字面值 `1` 开启 | 允许具名 RTC FP16/W8A16 配置通过入口限制；仍拒绝 W4 和不匹配配置，不会自动设置其他开关。 |
+| `RPU_WALL_OSS_RTC_EMBODIMENT` | X2 ex001_desktop | 非空字符串 | RTC 提示词中的机器人名称；非 RTC 调用使用数据集名称。应填写调用方机器人映射中的对应名称。 |
+| `RPU_WALL_OSS_SORTING_SILU_MUL` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 为支持的 sorting/base 路径融合 SiLU×Mul；固定 FP16 路径还要求对应 transfer 位，配对小图像视觉路径可跨层保留稠密 mask。 |
+| `RPU_WALL_OSS_VISION_LAYER_GROUP` | 0 | `0` 或 `32` | 固定三图像、每图 576 patch 的批量视觉配置中，让每幅图连续经过全部视觉层；与 weight-outer 调度互斥，构建时在进程内固定。 |
+| `RPU_WALL_OSS_VISION_MIXED_PRECISION` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在融合 merger、每图 576 patch 的 RTC 视觉配置中选择 FP16/BF16 边界，须配合 prefill 混合精度；RTC 模板显式设置取值。 |
+| `RPU_WALL_OSS_VISION_NATIVE_WINDOW_SDPA` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在支持的 W8 weight-outer 配置或开启行复用和 SiLU 的 base 双/三 224 图像配置中使用原生窗口注意力；FP16 还要求 transfer bit1。 |
+| `RPU_WALL_OSS_VISION_PAIR_252` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 固定三幅 252 图像时配对前两幅视觉输入，第三幅独立处理；要求通用窗口视觉、融合 merger、sorting SiLU 及 batch 容量至少 672。 |
+| `RPU_WALL_OSS_VISION_ROW_WEIGHT_OUTER` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在支持的紧凑/base 形状中跨视觉行块复用完整本地权重；FP16 要求 transfer bit1，小图像路径关闭混合精度。 |
+| `RPU_WALL_OSS_VISION_WEIGHT_OUTER` | 0；RTC W8 默认 1 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 选择固定三图像、每图 576 patch 的批量视觉、混合精度和融合 merger 调度；FP16/W4 RTC 强制关闭，与 layer-group32 互斥，进程内固定。 |
+| `RPU_WALL_OSS_W16_NEXT3_MASK` | 0 | `0` 或 `1` | 为 prefill O 投影选择 M160×4/N96 行调度。 |
+| `RPU_WALL_OSS_W16_NEXT4_MASK` | 0 | 十进制 `0..3` | 位 1 选择 W8 M640 Gate/Up 行调度，位 2 选择配对 ring/postnorm。 |
+| `RPU_WALL_OSS_W16_REUSE_MASK` | 0 | `0` 或 `8` | 为驻留动作 Gate/Up 启用 A16 复用，其他位组合会被拒绝。 |

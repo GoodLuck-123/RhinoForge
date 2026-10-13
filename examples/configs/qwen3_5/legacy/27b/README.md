@@ -2,7 +2,7 @@
 
 # Qwen3.8-27B 配套权重配置
 
-/ [Qwen3.5 配置](../../README.md)
+[Qwen3.5 配置](../../README.md)
 
 本目录的三份模板共用交付的 Qwen3.8-27B W8 权重。官方 Qwen3.5-27B 使用另一组模型配置和量化范围，入口见[官方 27B](../../README.md#官方-qwen35-27b)。
 
@@ -40,7 +40,7 @@ python3 examples/run.py --config examples/configs/qwen3_5/legacy/27b/w8a16_attn_
 python3 examples/run.py --config examples/configs/qwen3_5/legacy/27b/w8a16_attn_mlp.toml
 ```
 
-转换器检查 legacy27 的模型形状、层类型和 RoPE，写入 W8 主干/FP16 GDN 声明；源目录应为未量化权重。转换可在 CPU 执行，推理在 设备板卡执行。
+转换器检查 legacy27 的模型形状、层类型和 RoPE，写入 W8 主干/FP16 GDN 声明；源目录应为未量化权重。转换可在 CPU 执行，推理在设备板卡执行。
 
 ### 关键配置项
 

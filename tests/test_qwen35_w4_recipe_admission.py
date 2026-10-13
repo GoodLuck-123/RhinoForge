@@ -34,6 +34,18 @@ def test_named_mlp_recipe_admits_exact_2b_metadata_and_runtime(monkeypatch):
     Qwen3_5Adapter.preflight_execution(config, {"model": {"num_cores": 8}})
 
 
+def test_mlp_w4_attention_gdn_w8_keeps_generic_v2_text_admission(monkeypatch):
+    monkeypatch.delenv("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED", raising=False)
+    config = _config(2)
+    config.quant_config = _quant_config(
+        is_full_from_layer_types(config.text_config.layer_types), None, 32,
+        profile="w4_mlp_w8_attn_gdn")
+    execution = {"model": {"num_cores": 8}, "prefill": {"linear_acc32": False}}
+    assert not validate_mlp_only_text_profile(config.to_dict())
+    assert validate_core_profile(config, execution).num_cores == 8
+    Qwen3_5Adapter.preflight_execution(config, execution)
+
+
 @pytest.mark.parametrize("size", [0.8, 4, 9])
 def test_named_mlp_recipe_does_not_expand_converter_scope_into_other_sizes(size):
     config = _recipe(size)

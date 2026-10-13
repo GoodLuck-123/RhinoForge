@@ -370,7 +370,7 @@ def main(args=None):
             torch.rpu.set_hw_perf_trace(True, str(args.output_dir / "hwperf"), 16)
             report["timing_scope"] = "hardware_trace_diagnostic"
             report["hw_perf_trace"] = {"directory": str(args.output_dir / "hwperf"), "max_dumps": 16}
-        image_path = ROOT / "assets/example.ppm"
+        image_path = ROOT / "assets/test_frame.png"
         base = Image.open(image_path).convert("RGB").resize(tuple(args.image_size), Image.Resampling.BICUBIC)
         images_a = [base, ImageOps.mirror(base), ImageOps.flip(base)][:args.cameras]
         state = torch.linspace(0.05, 0.95, 26)

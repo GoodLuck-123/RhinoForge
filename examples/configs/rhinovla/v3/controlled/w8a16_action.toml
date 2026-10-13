@@ -1,3 +1,5 @@
+# All 18 layers and ten steps retained. Only expert Q/K/V/O and gate/up/down
+# use INT8 weights with per-output-channel FP16 scales; other weights stay FP16.
 # Action W8; use scripts/validate_rhinovla_v3.py run.
 [rpu_execution.vision]
 rpu_patch_embed = true

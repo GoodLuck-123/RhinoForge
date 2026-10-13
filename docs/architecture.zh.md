@@ -117,13 +117,14 @@ fail closed。
 ### Attention mask 缓存
 
 Adapter 可用 `rpu_backend.runtime.masks.versioned_cpu_mask(mask)` 创建自有、连续的 CPU FP16 mask。仅在新增缓存项时调用，命中时复用返回的 tensor。缓存键包含逻辑/补齐长度、可见性规则及变化的窗口位置。原生准备检查 tensor 身份、修改版本和 query/key 形状；原地修改后须在重放前刷新保留槽，固定地址不能代替内容检查。
+Inference tensor、请求刷新和临时存储范围见[mask 生命周期](../knowledge/concepts/sdpa-layout.md#mask-cache-and-replay)。
 
 共享 activation、Linear 和 mask 复用路径按已安装 profile、形状、dtype、核拓扑与算子能力选择。不满足条件时保留已准入的回退路径，使用模型配置选择行为。临时存储只在声明阶段内有效，每次重放均须刷新请求相关输入。
 
 ## SPM 设计
 
-当前 runtime 面向八核、每核 8 MiB SPM，保守规划预算约 7.5 MiB/核。FP16 是主要
-execution dtype，很多 operation 要求 16-element 对齐。
+设备有八核，每核 8 MiB SPM。规划使用 `SpmAllocator::SPM_PLANNING_BUDGET`，
+各模型可进一步收紧。FP16 是主要执行 dtype，很多操作要求 16 元素对齐。
 
 `BufferDecl` 表达 storage 和生命周期：
 
@@ -166,8 +167,9 @@ Segment 的 queue 资源前缀同时覆盖最高 kernel core ID 和 DMA channel�
 核心的 kernel 后追加的 DMA。例如 core 0–3 的 kernel 后接 channel 5 的 DMA，queue
 必须覆盖 core 0–5。这项资源管理修复不增加模型级核数配置。
 
-标准 residual reduction 使用共享生成式八核 ring，wrapper 根据已验证 geometry 自动
-选择 schedule；partial producer 先清 inactive shard。Linear 的 FP16/W8/W4-pgrp 路径
+标准 FP16 residual reduction 按已安装的消费核数使用共享 ring，默认配置为八核；
+缩核配置保留各自准入的生产/消费核数。Partial producer 先清空所有消费分片，再写有效前缀。
+Local-SPM、mixed-precision 和固定布局 collective 仍限定八核。Linear 的 FP16/W8/W4-pgrp 路径
 同样由共享 generated planner 自动选 tile，不再接受模型级 route/tile selector。见
 [自动 residual reduction](../knowledge/concepts/allreduce-routing.md)和
 [Linear 自动分块](../knowledge/concepts/linear-autotiling.md)。

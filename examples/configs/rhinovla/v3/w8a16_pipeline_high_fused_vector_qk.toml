@@ -31,8 +31,8 @@ RPU_RHINOVLA_VECTOR_Q_NORM = "1"
 RPU_RHINOVLA_PARTIAL_ROPE = "0"
 
 [input]
-checkpoint = "/path/to/RhinoVLA-v3/models/rhinovla_v3/steps_150000/model.pt"
-runtime_factory = "rpu_backend.adapters.rhinovla.factory:v3_runtime_factory"
+checkpoint = "/path/to/rhinovla-v3/checkpoint"
+runtime_factory = "your_package.rhinovla_v3:create_runtime"
 request = "/path/to/rhinovla-v3/request.pt"
 factory_config = "/path/to/rhinovla-v3/factory.json"
 trust_model_code = true

@@ -24,6 +24,21 @@ Create the cache after model configuration is final, size it for the complete
 prefill-plus-decode envelope, and let the adapter advance or rewind its logical
 position. [CausalLM API](../../docs/api_reference.md#causal-language-models)
 
+## Wall-OSS KV head replication
+
+The admitted Wall-OSS attention profile has 16 query heads and two real KV
+heads. `RPU_WALL_OSS_ATTN_TP8` defaults on: installation repeats each KV head's
+weights, bias and quantization scales four times, yielding eight effective KV
+heads. Adjacent replicas remain associated with the same real head; each core
+handles two query heads and its matching KV head. Q and output projections
+retain their logical head ordering.
+
+Create caches from the installed model's effective topology. An old two-head
+cache cannot become an eight-head cache by changing metadata. The choice is
+cold and applies to both language and action owners. See the
+[language loader](../../python/rpu_backend/adapters/wall_oss/llm.py) and
+[action loader](../../python/rpu_backend/adapters/wall_oss/action.py).
+
 ## Prefix replacement
 
 HALO action-prefix replacement validates every layer and prepares the complete

@@ -119,13 +119,14 @@ count 增长；`cache_invariant_ok()` 保持 true；不同语义值与 uncapture
 
 ## 7. 添加一个公开 example 及检查
 
-TOML schema 已覆盖目标时复用 `examples/causal_lm.py`。只为精确配置新增
-`examples/configs/` 文件；只有输入/输出契约确实不同才新建 script。
+使用 `python -m examples.run --config <TOML>` 和模型家族已有 runner。
+在 `examples/configs/` 下新增精确配置；只有输入/输出契约不同才在
+`examples/runners/` 下新增 runner。
 
 Example 必须在不导入 native backend 时通过配置校验：
 
 ```bash
-python examples/causal_lm.py --config examples/configs/<model>/<checkpoint>/<precision>.toml --check-config
+python -m examples.run --config examples/configs/<model>/<checkpoint>/<precision>.toml --check-config
 ```
 
 在[模型资产](model_assets.zh.md)更新来源、revision、destination 和 hash；只有入口表

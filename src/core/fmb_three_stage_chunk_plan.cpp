@@ -670,14 +670,7 @@ const FmbRouteManifestEntry& FmbPhysicalManifestConsumer::consume_route(
         "RPU_PLANNER_REJECT:EXACT_MISMATCH: physical route policy was not "
         "the selector/flags/arguments actually dispatched for family=",
         static_cast<int64_t>(family), ", site_id=", site_id,
-        ", invocation=", invocation,
-        ", expected_selector=", route.selector,
-        ", actual_selector=", resolved_selector,
-        ", expected_flags=", route.flags,
-        ", actual_flags=", resolved_flags,
-        ", expected_argument_count=", route.arguments.size(),
-        ", actual_argument_count=", resolved_arguments.size(),
-        ", arguments_match=", arguments_match);
+        ", invocation=", invocation);
     const size_t index = static_cast<size_t>(
         &route - manifest().routes.data());
     TORCH_INTERNAL_ASSERT(index < consumed_.size());

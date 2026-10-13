@@ -113,7 +113,8 @@ def planner_profiles(path: Path = PLANNER_REGISTRY) -> dict[str, dict]:
         if not isinstance(profile_id, str) or profile_id in profiles:
             raise ConfigError(f"invalid or duplicate profile id in {path}: {profile_id!r}")
         profiles[profile_id] = row
-    return profiles
+    return {key: row for key, row in profiles.items()
+            if row.get("example_only") is not True}
 
 
 def profile_runner_target(profile: dict) -> str:
@@ -125,9 +126,28 @@ def profile_runner_target(profile: dict) -> str:
     return target
 
 
+@lru_cache(maxsize=1)
 def example_profiles() -> dict[str, dict]:
-    """Read the public configuration catalog without loading models."""
-    return dict(planner_profiles())
+    """Add caller-factory identities without changing planner support admission."""
+    profiles = dict(planner_profiles())
+    data = json.loads(EXAMPLE_REGISTRY.read_text(encoding="utf-8"))
+    rows = data.get("profiles") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        raise ConfigError(f"profiles list missing from {EXAMPLE_REGISTRY}")
+    for row in rows:
+        if isinstance(row, dict) and row.get("example_only") is not True:
+            continue
+        profile_id = row.get("id") if isinstance(row, dict) else None
+        if (not isinstance(profile_id, str) or not profile_id
+                or profile_id in profiles):
+            raise ConfigError(f"invalid or duplicate example profile: {profile_id!r}")
+        if (row.get("example_only") is not True
+                or row.get("family") != "rhinovla"
+                or row.get("example", {}).get("runner_target") != "rhinovla"
+                or "support" in row or "hw_status" in row):
+            raise ConfigError("caller-factory templates cannot declare planner support")
+        profiles[profile_id] = row
+    return profiles
 
 
 def _validate_unbound_qwen_checkpoint(profile: dict, checkpoint: str) -> None:
@@ -192,54 +212,6 @@ def _is_official_qwen35_27b_profile(profile):
     return (profile.get("family") == "qwen3-5"
             and profile.get("asset_alias") in {
                 "qwen3_5-27b-w8a16", "qwen3_5-27b-w4a16"})
-
-
-def _validate_dense_qwen35_checkpoint(profile, checkpoint):
-    """Bind ordinary Dense templates to their size and uniform text recipe."""
-    if profile["family"] != "qwen3-5":
-        return
-    geometries = {
-        "0.8b": (24, 1024, 3584, 8, 2, 256),
-        "2b": (24, 2048, 6144, 8, 2, 256),
-        "4b": (32, 2560, 9216, 16, 4, 256),
-        "9b": (32, 4096, 12288, 16, 4, 256),
-    }
-    alias = profile["asset_alias"]
-    size = next((size for size in geometries if alias in {
-        f"qwen3_5-{size}", f"qwen3_5-{size}-w8a16", f"qwen3_5-{size}-w4a16"}), None)
-    if size is None:
-        return
-    metadata = json.loads((Path(checkpoint) / "config.json").read_text(encoding="utf-8"))
-    scope = _backend_leaf("adapters/qwen3_5/quant_scope.py")
-    try:
-        text = metadata.get("text_config", {})
-        fields = ("num_hidden_layers", "hidden_size", "intermediate_size",
-                  "num_attention_heads", "num_key_value_heads", "head_dim")
-        actual = tuple(text.get(key) for key in fields)
-        layers = text.get("layer_types")
-        expected_layers = (["linear_attention"] * 3 + ["full_attention"]) * (geometries[size][0] // 4)
-        if (metadata.get("model_type") != "qwen3_5"
-                or metadata.get("architectures") != ["Qwen3_5ForConditionalGeneration"]
-                or actual != geometries[size] or any(type(value) is not int for value in actual)
-                or layers != expected_layers):
-            raise ValueError(f"requires the declared Qwen3.5 {size} architecture and size")
-        if (metadata.get("quantization_config") is not None
-                or any(text.get(key) is not None for key in ("quant_config", "quantization_config"))):
-            raise ValueError("requires a single top-level quant_config for quantized text projections")
-        quant = metadata.get("quant_config")
-        precision = profile["precision"]
-        if precision == "fp16":
-            if quant is not None:
-                raise ValueError("FP16 requires a floating checkpoint without quantization metadata")
-            return
-        expected = scope.QuantSpec(scope.W8A16) if precision == "w8a16" else scope.QuantSpec(scope.W4A16_PGRP, 32)
-        specs = scope.resolve_quant_specs(scope.is_full_from_layer_types(layers), quant)
-        if not isinstance(quant, dict) or set(specs.values()) != {expected}:
-            raise ValueError(f"requires uniform {precision} text projections (W4 uses group_size=32)")
-        if quant.get("storage", "int8") != "int8" or quant.get("scale_dtype", "float16") != "float16":
-            raise ValueError("requires int8 weight storage and FP16 scales")
-    except (TypeError, ValueError, KeyError, AttributeError) as exc:
-        raise ConfigError(f"profile {profile['id']} rejects checkpoint: {exc}") from exc
 
 
 def validate_checkpoint_profile(config: dict, checkpoint: str) -> None:
@@ -321,9 +293,47 @@ def validate_checkpoint_profile(config: dict, checkpoint: str) -> None:
         if not valid:
             raise ConfigError("profile requires the exact Qwen3.5 2B MLP-only G32 recipe")
         return
+    if checkpoint_format == "qwen3_5_2b_w4_mlp_w8_attn_gdn_g32":
+        metadata = json.loads((Path(checkpoint) / "config.json").read_text(encoding="utf-8"))
+        scope = _backend_leaf("adapters/qwen3_5/quant_scope.py")
+        # Validate the declared recipe against geometry and every projection.
+        geometry = dict(hidden_size=2048, intermediate_size=6144, num_hidden_layers=24,
+                        num_attention_heads=8, num_key_value_heads=2, head_dim=256,
+                        linear_num_key_heads=16, linear_num_value_heads=16,
+                        linear_key_head_dim=128, linear_value_head_dim=128,
+                        linear_conv_kernel_dim=4, vocab_size=248320)
+        layers = [scope.LINEAR_ATTENTION] * 3 + [scope.FULL_ATTENTION]
+        try:
+            quant = scope.resolve_quant_config(metadata)
+            text = metadata.get("text_config")
+            valid = (metadata.get("model_type") == "qwen3_5"
+                     and metadata.get("architectures") == ["Qwen3_5ForConditionalGeneration"]
+                     and isinstance(text, dict)
+                     and all(type(text.get(k)) is int and text[k] == v
+                             for k, v in geometry.items())
+                     and text.get("layer_types") == layers * 6
+                     and text.get("quant_config") is None
+                     and text.get("quantization_config") is None
+                     and isinstance(quant, dict)
+                     and quant.get("format_version") == 2
+                     and quant.get("profile") == "w4_mlp_w8_attn_gdn"
+                     and "layer_overrides" not in quant
+                     and quant.get("storage", "int8") == "int8"
+                     and quant.get("scale_dtype", "float16") == "float16")
+            if valid:
+                specs = scope.resolve_quant_specs(
+                    scope.is_full_from_layer_types(text["layer_types"]), quant)
+                valid = all(
+                    spec.method == (scope.W4A16_PGRP if ".mlp." in name else scope.W8A16)
+                    and (".mlp." not in name or spec.group_size == 32)
+                    for name, spec in specs.items())
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ConfigError(f"invalid MLP W4/G32 + Attention/GDN W8 checkpoint: {exc}") from exc
+        if not valid:
+            raise ConfigError("profile requires the exact Qwen3.5 2B MLP W4/G32 + Attention/GDN W8 recipe")
+        return
     on_install = limits.get("on_install_quantization")
     if expected is None and checkpoint_format is None and on_install is None:
-        _validate_dense_qwen35_checkpoint(profile, checkpoint)
         _validate_unbound_qwen_checkpoint(profile, checkpoint)
         return
     if on_install is not None or checkpoint_format == "qwen3_32b_w8a16":
@@ -373,7 +383,22 @@ def validate_checkpoint_profile(config: dict, checkpoint: str) -> None:
 
 
 def required_example(profile: dict) -> bool:
-    return profile.get("example", {}).get("eligible") is True
+    status = profile.get("support", {}).get("status")
+    example = profile.get("example", {})
+    internal_evaluation = (
+        example.get("reason_code") == "INTERNAL_CONTROLLED_EVALUATION"
+        and status == "CONTROLLED_EVALUATION"
+        and profile.get("hw_status") == "IMPLEMENTED_UNVERIFIED_HW"
+        and profile.get("input_envelope", {}).get("kind") == "EXACT"
+        and example.get("eligible") is False and example.get("runner_target") is None
+        and any(gate.get("kind") == "env" and gate.get("value") == "1"
+                for gate in profile.get("controlled_gates", []))
+        # Private evidence paths are omitted from the public catalog.
+    )
+    return (status not in {"UNSUPPORTED", "ASSET_ONLY"}
+            and not internal_evaluation
+            and example.get("reason_code") not in {
+                "INTERNAL_COMPONENT_HARDWARE_CASE", "COMPOSITE_COMPONENT_HARDWARE_CASE"})
 
 
 def _load_file(name, path):
@@ -600,24 +625,9 @@ def _validate_execution(value, *, profile=None):
 
 def load_config(path: Path) -> dict:
     """Check profile identity and syntax; assets/capability require the runtime."""
-    from examples.common.legacy import (
-        is_runner_config, migration_error, missing_config_message,
-        resolve_config_path, validate_g05_integration,
-    )
-
-    path = resolve_config_path(path)
-    if not path.is_file() and (message := missing_config_message(path)):
-        raise ConfigError(message)
     with path.open("rb") as stream:
         config = tomllib.load(stream)
     validate_logging_config(config)
-    if message := migration_error(config):
-        raise ConfigError(message)
-    if is_runner_config(config):
-        try:
-            return validate_g05_integration(config)
-        except ValueError as exc:
-            raise ConfigError(str(exc)) from exc
     try:
         cpu_runtime().resolve_cpu_threads(config)
     except ValueError as exc:
@@ -699,11 +709,6 @@ def load_config(path: Path) -> dict:
     if target == "gr00t":
         try:
             import_module("examples.runners.gr00t.config").validate_config(config)
-        except (TypeError, ValueError) as exc:
-            raise ConfigError(str(exc)) from exc
-    if target == "lingbot2":
-        try:
-            import_module("examples.runners.lingbot2.runner").validate_legacy_config(config)
         except (TypeError, ValueError) as exc:
             raise ConfigError(str(exc)) from exc
     if ("checkpoint" in inputs and target not in {"wall_oss_rtc", "g05"}

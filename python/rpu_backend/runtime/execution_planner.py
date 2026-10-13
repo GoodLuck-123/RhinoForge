@@ -165,7 +165,7 @@ class PlannerCostScope:
 class PlannerCostCertificate:
     scope: PlannerCostScope
     domain_digest: str
-    # Exact native-candidate digest -> same-session media device time (ns).
+    # Exact native-candidate digest -> same-session median device time (ns).
     candidate_costs: tuple[tuple[str, int], ...]
     receipt_sha256: str
     sealed: bool = False
@@ -569,7 +569,7 @@ def planner_cost_domain(
             (int(length), replace(row, physical_metadata=tuple(
                 (name, value) for name, value in row.physical_metadata
                 if name not in {"execution_generation", "component_generation"}
-            )).identity()), "device-COST-CANDIDATE-V1",
+            )).identity()), "RPU-COST-CANDIDATE-V1",
         )
         for length, rows in domain.items()
         for row in (StageTuple.from_value(item) for item in rows)
@@ -589,7 +589,7 @@ def planner_cost_domain(
         "graph_mode": graph_mode,
         "raw_candidates": raw_keys,
         "candidates": sorted(set(keys.values())),
-    }, "device-COST-DOMAIN-V1")
+    }, "RPU-COST-DOMAIN-V1")
     return digest, keys
 
 
@@ -1160,7 +1160,7 @@ def plan_a6(
             sorted((int(key), str(value)) for key, value in (domain_rejections or {}).items())
         ),
     }
-    domain_digest = _digest(domain_payload, "device-A6-DOMAIN-V1")
+    domain_digest = _digest(domain_payload, "RPU-A6-DOMAIN-V1")
     candidates: list[A6Candidate] = []
     selected: A6Candidate | None = None
     feasible_count = 0
@@ -1296,10 +1296,10 @@ def plan_a6(
         "execution_len": selected.execution_len,
         "selected_stage_identity": selected.stage_tuple.identity(),
     }
-    physical_digest = _digest(physical_payload, "device-PHYS-V1")
+    physical_digest = _digest(physical_payload, "RPU-PHYS-V1")
     plan_digest = _digest(
         {"physical": physical_digest, "request": request.as_dict(), "optimality": optimality},
-        "device-A6P-V1",
+        "RPU-A6P-V1",
     )
     result = A6PlanResult(
         "ACCEPTED", request, selected, tuple(candidates), total_candidate_count, feasible_count,
@@ -1610,7 +1610,7 @@ def plan_prefill(
                 "cost_receipt": cost_certificate.receipt_sha256 if cost_certificate else None,
                 "cost_domain": cost_domain_digest or None,
                 "selection_scope": selection_scope,
-            }, "device-A6P-V1"),
+            }, "RPU-A6P-V1"),
         )
     if calibration_selection is not None:
         if ((result.request.mode != REQUEST_AUTO and not (
@@ -1653,14 +1653,14 @@ def plan_prefill(
             "graph_mode": graph_mode, "queue_owner_id": int(queue_owner_id),
             "lease_owner_id": int(lease_owner_id), "execution_len": candidate.execution_len,
             "selected_stage_identity": candidate.stage_tuple.identity(),
-        }, "device-PHYS-V1")
+        }, "RPU-PHYS-V1")
         result = replace(
             result, selected=candidate, optimality="P7_CALIBRATION_ONLY",
             selection_scope="P7_CALIBRATION_ONLY", cost_certificate=None,
             selected_cost_candidate_digest=calibration_selection.candidate_digest,
             physical_plan_digest=physical_digest,
             plan_digest=_digest({"physical": physical_digest, "request": result.request.as_dict(),
-                                 "selection_scope": "P7_CALIBRATION_ONLY"}, "device-A6P-V1"))
+                                 "selection_scope": "P7_CALIBRATION_ONLY"}, "RPU-A6P-V1"))
     if logger is not None:
         logger({
             "request_id": request_id,
@@ -1688,7 +1688,7 @@ def capability_selected(
                 "optimality": optimality,
                 "selection_scope": selection_scope,
             },
-            "device-A6P-V1",
+            "RPU-A6P-V1",
         ),
     )
 

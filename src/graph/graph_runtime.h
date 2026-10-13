@@ -1640,6 +1640,10 @@ public:
     // and raw allocation addresses are outside the public diagnostic surface.
     std::string dump_replay_plan() const;
     std::string dump_tree() const;
+    std::string dump_resources() const;
+    std::string dump_nodes_jsonl() const;
+    std::string dump_kernel_args_jsonl() const;
+    std::string dump_segments_jsonl() const;
 
     // Op 端通过 active().local_spm_pool() 拿到 graph-managed SPM 池:
     //   RECORDING : pool.acquire_recording(...) 创建 LocalSPM_t 并记 ptr_to_slot_

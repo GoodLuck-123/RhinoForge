@@ -69,6 +69,14 @@ The main and DDR-expansion roles are fixed. [runtime-dependencies.json](../relea
 
 `RPU_KERNEL_LIB_PATH` and `RPU_KERNEL_LIB_PATH_EXPANSION` may point to identical installed copies. Entries reject hash mismatches, swapped roles and conflicting inherited paths. GR00T configurations reject `example.expansion_ref`. Start a new process after replacing either asset.
 
+Update the complete main and expansion assets together with their adjacent
+manifests and the source/size/SHA256 records. A partial build or a locally merged
+payload is not a replacement for either role. New operator implementations
+belong to the operator repository; this repository owns model routing and host
+wrappers. To reproduce an older source, use that release's archived runtime set
+and original checksums together. Do not point the current source at an older
+payload while retaining current dependency metadata.
+
 ## Operator manifest
 
 Keep the `.kernels` file adjacent to its asset. Its first line is

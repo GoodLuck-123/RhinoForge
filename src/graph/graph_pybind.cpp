@@ -258,6 +258,30 @@ void add_bindings(py::module_& m) {
              py::return_value_policy::copy)
         .def("build_topology_hash", &RpuKernelGraph::build_topology_hash)
         .def("built_signature_identity", &RpuKernelGraph::built_signature_identity)
+        .def("dump_kernel_args_jsonl", &RpuKernelGraph::dump_kernel_args_jsonl,
+             "Return Release kernel capacity metadata as JSON lines")
+        .def("dump_resources", &RpuKernelGraph::dump_resources,
+             "Return Graph resource ownership and lifetimes without addresses")
+        .def("dump_nodes_jsonl", &RpuKernelGraph::dump_nodes_jsonl,
+             "Return Graph node topology as JSON lines")
+        .def("dump_segments_jsonl", &RpuKernelGraph::dump_segments_jsonl)
+        .def("debug_segments_jsonl", &RpuKernelGraph::dump_segments_jsonl)
+        .def("debug_nodes", [](const RpuKernelGraph& graph) {
+            py::list result;
+            auto loads = py::module_::import("json").attr("loads");
+            for (const auto& line : py::str(graph.dump_nodes_jsonl()).attr("splitlines")()) {
+                result.append(loads(line));
+            }
+            return result;
+        })
+        .def("debug_segments", [](const RpuKernelGraph& graph) {
+            py::list result;
+            auto loads = py::module_::import("json").attr("loads");
+            for (const auto& line : py::str(graph.dump_segments_jsonl()).attr("splitlines")()) {
+                result.append(loads(line));
+            }
+            return result;
+        })
         .def("dump_replay_plan", &RpuKernelGraph::dump_replay_plan,
              "Return the pointer-free recorded Graph structure")
         .def("dump_tree", &RpuKernelGraph::dump_tree,

@@ -26,6 +26,7 @@
 | 统一 W8：0.8B [Text](text/0_8b/w8a16_text.toml) / [VL](vl/0_8b/w8a16_text.toml)；2B [Text](text/2b/w8a16_text.toml) / [VL](vl/2b/w8a16_text.toml)；4B [Text](text/4b/w8a16_text.toml) / [VL](vl/4b/w8a16_text.toml)；9B [Text](text/9b/w8a16_text.toml) / [VL](vl/9b/w8a16_text.toml) | 全部文本投影，逐输出通道对称 INT8 | [从对应官方浮点包离线转换](#普通dense-w808249b) |
 | 统一 W4/G32：0.8B [Text](text/0_8b/w4a16_text_rtn_g32.toml) / [VL](vl/0_8b/w4a16_text_rtn_g32.toml)；2B [Text](text/2b/w4a16_text_rtn_g32.toml) / [VL](vl/2b/w4a16_text_rtn_g32.toml)；4B [Text](text/4b/w4a16_text_rtn_g32.toml) / [VL](vl/4b/w4a16_text_rtn_g32.toml)；9B [Text](text/9b/w4a16_text_rtn_g32.toml) | 与 W8 范围相同；RTN 对称 INT4，每 32 个输入值一组 | [从对应官方浮点包离线转换](#普通dense-w4g3208249b)；9B 无 W4 VL 模板 |
 | 2B 仅 MLP W4/G32：[Text](text/2b/w4a16_mlp_rtn_g32.toml) | 全部 24 层的 72 个 MLP gate/up/down，包括第 0 层；114 个 Attention/GDN 投影保持 FP16 | [官方 2B 浮点包 → RTN MLP-only](#cmd-mlp-only-g32) |
+| 2B MLP W4/G32 + Attention/GDN W8：[Text](text/2b/w4a16_mlp_rtn_g32_attn_gdn_w8a16.toml) | 同样72个MLP signed RTN W4/G32；24个Full Attention及90个GDN投影（含in_proj_b/a）改为对称逐输出通道W8；其余FP16 | [官方2B浮点包 → 混合W4/W8](#cmd-mlp-w4-attn-gdn-w8) |
 | 2B QuantTrio AWQ/G128：[Text](text/2b/w4a16_mlp_awq_g128.toml) | 第 1 层起的 69 个 MLP 投影为非对称 UINT4/G128；第 0 层 MLP、全部 Attention/GDN 保持 FP16 | [直接下载 QuantTrio AWQ 原包](#cmd-quanttrio-awq) |
 | 4B QuantTrio AWQ/G128：[Text](text/4b/w4a16_mlp_awq_g128.toml) | 同上，量化 93 个 MLP 投影 | [直接下载 QuantTrio AWQ 原包](#cmd-quanttrio-awq) |
 | 9B QuantTrio AWQ/G128：[Text](text/9b/w4a16_mlp_awq_g128.toml) | 同上，量化 93 个 MLP 投影 | [直接下载 QuantTrio AWQ 原包](#cmd-quanttrio-awq) |
@@ -34,22 +35,27 @@
 
 选择量化模板会同时改变 `example.dtype/registry_alias/profile_id`，Dense 量化入口还要求模板中的 `QWEN3_5_QUANT_ALLOW_UNCERTIFIED=1`。这些字段绑定权重格式和加载入口。上述各行是独立配方，比较时以 FP16 看改动；准备时分别从对应源包开始。
 
-Dense 转换器把未量化浮点参数按 BF16→FP16 路径保存。W4 整数在文件中仍用 INT8 容器，安装到设备时才打包，因此磁盘占用不能按 4 bit 直接估算。AWQ 的 FP32 GDN 参数直接转 FP16，不经过 BF16 中转。
+Dense 转换器的 W8/W4 方法和混合配方把量化输入及其余浮点参数从实际存储 dtype 直接转 FP16：FP16 保持原值，FP32 不经 BF16 中间舍入。旧产物保持不变；使用新转换规则时，从原始浮点权重生成到新目录。W4 整数在文件中仍用 INT8 容器，安装到设备时才打包，因此磁盘占用不能按 4 bit 直接估算。AWQ 的 FP32 GDN 参数直接转 FP16，不经过 BF16 中转。
 
 <a id="text-w4-recipes"></a>
 
-#### MLP-only / AWQ 的长输入配置
+#### MLP-only / 混合 W4-W8 / AWQ 的长输入配置
 
-以上四种仅 MLP 配方都使用 B1、TP8 的纯文本入口；短模板与以下长输入模板共用权重。
+以上五种配方都使用 B1、TP8 的纯文本入口；短模板与以下长输入模板共用权重。
 
 | 配方 | P64/D4096 | P4096/D4096 |
 |---|---|---|
 | 2B MLP-only | [配置](text/2b/w4a16_mlp_rtn_g32_p64_d4096.toml) | [配置](text/2b/w4a16_mlp_rtn_g32_p4096_d4096.toml) |
+| 2B MLP W4 + Attention/GDN W8 | [配置](text/2b/w4a16_mlp_rtn_g32_attn_gdn_w8a16_p64_d4096.toml) | [配置](text/2b/w4a16_mlp_rtn_g32_attn_gdn_w8a16_p4096_d4096.toml) |
 | 2B QuantTrio AWQ | [配置](text/2b/w4a16_mlp_awq_g128_p64_d4096.toml) | [配置](text/2b/w4a16_mlp_awq_g128_p4096_d4096.toml) |
 | 4B QuantTrio AWQ | [配置](text/4b/w4a16_mlp_awq_g128_p64_d4096.toml) | [配置](text/4b/w4a16_mlp_awq_g128_p4096_d4096.toml) |
 | 9B QuantTrio AWQ | [配置](text/9b/w4a16_mlp_awq_g128_p64_d4096.toml) | [配置](text/9b/w4a16_mlp_awq_g128_p4096_d4096.toml) |
 
 MLP-only 的 alias 为 `qwen3_5-2b-w4-mlp-only-g32`，profile 为 `qwen3_5-2b.w4-mlp-only-g32.text-controlled`；AWQ 对应 `qwen3_5-{2,4,9}b-quanttrio-awq-g128` 和 `qwen3_5-{2,4,9}b.quanttrio-awq-g128.text-controlled`。加载器按模型尺寸检查逐层范围和分组，格式定义见[量化范围实现](../../../python/rpu_backend/adapters/qwen3_5/quant_scope.py)。
+
+MLP W4 + Attention/GDN W8 使用现有 mixed-v2 `quant_config`：W8 default 加三个 MLP W4/G32 role override。入口 `dtype="w4a16"` 是加载声明，实际逐投影精度由 checkpoint 决定；新 alias 的入口会校验 2B 几何、层类型和每个投影，拒绝 MLP-only、统一 W4/W8 或误标的 checkpoint。
+
+`w4a16_mlp_rtn_g32_attn_gdn_w8a16` 文件名中的 `G32` 仅属于 MLP W4；Attention/GDN W8 每输出通道一个 FP16 scale，没有分组或 zero-point。它仍使用 `--profile w4_mlp_w8_attn_gdn`、alias `qwen3_5-2b-w4-mlp-w8-attn-gdn-g32` 和 profile ID `qwen3_5-2b.w4-mlp-w8-attn-gdn-g32.text-controlled`。
 
 <a id="官方-qwen35-27b"></a>
 
@@ -96,8 +102,8 @@ W2/R3 表示预热 2 次、正式测量 3 次，TP 表示配置的根核数。P 
 | 27B Text `w8a16_text*_p29_d31.toml` | 使用文件中的 29 个 token、D31、关闭 EOS；`_tp4` / `_tp6` 只改核数，`_acc32_text` 只改文本累加 |
 | Dense Text `*_p4096_d4.toml` | 固定 P4096、保留 D4；2B 的 `_chunk640` 额外指定 `prefill.chunk_size=640` |
 | Dense Text `*_p64_d4096`、`*_p4096_d4096` | 固定 token 前缀，以 `prefill_fill_token_id=248046` 补到 P，D4096、关闭 EOS、CPU24。0.8–9B 用 no_grad，正式 R1（0.8B W4 P64 为 R3）；27B 用 inference mode、R5 |
-| MLP-only/AWQ 的 `*_p64_d4096`、`*_p4096_d4096` | 使用完整固定 token 列表，P64 是 P4096 的前缀，不加填充；CPU4、TP8、ACC16、no_grad、W2/R5 |
-| Dense VL `*_p512_d192`、`*_p4096_d4096` | 仓库 `test_frame.png`、`image_size=448`，按 `prefill_filler_prompt` 补文本，关闭 EOS、CPU12。0.8–9B FP16 使用 `legacy_dense_vl`/R3；27B W8 使用 `per_call`/R5 |
+| MLP-only/混合 W4-W8/AWQ 的 `*_p64_d4096`、`*_p4096_d4096` | 使用完整固定 token 列表，P64 是 P4096 的前缀，不加填充；CPU4、TP8、ACC16、no_grad、W2/R5 |
+| Dense VL `*_p512_d192`、`*_p4096_d4096` | 仓库 [`assets/test_frame.png`](../../../assets/test_frame.png)、`image_size=448`，按 `prefill_filler_prompt` 补文本，关闭 EOS、CPU12。0.8–9B FP16 使用 `legacy_dense_vl`/R3；27B W8 使用 `per_call`/R5 |
 | 27B VL `w8a16_text_d4.toml` | 从 D32 改为 D4；省略 `stop_on_eos`，VL 入口仍按 `false` 执行 |
 | 27B VL `w8a16_text_image_mascot_d31.toml`、`w8a16_text_tp4_image_mascot_d31.toml`、`w8a16_text_tp6_image_mascot_d31.toml` | 同一 mascot 图片和提示词、D31，分别使用 8/4/6 根核数；需填写配套 `r1_mascot.jpeg` 路径 |
 | 27B Text 的 `*_acc32_text*.toml`、VL 的 `w4a16_text_rtn_g32_acc32_text_vision.toml` | Text 文件只开启 `prefill.linear_acc32`；VL W4 文件同时开启文本和 Vision ACC32 |
@@ -119,7 +125,7 @@ Dense 与 MoE 的根核数为 6 时，MLP 使用 6 核，Attention/GDN、输出�
 
 <a id="quantization"></a>
 
-下载和离线转换可在 CPU 机器完成，`examples/run.py` 在 设备板卡执行。以下命令从仓库根目录运行，使用已安装项目依赖的 Python 环境。
+下载和离线转换可在 CPU 机器完成，`examples/run.py` 在设备板卡执行。以下命令从仓库根目录运行，使用已安装项目依赖的 Python 环境。
 
 先设置缓存根目录：
 
@@ -155,6 +161,7 @@ ln -s /absolute/path/to/existing-Qwen3.5-2B "$RPU_MODEL_CACHE/Qwen3.5-2B"
 | Dense 27B | BF16 + 少量 FP32 | Qwen 官方 [Qwen/Qwen3.5-27B](https://huggingface.co/Qwen/Qwen3.5-27B) · [精度元数据](https://huggingface.co/api/models/Qwen/Qwen3.5-27B) | `Qwen3.5-27B` |
 | Dense 本仓库 W8/W4 产物 | 文本投影 INT8 容器（值为8bit或4bit）+ FP16 scale；其余 FP16 | 本仓库从对应官方父转换，无可直接替代的同名官方量化下载包 | `qwen3_5_quant_ckpts/qwen3_5-{SIZE}b-w8a16` 或 `-w4a16` |
 | Dense 2B 仅 MLP RTN G32 | INT8 容器保存 signed INT4 值，scale 与其余参数为 FP16 | 本仓库从 Qwen 官方 2B 父离线转换 | `qwen3_5-2b-w4a16-g32-mlp-only` |
+| Dense 2B MLP RTN G32 + Attention/GDN W8 | MLP的INT8容器保存signed INT4值；其余114个投影为INT8；scale和未量化参数FP16 | 本仓库从Qwen官方2B父离线转换，源dtype直接转FP16 | `qwen3_5-2b-w4a16-g32-mlp-w8-attn-gdn` |
 | Dense 2B/4B/9B QuantTrio AWQ G128 | MLP 的 qweight/qzeros 为 I32 packed UINT4，scales FP16；未量化参数按原包浮点 dtype 保存 | **QuantTrio 社区量化** [2B](https://huggingface.co/QuantTrio/Qwen3.5-2B-AWQ) / [4B](https://huggingface.co/QuantTrio/Qwen3.5-4B-AWQ) / [9B](https://huggingface.co/QuantTrio/Qwen3.5-9B-AWQ)，非 Qwen 官方量化发布 | `Qwen3.5-{2,4,9}B-AWQ` |
 | MoE 35B-A3B | BF16 + 少量 FP32 | Qwen 官方 [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) · [精度元数据](https://huggingface.co/api/models/Qwen/Qwen3.5-35B-A3B) | `Qwen3.5-35B-A3B` |
 | MoE RTN W4/G128：本仓库产物 | 路由专家 INT4（I32 packed），FP16 scale；非路由参数保留原 BF16/FP32 | 本仓库 routed-only RTN 转换 | `Qwen3.5-35B-A3B-RTN-W4A16-G128` |
@@ -229,6 +236,29 @@ TORCH_DEVICE_BACKEND_AUTOLOAD=0 python3 python/rpu_backend/quant/convert_qwen3_5
 ```
 
 转换器写入仅 MLP 量化声明；Attention/GDN 保持 FP16，不能使用普通全投影 W4 产物代替。
+
+<a id="cmd-mlp-w4-attn-gdn-w8"></a>
+
+### 2B MLP RTN W4/G32 + Attention/GDN W8
+
+先按[普通 Dense 官方下载](#cmd-dense-fp16)准备2B原始浮点父，再转换到独立缓存目录。`--profile` 固定 MLP G32 和 Attention/GDN 逐输出通道 W8，无需再传 `--method` 或校准数据。保留此 `DST` 名称以匹配 examples alias；不要用已有量化包再次量化。
+
+```bash
+SRC="$RPU_MODEL_CACHE/Qwen3.5-2B"
+DST="$RPU_MODEL_CACHE/qwen3_5-2b-w4a16-g32-mlp-w8-attn-gdn"
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5.py \
+  --src "$SRC" --dst "$DST" --profile w4_mlp_w8_attn_gdn
+```
+
+转换完成后，短模板和两档长输入模板分别运行如下；长模板均为 CPU4、TP8、语言 ACC16，输入 IDs 与对应 MLP-only 模板相同：
+
+```bash
+python examples/run.py --config examples/configs/qwen3_5/text/2b/w4a16_mlp_rtn_g32_attn_gdn_w8a16.toml
+python examples/run.py --config examples/configs/qwen3_5/text/2b/w4a16_mlp_rtn_g32_attn_gdn_w8a16_p64_d4096.toml
+python examples/run.py --config examples/configs/qwen3_5/text/2b/w4a16_mlp_rtn_g32_attn_gdn_w8a16_p4096_d4096.toml
+```
+
+加 `--check-config` 可在主机上检查模板而不启动模型；实际运行还会检查 checkpoint 配方。
 
 <a id="cmd-quanttrio-awq"></a>
 

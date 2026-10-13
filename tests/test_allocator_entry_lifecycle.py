@@ -18,7 +18,10 @@ def test_qwen35_quantized_9b_text_claims_caching_before_weight_upload(
     from rpu_backend.adapters.qwen3_5 import cores
 
     model = _Model()
-    model.config = SimpleNamespace(quant_config={"format": precision})
+    quant = {"method": precision}
+    if precision == "w4a16_pgrp":
+        quant["group_size"] = 32
+    model.config = SimpleNamespace(quant_config=quant)
     model._rpu_execution = {}
     model.forward = original_forward = object()
     adapter = object.__new__(qwen3_5.Qwen3_5Adapter)
@@ -68,7 +71,7 @@ def test_qwen35_9b_allocator_failure_is_cold_and_releases_owner(
     from rpu_backend.adapters.qwen3_5 import cores
 
     model = _Model()
-    model.config = SimpleNamespace(quant_config={"format": "w8a16"} if quantized else None)
+    model.config = SimpleNamespace(quant_config={"method": "w8a16"} if quantized else None)
     model._rpu_execution = {}
     model.forward = original_forward = object()
     adapter = object.__new__(qwen3_5.Qwen3_5Adapter)
@@ -118,7 +121,8 @@ def test_qwen35_9b_allocator_failure_is_cold_and_releases_owner(
 
     expected = ["claim"]
     if failure != "claim":
-        expected.append(("allocator", True))
+        if not quantized:
+            expected.append(("allocator", True))
         if failure == "arenas":
             expected.append("arenas")
         expected.append("release")

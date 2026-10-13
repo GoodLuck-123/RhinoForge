@@ -321,8 +321,6 @@ def load_qwen3_5_moe_model(
     **hf_kwargs,
 ):
     """Load an admitted 35B-A3B checkpoint onto a CPU skeleton."""
-    if hf_kwargs.get("trust_remote_code", False) is not False:
-        raise ValueError("RhinoForge requires trust_remote_code=False")
     if dtype is not torch.float16:
         raise RPUUnsupportedDtypeError(
             f"Qwen3.5-MoE requires dtype=torch.float16, got {dtype}."
@@ -360,7 +358,7 @@ def load_qwen3_5_moe_model(
     layer_types = _layer_types(config)
     expected = set(expected_fp8_weight_names(layer_types))
     with torch.device("meta"):
-        model = AutoModelForImageTextToText.from_config(config, trust_remote_code=False)
+        model = AutoModelForImageTextToText.from_config(config)
     # from_config only derives defaults from the model/text config. The exact
     # checkpoint adds <|im_end|> to the EOS set in this sidecar; preserve it for
     # both public generation and callers performing their own greedy loop.
