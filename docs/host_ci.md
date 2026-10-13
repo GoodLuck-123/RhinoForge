@@ -6,9 +6,9 @@ Runner and tag; this job does not access a device.
 
 ## Dependency image
 
-The Docker executor uses `rhino-host-ci:py312-20260913`, built from the recipe
-in [`scripts/ci/host-image`](../scripts/ci/host-image). It provides Python 3.12,
-CPU PyTorch 2.10.0, and the pinned host-test dependencies. The existing Pi0.5
+Build the Docker image from
+[`scripts/ci/host-image`](../scripts/ci/host-image). It provides Python 3.12,
+CPU PyTorch 2.10.0, CMake 4.1.3, Ninja 1.13.0 and the pinned host-test dependencies. The Pi0.5
 host tests require LeRobot 0.5.1 and its actual import dependencies; robot and
 training extras and model assets are not installed. Keep these pins aligned
 with the `vla` optional dependencies in [pyproject.toml](../pyproject.toml).
@@ -16,7 +16,7 @@ with the `vla` optional dependencies in [pyproject.toml](../pyproject.toml).
 Build the image on the Runner host before enabling a new image version:
 
 ```sh
-docker build -t rhino-host-ci:py312-20260913 scripts/ci/host-image
+docker build -t rhinoforge-host-ci:py312 scripts/ci/host-image
 ```
 
 The image supplies `RPU_HOST_PYTHON=/usr/local/bin/python` and

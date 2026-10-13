@@ -9,6 +9,7 @@ RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/
 
 ENV RPU_HOST_PYTHON=/usr/local/bin/python \
     RPU_HOST_SITE_PACKAGES=/usr/local/lib/python3.12/site-packages \
+    CMAKE_GENERATOR=Ninja \
     TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONNOUSERSITE=1 \
