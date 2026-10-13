@@ -78,6 +78,26 @@ def test_rejects_runtime_with_different_stage(source):
     assert failed.returncode != 0
 
 
+def test_existing_build_reconfigures_after_version_or_lock_changes(source):
+    set_version(source, "1.2.0rc1")
+    (source / "CMakeLists.txt").write_text(
+        'cmake_minimum_required(VERSION 3.19)\n'
+        'include(release/version.cmake)\n'
+        'project(VersionCheck VERSION ${RHINOFORGE_CMAKE_VERSION} LANGUAGES NONE)\n'
+        'file(WRITE "${CMAKE_BINARY_DIR}/version.txt" "${RHINOFORGE_VERSION}")\n')
+    build = source / "build"
+    subprocess.run(["cmake", "-S", str(source), "-B", str(build)], check=True)
+    set_version(source, "1.2.0rc2")
+    subprocess.run(["cmake", "--build", str(build)], check=True)
+    assert (build / "version.txt").read_text() == "1.2.0rc2"
+    path = source / "release/runtime-dependencies.json"
+    dependencies = json.loads(path.read_text())
+    dependencies["launch_kernel"]["release_version"] = "1.2.0"
+    path.write_text(json.dumps(dependencies))
+    failed = subprocess.run(["cmake", "--build", str(build)], capture_output=True)
+    assert failed.returncode != 0
+
+
 def test_source_and_installed_package_resolve_their_own_version(tmp_path):
     source_version = subprocess.check_output(
         [sys.executable, "-c", "import runpy; print(runpy.run_path('python/rpu_backend/_version.py')['DISTRIBUTION_VERSION'])"],
