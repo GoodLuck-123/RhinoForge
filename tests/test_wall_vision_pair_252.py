@@ -107,12 +107,13 @@ def test_public_forward_uses_pair_and_keeps_debug_off_and_other_shapes(monkeypat
     assert calls == expected
     assert torch.equal(result, pixels.reshape(-1, 4, 1).sum(1))
     assert owner._pending_rev is None and owner._last_forward_plans == []
-    for off, debug in [(False, True), (True, False)]:
+    for off, debug in [(False, False), (False, True), (True, False), (True, True)]:
         calls.clear(); owner._pair_252 = not off
         monkeypatch.setattr(torch.rpu, "get_debug_export", lambda: debug)
         h["forward"](owner, pixels, grid)
-        assert [x[0] for x in calls[1:]] == ([1] * cameras if off else [2] + ([1] if cameras == 3 else []))
+        assert [x[0] for x in calls[1:]] == ([1] * cameras if off or debug else [2] + ([1] if cameras == 3 else []))
     owner._pair_252 = True
+    monkeypatch.setattr(torch.rpu, "get_debug_export", lambda: False)
     calls.clear()
     h["forward"](owner, torch.arange(768).reshape(-1, 1).float(), torch.tensor([[1,16,16]]*3))
     assert calls[1][0] == 3

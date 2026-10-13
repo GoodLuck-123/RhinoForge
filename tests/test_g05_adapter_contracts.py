@@ -1583,6 +1583,8 @@ def test_g05_vlm_runtime_ready_requires_live_graphs_owner_and_bound_hooks(reques
         prefill_graph=object(),
         prefill_graph_cache=object(),
         prefill_graph_sig=None,
+        prefill_debug_graph_cache=None,
+        prefill_debug_graph_sig=None,
         prefill_rope_cache=None,
         max_seq_len=2048,
         num_layers=24,

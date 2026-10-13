@@ -227,3 +227,29 @@ def test_generic_loaders_reject_custom_model_code(loader: str, value) -> None:
         model_loader.from_pretrained(
             "unused/checkpoint", trust_remote_code=value
         )
+
+
+def test_controlled_config_check_does_not_apply_environment(monkeypatch):
+    from examples.common.cli import main
+
+    variable = "RPU_RHINOVLA_EXPERT_W8A16"
+    monkeypatch.setenv(variable, "0")
+    config = ROOT / "examples/configs/rhinovla/v3/controlled/w8a16_action.toml"
+    assert main(["--config", str(config), "--check-config"]) == 0
+    assert os.environ[variable] == "0"
+
+
+@pytest.mark.parametrize("section, extra", [
+    ("env", 'LD_PRELOAD = "unexpected"'),
+    ("rpu_execution.action", "unknown_option = true"),
+])
+def test_controlled_config_check_rejects_unknown_options(tmp_path, section, extra):
+    from examples.common.cli import main
+
+    config = ROOT / "examples/configs/rhinovla/v3/controlled/fp16.toml"
+    candidate = tmp_path / "invalid.toml"
+    contents = config.read_text().replace(f"[{section}]", f"[{section}]\n{extra}")
+    candidate.write_text(contents)
+    with pytest.raises(SystemExit) as error:
+        main(["--config", str(candidate), "--check-config"])
+    assert error.value.code == 2

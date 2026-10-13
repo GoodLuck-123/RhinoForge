@@ -111,3 +111,72 @@ def test_hyvit2_packed_mask_stays_host_side_until_sdpa_preparation() -> None:
     assert "device(at::kPrivateUse1)" not in normalization
     assert ".to(at::kPrivateUse1)" not in normalization
     assert "m = m.contiguous();" in normalization
+
+
+def test_shared_mask_cache_reuses_and_refreshes_actual_tensor_versions(tmp_path):
+    """Execute the base mask cache used by HALO with CPU publication doubles."""
+    import torch
+    from test_siglip_attention_dry_live_contract import _run_native
+
+    source = (ROOT / "src/fused/rpu_qwen3_model.h").read_text()
+    dynamic = _block(source, "ModelDynamicConfig dynamic_config(const ChunkPlan& plan) override")
+    mask = _block(dynamic, "if (ctx().attention_mask.has_value())")
+    program = r'''
+#include <ATen/ATen.h>
+#include <c10/core/InferenceMode.h>
+#include <cassert>
+#include <optional>
+struct PreparedMask { at::Tensor tensor; };
+struct Cache { int uploads=0; bool mutate=false; };
+PreparedMask sdpa_prepare_mask(const std::optional<at::Tensor>& input, bool,
+                              int64_t, int64_t, Cache& cache) {
+    ++cache.uploads;
+    auto copy=input->clone();
+    if(cache.mutate) { cache.mutate=false; input->add_(1); }
+    return {copy};
+}
+struct Model {
+    struct Context { std::optional<at::Tensor> attention_mask; int64_t seq_len=2,position=2; } context;
+    struct Plan { int num_chunks=1; } plan;
+    bool planning_domain_query_=false;
+    at::Tensor last_attn_mask_ref_;
+    int64_t last_attn_mask_version_=-1,last_attn_seq_q_=-1,last_attn_seq_k_=-1;
+    PreparedMask prepared_attn_mask_;
+    Cache cache;
+    Context& ctx() { return context; }
+    Cache& sdpa_stable_mask_cache() { return cache; }
+    int run() { int cfg=0; __MASK__; return cfg; }
+};
+int main() {
+    for(bool inference:{false,true}) {
+        c10::InferenceMode guard(inference);
+        Model m;
+        auto input=at::zeros({2,4},at::kFloat);
+        m.context.attention_mask=input;
+        m.run(); assert(m.cache.uploads==1);
+        auto old=m.prepared_attn_mask_.tensor;
+        m.run(); assert(m.cache.uploads==(inference?2:1));
+        assert(m.prepared_attn_mask_.tensor.equal(input));
+        input.add_(3);
+        int before=m.cache.uploads;
+        m.run(); assert(m.cache.uploads==before+1);
+        assert(m.prepared_attn_mask_.tensor.equal(input));
+        assert(old.sum().item<float>()==0);
+        // An equal replacement has a distinct identity and cannot reuse a stamp.
+        m.context.attention_mask=input.clone(); before=m.cache.uploads;
+        m.run(); assert(m.cache.uploads==before+1);
+        ++m.context.position; before=m.cache.uploads;
+        m.run(); assert(m.cache.uploads==before+1);
+    }
+    // A failed publication cannot leave a reusable identity/version receipt.
+    Model m; auto input=at::zeros({2,4},at::kFloat);
+    m.context.attention_mask=input; m.run(); input.add_(1); m.cache.mutate=true;
+    bool rejected=false; try { m.run(); } catch(const c10::Error&) { rejected=true; }
+    assert(rejected&&!m.last_attn_mask_ref_.defined());
+    assert(m.last_attn_mask_version_==-1);
+    int before=m.cache.uploads; m.run(); assert(m.cache.uploads==before+1);
+    assert(m.prepared_attn_mask_.tensor.equal(input));
+    before=m.cache.uploads; m.run(); assert(m.cache.uploads==before);
+}
+'''.replace("__MASK__", mask)
+    _run_native(tmp_path, program, torch)

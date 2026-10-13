@@ -62,9 +62,15 @@ def main(argv=None, *, keep_logging_until_exit=False, default_config=None,
                 raise ConfigError("--model is currently supported only by Qwen3.5 MoE text/image profiles")
             config["_model_override"] = str(args.model.expanduser().resolve())
         if "env" in config:
+            if args.check_config:
+                from examples.common.logging import configuration_checked
+
+                configuration_checked(
+                    f"configuration OK: {args.config} (RhinoVLA v3 runtime fragment; syntax only)")
+                return 0
             raise ConfigError(
-                "Standalone runtime fragments are not example configurations; "
-                "use a RhinoVLA v3 factory template")
+                "Run this RhinoVLA v3 configuration with "
+                "scripts/validate_rhinovla_v3.py run")
         if "wall_oss" not in config and "wall_oss_sorting" not in config:
             for flag in ("hwperf", "profile"):
                 config["run"][flag] = bool(getattr(args, flag) or config["run"].get(flag, False))

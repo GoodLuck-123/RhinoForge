@@ -323,9 +323,14 @@ def test_text_prefill_decode_graphs_keep_the_owner_policy(
     assert state.prefill_graph_cache.runtime_policy is state.graph_cache.runtime_policy
     assert graph_factories[-1][1]["max_entries"] == 1
 
-    # Public builds retain inference caches without activation-export graphs.
-    assert not hasattr(text, "_qwen35_debug_prefill_cache")
-    assert len(graph_factories) == 3
+    # Graphs created for logical Tensor inspection retain the installed policy.
+    monkeypatch.setenv("RPU_FASTREPLAY_SKIP_SYNC", "1")
+    debug = text._qwen35_debug_prefill_cache(state)
+    assert debug.runtime_policy.execution_core_count == cores
+    assert debug.runtime_policy is state.graph_cache.runtime_policy
+    assert debug.runtime_policy.fast_replay_skip_sync is installed_skip_sync
+    assert text._qwen35_debug_prefill_cache(state) is debug
+    assert len(graph_factories) == 4
 
 
 @pytest.mark.parametrize("cores, policy_cores", [(4, 8), (6, 4), (8, 6)])
@@ -582,7 +587,8 @@ def test_9b_text_and_lazy_vision_keep_one_frozen_arena_plan(
     state.vision_arena_admitted = True
     assert state.graph_cache.runtime_policy is state.prefill_graph.runtime_policy is policy
     assert graph_factories[0][1]["max_entries"] == 1
-    assert not hasattr(text, "_qwen35_debug_prefill_cache")
+    with pytest.raises(ValueError, match="retained debug prefill"):
+        text._qwen35_debug_prefill_cache(state)
 
     vision, visual, events = vision_install_boundary
     visual.config = _config(9).vision_config

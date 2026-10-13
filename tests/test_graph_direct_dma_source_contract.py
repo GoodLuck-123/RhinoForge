@@ -28,6 +28,7 @@ RAW_QUEUE_TYPE = r"(?:(?:::)?(?:[A-Za-z_]\w*::)*)Queue_t"
 RAW_QUEUE_CACHE_TYPE = r"(?:(?:::)?(?:[A-Za-z_]\w*::)*)QueueCache"
 
 QUEUE_CACHE_GET_OWNERS = (
+    ("src/graph/graph_runtime_execute.cpp", "RpuKernelGraph::execute_graph_oneshot"),
     ("src/ops/rpu_memcpy.cpp", "rpu_launch_ddr_broadcast_spm_dma_mutable"),
     ("src/ops/rpu_memcpy.cpp", "rpu_launch_ddr_scatter_spm_dma_mutable"),
     ("src/ops/rpu_memcpy.cpp", "rpu_launch_spm_scatter_ddr_dma_mutable"),
@@ -407,7 +408,7 @@ def test_raw_queue_and_sdk_dma_surface_is_allowlisted() -> None:
         rf"(?<![A-Za-z0-9_])"
         rf"(?:(?:::)?(?:[A-Za-z_]\w*::)*)make_unique\s*<\s*"
         rf"{RAW_QUEUE_TYPE}\s*>\s*[\(\{{]",
-    ) == Counter({"src/graph/graph_runtime_execute.cpp": 4})
+    ) == Counter({"src/graph/graph_runtime_execute.cpp": 3})
     # Freeze direct temporary/heap type-initializers and named stack objects
     # separately.  The direct form intentionally sees the one allowed `new`
     # construction; any additional `Queue_t(...)` / `Queue_t{...}` temporary
@@ -469,6 +470,7 @@ def test_raw_queue_and_sdk_dma_surface_is_allowlisted() -> None:
             "src/core/rpu_backend.cpp": 1,
             "src/core/rpu_kernel_cache.h": 1,
             "src/ops/rpu_memcpy.cpp": 14,  # one new get plus failure-only clear
+            "src/graph/graph_runtime_execute.cpp": 2,  # one-shot get and failure eviction
         }
     )
     # Freeze the singleton expression itself, not only `.get` / `.clear`, so
@@ -484,11 +486,22 @@ def test_raw_queue_and_sdk_dma_surface_is_allowlisted() -> None:
         {
             "src/core/rpu_kernel_cache.h": 1,
             "src/ops/rpu_memcpy.cpp": 13,
+            "src/graph/graph_runtime_execute.cpp": 1,
         }
     )
     assert _count_by_file(
         sources, queue_cache_instance + r"\s*\.clear\s*\("
     ) == Counter({"src/core/rpu_backend.cpp": 1, "src/ops/rpu_memcpy.cpp": 1})
+
+    queue_cache_evict = queue_cache_instance + r"\s*\.evict\s*\("
+    assert _count_by_file(sources, queue_cache_evict) == Counter({
+        "src/graph/graph_runtime_execute.cpp": 1,
+    })
+    _, begin, end = _function_span(
+        sources["src/graph/graph_runtime_execute.cpp"],
+        "RpuKernelGraph::execute_graph_oneshot")
+    assert len(re.findall(queue_cache_evict,
+                          sources["src/graph/graph_runtime_execute.cpp"][begin:end])) == 1
 
     queue_get_spans: dict[str, list[tuple[str, int, int]]] = {}
     for path, function in QUEUE_CACHE_GET_OWNERS:
