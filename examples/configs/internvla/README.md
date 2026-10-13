@@ -40,6 +40,8 @@ python examples/run.py --config /tmp/internvla.toml
 
 fixture 与 manifest 必须来自同一次资产准备；入口核对权重身份、词表、位置和组件形状。Vision grid 为 `[[1,28,28]]`，对应 784 patches 和 196 image tokens。模板为 System2 prefill 启用最多 64 行自动补齐，逻辑输入和输出长度不变。
 
+System2 逻辑长度为 1904 时，自动 chunk 使用 176；省略 padding 设置时补到 1936。其他长度默认由共享 planner 在 64 行预算内选择补齐。显式整数 `chunk_size`、`padding_rows` 和自动补齐预算仍按配置传入 planner。
+
 | 字段 | 设置 |
 |---|---|
 | `input.sample_num/seed` | `sample_num=4`，seed 默认 1 |

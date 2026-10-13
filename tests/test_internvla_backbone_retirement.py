@@ -51,11 +51,13 @@ def actual(native):
 
 
 @pytest.mark.parametrize("length,stage,expected", [
-    (260, {"chunk_size": "auto"}, (260, None, 0, 0)),
-    (289, {"chunk_size": "auto"}, (289, None, 0, 0)),
+    (260, {"chunk_size": "auto"}, (272, None, "auto", 64)),
+    (289, {"chunk_size": "auto"}, (304, None, "auto", 64)),
     (289, {"chunk_size": "auto", "padding_rows": 0}, (289, None, 0, 0)),
-    (1904, {"chunk_size": "auto"}, (1904, None, 0, 0)),
+    (1904, {"chunk_size": "auto"}, (1936, 176, 32, 0)),
     (1904, {"chunk_size": 160, "padding_rows": 0}, (1904, 160, 0, 0)),
+    (1904, {"chunk_size": 160, "padding_rows": "auto", "padding_budget": 16},
+     (1920, 160, "auto", 16)),
     (260, {"chunk_size": "auto", "padding_rows": "auto", "padding_budget": 32},
      (272, None, "auto", 32)),
 ])
