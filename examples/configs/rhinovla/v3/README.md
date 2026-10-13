@@ -2,17 +2,17 @@
 
 # RhinoVLA v3 配置
 
-v3 使用客户交付的 96D 模型，通过 factory 创建 Vision、语言模型和动作专家组成的流水线。五份配置从 FP16 开始，依次扩大量化范围，最后一档再调整非线性精度和 Q/K 归一化。
+v3 使用公开的 96D 模型，通过 factory 创建 Vision、语言模型和动作专家组成的流水线。五份配置从 FP16 开始，依次扩大量化范围，最后一档再调整非线性精度和 Q/K 归一化。
 
 [模型入口](../README.md) · [准备与运行](#quantization) · <a id="weight-recipes"></a>
 
 ## 配置说明
 
-五份配置的 `input.checkpoint` 均填写同一份配对的客户 v3 原始浮点权重。W8 在模型加载时完成，不需要预先生成五份量化目录。W8A16 表示逐输出通道 INT8 权重、FP16 scale 和 FP16 激活。
+五份配置的 `input.checkpoint` 均填写同一份公开 v3 原始浮点权重。W8 在模型加载时完成，不需要预先生成五份量化目录。W8A16 表示逐输出通道 INT8 权重、FP16 scale 和 FP16 激活。
 
 | 配置 | 相对前一档的主要变化 | 权重准备 |
 |---|---|---|
-| [FP16](fp16.toml) | 浮点基准，已启用缓存、融合和 Graph replay | [同一套客户 v3 原始权重](#quantization)，加载为 FP16 |
+| [FP16](fp16.toml) | 浮点基准，已启用缓存、融合和 Graph replay | [同一套 v3 原始权重](#quantization)，加载为 FP16 |
 | [专家 W8](w8a16_action.toml) | 动作专家每层 Q/K/V/O、Gate/Up/Down 七类投影改为 W8 | [复用原始权重](#quantization)，加载时量化 |
 | [完整专家 W8](w8a16_action_adarms.toml) | 增加 18 组 AdaRMS 条件投影 W8 | [复用原始权重](#quantization)，加载时转换并生成表 |
 | [全流水线 W8](w8a16_pipeline.toml) | 增加 Vision、Text、动作 IO、最终 AdaRMS 的 W8；同时调整缓存、padding 和 CPU 设置 | [复用原始权重](#quantization)，加载时量化 |
@@ -38,7 +38,7 @@ FP16 模板已经开启下列优化，后续四档沿用：
 
 本页表格中的大写开关均带 `RPU_RHINOVLA_` 前缀，写在 `[example.opt_in]`；小写字段位于对应的 `rpu_execution.components` 表。全部模板关闭 `PACKED_QKV` 和 `SKIP_ADARMS_GEMV`。
 
-FP16 描述运行时的主要权重与激活精度。AdaRMS 条件投影在加载时用浮点计算生成表，表以 FP16 存储；这些预计算不计入每次推理耗时。
+FP16 描述运行时的主要权重与激活精度。AdaRMS 条件投影在加载时用浮点计算生成表，表以 FP16 存储。
 
 ### 专家 W8：量化七类主干投影
 
@@ -117,36 +117,44 @@ vector Q/K 调整的是动作专家的归一化执行方式，后续 RoPE、atte
 
 ## 准备与运行
 
-### 配套资产
+### 固定源码与 checkpoint
 
-v3 的 checkpoint、源码和 factory 由客户交付。原始存储 dtype、交付版本及校验和按实际资产记录；公开 v1 的 72D checkpoint 对应另一模型。
+使用 [HUIXI-AI/RhinoVLA-v3](https://github.com/HUIXI-AI/RhinoVLA-v3) 提交 `e60650377dca38a78bcd4a2e2d58f9e6a631a275`，checkpoint 为同仓库 Git LFS 文件 `models/rhinovla_v3/steps_150000/model.pt`，SHA-256 为 `2303f9e44cc5847a9990a617cf56c30dfb0ca05f38b6f08b152bf95e67e2f70f`。
 
-| 资产 | 填写位置 | 要求 |
-|---|---|---|
-| v3 原始浮点 checkpoint | `input.checkpoint` | 五份配置共用，路径指向 factory 接受的文件或目录 |
-| 模型源码与构造函数 | `input.runtime_factory` | 使用可导入的 `module:callable`，创建与配置匹配的 `RhinoVLAOnRPU` |
-| factory JSON | `input.factory_config` | 配套模型结构和输入设置；同名量化字段须与 TOML 的布尔值一致 |
-| 请求文件 | `input.request` | 配套的状态、噪声和掩码等请求参数，供 `policy.predict(**request)` 使用 |
-| 输出目录 | `run.output_dir` | 保存本次运行结果 |
+```bash
+RHINOVLA_V3_SRC=/path/to/RhinoVLA-v3
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/HUIXI-AI/RhinoVLA-v3.git "$RHINOVLA_V3_SRC"
+git -C "$RHINOVLA_V3_SRC" checkout e60650377dca38a78bcd4a2e2d58f9e6a631a275
+git -C "$RHINOVLA_V3_SRC" lfs pull
+RHINOVLA_V3_CKPT="$RHINOVLA_V3_SRC/models/rhinovla_v3/steps_150000/model.pt"
+python scripts/validate_rhinovla_v3.py prepare \
+  --source "$RHINOVLA_V3_SRC" --checkpoint "$RHINOVLA_V3_CKPT" \
+  --fixture /tmp/rhinovla_v3_inputs.pt --example-dir /tmp/rhinovla_v3_example
+```
 
-factory 接收 runner 传入的 `checkpoint`、`steps`、量化选择和组件配置。安装时同时绑定权重、缓存与算子路径，修改这些选择后使用新进程。缓存复用时仍需刷新图像、状态及噪声等本次输入。
+准备命令在 CPU 上使用同版本 processor 和 `datasets/example_lerobot_v3/videos/` 的三个相机视频生成输入，state/noise 使用固定种子。输出 fixture 供[独立运行配置](controlled/README.md)使用，`--example-dir` 另生成统一入口所需的 `qin.pt`、`request.pt` 和 `factory.json`。
 
 <a id="fp16-loading"></a>
 <a id="使用"></a>
 
-### 运行
+### 统一入口
 
-在已安装后端和模型依赖的环境中，从仓库根目录执行。以下以 FP16 为例；运行其他档位时，只需在复制步骤选择上表对应的完整 TOML，再填写同一套配对资产。
+内置 `rpu_backend.adapters.rhinovla.factory:v3_runtime_factory` 加载固定源码与 checkpoint，并按所选 TOML 安装运行配置；W8 在加载时转换。
 
 ```bash
 cp examples/configs/rhinovla/v3/fp16.toml /tmp/rhinovla_v3.toml
-# 填写 input.checkpoint、runtime_factory、factory_config、request 和 run.output_dir。
+# input.checkpoint = RHINOVLA_V3_CKPT 的实际路径。
+# input.factory_config = /tmp/rhinovla_v3_example/factory.json
+# input.request = /tmp/rhinovla_v3_example/request.pt
+# run.output_dir = 本次结果目录。
 vi /tmp/rhinovla_v3.toml
 python examples/run.py --config /tmp/rhinovla_v3.toml --check-config
 python examples/run.py --config /tmp/rhinovla_v3.toml
 ```
 
-`--check-config` 检查配置结构，最后一行在设备上加载和推理。W8 转换发生在加载阶段，结果保存在进程内；`trust_model_code=true` 允许执行所填写的 factory。
+其他档位替换复制的 TOML，继续使用同一套原始权重与输入。`factory.json` 的 `model_root` 指向源码，`qin` 指向保存的 CPU 输入；`request.pt` 包含状态、噪声和掩码。`trust_model_code=true` 允许执行固定模型源码。已有自定义集成仍可填写自己的 `module:callable` 和配对文件。
+
+factory 接收 checkpoint、steps、量化选择和组件配置。修改安装参数后使用新进程；缓存复用时仍需刷新图像、状态及噪声。
 
 <a id="parameters"></a>
 

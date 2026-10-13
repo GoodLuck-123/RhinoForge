@@ -42,7 +42,7 @@ RhinoForge 提供少量面向用户的设置，以及数量更多的精确模型
 
 统一入口为 `examples/run.py --config PATH`。配置结构、模型目录与输入要求见[模型示例](../examples/README.md)。通用模型使用 `[example]/[input]/[run]`，专用策略配置使用对应模板的模型表。`example.opt_in` 在导入 Torch 前绑定配置允许的控制；继承环境冲突会被拒绝。`[cpu].threads` 在首次 Torch 导入前生效，线程别名必须取值一致。
 
-运行时资产通过 `RPU_KERNEL_LIB_PATH` 与 `RPU_KERNEL_LIB_PATH_EXPANSION` 分别指定主库与扩展库。资产路径、凭据和本机信息只放在部署环境中。`rpu_execution` 用于冷态模型与组件配置；改变后应关闭当前模型并使用新进程。
+运行时资产通过 `RPU_KERNEL_LIB_PATH` 与 `RPU_KERNEL_LIB_PATH_EXPANSION` 分别指定主库与扩展库。资产路径、凭据和本机信息只放在部署环境中。`rpu_execution` 管理模型与组件配置。冷态设置需新模型/进程；支持热修改的 stage 在请求之间通过[执行 API](api_reference.zh.md#执行配置与运行中重配)更新。
 
 ## Host 执行设置
 
@@ -72,12 +72,16 @@ tensor 对象当作内容未变的证明。
 
 Qwen3、Qwen3-VL、Qwen3.5 和 Pi0.5 接受冷态 `model.num_cores` 与分组件
 `linear_acc32`。核数是整数 `4/6/8`，实际准入仍由 checkpoint、量化与输入 profile
-收窄；Pi 优化 profile 和量化 Qwen 配置保持八核约束。`linear_acc32` 只接受布尔值，
+收窄；Pi 优化配置使用八核，通用 Pi 缩核配置与量化 Qwen 配置按各自明确准入的范围选择。`linear_acc32` 只接受布尔值，
 `false`（默认）选择 ACC16，`true` 选择 ACC32。Qwen3、Qwen3.5 文本入口在 `prefill`
 设置，图文入口还可在 `vision` 设置，Pi 分别在 `prefill/vision/action` 设置。
 Qwen3-VL 另接受冷态布尔值 `prefill.fast_replay`，不接受 `vision.fast_replay`
 或独立 `decode` 表。普通 FP16 和量化 API 入口省略时默认 `false`；适用的 FP16
 和量化示例模板显式设为 `true`。专用 profile 策略及原生 owner/Graph 检查仍具最终决定权。配置在安装权重前绑定；改变后应关闭模型、重新加载。
+
+`model.num_cores` 省略时为八核。获准使用缩核的 dense Qwen3、Qwen3-VL、Qwen3.5 配置，四核档的 attention/MLP/head 均使用四核；六核档的 attention/head 使用四核、MLP 使用六核，图像塔使用四核。通过模型的 cache factory 创建缓存，以匹配已选拓扑。具体模型大小与量化变体见[配置指南](../examples/configs/CONFIGURATIONS.md)。
+
+模型开关放在对应配置或启动进程中。显式环境值优先于 adapter 的 `setdefault`；示例 runner 在导入 adapter 前应用所选配置。日志、分配器及 Launch 初始化设置须在导入 backend 前准备。使用模板的 opt-in 与默认值，避免把模型优化开关导出到所有进程。
 
 ## 通用和 cache 设置
 

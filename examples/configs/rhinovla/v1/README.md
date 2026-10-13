@@ -1,56 +1,51 @@
-# RhinoVLA v1 官方 FP16
-[官方模板](official_fp16.toml) · [旧 caller-factory 配置](fp16.toml)
+# RhinoVLA v1
 
-官方非 RTC 路径，固定 a3 源码和 checkpoint；2图、P171、H30、十步去噪，动作完整72D/有效64D。与 [v3 factory](../v3/README.md)使用不同权重和输入。
+[官方 FP16](official_fp16.toml) · [caller-factory 配置](fp16.toml) · [v3](../v3/README.md)
+
+官方入口使用两图、P171、H30 和十步非 RTC 去噪；动作完整维度为 72，有效维度为 64。权重在设备上以 FP16 运行。
 
 <a id="weights"></a>
 <a id="weight-sources"></a>
-## 官方来源与原始存储精度
+<a id="weight-recipes"></a>
+<a id="quantization"></a>
+## 准备权重与输入
 
-| 资产 | 官方下载 / 源码 | 原始存储精度与版本 |
-|---|---|---|
-| `rhinovla_pretrain.ckpt` | [HuixiAI/RhinoVLA](https://huggingface.co/HuixiAI/RhinoVLA) | 固定 revision `7f3708650e302f395e7c63607b48b56fb96b8076`；HF 元数据未列 `.ckpt` 各张量 dtype，**原始存储类型待确认**。本页 FP16 是运行精度 |
-| 配套源码 | [HUIXI-AI/RhinoVLA](https://github.com/HUIXI-AI/RhinoVLA) | 必须匹配 `a3edf0c1addf4bf849192642bff3ad15559db3f4`；数据 parquet/fixture 也须按准备脚本配对 |
+| 资产 | 公开来源与固定版本 |
+|---|---|
+| 源码 | [HUIXI-AI/RhinoVLA](https://github.com/HUIXI-AI/RhinoVLA)，`a3edf0c1addf4bf849192642bff3ad15559db3f4` |
+| checkpoint | [HuixiAI/RhinoVLA](https://huggingface.co/HuixiAI/RhinoVLA)，revision `7f3708650e302f395e7c63607b48b56fb96b8076` |
+| 输入图像 | [lerobot/libero_10_image](https://huggingface.co/datasets/lerobot/libero_10_image)，revision `7e324b526699f444044952c82ce3f438e8d300d0`，episode/frame/task 均为 0 |
 
-官方下载与源码准备如下；已有相同版本时不需重新下载。这里不生成量化权重：
+在安装模型源码所需 CPU 依赖和 `pyarrow` 的环境中执行。准备工具核对源码提交、干净状态、checkpoint 与 parquet 的 SHA-256，使用官方 processor 生成输入。
 
 ```bash
 export RPU_MODEL_CACHE=/path/to/model-cache
 RHINO_ROOT="$RPU_MODEL_CACHE/rhinovla-controlled"
 git clone https://github.com/HUIXI-AI/RhinoVLA.git "$RHINO_ROOT/source"
 git -C "$RHINO_ROOT/source" checkout a3edf0c1addf4bf849192642bff3ad15559db3f4
-hf download HuixiAI/RhinoVLA rhinovla_pretrain.ckpt --revision 7f3708650e302f395e7c63607b48b56fb96b8076 --local-dir "$RHINO_ROOT/weights"
+hf download HuixiAI/RhinoVLA rhinovla_pretrain.ckpt \
+  --revision 7f3708650e302f395e7c63607b48b56fb96b8076 --local-dir "$RHINO_ROOT/weights"
+hf download lerobot/libero_10_image data/chunk-000/file-000.parquet \
+  --repo-type dataset --revision 7e324b526699f444044952c82ce3f438e8d300d0 \
+  --local-dir "$RHINO_ROOT/libero"
+python scripts/prepare_rhinovla_assets.py \
+  --source "$RHINO_ROOT/source" \
+  --checkpoint "$RHINO_ROOT/weights/rhinovla_pretrain.ckpt" \
+  --libero-parquet "$RHINO_ROOT/libero/data/chunk-000/file-000.parquet" \
+  --output-dir "$RHINO_ROOT/fixture"
 ```
 
-<a id="weight-recipes"></a>
-## 模块精度与配方
-
-| 配置 | 模块实际 W/A 精度 | 输入父权重 → 转换方式与命令 |
-|---|---|---|
-| `official_fp16.toml` | 官方非 RTC Vision/Text/Action 的设备投影为 W16/A16；CPU fixture/参考生成独立采用 FP32 | 上述固定 v1 checkpoint → 官方加载后转 FP16；无低比特量化或量化导出 CLI。先准备同一源码的 fixture，再按[使用](#使用)运行 |
-
-输入 fixture 由同一固定源码和 checkpoint 准备；v3 W8 使用另一套 96D 模型。
-
-<a id="quantization"></a>
-## 下载与运行
-
-**无需量化转换。** 官方配置使用 `official_fp16.toml`；配对 fixture 使用同一源码和 checkpoint。v3 W8 属于另一客户模型，不能替代本 v1/72D checkpoint。
-
-## 旧 caller-factory 入口
-
-`fp16.toml` 保留原有 caller-factory 含义：调用者提供 checkpoint、配对请求、
-可信 `input.runtime_factory` 和 `input.factory_config`。已有集成继续使用这些资产，
-切换官方路径时另行准备本页的固定源码和 fixture。迁移步骤见
-[升级指南](../../../../docs/upgrading_1_2.zh.md)。
+输出目录须不存在。生成的 `cpu_fixture.pt` 包含两图的 `qwen_inputs`、固定种子的 state/noise、state/action mask 及来源信息；PNG 保留原数据字节，`manifest.json` 记录文件校验和。工具只准备输入，不加载模型权重。`--inputs-only` 仅导出 PNG 和清单，不生成运行所需的 fixture。
 
 ## 使用
 
-将已准备的官方完整资产登记为 `rhinovla-controlled`。目录需要包含 `source/`、`weights/rhinovla_pretrain.ckpt`、`fixture/cpu_fixture.pt`，只放 checkpoint 不足以运行。模板内 `trust_model_code=true`、`num_steps=10`，输入与噪声从同一固定 fixture 读取。
-
 ```bash
-export RPU_MODEL_CACHE=/path/to/model-cache
 python examples/run.py --config examples/configs/rhinovla/v1/official_fp16.toml --check-config
 python examples/run.py --config examples/configs/rhinovla/v1/official_fp16.toml
 ```
 
-`$RPU_MODEL_CACHE/rhinovla-controlled`指向上述完整资产。可修改 `run.warmup/runs/output_dir` 和 `cpu.threads`；可设 `cpu.threads=8`、`run.warmup=2`、`run.runs=5`，模板默认3次正式运行。非 RTC、固定官方 source/checkpoint 与十步合同保持不变。
+`rhinovla-controlled` 从 `$RPU_MODEL_CACHE` 查找 `source/`、`weights/rhinovla_pretrain.ckpt` 和 `fixture/cpu_fixture.pt`。模板启用 `trust_model_code=true`，`input.num_steps=10`；可调整 `cpu.threads`、`run.warmup/runs/output_dir`。
+
+## caller-factory 入口
+
+`fp16.toml` 接受自备 checkpoint、请求文件、`input.runtime_factory` 和 `input.factory_config`。切换官方入口时使用上面的固定资产，迁移步骤见[升级指南](../../../../docs/upgrading_1_2.zh.md)。v3 使用另一套 96D 模型和输入。

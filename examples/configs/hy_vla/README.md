@@ -92,6 +92,18 @@ python examples/run.py --config /tmp/hyvla.toml
 
 默认 `source="synthetic"` 使用 checkpoint tokenizer 和 `run.seed` 生成测试 RGB、state、noise。指令至少编码出 T 个 token，入口截取前 T 个，再补至 64 槽；运行摘要记录实际 token 和截断情况。重放已有输入时设 `source="batch"`、填写 `batch` 并移除 `instruction`，相机数、token、mask 和位置与文件一致。
 
+### 从同一观测准备文本长度变体
+
+`prepare_hyvla_text_batches.py` 保留三图、state 和 noise，为 T16/32/48/64 分别选择可完整编码回读的自然语言前缀，并重新生成 mask 与位置。
+
+```bash
+python scripts/prepare_hyvla_text_batches.py \
+  --source-observation /path/to/input_batch.pt --checkpoint "$HYVLA_SRC" \
+  --output /path/to/hyvla-text-inputs
+```
+
+输出 `hyvla_3cam_t16_batch.pt`、`hyvla_3cam_t32_batch.pt`、`hyvla_3cam_t48_batch.pt`、`hyvla_3cam_t64_batch.pt` 和 `inputs.json`。在三图配置中设置 `source="batch"`、相应的 `text_tokens` 与 `batch` 路径，删除 `instruction`。也可用 `--source-assets` 读取包含 `synth_images.pt`、`state.pt`、`initial_noise.pt` 的目录；`--instruction-file` 提供自定义指令。
+
 <a id="输入与执行变体"></a>
 
 ### 常调参数

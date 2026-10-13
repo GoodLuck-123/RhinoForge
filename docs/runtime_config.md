@@ -43,7 +43,7 @@ source default applies to direct adapter use.
 
 Use `examples/run.py --config PATH`. [Model examples](../examples/README.md) describes the model directories, formats and required inputs. General models use `[example]/[input]/[run]`; specialized policies use the model table shown in their templates. `example.opt_in` binds permitted controls before Torch import and rejects inherited conflicts. `[cpu].threads` applies before the first Torch import; thread aliases must agree.
 
-Select main and expansion assets with `RPU_KERNEL_LIB_PATH` and `RPU_KERNEL_LIB_PATH_EXPANSION`. Keep asset paths and credentials in the deployment environment. `rpu_execution` configures cold model and component settings; close the current model and start a new process when changing them.
+Select main and expansion assets with `RPU_KERNEL_LIB_PATH` and `RPU_KERNEL_LIB_PATH_EXPANSION`. Keep asset paths and credentials in the deployment environment. `rpu_execution` configures model and component settings. Cold settings require a fresh model/process; supported stage updates use the [execution API](api_reference.md#execution-configuration-and-updates) between requests.
 
 ## Host execution settings
 
@@ -80,8 +80,7 @@ example formats do not apply `[runner.env]` on behalf of the common runner.
 Qwen3, Qwen3-VL, Qwen3.5 and Pi0.5 accept cold `model.num_cores` and
 component `linear_acc32` controls. A core budget is an integer `4`, `6` or `8`;
 each adapter further narrows it by checkpoint, quantization and input profile.
-The optimized Pi examples and quantized Qwen examples retain eight-core
-admission. `linear_acc32` is a boolean: `false` selects ACC16 and `true`
+Optimized Pi profiles use eight cores; reduced generic Pi profiles and quantized Qwen profiles follow their explicit model/configuration admission. `linear_acc32` is a boolean: `false` selects ACC16 and `true`
 selects ACC32. Qwen3 and Qwen3.5 text expose it under `prefill`; image-text
 entries also expose `vision`; Pi exposes `prefill`, `vision` and `action`.
 Qwen3-VL additionally accepts the cold boolean `prefill.fast_replay`,
@@ -90,6 +89,10 @@ API entries default to `false` when it is omitted; the applicable FP16 and
 quantized example templates explicitly select `true`. Specialized profile
 policies and native owner/Graph checks remain authoritative. These settings bind before
 weight installation; close the model and load a new instance to change them.
+
+Omitting `model.num_cores` selects eight. For admitted reduced-core dense Qwen3, Qwen3-VL and Qwen3.5 profiles, a budget of four uses four attention/MLP/head cores; a budget of six uses four attention/head cores and six MLP cores. Their image tower uses four. Construct caches through the model's cache factory so storage matches the selected topology. Supported sizes and quantized variants are listed in each [configuration guide](../examples/configs/CONFIGURATIONS.md).
+
+Keep model switches scoped to that model's configuration or launch process. Explicit environment values override adapter `setdefault` values; the example runner applies its selected configuration before adapter import. Logging, allocator and Launch initialization settings must be present before importing the backend. Use the model template's opt-ins and defaults instead of exporting optimization flags globally.
 
 ## General and cache settings
 

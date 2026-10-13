@@ -360,6 +360,15 @@
 
 | 配置 | 配方 | 输入默认 | 用途 |
 |---|---|---|---|
+| [rhinovla/v3/controlled/fp16.toml](rhinovla/v3/controlled/fp16.toml) | `fp16` | FP16 | 独立运行配置 |
+| [rhinovla/v3/controlled/w8a16_action.toml](rhinovla/v3/controlled/w8a16_action.toml) | `w8a16` | Action W8 | 独立运行配置 |
+| [rhinovla/v3/controlled/w8a16_pipeline.toml](rhinovla/v3/controlled/w8a16_pipeline.toml) | `w8a16` | Pipeline W8 | 独立运行配置 |
+| [rhinovla/v3/controlled/w8a16_pipeline_input_cache.toml](rhinovla/v3/controlled/w8a16_pipeline_input_cache.toml) | `w8a16` | Pipeline W8 with image input cache | 独立运行配置 |
+| [rhinovla/v3/controlled/w8a16_pipeline_high.toml](rhinovla/v3/controlled/w8a16_pipeline_high.toml) | `w8a16` | Pipeline W8 with HIGH nonlinear operations | 独立运行配置 |
+| [rhinovla/v3/controlled/w8a16_pipeline_high_fused.toml](rhinovla/v3/controlled/w8a16_pipeline_high_fused.toml) | `w8a16` | Pipeline W8 with HIGH fusion | 独立运行配置 |
+| [rhinovla/v3/controlled/w8a16_pipeline_high_fused_vector_k.toml](rhinovla/v3/controlled/w8a16_pipeline_high_fused_vector_k.toml) | `w8a16` | Pipeline W8 with vector K norm | 独立运行配置 |
+| [rhinovla/v3/controlled/w8a16_pipeline_high_fused_vector_qk.toml](rhinovla/v3/controlled/w8a16_pipeline_high_fused_vector_qk.toml) | `w8a16` | Pipeline W8 with vector Q/K norm | 独立运行配置 |
+| [rhinovla/v3/controlled/w8a16_pipeline_high_fused_vector_qk_partial_rope.toml](rhinovla/v3/controlled/w8a16_pipeline_high_fused_vector_qk_partial_rope.toml) | `w8a16` | Pipeline W8 with partial RoPE | 独立运行配置 |
 | [rhinovla/v1/fp16.toml](rhinovla/v1/fp16.toml) | `fp16` | 见模板 | 运行模板 |
 | [rhinovla/v1/official_fp16.toml](rhinovla/v1/official_fp16.toml) | `fp16` | 见模板 | 运行模板 |
 | [rhinovla/v3/fp16.toml](rhinovla/v3/fp16.toml) | `fp16` | 见模板 | 运行模板 |

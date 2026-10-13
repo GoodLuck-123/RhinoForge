@@ -1,0 +1,43 @@
+# Pipeline W8 with vector Q/K norm; use scripts/validate_rhinovla_v3.py run.
+[rpu_execution.vision]
+rpu_patch_embed = true
+rpu_mergers = true
+fused_merger = true
+fast_replay = true
+preload_replay_skip = true
+bake_merger = true
+
+[rpu_execution.prefill]
+padding_rows = 10
+prefix_prep_cache = true
+prefix_prep_rpu = true
+prefix_no_clone = true
+partial_mrope = true
+merger_scatter = true
+fast_replay = true
+preload_replay_skip = true
+
+[rpu_execution.action]
+denoise_unroll = true
+shared_cache = true
+prefix_alias = true
+fast_replay = true
+
+[env]
+RPU_RHINOVLA_VISION_BATCH_VIEWS = "1"
+RPU_RHINOVLA_VISION_PREP_CACHE = "1"
+RPU_RHINOVLA_DENOISE_STATIC_CONTEXT_CACHE = "1"
+RPU_RHINOVLA_PRECOMPUTE_ADARMS = "1"
+RPU_RHINOVLA_GATED_NO_SUB = "1"
+RPU_RHINOVLA_FUSED_SILU_MUL = "1"
+RPU_RHINOVLA_EXPERT_FUSIONS = "1"
+RPU_RHINOVLA_ADARMS_RESIDENT = "1"
+RPU_RHINOVLA_ALIGNED_KV = "1"
+RPU_RHINOVLA_EXPERT_W8A16 = "1"
+RPU_RHINOVLA_FULL_W8A16 = "1"
+RPU_RHINOVLA_PRECOMPUTE_GATE_TANH = "1"
+RPU_RHINOVLA_VISION_INPUT_CACHE = "1"
+RPU_RHINOVLA_HIGH_PRECISION = "1"
+RPU_RHINOVLA_HIGH_PRECISION_FUSIONS = "1"
+RPU_RHINOVLA_VECTOR_K_NORM = "1"
+RPU_RHINOVLA_VECTOR_Q_NORM = "1"

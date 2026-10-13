@@ -6,7 +6,7 @@ dtype = "fp16"
 
 [input]
 # Executes only the clean source/checkpoint pinned by official_runtime_factory.
-# The bundle supplies the same open LIBERO images used by the CPU reference.
+# The bundle supplies the public LIBERO images and prepared CPU inputs.
 trust_model_code = true
 num_steps = 10
 

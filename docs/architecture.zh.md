@@ -114,6 +114,12 @@ Attention storage 默认 `AUTO`。只有精确配置已认证且联合 SPM layou
 model-certified SPM-resident K/V；否则使用 DDR-cache。显式要求 SPM 但任一条件不满足时
 fail closed。
 
+### Attention mask 缓存
+
+Adapter 可用 `rpu_backend.runtime.masks.versioned_cpu_mask(mask)` 创建自有、连续的 CPU FP16 mask。仅在新增缓存项时调用，命中时复用返回的 tensor。缓存键包含逻辑/补齐长度、可见性规则及变化的窗口位置。原生准备检查 tensor 身份、修改版本和 query/key 形状；原地修改后须在重放前刷新保留槽，固定地址不能代替内容检查。
+
+共享 activation、Linear 和 mask 复用路径按已安装 profile、形状、dtype、核拓扑与算子能力选择。不满足条件时保留已准入的回退路径，使用模型配置选择行为。临时存储只在声明阶段内有效，每次重放均须刷新请求相关输入。
+
 ## SPM 设计
 
 当前 runtime 面向八核、每核 8 MiB SPM，保守规划预算约 7.5 MiB/核。FP16 是主要

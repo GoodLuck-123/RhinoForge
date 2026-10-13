@@ -105,10 +105,28 @@ Batch>1 只限明确允许的 Qwen3 路径，并要求各行真实 token 长度�
 Qwen3.5 text 的 recurrent/convolution state。它可完整 reset 到 position 0，但无法通过
 rewind 重建非零 recurrent state。
 
+## 执行配置与运行中重配
+
+`rpu_execution` 接受 Python mapping，也可从 TOML/JSON 读取。component override 优先于顶层 stage，顶层 stage 优先于 profile 默认值；模型保存不可变副本。整数 `chunk_size` 要求精确尺寸，`"auto"` 在允许范围内选择；整数 `padding_rows` 固定补齐量，不能同时指定 `padding_budget`。
+
+已绑定执行会话的模型通过统一 API 查询状态、修改支持热更新的配置：
+
+```python
+from rpu_backend.api import reconfigure_rpu_execution, rpu_execution_stats
+
+before = rpu_execution_stats(model)
+reconfigure_rpu_execution(model, {
+    "prefill": {"chunk_size": "auto", "padding_budget": 64},
+})
+after = rpu_execution_stats(model)
+```
+
+传入的 stage 整体替换原 override，`components` 下同样处理；未出现的 stage 保持不变。`{"prefill": {}}` 清除该 stage 的 override。成功修改后 `generation` 增加，受影响的 Graph 退休，下次执行重新构建。调用须在请求之间进行；无会话、正在 forward、固定或不支持的字段、已关闭或失败的会话都会拒绝修改。核数、精度等冷态安装参数仍需新模型；退休失败后需新进程。
+
 ## Image-text model
 
-`rpu_backend.api.RPUModelForConditionalGeneration` 是 built-in Qwen3-VL 路径的
-Hugging Face 风格 loader：
+`rpu_backend.api.RPUModelForConditionalGeneration` 是 Qwen3-VL 和 Qwen3.5 MoE 的
+Hugging Face 风格 loader。Qwen3-VL 示例：
 
 ```python
 from rpu_backend.api import RPUModelForConditionalGeneration
@@ -132,6 +150,31 @@ adapter。
 ### Qwen3.5 27B
 
 官方 27B 提供 4/6/8 核 W8 Text/VL 和 8 核 W4 group32。root6 的 MLP 使用 6 核，attention/GDN/head/Vision 使用 4 核。启用既有量化 opt-in；图像输入另需 Vision opt-in。安装使用缓存分配器、四个冷 Graph arena、CPU 权重最终布局上传及物理 KV24；prefill 为有界单次 Graph，decode 保留独立 Graph。暂不提供 FP16 运行入口。详见[配置与权重](../examples/configs/qwen3_5/README.md)。
+
+### Qwen3.5 MoE
+
+35B-A3B 的 RTN/GPTQ 路径使用 conditional loader、MoE adapter 和混合 cache。[配置与权重](../examples/configs/qwen3_5/README.md)须匹配，RTN 与 GPTQ 元数据不能互换。
+
+```python
+import torch
+from rpu_backend.api import RPUModelForConditionalGeneration, Qwen3_5MoeCache
+from rpu_backend.adapters.qwen3_5_moe import Qwen3_5MoeAdapter
+
+model = RPUModelForConditionalGeneration.from_pretrained(
+    checkpoint, dtype=torch.float16, local_files_only=True,
+    rpu_execution={"model": {"num_cores": 8}, "prefill": {"chunk_size": 64}},
+)
+model = Qwen3_5MoeAdapter(model).to_rpu(max_seq_len=1024)
+cache = Qwen3_5MoeCache.from_model(model, max_seq_len=1024, dtype=torch.float16)
+with torch.no_grad():
+    output = model(input_ids=input_ids, past_key_values=cache,
+                   use_cache=True, return_dict=True, logits_to_keep=0)
+cache.reset()
+```
+
+`input_ids` 为 CPU `int64`、形状 `[1, T]`，这组配置使用八核。模型安装一次，decode 复用 cache；新请求前调用 `reset()`。prefill 使用有界单次 Graph，decode 保留独立 Graph；按请求长度设置 chunk size 和 cache 容量。
+
+图像请求在 reset 后的首次调用同时传入 processor 的 `input_ids`、`attention_mask`、`pixel_values`、`image_grid_thw`；随后复用 cache 的调用只传文本 token。返回 logits 为 CPU FP32。
 
 ## Policy API
 
@@ -168,6 +211,8 @@ finite 和 Graph 不变量须通过检查。
 `profile="pi0.5-libero-v044"`，并同时传入首个预处理后的 `admission_batch`。
 Loader 会在加载权重前校验精确公开 payload 和请求范围，后续 Graph 与推理请求继续按
 同一 profile 校验。
+
+可在应用中保留已加载的 `HyEmbodiedPolicy` 或 `WallOssPolicy`，为连续请求重复调用 `infer(...)`。同一实例串行使用，每次更新请求输入；结束时调用 `HyEmbodiedPolicy.close()`。
 
 `WallOssActionOutput`、`Lingbot2ActionOutput`、`HyEmbodiedActionOutput` 是对应
 结构化结果。带物理单位的 action 字段应用配置的 normalization。

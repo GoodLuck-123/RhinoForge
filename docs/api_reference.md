@@ -133,10 +133,28 @@ require equal real-token lengths across rows.
 the recurrent and convolution state used by Qwen3.5 text. It may reset fully to
 position zero but cannot reconstruct a non-zero recurrent state by rewinding.
 
+## Execution configuration and updates
+
+Pass `rpu_execution` as a Python mapping, or load the same mapping from TOML/JSON. Component overrides take priority over top-level stage defaults, which take priority over profile defaults. The model keeps an immutable copy. An integer `chunk_size` requests that exact size; `"auto"` selects within the admitted range. An integer `padding_rows` fixes padding and cannot accompany `padding_budget`.
+
+Owners with a live execution session expose shared configuration updates and statistics:
+
+```python
+from rpu_backend.api import reconfigure_rpu_execution, rpu_execution_stats
+
+before = rpu_execution_stats(model)
+reconfigure_rpu_execution(model, {
+    "prefill": {"chunk_size": "auto", "padding_budget": 64},
+})
+after = rpu_execution_stats(model)
+```
+
+Updates replace each supplied stage, including stages nested under `components`; omitted stages stay unchanged. `{"prefill": {}}` clears that stage's override. A successful change advances `generation`, retires affected graphs, and builds them again on the next execution. Call between requests. Missing sessions, active forwards, fixed/unsupported controls and closed or failed sessions reject updates. Core count, precision and other cold installation settings still require a fresh model. A retirement failure requires a fresh process.
+
 ## Image-text models
 
 `rpu_backend.api.RPUModelForConditionalGeneration` is the Hugging Face-style
-loader for the built-in Qwen3-VL conditional-generation path:
+loader for Qwen3-VL and Qwen3.5 MoE. A Qwen3-VL example:
 
 ```python
 from rpu_backend.api import RPUModelForConditionalGeneration
@@ -162,6 +180,31 @@ Qwen3.5 text/vision and Gemma4 use their model-specific adapters.
 ### Qwen3.5 27B
 
 Official 27B uses uniform W8 Text/VL at 4/6/8 cores or W4 group32 at 8 cores. Root6 assigns MLP to 6 cores and attention/GDN/head/Vision to 4. It requires the existing quantization opt-in and, for image inputs, the Vision opt-in. It uses caching allocation, four cold Graph arenas, finalized uploads from CPU weights, physical KV24, bounded one-shot prefill and retained decode. FP16 runtime is not provided. [Configuration and weights](../examples/configs/qwen3_5/README.md).
+
+### Qwen3.5 MoE
+
+The 35B-A3B RTN/GPTQ paths use the conditional loader, MoE adapter and hybrid cache. Select the checkpoint matching the [configuration](../examples/configs/qwen3_5/README.md); RTN and GPTQ metadata are not interchangeable.
+
+```python
+import torch
+from rpu_backend.api import RPUModelForConditionalGeneration, Qwen3_5MoeCache
+from rpu_backend.adapters.qwen3_5_moe import Qwen3_5MoeAdapter
+
+model = RPUModelForConditionalGeneration.from_pretrained(
+    checkpoint, dtype=torch.float16, local_files_only=True,
+    rpu_execution={"model": {"num_cores": 8}, "prefill": {"chunk_size": 64}},
+)
+model = Qwen3_5MoeAdapter(model).to_rpu(max_seq_len=1024)
+cache = Qwen3_5MoeCache.from_model(model, max_seq_len=1024, dtype=torch.float16)
+with torch.no_grad():
+    output = model(input_ids=input_ids, past_key_values=cache,
+                   use_cache=True, return_dict=True, logits_to_keep=0)
+cache.reset()
+```
+
+`input_ids` is CPU `int64` with shape `[1, T]`; these profiles use eight cores. Install once, reuse the cache during decoding, and call `reset()` before a new request. Prefill uses a bounded single graph and decoding retains its graph. Choose the prefill chunk size and cache capacity for the request length.
+
+For image input, pass the processor's `input_ids`, `attention_mask`, `pixel_values` and `image_grid_thw` together on the first call after reset. Keep subsequent calls text-only while reusing that cache. Returned logits are CPU FP32.
 
 ## Policy APIs
 
@@ -201,6 +244,8 @@ or `profile="pi0.5-libero-v044"` together with the first preprocessed
 `admission_batch`. The loader verifies the exact public payload and request
 envelope before loading weights; subsequent Graph and inference requests are
 checked against the same profile.
+
+Keep a loaded `HyEmbodiedPolicy` or `WallOssPolicy` instance in the application and call `infer(...)` for successive requests. Serialize access to each instance; refresh request inputs between calls. Call `HyEmbodiedPolicy.close()` when finished.
 
 `WallOssActionOutput`, `Lingbot2ActionOutput`, and
 `HyEmbodiedActionOutput` are the corresponding structured return types. A

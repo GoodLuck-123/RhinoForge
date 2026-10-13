@@ -141,6 +141,12 @@ SPM-resident K/V path only when the exact profile is eligible and the joint SPM
 layout fits; otherwise it uses the DDR-cache path. An explicit request for the
 SPM path fails closed when either condition is false.
 
+### Cached attention masks
+
+Adapter caches can create an owned contiguous CPU FP16 mask with `rpu_backend.runtime.masks.versioned_cpu_mask(mask)`. Call it when adding a cache entry and reuse the returned tensor. Cache keys include logical/padded lengths, visibility rules and changing window positions. Native preparation checks tensor identity, mutation version and query/key geometry; an in-place change refreshes the retained slot before replay. A stable address alone does not preserve mask contents.
+
+Shared activation, Linear and mask-reuse paths are selected from the installed profile, geometry, dtype, core topology and operator capabilities. Keep unsupported combinations on their admitted fallback; use the model's configuration instead of adding global optimization switches. Temporary storage belongs to its declared phase, and every replay must refresh request-dependent inputs.
+
 ## SPM design
 
 The current runtime targets eight cores with 8 MiB of SPM per core and plans to
