@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.3.0.dev0
+
+开发线已进入 1.3；当前仅提供源码。
+
+Development has moved to 1.3; this line currently provides source only.
+
 ## v1.2.0rc1
 
 - 增加 Qwen3.5-2B 的 MLP W4、attention/GDN W8 混合量化转换和三份示例配置；转换保留输入浮点权重的原始精度。
