@@ -6,8 +6,7 @@
 > accepted grammar、读取阶段、作用域与风险必须与英文版保持一致。
 
 RhinoForge 提供少量面向用户的设置，以及数量更多的精确模型配置和诊断控制项。
-请在导入 `rpu_backend` 前设置完整环境；除非某一行明确说明按调用读取，否则不支持在
-存活进程中更改配置。
+请在导入 `rpu_backend` 前设置完整环境，按表中生命周期更改环境变量。支持热修改的 stage 通过下述执行 API 更新。
 
 本页记录 `python/rpu_backend` 和 `src` 中当前保留的所有环境变量读取项，以及 Launch
 容量输入。
@@ -118,7 +117,7 @@ Qwen3-VL 另接受冷态布尔值 `prefill.fast_replay`，不接受 `vision.fast
 | `RPU_PI05_ADARMS_DENSE_W8A16` | 量化 expert 时为 **PB(true)**，否则为 **PB(false)** | Pi0.5 AdaRMS 安装 / **MODEL** | 选择量化 AdaRMS dense 权重。与加载配置不匹配会失败或改变数值。 |
 
 chunk 和 padding 选择应优先使用公共 loader 或 policy 的 `rpu_execution` 参数。该参数会在
-加载权重前校验，并在绑定后保持不可变。
+加载权重前校验，并以不可变快照暴露；支持的修改通过执行 API 替换快照。
 
 ## Fail-closed 评估门
 
@@ -458,7 +457,7 @@ grid 和之后变化的 grid 分别会在进程级 claim 前或任何 Vision 工
 
 应优先使用这些公共 API，而不是增加新的环境开关。
 
-### 冷态、按 handle 生效的 `rpu_execution`
+### 按 handle 生效的 `rpu_execution`
 
 公共 loader 和 policy 接受不可变的 `rpu_execution` mapping。stage 表为
 `prefill`、`vision` 和 `action`；支持该能力的入口另有 `model` 控制表；每个入口都会公布其支持的 subset，并在加载权重前拒绝
@@ -469,13 +468,11 @@ grid 和之后变化的 grid 分别会在进程级 claim 前或任何 Vision 工
 | `model.num_cores` | 整数 `4/6/8` | 仅限入口声明并由模型 profile 准入的冷态计算预算。 |
 | `<stage>.linear_acc32` | 布尔值 | 上述组件的 ACC16（`false`，默认）或 ACC32（`true`）；不改变量化权重格式。 |
 | `prefill.fast_replay` | 布尔值 | 仅 Qwen3-VL；普通 API 默认 `false`，适用的 FP16/量化示例显式启用。 |
-| `chunk_size` | `"auto"` 或 16 的正整数倍 | 指定 stage 的 planner cap/choice。绑定到模型或 policy；改变时应构造新实例。 |
+| `chunk_size` | `"auto"` 或 16 的正整数倍 | 在模型准入范围内自动选择或指定精确 chunk；支持该能力的 owner 可通过执行 API 更新。 |
 | `padding_rows` | `"auto"` 或非负整数 | 指定 stage 的精确/自动 execution padding。精确整数与 `padding_budget` 互斥。 |
 | `padding_budget` | 非负整数 | stage planner 考虑的最大可选 padding。不能与精确整数 `padding_rows` 同时使用。 |
 
-即使某字段只影响一个 Graph，全部三个 stage mapping 仍是冷态配置：应在 设备权重安装和
-首次 Graph BUILD 前传给 loader/factory。adapter 可以把请求收窄到其精确 capability
-envelope；如果公共 policy API 有记录，它也会公开 resolved execution plan。
+初始 mapping 在权重安装和首次 Graph BUILD 前传给 loader/factory。绑定了执行会话的 owner，可在请求之间用 [`reconfigure_rpu_execution`](api_reference.zh.md#执行配置与运行中重配) 更新支持热修改的 stage。传入 stage 整体替换原 override，并使受影响的 Graph 失效。核数、累加精度、重放策略及其他安装设置仍为冷态；无会话的 owner 需新实例，所有更新均须满足该 owner 的能力范围。
 
 ### Graph 快照策略
 

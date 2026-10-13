@@ -4,8 +4,7 @@
 
 RhinoForge has a small set of user-facing settings and a larger set of exact
 model-profile and diagnostic controls. Set the complete environment before
-importing `rpu_backend`; changing a profile in a live process is unsupported
-unless a row explicitly says that it is read per call.
+importing `rpu_backend`; change environment settings only at the lifecycle listed in the table. Supported stage changes use the execution API described below.
 
 This page lists controls from `python/rpu_backend`, `src` and Launch.
 
@@ -130,8 +129,7 @@ model profile supported.
 | `RPU_PI05_ADARMS_DENSE_W8A16` | **PB(true)** for a quantized expert, otherwise **PB(false)** | Pi0.5 AdaRMS installation / **MODEL** | Selects quantized AdaRMS dense weights. Mismatch with the loaded profile fails or changes numerics. |
 
 Prefer the public loader or policy `rpu_execution` argument for chunk and
-padding choices. It is validated before weight loading and is immutable after
-binding.
+padding choices. It is validated before weight loading and exposed as an immutable snapshot; supported changes replace that snapshot through the execution API.
 
 ## Fail-closed evaluation gates
 
@@ -489,7 +487,7 @@ sharing it.
 
 Prefer these public APIs over new environment switches.
 
-### Cold per-handle `rpu_execution`
+### Per-handle `rpu_execution`
 
 Public loaders and policies accept an immutable `rpu_execution` mapping. The
 stage tables are `prefill`, `vision`, and `action`, with a separate `model`
@@ -502,15 +500,11 @@ weight loading.
 | `model.num_cores` | Integer `4`, `6` or `8` | Cold compute budget, only for declaring entry points and admitted profiles. |
 | `<stage>.linear_acc32` | Boolean | ACC16 (`false`, default) or ACC32 (`true`), for the components listed above. This does not change checkpoint quantization. |
 | `prefill.fast_replay` | Boolean | Qwen3-VL only; ordinary API default `false`, explicitly enabled by applicable FP16/quantized examples. |
-| `chunk_size` | `"auto"` or a positive integer multiple of 16 | Planner cap/choice for the named stage. It is bound to the model or policy; construct a new one to change it. |
+| `chunk_size` | `"auto"` or a positive integer multiple of 16 | Automatic selection or an exact chunk size for the named stage, within that model’s admitted range. Supported owners can update it through the execution API. |
 | `padding_rows` | `"auto"` or a non-negative integer | Exact/automatic execution padding for the named stage. An exact integer is mutually exclusive with `padding_budget`. |
 | `padding_budget` | Non-negative integer | Maximum optional padding considered by the stage planner. It cannot accompany an exact integer `padding_rows`. |
 
-All three stage mappings are cold even when a field influences only one Graph:
-pass them to the loader/factory before device weight installation and first Graph
-BUILD. The adapter may narrow a request to its exact capability envelope and
-will expose the resolved execution plan where its public policy API documents
-one.
+Pass the initial mapping to the loader/factory before weight installation and the first Graph BUILD. Owners with a live execution session may then update supported stage controls between requests using [`reconfigure_rpu_execution`](api_reference.md#execution-configuration-and-updates). Each supplied stage replaces its previous override and invalidates affected Graphs. Core count, accumulation precision, replay policy and other installation settings remain cold. Owners without a session require a new instance; every update must stay within the owner’s capability envelope.
 
 ### Graph snapshot policy
 
