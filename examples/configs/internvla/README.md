@@ -12,7 +12,7 @@ System2 Vision 编码图像，decoder 生成 latent，经 CPU goal glue 交给 R
 
 父权重为 [InternRobotics/InternVLA-N1-w-NavDP](https://huggingface.co/InternRobotics/InternVLA-N1-w-NavDP) 的 BF16 版本 `6d48df24da45e8b31fdcef9572bbcbf68c0baf64`；配套 [InternNav](https://github.com/InternRobotics/InternNav) 固定到 `7a5c62400ac45b313d9b709c740b64191556a242`。
 
-在安装 InternNav CPU 依赖、Transformers 4.51 的环境中执行：
+在安装 InternNav CPU 依赖、`transformers==4.51.0` 的环境中执行：
 
 ```bash
 export RPU_MODEL_CACHE=/path/to/model-cache
@@ -24,7 +24,7 @@ python scripts/prepare_internvla_assets.py \
   --root "$RPU_MODEL_CACHE" --hf-cache "$HF_CACHE" --internnav-root "$INTERNNAV_SRC"
 ```
 
-工具下载固定权重并生成 `internvla_n1-controlled/`，包括 `s2_w8a16/`、`s2_vit/`、`s2_frontend.safetensors`、`navdp_head.safetensors`、`rgbd_src/`、`full_chain_fixture.pt` 和 `asset_manifest.json`。`--prepare-only` 仅准备权重。已有镜像下载文件可通过 `--modelscope-weights` 指定，仍须通过固定文件校验。
+工具下载固定权重并生成 `internvla_n1-controlled/`，包括 `s2_w8a16/`、`s2_vit/`、`s2_frontend.safetensors`、`navdp_head.safetensors`、`rgbd_src/`、`full_chain_fixture.pt` 和 `asset_manifest.json`。`--prepare-only` 仅准备权重。`--modelscope-weights` 从官方 ModelScope 镜像获取权重，并按固定 Hugging Face 版本的文件校验和核对。
 
 默认输入为固定种子的图像、RGBD 和噪声；System2 使用真实模型生成 token 和位置。`--rgb-input` 只替换 System2 图像，RGBD 仍为合成输入；`--instruction` 修改导航指令。fixture 保存 `pixel_values`、`grid_thw`、`output_ids`、`image_idx`、`position_ids`、`rgb`、`depth` 和 `init_noise`。
 
