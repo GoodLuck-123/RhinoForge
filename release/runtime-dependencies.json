@@ -1,8 +1,11 @@
 {
   "schema_version": 1,
   "launch_kernel": {
-    "commit": "bdc0dae56a6176c2fed6ae94f7c8c38a42bc7f06",
-    "version": "1.0.0"
+    "commit": "530a1f1dc890c0904a9eac46d7997ad7ce1064ce",
+    "version": "1.2.0",
+    "release_version": "1.2.0rc1",
+    "cmake_version": "1.2.0",
+    "abi_version": 1
   },
   "artifacts": {
     "rhino_ops_main": {

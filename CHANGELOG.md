@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.2.0
+## v1.2.0rc1
 
 - 增加 Qwen3 ASR/TTS 独立语音接口、可选音频依赖和固定源码准备流程。
 - 扩展 Qwen3.5-27B、LingBot v2 replay 及多组视觉/VLA 配置，补齐权重来源、转换和输入步骤。
@@ -11,7 +11,7 @@
 - 修复首次运行的生成文本显示、Wall-OSS W4 转换命令，更新运行时资产依赖、许可说明和安装文档。
 
 升级步骤、旧路径映射与输入变更见[中文升级指南](docs/upgrading_1_2.zh.md)。
-源码版本为 `1.2.0`；运行包为 `RhinoForge-runtime-v1.2.0.tar.gz`，Rhino Launch API 仍为 `1.0.0`。
+RhinoForge、Runtime 和 Rhino Launch 发行版本为 `1.2.0rc1`；Launch CMake 版本为 `1.2.0`，ABI 版本保持 `1`。
 
 ### English
 
@@ -22,4 +22,4 @@
 - Standardized configuration names by quantized modules, method and group size; expanded parameter, model and weight guides while preserving old command paths.
 - Separated RhinoVLA v1 caller-factory and official templates; corrected first-run text output and Wall-OSS W4 commands; updated runtime asset dependencies, notices and installation guides.
 
-See the [upgrade guide](docs/upgrading_1_2.md). The source and runtime bundle use version `1.2.0`; the Rhino Launch API remains `1.0.0`.
+See the [upgrade guide](docs/upgrading_1_2.md). RhinoForge, Runtime and Rhino Launch use release version `1.2.0rc1`; Launch uses CMake version `1.2.0` and ABI version `1`.

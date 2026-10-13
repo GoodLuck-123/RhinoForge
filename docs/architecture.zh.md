@@ -19,7 +19,7 @@ Hugging Face model 或 policy API
  SPM plan、多核 schedule、
  graph、batch 与 DMA nodes
               |
-       Rhino Launch 1.0.0
+       Rhino Launch
               |
              device
 ```

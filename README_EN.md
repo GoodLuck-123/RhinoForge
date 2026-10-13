@@ -22,7 +22,7 @@ The distribution name is `rhinoforge`; the Python import remains
 `rpu_backend`. RhinoForge is inference-only and does not support training or
 fine-tuning.
 
-This source tree targets **v1.2.0**. See the [changelog](CHANGELOG.md)
+This source tree targets **v1.2.0rc1** (release candidate). See the [release policy](docs/release_policy.md). See the [changelog](CHANGELOG.md)
 and [upgrade guide](docs/upgrading_1_2.md) before updating an existing installation.
 
 ## Highlights
@@ -97,7 +97,7 @@ See [Getting started](docs/getting_started.md) for installation and a first run.
 
 | Topic | Document |
 |---|---|
-| v1.2.0 changes and migration | [Changelog](CHANGELOG.md) · [Upgrade guide](docs/upgrading_1_2.md) |
+| v1.2.0rc1 changes and migration | [Changelog](CHANGELOG.md) · [Upgrade guide](docs/upgrading_1_2.md) |
 | Install current source | [Development build](docs/development_build.md) |
 | Installation and first run | [Getting started](docs/getting_started.md) |
 | Speech recognition and synthesis | [Qwen3 ASR/TTS](docs/qwen3_audio.md) |

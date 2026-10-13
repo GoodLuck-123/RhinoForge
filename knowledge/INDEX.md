@@ -34,6 +34,9 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
   [quantization](../docs/quantization.md): checkpoint records and offline
   conversion.
 
+- [Release policy](../docs/release_policy.md): development and release branches,
+  version stages, dependency locks and immutable artifacts.
+
 ## Concepts
 
 - [SPM allocation](concepts/spm-allocation.md): buffer lifetimes, planning, and

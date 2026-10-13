@@ -17,6 +17,7 @@ export PYTHONNOUSERSITE=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0 PYTHONDONTWRITEBYTECOD
 export PIP_REQUIRE_VIRTUALENV=true PYTEST_DISABLE_PLUGIN_AUTOLOAD=1
 # Explicit nodes keep local regression checks proportional to the change.
 if (( $# == 0 )); then
+    "$rf_job_venv/bin/python" scripts/check_release_version.py
     "$rf_job_venv/bin/python" scripts/check_examples.py
     set -- tests python/rpu_backend/tests/acceptance
 fi

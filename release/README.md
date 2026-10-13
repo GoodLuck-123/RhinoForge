@@ -4,13 +4,13 @@ This directory contains the operator-manifest generator and provenance manifests
 for public model sources and weights. Runtime binaries, opaque operator payloads,
 and model checkpoints are distributed separately under their own terms.
 
-RhinoForge v1.2.0 uses the provider-delivered
-`RhinoForge-runtime-v1.2.0.tar.gz`, extracted under `RhinoForge-runtime-v1.2.0/`,
+RhinoForge v1.2.0rc1 uses the provider-delivered
+`RhinoForge-runtime-v1.2.0rc1.tar.gz`, extracted under `RhinoForge-runtime-v1.2.0rc1/`,
 with `rhinoOpLib_current.ref` and `rhinoExpansionOpLib_current.ref`, each with
 its adjacent `.ref.kernels` manifest. Their identities are pinned in
 [runtime-dependencies.json](runtime-dependencies.json).
-Rhino Launch remains version 1.0.0; `RELEASE.txt` selects the matching sanitized
-Release package. Verify the outer checksum and inner `SHA256SUMS` before using
+Rhino Launch uses the same `1.2.0rc1` release version, with CMake version `1.2.0`
+and ABI version `1`. `RELEASE.txt` selects the matching Release package. Verify the outer checksum and inner `SHA256SUMS` before using
 the [provider paths](../docs/runtime_assets.md#configure-paths).
 
 Keep model evaluation data and reports outside source releases, package artifacts and release notes.

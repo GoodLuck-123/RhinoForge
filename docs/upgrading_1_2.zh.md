@@ -2,7 +2,7 @@
 
 简体中文 | [English](upgrading_1_2.md)
 
-当前源码版本为 v1.2.0。[发行说明](../CHANGELOG.md)列出主要变化；本页说明上一公开
+本页适用于 1.2 发布系列，当前候选版为 `1.2.0rc1`。[发行说明](../CHANGELOG.md)列出主要变化；本页说明上一公开
 版本的安装与迁移。发行包名 `rhinoforge`、导入名 `rpu_backend`、`torch.rpu` 和
 现有运行时路径环境变量保持不变。
 
@@ -12,8 +12,8 @@
    资产构建。依赖以 [pyproject.toml](../pyproject.toml) 为准，包括 PyTorch 2.10.0 和
    Transformers 5.3.0；视觉/VLA/语音分别选择 `vision` / `vla` / `audio` 可选依赖。
 2. 通过[资产申请入口](runtime_assets.zh.md#申请运行时资产)获取
-   `RhinoForge-runtime-v1.2.0.tar.gz` 及校验和，核对完整性并保留 main、DDR-expansion
-   两份资产及各自清单。Rhino Launch 仍为 1.0.0；准确源码和资产身份见
+   `RhinoForge-runtime-v1.2.0rc1.tar.gz` 及校验和，核对完整性并保留 main、DDR-expansion
+   两份资产及各自清单。Rhino Launch 使用相同的发行版本 `1.2.0rc1`；准确源码和资产身份见
    [依赖清单](../release/runtime-dependencies.json)。
 3. 更新 `RHINO_LAUNCH_ROOT`、`RPU_KERNEL_LIB_PATH` 和
    `RPU_KERNEL_LIB_PATH_EXPANSION`，重新构建扩展并启动新进程。

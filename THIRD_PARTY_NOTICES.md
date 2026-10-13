@@ -48,7 +48,7 @@ source. Consult the linked upstream license text for the exact version used.
 
 ## External assets
 
-Rhino Launch 1.0.0 is a separately distributed restricted prerequisite. It is
+Rhino Launch is a separately distributed restricted prerequisite. It is
 not included in this repository and is governed by the terms delivered with
 that package. The versioned main and expansion operator assets named by the matching
 runtime set are also distributed separately under its accompanying terms.

@@ -117,3 +117,11 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   lengths; other convolutions retain their original path. Keep thread settings
   caller-controlled and check retained outputs, input changes and close/reload
   when changing component handoffs.
+
+## Version and release changes
+
+Update [VERSION](../VERSION) and the matching Launch dependency lock together.
+Run `python scripts/check_release_version.py` and the affected package checks.
+Cut `release/X.Y` before advancing `main` to the next `.dev0` version. Preserve
+published tags and assets; record each source commit and payload checksum.
+See the [release policy](../docs/release_policy.md).

@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "rhinoforge"
-version = "1.2.0"
+dynamic = ["version"]
 authors = [{name = "HUIXI-AI"}]
 description = "PyTorch inference backend and model deployment toolkit for Rhino devices"
 readme = "README.md"
@@ -15,7 +15,7 @@ license = {file = "LICENSE"}
 requires-python = ">=3.12,<3.13"
 keywords = ["pytorch", "rhinoforge", "inference", "transformers", "vla"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
@@ -76,6 +76,11 @@ wheel.exclude = [
     "**/*.log",
 ]
 wheel.license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "LICENSES/*.txt"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "VERSION"
+regex = '^(?P<value>[0-9]+\.[0-9]+\.[0-9]+(?:rc[0-9]+|\.dev[0-9]+)?)\s*$'
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

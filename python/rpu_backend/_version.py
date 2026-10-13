@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import importlib.metadata as _metadata
 import pathlib as _pathlib
-import re as _re
 
 
 # API compatibility evolves independently from distribution releases.
@@ -11,22 +10,12 @@ API_VERSION = "5.0.0"
 
 
 def _source_distribution_version() -> str | None:
-    """Read the canonical PEP 621 version when running from a source tree."""
-    pyproject = _pathlib.Path(__file__).resolve().parents[2] / "pyproject.toml"
-    if not pyproject.is_file():
+    """Read the same version file used by Python and CMake builds."""
+    root = _pathlib.Path(__file__).resolve().parents[2]
+    version_file = root / "VERSION"
+    if not (root / "pyproject.toml").is_file() or not version_file.is_file():
         return None
-    text = pyproject.read_text(encoding="utf-8")
-    project = _re.search(
-        r"(?ms)^\[project\]\s*$\n(?P<body>.*?)(?=^\[|\Z)",
-        text,
-    )
-    if project is None:
-        return None
-    match = _re.search(
-        r"(?m)^version\s*=\s*['\"](?P<value>[^'\"]+)['\"]\s*$",
-        project.group("body"),
-    )
-    return None if match is None else match.group("value")
+    return version_file.read_text(encoding="utf-8").strip()
 
 
 def _resolve_distribution_version() -> str:

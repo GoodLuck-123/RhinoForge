@@ -6,7 +6,8 @@ restricted library and main and expansion operator assets remain outside the sou
 
 ## Dependency and compatibility contract
 
-- CMake resolves one exact `rhino_launch` package version. Install its headers,
+- CMake checks the numeric package version, complete release version and ABI
+  against [runtime-dependencies.json](../../release/runtime-dependencies.json). Install its headers,
   shared library, and CMake package files from the same runtime set as the
   main and expansion operator assets. [Build dependency](../../CMakeLists.txt)
 - The shared library is discovered by the board environment's normal loader;

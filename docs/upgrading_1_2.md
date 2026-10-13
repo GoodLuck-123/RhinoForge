@@ -2,7 +2,7 @@
 
 [简体中文](upgrading_1_2.zh.md) | English
 
-This source tree targets v1.2.0. The [changelog](../CHANGELOG.md) summarizes the
+This guide covers the 1.2 release series, currently `1.2.0rc1`. The [changelog](../CHANGELOG.md) summarizes the
 changes; this guide covers installation and migration from the previous public
 source. Package name `rhinoforge`, import `rpu_backend`, `torch.rpu`, and the
 existing runtime-path environment variables remain unchanged.
@@ -13,10 +13,10 @@ existing runtime-path environment variables remain unchanged.
    assets using [Getting started](getting_started.md). Dependencies are declared
    in [pyproject.toml](../pyproject.toml), including PyTorch 2.10.0 and Transformers
    5.3.0. Select the `vision`, `vla` or `audio` extra for the corresponding models.
-2. Obtain `RhinoForge-runtime-v1.2.0.tar.gz` and its checksum through the
+2. Obtain `RhinoForge-runtime-v1.2.0rc1.tar.gz` and its checksum through the
    [asset request entry](runtime_assets.md#request-runtime-assets). Verify the
    package and retain both main and DDR-expansion assets with their sidecars.
-   Rhino Launch remains version 1.0.0. Select the exact source and asset identities
+   Rhino Launch uses the same `1.2.0rc1` release version. Select the exact source and asset identities
    in [runtime-dependencies.json](../release/runtime-dependencies.json).
 3. Update `RHINO_LAUNCH_ROOT`, `RPU_KERNEL_LIB_PATH` and
    `RPU_KERNEL_LIB_PATH_EXPANSION`, rebuild the extension, and start a new process.
