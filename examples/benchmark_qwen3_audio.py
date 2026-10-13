@@ -105,19 +105,21 @@ def main():
     model = (Qwen3ASRModel.from_pretrained(args.checkpoint) if args.task == "asr" else
              Qwen3TTSModel.from_pretrained(args.checkpoint, source=args.source))
     report = dict(task=args.task, load_seconds=time.perf_counter() - start, threads=args.threads,
-                  warmup_count=2, measured_repeats=5, generation_limit=64, runs=[])
+                  warmup_count=2, measured_repeats=5, generation_limit=64 if args.task == "asr" else 256, runs=[])
     try:
         held = None
         sequence = [("warmup", records[0])] * 2 + [("steady", records[0])] * 5
         sequence += [("quality", row) for row in records]
         for index, (phase, row) in enumerate(sequence):
             before = model.execution_stats()
+            if args.task == "tts":
+                torch.manual_seed(0)
             start = time.perf_counter()
             if args.task == "asr":
                 result = model.transcribe(inputs[row["id"]], max_new_tokens=64)
             else:
                 result = model.synthesize(row["text"], language=row["language"],
-                                          reference_audio=row["reference_audio"], max_new_tokens=64)
+                                          reference_audio=row["reference_audio"], max_new_tokens=256)
             elapsed = time.perf_counter() - start
             stats = model.execution_stats()
             item = dict(id=row["id"], language=row["language"], reference=row["text"], phase=phase, seconds=elapsed)
@@ -138,12 +140,15 @@ def main():
             else:
                 wave, rate = result
                 assert rate == 24000 and wave.ndim == 1 and np.isfinite(wave).all() and len(wave)
-                assert all(c["graph_size"] == (2 if name == "talker" else 1)
-                           and c["graph_invariant_ok"] for name, c in stats["components"].items())
+                for name, component in stats["components"].items():
+                    expected_sizes = (2,) if name == "talker" else (1,)
+                    if name == "codec_transformer" and stats["codec_frontend"]["device"] == "cpu":
+                        expected_sizes = (0, 1)
+                    assert component["graph_size"] in expected_sizes and component["graph_invariant_ok"]
                 assert all(a > b for a,b in zip(stats["head_calls"], before["head_calls"]))
                 calls = stats["head_calls"][0] - before["head_calls"][0]
                 item.update(audio_seconds=len(wave)/rate, samples=len(wave), generation_steps=calls,
-                            cap_reached=calls == 64, execution=stats)
+                            cap_reached=not stats["generation"]["eos"], execution=stats)
                 if phase in ("warmup", "steady"):
                     if held is None: held = wave.copy()
                     assert np.array_equal(wave, held)
@@ -163,6 +168,9 @@ def main():
             assert all(a["audio_graph_replays"] < b["audio_graph_replays"] for a,b in zip(steady,steady[1:]))
         else:
             for name in steady[0]["execution"]["components"]:
+                if name == "codec_transformer" and (steady[0]["execution"]["codec_frontend"]["device"] == "cpu"
+                        or len(steady[0]["execution"]["generation"]["segment_steps"]) > 1):
+                    continue
                 assert all(a["execution"]["components"][name]["graph_replays"] < b["execution"]["components"][name]["graph_replays"] for a,b in zip(steady,steady[1:]))
         report["steady"] = timing_summary(steady)
         report["languages"] = {}

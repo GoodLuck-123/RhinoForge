@@ -416,12 +416,27 @@ in a model example, treat it as an implementation detail.
 - `Qwen3TTSModel.from_pretrained(checkpoint, source=prepared_package,
   dtype=torch.float16)` accepts the frozen local Base checkpoint and explicitly
   prepared upstream source. `synthesize(text, reference_audio=local_file,
-  language="Chinese", max_new_tokens=64)` returns an independent float32 mono
-  waveform and sample rate 24000. Text must have 1–128 characters and at most
-  32 tokenizer tokens; language is `Chinese` or `English`. Reference audio is
-  mono 24 kHz, 0.5–20 seconds. The token limit is 2–64 and may truncate speech.
-  Only non-streaming, greedy, speaker-embedding-only voice cloning is admitted.
-  Talker prompt plus requested generation must fit 128 positions.
+  language="Chinese", max_new_tokens=256)` returns an independent float32 mono
+  waveform and sample rate 24000. Text must have 1–1024 characters; language is
+  `Chinese` or `English`. Existing inputs within 128 characters / 32 tokenizer
+  tokens keep their single-segment route. Longer inputs are split at punctuation
+  with a 12-token target (up to 16 tokens to keep tiny sentence endings with
+  their preceding clause), at most 128 characters per segment. Non-final
+  punctuation at a segment end becomes a sentence stop. Reference audio is
+  non-silent mono 24 kHz, 0.5–20 seconds. The token limit is 2–256 per segment. Missing EOS
+  raises before codec decoding instead of returning truncated speech. Only
+  non-streaming, speaker-embedding-only voice cloning is admitted. Sampling uses
+  the frozen checkpoint recipe (top-k 50, temperature 0.9, top-p 1.0 on both
+  Talker and Predictor); set `torch.manual_seed` before a request for repeatability
+  on the same execution profile. Each long-form segment starts from the request
+  initial CPU RNG state; later segments restore the caller RNG state left by the
+  first segment. All segments must finish before the independent waveforms are
+  concatenated; failures return no partial audio. Segment boundaries may alter
+  pauses and intonation. `generation.segment_steps` records each segment;
+  `codec_frontend` reports the last segment route. Talker prompt plus generation
+  must fit 512 positions per segment. The character bound is not a guaranteed
+  speech duration or universal long-form quality claim.
+  Exactly zero output is rejected; this is not a perceptual silence detector.
 
 Both classes support context managers, explicit idempotent `close()`, and
 `execution_stats()`. Requests, statistics and close are serial, with one live
@@ -454,7 +469,9 @@ projections and eight Transformer layers) runs on RPU FP16 with FP32 linear
 accumulation. Its LayerScale is folded in FP32 before rounding, while RoPE phases
 retain the original FP32 frequency buffer. This explicitly changes frontend
 precision; the codebook, convolutions and waveform output stay CPU FP32. The
-frontend accepts 1–63 frames, below the original 72-frame sliding window. Native
+RPU frontend accepts 1–63 frames, below the original 72-frame sliding window.
+Sequences of 64–255 frames use the preserved original CPU FP32 frontend with
+its sliding attention. Native
 binaries without that setter keep this frontend on CPU. The codec explicitly enables
 its per-head K RoPE on its own handle after weight installation; the native mode
 defaults to off and preserves other decoders' existing RoPE parameters and layout hash.
@@ -477,17 +494,18 @@ logical projections, including the 110 projections within the fused encoder and 
 TTS Talker keeps the current prompt length's prefill Graph and one decode Graph.
 A prompt-length change evicts only the old prefill, retaining decode and the
 bounded prepared-plan cache. It reuses the Qwen3 28-layer/1024 prefill envelope,
-bounded by its 128-position cache; physical padding never advances logical KV
+bounded by its 512-position cache; physical padding never advances logical KV
 position. Predictor keeps one fixed decode Graph, processing its two-token
 prefill sequentially. The optional codec frontend keeps one Graph for its current
 frame count and evicts it on a length change. All three components share the
 owner arena policy. `execution_stats()` reports `codec_frontend.device` and a
-missing-native-capability fallback reason. Output storage is independent of replay.
+fallback reason (missing native capability or more than 63 frames). It also reports
+`generation.steps` and `generation.eos` for the latest generation. Output storage is independent of replay.
 Both APIs retain private KV storage and reset its logical position for each new
 sequence. TTS retains only the latest speaker embedding, keyed by decoded audio
 content; every request still reads and validates the reference file. Reference
 codec encoding is omitted because this profile consumes no reference codec tokens.
-The frozen TTS Predictor uses a fixed 15-step greedy loop; Talker retains its
-EOS and repetition-penalty handling. The TTS CLI accepts `--threads` (default 4)
+The frozen TTS Predictor uses a fixed 15-step sampling loop; Talker retains its
+EOS and repetition-penalty handling. The TTS CLI accepts `--threads` (default 16, measured on the 24-CPU R1)
 for CPU codec tuning without changing the Python API's process-wide thread setting.
 See the [speech profile and examples](qwen3_audio_r1.zh.md).
