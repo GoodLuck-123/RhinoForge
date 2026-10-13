@@ -4,6 +4,8 @@
 
 - 增加 Qwen3 ASR/TTS 独立语音接口、可选音频依赖和固定源码准备流程。
 - 扩展 Qwen3.5-27B、LingBot v2 replay 及多组视觉/VLA 配置，补齐权重来源、转换和输入步骤。
+- 补齐 RhinoVLA v1/v3、InternVLA 和 HyVLA 输入准备命令、V3 内置工厂及九组独立配置。
+- 恢复共享 mask、one-shot 队列复用、缺失的线性算子选型和逻辑 Tensor 调试接口；Graph snapshot 校验表绑定当前算子包。
 - 更新 Graph 生命周期、DDR 同步、缓存与输出所有权处理，以及匹配的 Launch/main/DDR-expansion 资产组合。
 - 统一 `examples/run.py` 的配置、日志与运行摘要；保留语义相同的旧脚本和配置入口。
 - 按量化模块、方法和分组统一配置命名，补齐参数、模型差异和权重指南，保留旧命令路径。
@@ -17,6 +19,8 @@ RhinoForge、Runtime 和 Rhino Launch 发行版本为 `1.2.0rc1`；Launch CMake 
 
 - Added dedicated Qwen3 ASR/TTS APIs, optional audio dependencies and pinned source preparation.
 - Expanded Qwen3.5-27B, LingBot v2 replay, vision and VLA configurations, with weight sources, conversion commands and input preparation.
+- Added RhinoVLA v1/v3, InternVLA and HyVLA input preparation commands, a built-in V3 factory and nine standalone configurations.
+- Restored shared masks, one-shot queue reuse, missing linear operator selections and logical tensor debugging; bound Graph snapshot contracts to the current operator assets.
 - Updated Graph lifecycle, DDR synchronization, cache and output ownership, and the matching Launch/main/DDR-expansion asset set.
 - Unified example configuration, logging and runtime summaries; retained compatible legacy entry points and added a migration tool for five old input schemas, with explicit target templates.
 - Standardized configuration names by quantized modules, method and group size; expanded parameter, model and weight guides while preserving old command paths.
