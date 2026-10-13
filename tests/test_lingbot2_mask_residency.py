@@ -120,7 +120,7 @@ struct LayoutContext {
 class LingbotV2MoeExpertModel:public CausalDecoderModel {public:
  int64_t chunk_size_=51,num_steps_=10;uint64_t generation=1;
  bool persistent_allocated=false;mutable int budget_queries=0;
- int num_cores()const{return 8;}
+ int cores=8;int num_cores()const{return cores;}
  uint64_t installed_model_state_generation()const{return generation;}
  int validate_exact_suffix_profile(int64_t prefix)const{TORCH_CHECK(prefix==225);return 1;}
  uint64_t exact_suffix_profile_hash(int kind)const{return kind*123;}
@@ -163,6 +163,7 @@ def test_real_budget_capacity_bound_layout_and_typed_replay(tmp_path):
 template<class Fn>void reject(Fn f){bool threw=false;try{f();}catch(const std::runtime_error&){threw=true;}assert(threw);}
 int main(){
  LingbotV2MoeExpertModel m;LayoutContext l;l.planning_chunk_capacity=64;
+ m.cores=4;assert(m.mask_residency_route_for_layout(l).arguments[3]==4);m.cores=8;
  for(bool grouped:{false,true})for(bool unroll:{false,true}){
   m.grouped_experts_=grouped;m.denoise_unroll_=unroll;
   test_allocator.held=774144;test_allocator.temporary=500000;

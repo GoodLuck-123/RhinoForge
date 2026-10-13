@@ -1759,8 +1759,10 @@ def test_queue_ownership_and_oneshot_lifecycle():
     invalidate = _between(runtime, "void RpuKernelGraph::invalidate_impl", "    nodes_.clear();")
     assert invalidate.index("release_prepared_queues();") < invalidate.index("kernels_.clear();")
     oneshot = source[source.index("void RpuKernelGraph::execute_graph_oneshot()") :]
-    assert "QueueCache::instance()" not in oneshot
-    assert "std::unique_ptr<::rhino_lkn::Queue_t> one_shot_queue" in oneshot
+    assert "QueueCache::instance().get(" in oneshot
+    assert "remaining_segments_by_core_count[8]" in oneshot
+    assert "retained_oneshot_queues[8]" in oneshot
+    assert "discard_retained_on_failure" in oneshot
     assert "/*retain_replay_state=*/false" in oneshot
     assert oneshot.index("wq->discard_completed_batch()") < oneshot.index("++seg_idx_oneshot")
 

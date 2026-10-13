@@ -5,6 +5,8 @@ import subprocess
 
 import pytest
 
+from _native_runtime_identity import runtime_identity_include
+
 ROOT = Path(__file__).resolve().parents[1]
 DECODER = (ROOT / 'src/fused/rpu_qwen3_model.h').read_text()
 LAUNCHER = (ROOT / 'src/ops/rpu_llama_kvcache.cpp').read_text()
@@ -31,7 +33,7 @@ def compile_run(tmp_path, name, source):
     binary = tmp_path / name
     command = [compiler, '-std=c++17', '-O0', '-Wall', '-Wextra',
                f'-D_GLIBCXX_USE_CXX11_ABI={int(torch._C._GLIBCXX_USE_CXX11_ABI)}',
-               '-I' + str(ROOT / 'src'), '-I' + str(torch_root / 'include'),
+               '-I' + str(ROOT / 'src'), '-I' + str(runtime_identity_include(tmp_path)), '-I' + str(torch_root / 'include'),
                str(cpp), str(ROOT / 'src/ops/rpu_kvinsert_segment_plan.cpp'),
                '-L' + str(torch_root / 'lib'), '-Wl,-rpath,' + str(torch_root / 'lib'),
                '-lc10', '-o', str(binary)]

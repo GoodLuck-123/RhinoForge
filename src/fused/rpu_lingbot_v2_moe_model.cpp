@@ -64,6 +64,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>    // std::printf (debug router banner)
 #include <limits>
 #include <tuple>
@@ -940,7 +941,7 @@ void LingbotV2MoeExpertModel::set_moe_weights(
     //    When OFF nothing is allocated and emit_router_select emits no extra DMA, so the
     //    graph is byte-identical to a build without this feature.
     {
-        const char* e = nullptr;  // Public runtime disables activation capture.
+        const char* e = std::getenv("RPU_LINGBOT2_DEBUG_DUMP_ROUTER_H");
         debug_dump_router_h_ = (e != nullptr && e[0] == '1' && e[1] == '\0');
     }
     if (debug_dump_router_h_) {
@@ -953,7 +954,7 @@ void LingbotV2MoeExpertModel::set_moe_weights(
     // ── DEBUG all-layer residual-stream capture (layer_in + attn_resid). SEPARATE env var,
     //    default OFF => nothing allocated, no DMA emitted, graph byte-identical.
     {
-        const char* e = nullptr /* no public activation capture */;
+        const char* e = std::getenv("RPU_L2_CAP_RESID");
         debug_cap_resid_ = (e != nullptr && e[0] == '1' && e[1] == '\0');
     }
     if (debug_cap_resid_) {
@@ -979,7 +980,7 @@ void LingbotV2MoeExpertModel::set_moe_weights(
         std::fflush(stdout);
     }
     {
-        const char* e = nullptr /* activation capture is disabled */;
+        const char* e = std::getenv("RPU_L2_CAPTURE_L0");
         debug_capture_l0_ = (e != nullptr && e[0] == '1' && e[1] == '\0');
         const char* est = nullptr /* activation capture is disabled */;
         debug_stages_ = (est != nullptr && est[0] == '1' && est[1] == '\0');
@@ -993,7 +994,7 @@ void LingbotV2MoeExpertModel::set_moe_weights(
                 at::TensorOptions().dtype(at::kHalf).device(at::kPrivateUse1));
         // Opt-in capture of layer 0's post-AdaRMS activation. Same shape/dtype/device as
         // l0_out_; allocated only when asked for, so the default build is unchanged.
-        const char* ein = nullptr /* activation capture is disabled */;
+        const char* ein = std::getenv("RPU_L2_CAPTURE_INNORM");
         debug_capture_innorm_ = (ein != nullptr && ein[0] == '1' && ein[1] == '\0');
         if (debug_capture_innorm_)
             innorm_ = at::zeros({tp_rows_, hidden_size()},
@@ -2313,7 +2314,7 @@ FmbRouteManifestEntry LingbotV2MoeExpertModel::mask_residency_route_for_layout(
                 "LingBot2 selected retained mask lifetime changed");
     return {L2_MASK_SPM_SCHEDULE, FmbRouteFamily::GRAPH_SCHEDULE,
             static_cast<int64_t>(mode), 0,
-            {layout.chunk_size, layout.max_kv_seq_len, attn_tp(), 8,
+            {layout.chunk_size, layout.max_kv_seq_len, attn_tp(), num_cores(),
              denoise_unroll_ ? num_steps_ : 1, num_layers()}, 0};
 }
 
@@ -2327,7 +2328,7 @@ LingbotV2MoeExpertModel::physical_forward_operand_residency(
     const auto& args = route.arguments;
     TORCH_CHECK(args[0] == manifest.physical_length &&
                     args[1] == manifest.kv_logical_length &&
-                    args[2] == attn_tp() && args[3] == 8 &&
+                    args[2] == attn_tp() && args[3] == num_cores() &&
                     args[4] == (denoise_unroll_ ? num_steps_ : 1) &&
                     args[5] == num_layers(),
                 "LingBot2 mask residency descriptor/model geometry drift");
@@ -2368,7 +2369,7 @@ void LingbotV2MoeExpertModel::emit_action_mask_spm(
             ctx().consume_physical_route(
                 FmbRouteFamily::GRAPH_SCHEDULE, L2_MASK_SPM_SCHEDULE,
                 route.selector, 0,
-                {seq_len, kv_seq_len, tp, 8,
+                {seq_len, kv_seq_len, tp, num_cores(),
                  denoise_unroll_ ? num_steps_ : 1, num_layers()}, 0);
         }
     }

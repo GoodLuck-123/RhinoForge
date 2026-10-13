@@ -138,7 +138,6 @@ public:
     };
 
     void set_debug_export(bool enabled) {
-        TORCH_CHECK(!enabled, "Intermediate activation export is unavailable in RhinoForge");
         TORCH_CHECK(!debug_export_configured_ || debug_export_ == enabled,
                     "NextDiT debug export is cold per native handle");
         TORCH_CHECK(layers_.empty() || debug_export_configured_ || !enabled,

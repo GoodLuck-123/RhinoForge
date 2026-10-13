@@ -752,3 +752,30 @@ void rpu_launch_wall_window_sdpa_by_mha_spm(
     queue->enqueu_kernel(
         *kernel, {2, 1, 36}, spm_cores(kWallVisionCores));
 }
+
+void rpu_launch_v_transpose_spm_batch3_576(
+    uint32_t input_spm,
+    uint32_t output_spm) {
+    rpu_launch_v_transpose_spm(
+        input_spm, output_spm,
+        kWallVisionBatch, kWallVisionSeq,
+        kWallVisionHeadsPerCore * kWallVisionCores,
+        kWallVisionHeadDim, kWallVisionCores);
+}
+
+void rpu_launch_sdpa_by_mha_spm_batch3_576(
+    uint32_t q_spm,
+    uint32_t k_spm,
+    uint32_t v_transposed_spm,
+    uint32_t output_spm,
+    uint32_t mask_spm,
+    int attn_mask_type,
+    double scale) {
+    rpu_launch_sdpa_by_mha_spm(
+        q_spm, k_spm, v_transposed_spm, output_spm, mask_spm,
+        attn_mask_type, scale,
+        kWallVisionBatch, kWallVisionSeq, kWallVisionSeq,
+        kWallVisionHeadsPerCore * kWallVisionCores,
+        kWallVisionHeadsPerCore * kWallVisionCores,
+        kWallVisionHeadDim, kWallVisionCores);
+}

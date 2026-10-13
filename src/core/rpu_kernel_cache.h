@@ -1676,6 +1676,16 @@ public:
         return queues_[idx];
     }
 
+    // Failed preparation may leave pending work without a completed batch.
+    // Destroy only the queue owned by this caller before another graph reuses it.
+    void evict(int64_t core_num, ::rhino_lkn::Queue_t* expected) noexcept {
+        if (core_num < 1 || core_num > 8) return;
+        auto& queue = queues_[static_cast<size_t>(core_num - 1)];
+        if (queue != expected) return;
+        delete queue;
+        queue = nullptr;
+    }
+
     // 清空所有缓存的 Queue (用于 shutdown)
     void clear() {
         for (int i = 0; i < 8; ++i) {

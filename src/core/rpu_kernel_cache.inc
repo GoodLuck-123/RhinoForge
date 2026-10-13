@@ -818,6 +818,14 @@ void KernelCache::initialize() {
         const std::string& mixed_lib = expansion_path;
         int mixed_loaded = 0;
         static constexpr const char* kMixedNames[] = {
+            "parallel_linear_acc32_out_bf16_m208n128k128",
+            "parallel_linear_acc32_out_bf16_m240n112k128",
+            "parallel_linear_acc32_out_bf16_m272n96k128",
+            "parallel_linear_acc32_out_bf16_m304n80k128",
+            "parallel_linear_acc32_out_bf16_m352n64k128",
+            "parallel_linear_w8a16_acc32_out_bf16_m400n48k128",
+            "llama_rms_norm_bf16in_fp16out",
+            "llama_rms_norm_bf16in_fp16out_v16",
             "llm_all_reduce_residual_local_spm",
             "fused_gate_up_swiglu_w8a16_m320n112k128",
             "pi05_gate_up_geglu_w8a16_m400n80k128",

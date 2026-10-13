@@ -1,4 +1,5 @@
 #include "rpu_kvinsert_segment_plan.h"
+#include "rhino_runtime_identity.h"
 
 #include <c10/util/Exception.h>
 
@@ -34,7 +35,7 @@ uint64_t dependency_hash_append(uint64_t hash, const char* value) {
 int64_t current_dependency_identity() {
     uint64_t hash = 1469598103934665603ULL;
     hash = dependency_hash_append(hash, kKvInsertCostRuntimeRelease);
-    hash = dependency_hash_append(hash, kKvInsertCostLaunchSha256);
+    hash = dependency_hash_append(hash, kKvInsertCostLaunchCommit);
     hash = dependency_hash_append(hash, kKvInsertCostOperatorSha256);
     hash = dependency_hash_append(hash, kKvInsertCostExpansionSha256);
     return static_cast<int64_t>(hash &

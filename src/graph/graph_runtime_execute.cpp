@@ -3779,29 +3779,38 @@ void RpuKernelGraph::execute_graph_oneshot() {
 
     size_t next_node = 0;
     size_t seg_idx_oneshot = 0;
-    // Match Launch's core count at construction and return every completed
-    // arena lease before running the next segment or interleaved data node.
-    std::unique_ptr<::rhino_lkn::Queue_t> one_shot_queue;
-    size_t one_shot_queue_core_count = 0;
+    // QueueCache returns one SDK queue for each core count. Keep its completed
+    // batch arena until the last segment with that core count, then release it.
+    size_t remaining_segments_by_core_count[8] = {};
+    ::rhino_lkn::Queue_t* retained_oneshot_queues[8] = {};
+    auto discard_retained_on_failure = c10::make_scope_exit([&] {
+        for (size_t i = 0; i < 8; ++i) {
+            if (retained_oneshot_queues[i] == nullptr) continue;
+            QueueCache::instance().evict(i + 1, retained_oneshot_queues[i]);
+        }
+    });
+    for (const auto& seg : segments_) {
+        TORCH_CHECK(
+            !seg.core_ids.empty() && seg.core_ids.size() <= 8,
+            "execute_graph_oneshot: segment core count must be in [1, 8], got ",
+            seg.core_ids.size());
+        ++remaining_segments_by_core_count[seg.core_ids.size() - 1];
+    }
     for (auto& seg : segments_) {
         for (size_t i = next_node; i < seg.start_idx; ++i) {
             execute_data_node(nodes_[i]);
         }
-        const size_t seg_core_count = seg.core_ids.size();
-        TORCH_CHECK(seg_core_count >= 1 && seg_core_count <= 8,
-                    "execute_graph_oneshot: segment core count must be in [1, 8]");
-        if (!one_shot_queue || seg_core_count != one_shot_queue_core_count) {
-            one_shot_queue = std::make_unique<::rhino_lkn::Queue_t>(
-                static_cast<uint8_t>(seg_core_count));
-            one_shot_queue_core_count = seg_core_count;
-        }
-        ::rhino_lkn::Queue_t* wq = one_shot_queue.get();
+        ::rhino_lkn::Queue_t* wq = QueueCache::instance().get(
+            seg.core_ids.size());
         // 复用 prepare_segment_queue,自动处理 Kernel / Dma / Barrier 三种段内节点。
         // oneshot 不需要 sync_mutable_params 复用 kd_buf,prepare 内部用
         // add_kernel_mutable 没有副作用(kd_buf 一次性执行后丢弃)。
-        // P2: prepare_segment_queue 现在改为 Segment& (要填 seg.mutable_dmas);
-        // oneshot 路径填的 slot 在下面 segments_.clear() 时就丢了,无副作用。
+        // Keep the complete DMA preflight and submission lease, but omit
+        // sidecars that would only be consumed by a future REPLAY.
         RpuDmaSubmissionLease submission_lease;
+        // Preparation can fail after appending work. Retire this cached queue
+        // on that path too, before it can be reused by another graph.
+        retained_oneshot_queues[seg.core_ids.size() - 1] = wq;
         const uint32_t build_rc = prepare_segment_queue(
             seg, *wq, hw_perf_cfg_oneshot.enabled, submission_lease,
             /*retain_replay_state=*/false);
@@ -3818,10 +3827,14 @@ void RpuKernelGraph::execute_graph_oneshot() {
             seg, *wq, "oneshot", hw_perf_gid_oneshot,
             hw_perf_cfg_oneshot.enabled, /*hwperf_prepared=*/true,
             hw_perf_cfg_oneshot.output_dir);
-        const uint32_t rc_discard = wq->discard_completed_batch();
-        TORCH_CHECK(rc_discard == 0,
-                    "execute_graph_oneshot: discard_completed_batch SDK rc=",
-                    rc_discard, " on segment idx=", seg_idx_oneshot);
+        if (--remaining_segments_by_core_count[seg.core_ids.size() - 1] == 0) {
+            const uint32_t rc_discard = wq->discard_completed_batch();
+            TORCH_CHECK(
+                rc_discard == 0,
+                "execute_graph_oneshot: discard_completed_batch SDK rc=",
+                rc_discard, " on segment idx=", seg_idx_oneshot);
+            retained_oneshot_queues[seg.core_ids.size() - 1] = nullptr;
+        }
 
         ++seg_idx_oneshot;
         next_node = seg.end_idx;
@@ -3831,4 +3844,5 @@ void RpuKernelGraph::execute_graph_oneshot() {
     }
     mirror_per_segment_replay_count(last_stats_, segments_);
     segments_.clear();
+    discard_retained_on_failure.release();
 }

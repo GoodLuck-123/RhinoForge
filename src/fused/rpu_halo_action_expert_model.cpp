@@ -14,6 +14,7 @@
 #include "rpu_eltwise.h"
 #include "rpu_helpers.h"
 #include "rpu_runtime_state.h"
+#include "rpu_spm_residency.h"
 
 #include <ATen/record_function.h>
 #include <c10/util/Half.h>
@@ -46,6 +47,7 @@ constexpr int64_t HALO_ACTION_K_ROPE_SITE = 6071864173885174758LL;
 constexpr int64_t HALO_ACTION_PREPARE_ALL_REDUCE_SITE =
     3905443535840784612LL;
 constexpr int64_t HALO_ACTION_BIAS_PRELOAD_SITE = 2863746215900564039LL;
+constexpr int64_t HALO_ACTION_MASK_SPM_SCHEDULE_SITE = 3893593376471794725LL;
 constexpr uint32_t HALO_ACTION_KV_CAPABILITIES = KV_INSERT_CAP_V2;
 constexpr int64_t HALO_ACTION_KV_REASON_PREFIX_HISTORY_DDR_REQUIRED = 2;
 
@@ -119,18 +121,13 @@ void HaloActionExpertModel::set_weights_halo(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// dynamic_config — 基类断言单 chunk + 准备其 private mask; 再备一份子类可见的
-// PreparedMask 供步 4 的 sdpa_dma_mask_to_spm/SDPA 使用 (每 forward 一次)。
+// The base owns the version-checked mask shared by every action layer.
 // ─────────────────────────────────────────────────────────────────────────────
 ModelDynamicConfig HaloActionExpertModel::dynamic_config(const ChunkPlan& plan) {
     ModelDynamicConfig cfg = CausalDecoderModel::dynamic_config(plan);
     cfg.attention_policy = AttentionExecutionPolicy::DDR_KV;
     TORCH_CHECK(ctx().attention_mask.has_value(),
                 "halo dynamic_config: explicit attention mask required");
-    prepared_mask_halo_ = sdpa_prepare_mask(
-        ctx().attention_mask, /*is_causal=*/false,
-        ctx().seq_len, ctx().position + ctx().seq_len,
-        sdpa_stable_mask_cache());
     return cfg;
 }
 
@@ -171,7 +168,7 @@ std::vector<int64_t> HaloActionExpertModel::resolve_stage_domain(
 FmbPhysicalExecutionManifest
 HaloActionExpertModel::physical_manifest_for_candidate(
     const FmbThreeStageChunkPlan& plan,
-    const LayoutContext& /*layout*/,
+    const LayoutContext& layout,
     int64_t physical_len, int64_t logical_len,
     int64_t position) const {
     TORCH_CHECK(
@@ -232,6 +229,11 @@ HaloActionExpertModel::physical_manifest_for_candidate(
     append(
         FmbRouteFamily::ATTENTION, HALO_ACTION_ATTN_SITE,
         static_cast<int64_t>(AttentionExecutionPolicy::DDR_KV));
+    append(
+        FmbRouteFamily::GRAPH_SCHEDULE, HALO_ACTION_MASK_SPM_SCHEDULE_SITE,
+        static_cast<int64_t>(mask_residency_for_candidate(layout)),
+        {layout.batch_size, seq_len, chunk.kv_seq_len, tp,
+         num_layers(), moe_chunk_size_});
 
     const int64_t qkv_widths[] = {
         nq * hd, nkv * hd, nkv * hd,
@@ -325,6 +327,72 @@ FmbPhysicalManifestForwardCapability
 HaloActionExpertModel::physical_manifest_forward_capability(
     const FmbPhysicalExecutionManifest& /*manifest*/) const {
     return {true, FmbGraphLifecycle::COMPOSITE_CHILD};
+}
+
+FmbForwardOperandResidency
+HaloActionExpertModel::physical_forward_operand_residency(
+    const FmbPhysicalExecutionManifest& manifest) const {
+    if (manifest.state != FmbPhysicalManifestState::COMPLETE)
+        return FmbForwardOperandResidency::UNSPECIFIED;
+    const FmbRouteManifestEntry* selected = nullptr;
+    for (const auto& route : manifest.routes) {
+        if (route.family != FmbRouteFamily::GRAPH_SCHEDULE ||
+            route.site_id != HALO_ACTION_MASK_SPM_SCHEDULE_SITE) continue;
+        TORCH_CHECK(selected == nullptr, "HALO duplicate mask residency route");
+        selected = &route;
+    }
+    TORCH_CHECK(selected && selected->flags == 0 && selected->invocation == 0 &&
+                    (selected->selector == static_cast<int64_t>(FmbForwardOperandResidency::PER_LAYER) ||
+                     selected->selector == static_cast<int64_t>(FmbForwardOperandResidency::FORWARD)),
+                "HALO missing or invalid mask residency route");
+    const auto& a = selected->arguments;
+    TORCH_CHECK(a.size() == 6 && a[0] == 1 && a[1] == moe_chunk_size_ &&
+                    a[2] >= a[1] && a[3] == attn_tp() &&
+                    a[4] == num_layers() && a[5] == moe_chunk_size_,
+                "HALO mask residency descriptor geometry drift");
+    return static_cast<FmbForwardOperandResidency>(selected->selector);
+}
+
+FmbForwardOperandResidency
+HaloActionExpertModel::mask_residency_for_candidate(
+    const LayoutContext& layout) const {
+    const auto bound = layout.forward_operand_residency;
+    TORCH_CHECK(bound == FmbForwardOperandResidency::UNSPECIFIED ||
+                    bound == FmbForwardOperandResidency::PER_LAYER ||
+                    bound == FmbForwardOperandResidency::FORWARD,
+                "HALO invalid bound mask residency mode");
+    if (bound != FmbForwardOperandResidency::UNSPECIFIED) {
+        TORCH_CHECK(layout.use_attn_mask && !layout.is_causal &&
+                        layout.batch_size == 1 && layout.chunk_size >= moe_chunk_size_,
+                    "HALO bound mask residency geometry drift");
+        if (bound == FmbForwardOperandResidency::FORWARD) {
+            const auto candidate = detail::make_forward_spm_residency_candidate(
+                baseline_buffer_declarations(layout), {"sdpa_mask"});
+            TORCH_CHECK(candidate.valid, "HALO bound mask lifetime is invalid");
+        }
+        // A descriptor already owns this choice. FMB's final layout admission
+        // rejects new pressure; rebuilding a manifest must not reselect it.
+        return bound;
+    }
+    // This is a cold planner decision. Neither declaration nor emission reads
+    // live free space. Both the actual M18 plan and the C32 capacity probe must
+    // fit the same full owner/held-reservation budget before publishing FORWARD.
+    if (!layout.use_attn_mask || layout.is_causal || layout.batch_size != 1 ||
+        layout.chunk_size != moe_chunk_size_ ||
+        layout.planning_chunk_capacity < layout.chunk_size)
+        return FmbForwardOperandResidency::PER_LAYER;
+    const auto candidate = detail::make_forward_spm_residency_candidate(
+        baseline_buffer_declarations(layout), {"sdpa_mask"});
+    if (!candidate.valid || !declared_spm_layout_fits(candidate.declarations))
+        return FmbForwardOperandResidency::PER_LAYER;
+    auto capacity_layout = layout;
+    capacity_layout.chunk_size = layout.planning_chunk_capacity;
+    const auto capacity_candidate = detail::make_forward_spm_residency_candidate(
+        baseline_buffer_declarations(capacity_layout), {"sdpa_mask"});
+    if (!capacity_candidate.valid ||
+        !declared_spm_layout_fits(capacity_candidate.declarations))
+        return FmbForwardOperandResidency::PER_LAYER;
+    return FmbForwardOperandResidency::FORWARD;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -506,7 +574,27 @@ void HaloActionExpertModel::set_moe_weights(
 // declare_buffers — 基类布局 + act 孪生 Temp 槽 + 掩码/act 权重 preload 槽
 // ─────────────────────────────────────────────────────────────────────────────
 std::vector<BufferDecl> HaloActionExpertModel::declare_buffers(const LayoutContext& lctx) {
-    auto d = CausalDecoderModel::declare_buffers(lctx);
+    TORCH_CHECK(lctx.forward_operand_residency == FmbForwardOperandResidency::UNSPECIFIED ||
+                    lctx.forward_operand_residency == FmbForwardOperandResidency::PER_LAYER ||
+                    lctx.forward_operand_residency == FmbForwardOperandResidency::FORWARD,
+                "HALO invalid declaration mask residency mode");
+    auto declarations = baseline_buffer_declarations(lctx);
+    if (lctx.forward_operand_residency != FmbForwardOperandResidency::FORWARD)
+        return declarations;
+    TORCH_CHECK(lctx.use_attn_mask && !lctx.is_causal && lctx.batch_size == 1,
+                "HALO retained mask requires its explicit noncausal B1 layout");
+    auto candidate = detail::make_forward_spm_residency_candidate(
+        declarations, {"sdpa_mask"});
+    TORCH_CHECK(candidate.valid, "HALO retained mask lifetime is invalid");
+    return std::move(candidate.declarations);
+}
+
+std::vector<BufferDecl> HaloActionExpertModel::baseline_buffer_declarations(
+    const LayoutContext& lctx) const {
+    // The base API constructs callbacks but does not execute them. Keep this
+    // one const_cast local to declaration construction, without mutable sizing.
+    auto d = const_cast<HaloActionExpertModel*>(this)->
+        causal_baseline_buffer_declarations(lctx);
     TORCH_CHECK(moe_chunk_size_ > 0,
                 "halo declare_buffers: set_moe_weights must precede forward");
     // 框架解析出的 chunk_size 是单块 SPM 规划宽度 (ceil16(seq)=32), 实际行数
@@ -849,14 +937,31 @@ void HaloActionExpertModel::build_layer_subgraph(int layer_idx, const ChunkInfo&
         /*v_cache_batch_offset_elems=*/0,
         /*spm_rows=*/0, kv_plan);
     const uint32_t mask_off = addr_offset("sdpa_mask").value;
-    sdpa_dma_mask_to_spm(prepared_mask_halo_, mask_off, seq_len, chunk.kv_seq_len, tp);
+    bool upload_mask = true;
+    if (ctx().has_complete_physical_manifest()) {
+        const auto& route = ctx().find_physical_route(
+            FmbRouteFamily::GRAPH_SCHEDULE, HALO_ACTION_MASK_SPM_SCHEDULE_SITE);
+        TORCH_CHECK(
+            route.selector == static_cast<int64_t>(FmbForwardOperandResidency::PER_LAYER) ||
+                route.selector == static_cast<int64_t>(FmbForwardOperandResidency::FORWARD),
+            "HALO mask schedule selector drift");
+        ctx().consume_physical_route(
+            FmbRouteFamily::GRAPH_SCHEDULE, HALO_ACTION_MASK_SPM_SCHEDULE_SITE,
+            route.selector, /*resolved_flags=*/0,
+            {ctx().batch_size, seq_len, chunk.kv_seq_len, tp,
+             num_layers(), moe_chunk_size_});
+        upload_mask = route.selector == static_cast<int64_t>(FmbForwardOperandResidency::PER_LAYER) ||
+            (ctx().body_iter == 0 && layer_idx == 0);
+    }
+    if (upload_mask)
+        sdpa_dma_mask_to_spm(prepared_attn_mask_, mask_off, seq_len, chunk.kv_seq_len, tp);
     if (ctx().has_complete_physical_manifest()) {
         ctx().consume_physical_attention_route(
             HALO_ACTION_ATTN_SITE, AttentionExecutionPolicy::DDR_KV);
     }
     rpu_launch_sdpa_spm_dispatch(
         SdpaKernelType::FLASH_ATTN_SPM,
-        k_cache, v_cache, prepared_mask_halo_.mask_type, c10::nullopt,
+        k_cache, v_cache, prepared_attn_mask_.mask_type, c10::nullopt,
         addr_offset("q").value, addr_offset("output").value,
         addr_offset("sdpa_tmp").value, mask_off,
         seq_len, nq, nkv, hd, chunk.kv_seq_len, tp, NUM_CORES);

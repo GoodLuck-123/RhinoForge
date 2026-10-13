@@ -122,6 +122,9 @@ include_directories(
     ${Python3_INCLUDE_DIRS}
 )
 
+rhinoforge_generate_runtime_identity("${CMAKE_BINARY_DIR}/generated")
+include_directories("${CMAKE_BINARY_DIR}/generated")
+
 add_subdirectory(src)
 set_target_properties(rpu_backend PROPERTIES PREFIX "")
 

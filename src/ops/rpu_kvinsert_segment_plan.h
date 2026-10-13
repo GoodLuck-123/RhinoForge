@@ -218,19 +218,6 @@ private:
         c10::ArrayRef<KvInsertCostCertificate> cost_certificates);
 };
 
-// Public provider release and opaque asset identities. A dependency bump
-// invalidates sealed hardware cost certificates; it does not relabel
-// historical calibration evidence. Hashes refer to the shared library and
-// main and expansion operator payloads supplied with this release.
-inline constexpr char kKvInsertCostRuntimeRelease[] = "runtime-v1.1.0";
-inline constexpr char kKvInsertCostLaunchSha256[] =
-    "5e9eb5d1fc28bd64e0184ae681c955338669e4e582c63247f4edb97ee35b5d0c";
-inline constexpr char kKvInsertCostOperatorSha256[] =
-    "32539098de8ab4468da0b073db6f4da02592fa63c1d2511dd8a33bc12aa96365";
-
-inline constexpr char kKvInsertCostExpansionSha256[] =
-    "192cf67ccd8ebf88f38c1bbc295a961bad21068afce77de3fcd236b3361e84e8";
-
 // The no-argument overload is only the unsealed structural fallback.
 const KvInsertCostCertificate& rpu_kvinsert_cost_certificate();
 KvInsertCostCertificate rpu_kvinsert_cost_certificate(

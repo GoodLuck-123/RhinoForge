@@ -6,6 +6,8 @@ import subprocess
 
 import pytest
 
+from _native_runtime_identity import runtime_identity_include
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -30,6 +32,7 @@ def _run_native(tmp_path, source, torch, *, extra_sources=()):
     torch_root = Path(torch.__file__).resolve().parent
     command = [compiler, "-std=c++17", "-O0", "-D_GLIBCXX_USE_CXX11_ABI=" +
                str(int(torch.compiled_with_cxx11_abi())), "-I", str(ROOT / "src"),
+               "-I", str(runtime_identity_include(tmp_path)),
                "-I", str(torch_root / "include"), "-I", str(torch_root / "include/torch/csrc/api/include"),
                str(cpp), *map(str, extra_sources),
                "-L", str(torch_root / "lib"), "-Wl,-rpath," + str(torch_root / "lib"),

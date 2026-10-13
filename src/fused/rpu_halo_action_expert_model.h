@@ -119,8 +119,7 @@ public:
 protected:
     std::vector<BufferDecl> declare_buffers(const LayoutContext& ctx) override;
     void build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) override;
-    // dynamic_config: 基类已做单 chunk 断言 + 自己的 mask 准备; 这里再准备一份
-    // 子类可见的 PreparedMask (基类的是 private)。forward/static_config 继承。
+    // Reuse the base prepared mask and enforce the action attention policy.
     ModelDynamicConfig dynamic_config(const ChunkPlan& plan) override;
     // HALO act 永远单块 (query 18 全块送 MASK_2D 非因果 SDPA)。当前 tiling
     // tile_m=32 → grid=1, gqa=6, product=6，满足严格 keeper；override 只表达
@@ -136,8 +135,14 @@ protected:
     FmbPhysicalManifestForwardCapability
     physical_manifest_forward_capability(
         const FmbPhysicalExecutionManifest& manifest) const override;
+    FmbForwardOperandResidency physical_forward_operand_residency(
+        const FmbPhysicalExecutionManifest& manifest) const override;
 
 private:
+    std::vector<BufferDecl> baseline_buffer_declarations(
+        const LayoutContext& layout) const;
+    FmbForwardOperandResidency mask_residency_for_candidate(
+        const LayoutContext& layout) const;
     // 行掩码 merge: out = text*text_mask + act*act_mask (3 次全尺寸 eltwise)。
     // 前置: text/act 位于不同 SPM 槽; MUL 就地破坏两者, out 可与 text 同槽。
     void emit_row_merge(uint32_t text_addr, uint32_t act_addr, uint32_t out_addr,
@@ -184,7 +189,6 @@ private:
     // 宽度 -> [chunk_size, width] fp16 device 常量掩码 (Persistent 槽 preload 源)。
     std::unordered_map<int64_t, at::Tensor> text_mask_ddr_, act_mask_ddr_;
     int64_t moe_chunk_size_ = 0;                // 掩码/槽固化的 chunk_size (0 = 未设)
-    PreparedMask prepared_mask_halo_;           // 每 forward 在 dynamic_config 重备
 };
 
 }  // namespace v3
