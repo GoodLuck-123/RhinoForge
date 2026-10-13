@@ -66,16 +66,6 @@ def _upload_denoise_inputs(owner, inputs):
     return cached[4]
 
 
-def _reuse_denoise_attention_mask(owner, mask):
-    """Retain an owned, tracked CPU mask only when its actual contents match."""
-    cached = getattr(owner, "_denoise_attention_mask_cpu", None)
-    if (cached is None or cached.dtype != mask.dtype or cached.shape != mask.shape
-            or not torch.equal(cached, mask)):
-        with torch.inference_mode(False):
-            cached = mask.detach().clone()
-        owner._denoise_attention_mask_cpu = cached
-    return cached
-
 
 def _spm_dump(rb, label):
     """Per-core SPM usage dump, gated by RHINO_SPM (diagnostic only).
@@ -733,7 +723,6 @@ class RhinoVLAOnRPU:
         self._denoise_cond_all_cpu = None
         self._denoise_cond_all_rpu = None
         self._denoise_input_upload = None
-        self._denoise_attention_mask_cpu = None
         self._denoise_adarms_tables = None
         self._denoise_time_proj_table = None
         self._denoise_loop_meta = None
@@ -1332,7 +1321,7 @@ class RhinoVLAOnRPU:
             _plan_rhino_prefix_kv_execution,
             _prefill_kv_cache,
         )
-        from .fused import _rhino_action_math
+        from .fused import _rhino_action_math, _cached_rhino_attention_bias
         make_suffix_attn_mask, bool_mask_to_attention_bias, get_cache_layer = (
             _rhino_action_math(self.er)
         )
@@ -1403,24 +1392,10 @@ class RhinoVLAOnRPU:
                 f"{int(self.er._rpu_rope_max_seq_len)}")
 
         cond_all = self._denoise_cond_all_rpu
-        # Rebuild masks per predict: identity-only caching cannot detect in-place
-        # updates and may collide when Python object ids are reused.
         suffix_mask = torch.ones((1, S), dtype=torch.bool)
-        bool_mask = make_suffix_attn_mask(prefix_mask, suffix_mask)
-        attention_mask = bool_mask_to_attention_bias(
-            bool_mask, torch.float16
-        )
-        # Match the per-step fused path: C++ reads v16-aligned K length, while
-        # padded dummy lanes stay invisible through the attention bias.
-        pad_k = (-attention_mask.shape[-1]) % 16
-        if pad_k:
-            attention_mask = Fnn.pad(
-                attention_mask,
-                (0, pad_k),
-                value=torch.finfo(attention_mask.dtype).min,
-            )
-        attention_mask = _reuse_denoise_attention_mask(
-            self, attention_mask.cpu().contiguous())
+        attention_mask = _cached_rhino_attention_bias(
+            self.er, prefix_mask, suffix_mask,
+            make_suffix_attn_mask, bool_mask_to_attention_bias)
         _am = action_mask if action_mask is not None else torch.ones(
             (1, AH, AD), dtype=torch.float32
         )

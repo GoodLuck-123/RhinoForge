@@ -59,6 +59,8 @@ _MROPE_SECTION = [16, 24, 24]
 _MAX_SEQ_LEN = 4096
 _CERTIFIED_MAX_KV_LEN = 1936
 _CERTIFIED_CHUNK_SIZE = 176
+_DEFAULT_LOGICAL_PREFILL = 1904
+_DEFAULT_EXECUTION_PREFILL = 1936
 
 
 def _expected_checkpoint_profile() -> dict[str, tuple[tuple[int, ...], str]]:
@@ -207,15 +209,19 @@ class Qwen25VLBackbone:
             self, "_rpu_execution", {"prefill": {"chunk_size": "auto"}}
         ).get("prefill", {})
         generation = int(getattr(self, "_fmb_execution_generation", 0))
+        default_prefill = logical_seq == _DEFAULT_LOGICAL_PREFILL
         exact_chunk = stage.get("chunk_size", "auto")
         requested_chunk = (
             int(exact_chunk)
             if isinstance(exact_chunk, int)
-            else 0
+            else (_CERTIFIED_CHUNK_SIZE if default_prefill else 0)
         )
         padding_rows = stage.get("padding_rows")
         if padding_rows is None:
-            padding_rows = 0
+            padding_rows = (
+                _DEFAULT_EXECUTION_PREFILL - logical_seq
+                if default_prefill else "auto"
+            )
         padding_budget = int(stage.get(
             "padding_budget", 0 if isinstance(padding_rows, int) else 64
         ))

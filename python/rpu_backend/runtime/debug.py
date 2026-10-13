@@ -138,14 +138,37 @@ def hw_perf_trace(output_dir: str = ".rpu-hw-perf", max_dumps: int = 32):
 # -------------------------------
 # Debug tensor export
 # -------------------------------
+def set_debug_export(enabled: bool) -> None:
+    """Enable/disable debug tensor export for fused decoder layer verification."""
+    if _cpp_loaded():
+        _cpp().set_debug_export(enabled)
 
 
+def get_debug_export() -> bool:
+    """Get debug tensor export state."""
+    if _cpp_loaded() and hasattr(_cpp(), "get_debug_export"):
+        return _cpp().get_debug_export()
+    return False
 
 
+def get_debug_tensor(name: str) -> torch.Tensor:
+    """Get a debug tensor by name."""
+    if _cpp_loaded() and hasattr(_cpp(), "get_debug_tensor"):
+        return _cpp().get_debug_tensor(name)
+    return torch.Tensor()
 
 
+def clear_debug_tensors() -> None:
+    """Clear all stored debug tensors."""
+    if _cpp_loaded() and hasattr(_cpp(), "clear_debug_tensors"):
+        _cpp().clear_debug_tensors()
 
 
+def list_debug_tensors() -> list:
+    """List all stored debug tensor names."""
+    if _cpp_loaded() and hasattr(_cpp(), "list_debug_tensors"):
+        return _cpp().list_debug_tensors()
+    return []
 
 
 # -------------------------------

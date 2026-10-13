@@ -529,6 +529,23 @@ def _reset_prefix_mask_cache():
         _PREFIX_MASK_CACHE_MISSES = 0
 
 
+def _pi05_probe_save(name: str, tensor: Any) -> None:
+    """Save a named tensor when RPU_PI05_PROBE_DIR is configured."""
+    probe_dir = os.environ.get("RPU_PI05_PROBE_DIR")
+    if not probe_dir or tensor is None:
+        return
+    try:
+        os.makedirs(probe_dir, exist_ok=True)
+        t = tensor
+        if hasattr(t, "device") and t.device.type == "rpu":
+            t = t.cpu()
+        if hasattr(t, "dtype") and t.dtype in (torch.float16, torch.bfloat16):
+            t = t.float()
+        torch.save(t, os.path.join(probe_dir, f"{name}.pt"))
+    except Exception as exc:  # probes must never break the forward
+        _LOG.warning("Pi05 probe dump %s failed: %s", name, exc)
+
+
 def _load_pi05_probe_tensor(
     path: str,
     *,
@@ -610,6 +627,7 @@ def _sample_noise(self, bsize, noise):
             name="RPU_PI05_LOAD_NOISE",
             expected_shape=actions_shape,
         ).to(dtype=torch.float32)
+    _pi05_probe_save("x_t_init", x_t)
     return x_t
 
 
@@ -923,6 +941,9 @@ def _prefill_prefix_embs(self, images, img_masks, tokens, masks, rpu_device):
         prefix_att_masks,
         execution_prefix_len - logical_prefix_len,
     )
+    _pi05_probe_save("prefix_embs", prefix_embs)
+    _pi05_probe_save("prefix_pad_masks", prefix_pad_masks)
+    _pi05_probe_save("prefix_att_masks", prefix_att_masks)
     # B3·A·2 (2026-05-27): cache hit returns last (mask4d, pos_ids) verbatim;
     # cache miss with all-zero att uses pad-outer-product fast-path; otherwise
     # calls upstream make_att_2d_masks. Spec §5.2.
@@ -932,6 +953,8 @@ def _prefill_prefix_embs(self, images, img_masks, tokens, masks, rpu_device):
             self, "_pi05_prefill_mask_fp16", False
         ) else None),
     )
+    _pi05_probe_save("prefix_att_2d_masks_4d", prefix_att_2d_masks_4d)
+    _pi05_probe_save("prefix_position_ids", prefix_position_ids)
     self.paligemma_with_expert.paligemma.model.language_model.config._attn_implementation = "eager"  # noqa: SLF001
 
     vlm = self.paligemma_with_expert.paligemma.model.language_model
@@ -991,6 +1014,15 @@ def _prefill_prefix_embs(self, images, img_masks, tokens, masks, rpu_device):
     })
     prefix_len = int(prefix_pad_masks.shape[1])
     past_key_values._prefix_len = prefix_len
+    # Save selected logical KV tensors after prefill.
+    if os.environ.get("RPU_PI05_PROBE_DIR"):
+        _pi05_probe_save("kv_post_prefill_L0_k", past_key_values.k_caches[0])
+        _pi05_probe_save("kv_post_prefill_L0_v", past_key_values.v_caches[0])
+        _pi05_probe_save("kv_post_prefill_L8_k", past_key_values.k_caches[8])
+        _pi05_probe_save("kv_post_prefill_L8_v", past_key_values.v_caches[8])
+        _pi05_probe_save("kv_post_prefill_L17_k", past_key_values.k_caches[17])
+        _pi05_probe_save("kv_post_prefill_L17_v", past_key_values.v_caches[17])
+
     return past_key_values, prefix_pad_masks, prefix_len
 
 
@@ -1171,6 +1203,11 @@ def _run_denoise_python_baseline(self, x_t, prefix_pad_masks, past_key_values,
                 [1] + [0] * (chunk_size - 1),
                 dtype=suffix_embs.dtype, device=suffix_embs.device,
             )[None, :].expand(bsize, chunk_size)
+        if step == 0:
+            _pi05_probe_save("suffix_embs_step0", suffix_embs)
+            _pi05_probe_save("adarms_cond_step0", adarms_cond)
+            _pi05_probe_save("suffix_pad_masks_step0", suffix_pad_masks)
+            _pi05_probe_save("suffix_att_masks_step0", suffix_att_masks)
 
         # L2 mask construction once at step 0 (data_ptr stable across
         # 5 forwards → C++ AdaRMSModel mask cache hits on steps 1-4).
@@ -1185,6 +1222,8 @@ def _run_denoise_python_baseline(self, x_t, prefix_pad_masks, past_key_values,
             prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
             position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
             full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
+            _pi05_probe_save("att_mask_4d_step0", full_att_2d_masks_4d)
+            _pi05_probe_save("position_ids_step0", position_ids)
 
         # Expert forward via paligemma_with_expert — routes through
         # `rpu_adarms_model_forward` (patched in Step E). That function:
@@ -1201,6 +1240,8 @@ def _run_denoise_python_baseline(self, x_t, prefix_pad_masks, past_key_values,
             adarms_cond=[None, adarms_cond],
         )
         suffix_out = outputs_embeds[1]
+        if step == 0:
+            _pi05_probe_save("suffix_out_step0_full", suffix_out)
 
         # Match legacy semantics (pi05_converter.py:369-372):
         #   - take last chunk_size tokens (take_len precomputed above)
@@ -1208,12 +1249,18 @@ def _run_denoise_python_baseline(self, x_t, prefix_pad_masks, past_key_values,
         #   - action_out_proj on CPU fp32 -> v_t is fp16 (post-hook cast)
         suffix_out = suffix_out[:, -take_len:]
         suffix_out = suffix_out.to(dtype=torch.float32)
+        if step == 0:
+            _pi05_probe_save("suffix_out_step0_sliced", suffix_out)
         v_t = self.action_out_proj(suffix_out)
+        if step == 0:
+            _pi05_probe_save("v_t_step0", v_t)
 
         # Preserve the legacy Euler arithmetic: dt * v_t keeps v_t's dtype;
         # adding it to the FP32 state produces FP32. This is not equivalent
         # to the fused loop's FP16 state and rounded scalar.
         x_t = x_t + dt * v_t
+        if step == 0:
+            _pi05_probe_save("x_t_after_step0", x_t)
 
     action_plan = getattr(
         self.paligemma_with_expert.gemma_expert.model,

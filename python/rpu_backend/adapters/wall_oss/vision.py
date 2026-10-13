@@ -717,7 +717,7 @@ class WallOssVision:
         if (getattr(self, "_pair_252", False)
                 and tuple(grid_cpu.shape) in ((2, 3), (3, 3))
                 and bool((grid_cpu == grid_cpu.new_tensor([1, 18, 18])).all())
-                and not False):
+                and not torch.rpu.get_debug_export()):
             if not batch_on or max_seq < 672:
                 raise ValueError("paired Vision requires batch mode and max_seq >= 672")
             self._validate_execution_chunks((672,) if N == 2 else (672, 336))
@@ -1182,7 +1182,7 @@ class WallOssVision:
                 self._native_chunk_size(grid_cpu),
                 int(self._window),
                 int(self._mixed_precision),
-                int(False),
+                int(torch.rpu.get_debug_export()),
             ],
             window_boundaries,
         )
@@ -1359,7 +1359,7 @@ class WallOssVision:
              int(self._window), g,
              layer_group if grouped_chunks else 0,
              int(weight_outer), int(self._mixed_precision),
-             int(False)],
+             int(torch.rpu.get_debug_export())],
             window_boundaries,
         )
         graph_dyn_dims.extend(a6_plan.graph_key_words())

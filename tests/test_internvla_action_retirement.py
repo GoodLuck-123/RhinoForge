@@ -576,7 +576,7 @@ def test_actual_navdp_first_batched_forward_cache_survives_failed_gc(native, mon
 
 
 @pytest.mark.parametrize("fused_qkq,debug", [(False, False), (False, True), (True, True)])
-def test_nextdit_public_forward_ignores_legacy_export_flag_and_reuses_graph(native, monkeypatch, fused_qkq, debug):
+def test_nextdit_actual_debug_caller_reads_three_slots_and_rejects_mode_drift(native, monkeypatch, fused_qkq, debug):
     """CPU endpoint checks original caller/readback; no native Graph/model claim."""
     from contextlib import nullcontext
     mode = [debug]
@@ -586,8 +586,8 @@ def test_nextdit_public_forward_ignores_legacy_export_flag_and_reuses_graph(nati
     monkeypatch.setenv("RPU_INTERNVLA_NEXTDIT_FUSED_QKQ", str(int(fused_qkq)))
     owner = nextdit.build_nextdit_runtime(_nextdit_model(), collect_layer_outputs=True, asset_paths=("unused",))
     try:
-        assert owner._debug_export is False and owner._fused_qkq is fused_qkq
-        assert owner._handle not in native["debug_selections"]
+        assert owner._debug_export is debug and owner._fused_qkq is fused_qkq
+        assert native["debug_selections"][owner._handle] is debug
         state = SimpleNamespace(cross_context_rpu=torch.zeros(1, 260, 384, dtype=torch.float16))
         step = SimpleNamespace(modulation_rpu=torch.zeros(12, 4, 384, dtype=torch.float16),
                                final_scale_rpu=torch.zeros(384, dtype=torch.float16))
@@ -605,7 +605,7 @@ def test_nextdit_public_forward_ignores_legacy_export_flag_and_reuses_graph(nati
                     euler, cross, sk, sv, ck, cv, probes, collect, descriptor):
             assert handle == owner._handle and collect and not unroll and not prepare and not euler
             assert probes is owner._layer_outputs_rpu and descriptor == (1, 2, 3)
-            assert owner._debug_export is False and owner._fused_qkq is fused_qkq
+            assert mode[0] is debug and owner._fused_qkq is fused_qkq
             calls.append((handle, action, populate))
             for slot in range(15):
                 probes[slot].fill_(slot + len(calls))
@@ -615,18 +615,29 @@ def test_nextdit_public_forward_ignores_legacy_export_flag_and_reuses_graph(nati
         result = owner.forward(x, time, condition)
         assert torch.equal(result, x) and len(calls) == len(receipts) == 1
         assert receipts[0][0] is plan and receipts[0][1]["logical_len"] == 32
-        assert owner.last_debug_outputs == {}
+        probes = owner.last_debug_outputs
+        if debug:
+            assert set(probes) == {"internvla_nextdit_L0_q_" + suffix for suffix in ("projected", "normalized", "headmajor")}
+            for key, value in probes.items():
+                slot = ("projected", "normalized", "headmajor").index(key.removeprefix("internvla_nextdit_L0_q_"))
+                assert value.shape == ((6, 32, 64) if slot == 2 else (32, 384))
+                assert value.dtype == torch.float32 and torch.all(value == 13 + slot)
+        else:
+            assert probes == {}
+        previous = {key: value.clone() for key, value in probes.items()}
         signature = owner._graph_signature(260)
-        assert torch.equal(owner.forward(x, time, condition), x)
+        owner.forward(x, time, condition)
         assert owner._graph_signature(260) is signature and len(calls) == 2
-        assert owner.last_debug_outputs == {}
+        for key, value in previous.items():
+            assert torch.equal(probes[key], value)
+            assert torch.equal(owner.last_debug_outputs[key], value + 1)
         mode[0] = not debug
         before = len(calls), len(receipts), dict(owner._graph_signatures)
-        owner.forward(x, time, condition)
-        assert (len(calls), len(receipts)) == (before[0] + 1, before[1] + 1)
-        assert owner._graph_signatures == before[2]
+        with pytest.raises(RuntimeError, match="debug export is cold"):
+            owner.forward(x, time, condition)
+        assert (len(calls), len(receipts), owner._graph_signatures) == before
         mode[0] = debug
         owner.forward(x, time, condition)
-        assert len(calls) == 4
+        assert len(calls) == 3
     finally:
         owner.destroy()

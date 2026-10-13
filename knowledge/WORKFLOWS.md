@@ -125,3 +125,11 @@ Run `python scripts/check_release_version.py` and the affected package checks.
 Cut `release/X.Y` before advancing `main` to the next `.dev0` version. Preserve
 published tags and assets; record each source commit and payload checksum.
 See the [release policy](../docs/release_policy.md).
+
+## Tensor diagnostics and cached masks
+
+Keep diagnostic graph modes separate from normal retained graphs and bind cold
+choices before installing a native owner. Test mode drift, frozen-cache misses
+and retirement. Tensor getters share storage; callers keep a replay-independent
+value with `.cpu().clone()`. Cached attention masks must compare actual input
+contents, including inference tensors, and own versioned CPU storage.

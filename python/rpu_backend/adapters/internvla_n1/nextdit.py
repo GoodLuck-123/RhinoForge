@@ -411,8 +411,10 @@ class NextDiTRPURuntime:
         )
         self._max_cross_seq_len = max_cross_seq_len
         self._collect_layer_outputs = bool(collect_layer_outputs)
-        # Raw diagnostic exports are disabled in the public runtime.
-        self._debug_export = False
+        # Native diagnostic copies are selected when the retained graph BUILDs.
+        # The global setter does not invalidate model-owned graphs. Keep this
+        # diagnostic choice cold for this owner, including after hot config.
+        self._debug_export = self._collect_layer_outputs and bool(torch.rpu.get_debug_export())
         self._action_encoder_enabled = action_encoder is not None or action_decoder is not None
         if self._action_encoder_enabled:
             if action_encoder is None or action_decoder is None:
@@ -557,6 +559,7 @@ class NextDiTRPURuntime:
             label="InternVLA NextDiT", handle_name="_handle")
         self._handle_finalizer = self._native_resource.finalizer
         try:
+            torch.ops.rpu.internvla_nextdit_set_debug_export(self._handle, self._debug_export)
             self._install_weights(self._handle)
             torch.ops.rpu.internvla_nextdit_set_chunk_envelope(
                 self._handle, int(self._packed_self_cache.max_seq_len),
@@ -1514,6 +1517,8 @@ class NextDiTRPURuntime:
         _require_execution_process_safe()
         if self._handle is None:
             raise RuntimeError("NextDiTRPURuntime has been destroyed")
+        if self._collect_layer_outputs and bool(torch.rpu.get_debug_export()) != self._debug_export:
+            raise RuntimeError("NextDiT debug export is cold per runtime; restore the original mode or use a fresh owner")
 
     def destroy(self) -> None:
         if getattr(self, "_handle", None) is not None:

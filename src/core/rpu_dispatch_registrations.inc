@@ -623,6 +623,7 @@ TORCH_LIBRARY(rpu, m) {
   m.def("internvla_nextdit_create", TORCH_FN(rpu_internvla_nextdit_create));
   m.def("internvla_nextdit_set_chunk_envelope", TORCH_FN(rpu_internvla_nextdit_set_chunk_envelope));
   m.def("internvla_nextdit_destroy", TORCH_FN(rpu_internvla_nextdit_destroy));
+  m.def("internvla_nextdit_set_debug_export(int handle, bool enabled) -> ()", TORCH_FN(rpu_internvla_nextdit_set_debug_export));
   m.def("internvla_nextdit_set_16b_sdpa", TORCH_FN(rpu_internvla_nextdit_set_16b_sdpa));
   m.def("internvla_nextdit_set_fused_qkq_weights(int handle, Tensor[] weights) -> ()");
   m.def("internvla_nextdit_set_step_prepare_weights(int handle, Tensor weight, Tensor bias, Tensor fold_norm_weight) -> ()");
@@ -862,6 +863,11 @@ TORCH_LIBRARY(rpu, m) {
         "int handle, int execution_len, int prefix_len, int mask_kv_len, "
         "int cos_sin_offset) -> int[]",
         TORCH_FN(rpu_lingbot_v2_moe_resolve_action_stage_domain));
+  m.def("lingbot_v2_moe_debug_l0_out", &rpu_lingbot_v2_moe_debug_l0_out);
+  m.def("lingbot_v2_moe_debug_innorm", &rpu_lingbot_v2_moe_debug_innorm);
+  m.def("lingbot_v2_moe_debug_router_h", &rpu_lingbot_v2_moe_debug_router_h);
+  m.def("lingbot_v2_moe_debug_layer_in", &rpu_lingbot_v2_moe_debug_layer_in);
+  m.def("lingbot_v2_moe_debug_attn_resid", &rpu_lingbot_v2_moe_debug_attn_resid);
   m.def("lingbot_v2_moe_forward("
         "int handle, Tensor hidden_states, "
         "Tensor[] k_caches, Tensor[] v_caches, "
@@ -1442,6 +1448,8 @@ TORCH_LIBRARY(rpu, m) {
   m.def("qwen3_5_vision_stage_prefill_execution_controls",
         TORCH_FN(rpu_qwen3_5_vision_stage_prefill_execution_controls));
   // Per-layer debug snapshots (int -> Tensor, DEFAULT block). Read after a get_debug_export() forward.
+  m.def("qwen3_5_vision_get_dbg_hidden", TORCH_FN(rpu_qwen3_5_vision_get_dbg_hidden));
+  m.def("qwen3_5_vision_get_dbg_q", TORCH_FN(rpu_qwen3_5_vision_get_dbg_q));
   m.def("qwen3_5_vision_set_weight_scales(int handle, Tensor[] q_scales, Tensor[] k_scales, Tensor[] v_scales, Tensor[] o_scales, Tensor[] fc1_scales, Tensor[] fc2_scales) -> ()");
   m.def("qwen3_5_vision_set_weights(int handle, "
         "Tensor[] q_w_list, Tensor[] k_w_list, "

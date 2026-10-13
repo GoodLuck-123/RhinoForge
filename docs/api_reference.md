@@ -22,6 +22,19 @@ Choose the checkpoint, precision and input profile from [examples](model_support
 The API compatibility level is available as `rpu_backend.api.API_VERSION` and
 currently reports `5.0.0`; it is independent of the distribution version.
 
+### Tensor diagnostics
+
+`torch.rpu.set_debug_export(True)` enables supported intermediate tensor
+captures. Set the mode before constructing and capturing the model. Use
+`list_debug_tensors()` and `get_debug_tensor(name)` to read them;
+`get_debug_export()` returns the current mode. The getter returns shared
+storage: use `.cpu().clone()` to keep values across later replays.
+`clear_debug_tensors()` releases registry entries; disabling export also clears
+them. NextDiT binds the mode for its lifetime. Qwen3.5 keeps separate diagnostic
+prefill graphs and rejects a missing diagnostic graph after Graph freeze.
+Pi0.5 can also save named input and intermediate tensors as `.pt` files when
+`RPU_PI05_PROBE_DIR` is set to a local output directory.
+
 ## Causal language models
 
 ```python

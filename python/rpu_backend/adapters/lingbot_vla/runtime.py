@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from numbers import Integral
 import torch
 import torch.nn.functional as F
+from rpu_backend.runtime.masks import versioned_cpu_mask
 from safetensors import safe_open
 
 import rpu_backend
@@ -532,6 +533,7 @@ def _build_expert(gw, max_seq, chunk_size=0):
     handle = torch.ops.rpu.causal_decoder_create(
         False, rpu_env_bool("RPU_ADARMS_FUSED_BCAST"))
     try:
+        torch.ops.rpu.causal_decoder_set_explicit_mask_spm_residency(handle, True)
         torch.ops.rpu.causal_decoder_set_weights(
             handle, q_w, k_w, v_w, o_w, [], [], in_norm, post_norm,
             gate_l, up_l, down_l, cos, sin, final_norm_w,
@@ -558,7 +560,7 @@ def _build_suffix_mask(prefix_len):
     prefix_2d = torch.ones(B, S, prefix_len, dtype=torch.bool)   # [1,51,prefix_len]
     full = torch.cat([prefix_2d, suffix_2d], dim=2)[0]           # [51, prefix_len+51] bool
     add = torch.where(full, torch.tensor(0.0), torch.tensor(-50000.0)).half()
-    return add.to("rpu").contiguous()
+    return versioned_cpu_mask(add)
 
 
 # =============================================================================

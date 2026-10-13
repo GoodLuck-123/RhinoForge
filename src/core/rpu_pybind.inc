@@ -108,6 +108,11 @@ PYBIND11_MODULE(rpu_backend, m) {
   m.def("shutdown", &rpu_shutdown, "Release all cached resources (call before exit)");
 
   // Debug export - store intermediate tensors for verification
+  m.def("set_debug_export", &set_debug_export, "Enable/disable debug tensor export");
+  m.def("get_debug_export", &get_debug_export, "Get debug tensor export state");
+  m.def("get_debug_tensor", &get_debug_tensor, "Get debug tensor by name", py::arg("name"));
+  m.def("clear_debug_tensors", &clear_debug_tensors, "Clear all debug tensors");
+  m.def("list_debug_tensors", &list_debug_tensors, "List all debug tensor names");
 
   // SPM debug - control SPM/chunk size debug output
   m.def("set_spm_debug", &set_spm_debug, "Enable/disable SPM/chunk debug output");

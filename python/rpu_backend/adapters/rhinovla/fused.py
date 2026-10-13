@@ -25,6 +25,7 @@ from numbers import Integral
 import torch
 
 from rpu_backend.runtime import rpu_env_bool
+from rpu_backend.runtime.masks import versioned_cpu_mask
 from rpu_backend.runtime.decoder import plan_bounded_prefill_execution
 from rpu_backend.runtime.execution_planner import GRAPH_COMPOSITE_CHILD
 
@@ -822,18 +823,9 @@ def patch_rhino_vla_for_rpu(expert, *, prefix_len, suffix_len, max_seq_len=2048,
 
         # -- attention mask --
         if prefix_mask is not None and suffix_mask is not None:
-            bool_mask = make_suffix_attn_mask(prefix_mask, suffix_mask)
-            attention_mask = bool_mask_to_attention_bias(bool_mask, torch.float16)
-            # Keep RhinoVLA SPM SDPA on v16-aligned K length; dummy cache lanes
-            # are masked below and the C++ launcher reads the aligned length.
-            pad_k = (-attention_mask.shape[-1]) % 16
-            if pad_k:
-                attention_mask = torch.nn.functional.pad(
-                    attention_mask,
-                    (0, pad_k),
-                    value=torch.finfo(attention_mask.dtype).min,
-                )
-            attention_mask = attention_mask.cpu().contiguous()
+            attention_mask = _cached_rhino_attention_bias(
+                self, prefix_mask, suffix_mask,
+                make_suffix_attn_mask, bool_mask_to_attention_bias)
             is_causal = False
         else:
             attention_mask = None

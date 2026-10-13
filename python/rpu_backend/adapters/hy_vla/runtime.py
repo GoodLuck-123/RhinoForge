@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
+from rpu_backend.runtime.masks import versioned_cpu_mask
 
 import rpu_backend
 from rpu_backend.api._execution import (
@@ -1615,7 +1616,8 @@ class HyVlaRunner:
                                      # 退化成均匀分布，device kernel 未必；因果性保证
                                      # 这些行的值流不回有效行。
             return (vcos, vsin,
-                    _rpu16(torch.where(vm, 0.0, MASK_NEG).reshape(1, 1, S, S)),
+                    versioned_cpu_mask(
+                        torch.where(vm, 0.0, MASK_NEG).reshape(1, 1, S, S)),
                     _rpu16(1.0 - modality_mask[:S].float()))
 
         return self._cached(
@@ -1759,7 +1761,8 @@ class HyVlaRunner:
             # denoise mask 的 prefix 块必须跟着 S 走，总长度为 S + 51。
             dm = torch.cat([denoise_mask[:, :S], denoise_mask[:, -L:]], dim=1)
             return (ecos, esin,
-                    _rpu16(torch.where(dm, 0.0, MASK_NEG).reshape(1, 1, L, S + L)))
+                    versioned_cpu_mask(
+                        torch.where(dm, 0.0, MASK_NEG).reshape(1, 1, L, S + L)))
 
         return self._cached(
             "denoise", (prefill_pos, suffix_pos, denoise_mask), build_consts)

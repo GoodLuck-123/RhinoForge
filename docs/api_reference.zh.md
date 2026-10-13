@@ -1,5 +1,14 @@
 # API 参考
 
+## 张量诊断
+
+在构造模型、捕获 Graph 前调用 `torch.rpu.set_debug_export(True)`，可开启支持路径的中间张量导出。
+用 `list_debug_tensors()` 列出名称，`get_debug_tensor(name)` 读取，`get_debug_export()` 查询开关。
+返回值共享运行时存储，跨重放保存数值时使用 `.cpu().clone()`。
+`clear_debug_tensors()` 清空注册项，关闭导出也会清空。NextDiT 在整个实例生命周期内固定此开关；
+Qwen3.5 使用独立诊断 prefill Graph，冻结后不能临时创建缺失的诊断图。
+Pi0.5 还可通过 `RPU_PI05_PROBE_DIR` 指定本地输出目录，将命名输入和中间张量保存为 `.pt` 文件。
+
 简体中文 | [English](api_reference.md)
 
 发行包名为 `rhinoforge`，Python package 仍是 `rpu_backend`。导入后把 PyTorch

@@ -151,7 +151,7 @@ def _refresh_qwen35_text_retirement(state):
     resource = getattr(state, "retirement", None)
     if resource is not None:
         resource.graphs = tuple(value for name in (
-            "graph_cache", "prefill_graph_cache",
+            "graph_cache", "prefill_graph_cache", "prefill_debug_graph_cache",
             "action_graph_cache", "action_trace_graph_cache")
             if (value := getattr(state, name, None)) is not None)
 
@@ -161,7 +161,7 @@ def _clear_qwen35_graphs(states, vision=None):
     caches, raw_graphs = [], []
     for state in states:
         child_caches = tuple(getattr(state, name, None) for name in (
-            "graph_cache", "prefill_graph_cache",
+            "graph_cache", "prefill_graph_cache", "prefill_debug_graph_cache",
             "action_graph_cache", "action_trace_graph_cache"))
         child_raw = (getattr(state, "prefill_graph", None),)
         resource = getattr(state, "retirement", None)
@@ -282,7 +282,7 @@ def _retire_qwen3_5_text_state(inner, *, state=None, _graphs_retired=False):
         if handle is not None and resource is None and finalizer is not None and not finalizer.alive:
             raise RuntimeError("Qwen3.5 text handle has a dead finalizer without a confirmed retirement")
         if not _graphs_retired:
-            for name in ("graph_cache", "prefill_graph_cache",
+            for name in ("graph_cache", "prefill_graph_cache", "prefill_debug_graph_cache",
                          "action_graph_cache", "action_trace_graph_cache"):
                 cache = getattr(state, name, None)
                 if cache is not None:
@@ -1668,11 +1668,33 @@ def _install_qwen3_5_text_for_rpu_impl(
     return handle
 
 
+def _qwen35_debug_prefill_cache(st):
+    """Return the existing diagnostic Graph lifecycle before planning or BUILD."""
+    import rpu_backend as _rb
+
+    debug_cache = getattr(st, "prefill_debug_graph_cache", None)
+    if debug_cache is None:
+        if (getattr(st, "prefill_graph_cache", None) is not None
+                and st.prefill_graph_cache.is_frozen()):
+            raise RuntimeError("Qwen3.5 READY has no prewarmed diagnostic prefill graph")
+        if (st.graph_cache.runtime_policy.graph_arena_count or
+                (getattr(st, "public_retained_prefill", False)
+                 and getattr(st, "hidden_size", None) == 4096)):
+            raise ValueError("Qwen3.5 9B text cold plan does not admit a retained debug prefill cache")
+        debug_cache = _rb.graph.GraphCache(
+            max_entries=1, runtime_policy=st.graph_cache.runtime_policy)
+        st.prefill_debug_graph_cache = debug_cache
+        _refresh_qwen35_text_retirement(st)
+        st.prefill_debug_graph_sig = None
+    return debug_cache
+
+
 def _prepare_qwen35_prefill_capture(st, *, seq_len, real_len, planned_chunk_size, plan):
     """Validate READY and retire stale RoPE users before any native mutation.
 
-    A physical shape change can reallocate native prefill cos/sin backing.
-    Evict the retained graph before changing it; equal shapes refresh in place.
+    Normal and debug graphs share native prefill cos/sin backing. A physical
+    shape change can reallocate it, so BOTH users must be evicted first. Equal
+    shapes retain their addresses and refresh values through native copy_.
     """
     import torch
     import rpu_backend as _rb
@@ -1680,11 +1702,12 @@ def _prepare_qwen35_prefill_capture(st, *, seq_len, real_len, planned_chunk_size
     prefill_cache = getattr(st, "prefill_graph_cache", None)
     if prefill_cache is None:
         return _oneshot_scope(st.prefill_graph)
-    active = prefill_cache
-    sig_attr = "prefill_graph_sig"
+    debug = bool(torch.rpu.get_debug_export())
+    active = _qwen35_debug_prefill_cache(st) if debug else prefill_cache
+    sig_attr = "prefill_debug_graph_sig" if debug else "prefill_graph_sig"
     family = "qwen3_5" if getattr(st, "public_retained_prefill", False) else "g05_qwen3_5"
     sig = _rb.graph.GraphSignature(
-        op_id=f"rpu_{family}_prefill",
+        op_id=f"rpu_{family}_prefill" + ("_debug" if debug else ""),
         shapes=[seq_len, st.hidden_size],
         dyn_dims=[st.num_layers, real_len, planned_chunk_size,
                   int(getattr(st, "execution_generation", 0)), *plan.graph_key_words()],
@@ -1696,8 +1719,9 @@ def _prepare_qwen35_prefill_capture(st, *, seq_len, real_len, planned_chunk_size
     rope_shape = (seq_len, st.rotary_dim // 2) if st.mrope_section else None
     old_shape = getattr(st, "prefill_rope_shape", None)
     if old_shape is not None and rope_shape != old_shape:
-        siblings = [(getattr(st, "prefill_graph_cache", None),
-                     "prefill_graph_sig")]
+        siblings = [(getattr(st, name, None), attr) for name, attr in (
+            ("prefill_graph_cache", "prefill_graph_sig"),
+            ("prefill_debug_graph_cache", "prefill_debug_graph_sig"))]
         if any(cache is not None and cache.is_frozen() for cache, _ in siblings):
             raise RuntimeError("Qwen3.5 READY cannot replace shared prefill RoPE backing; begin warmup first")
         for cache, attr in siblings:
@@ -1813,6 +1837,8 @@ def _preflight_qwen3_5_text(
     # The shared lifecycle owns reuse, including READY and native identity.
     # Keep the last receipt below for its existing readers, never as a cache.
     plan_graph_cache = getattr(st, "prefill_graph_cache", None)
+    if plan_graph_cache is not None and bool(torch.rpu.get_debug_export()):
+        plan_graph_cache = _qwen35_debug_prefill_cache(st)
 
     plan_box = {}
     pad_len, planned_chunk_size = _plan_prefill_execution(

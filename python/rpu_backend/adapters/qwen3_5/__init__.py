@@ -462,12 +462,14 @@ def _apply_qwen3_5_execution_config(
     # after that commit; a later failure is restored by the session rollback.
     _clear_execution_graph(state.graph_cache)
     _clear_execution_graph(getattr(state, "prefill_graph_cache", None))
+    _clear_execution_graph(getattr(state, "prefill_debug_graph_cache", None))
     state.prefill_graph.invalidate()
     if vision_handle is not None:
         _clear_execution_graph(vision_model._rpu_vision_graph_cache)
         vision_model._rpu_vision_debug_graph.invalidate()
 
     state.prefill_graph_sig = None
+    state.prefill_debug_graph_sig = None
     state.prefill_rope_shape = None
     state.prefill_rope_cache = None
     state.execution_generation = int(generation)

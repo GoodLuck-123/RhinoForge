@@ -1254,7 +1254,7 @@ def _plan_qwen3_5_vision_group(
 
     diagnostic_oneshot = bool(
         getattr(vision_model, "_rpu_vision_graph_disable", False)
-        or False)
+        or torch.rpu.get_debug_export())
     plan_box = {}
     plan_bounded_prefill_execution(
         logical_len,
@@ -2514,7 +2514,7 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
     last_hidden_per_image: list[torch.Tensor] = []
     graph_requests = []
     if not (getattr(self, "_rpu_vision_graph_disable", False)
-            or False):
+            or torch.rpu.get_debug_export()):
         for (_, n_i, _), vision_plan in planned_groups:
             embed_shape = (tuple(embed_packed.shape) if compact_input else
                            (n_i, *tuple(embed_packed.shape[1:])))
@@ -2635,7 +2635,7 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
             except BaseException:
                 _evict_vision_graph(self)
                 raise
-        elif False:
+        elif torch.rpu.get_debug_export():
             # Debug DMAs point at per-forward buffers, so never retain their addresses.
             try:
                 out_3d = _run_vision_diagnostic_oneshot(self, op_args)
@@ -2860,7 +2860,8 @@ def _prepare_qwen3_5_multimodal_spm(model, input_ids, pixel_values,
                        [n // (merge * merge) for n in patches])
     # A new peer changes the feasible domain; the caller must leave READY
     # before installing it, just as for a new physical graph shape.
-    for owner, names in ((state, ("graph_cache", "prefill_graph_cache")),
+    for owner, names in ((state, ("graph_cache", "prefill_graph_cache",
+                                 "prefill_debug_graph_cache")),
                          (vision, ("_rpu_vision_graph_cache",))):
         for name in names:
             graph = getattr(owner, name, None)
@@ -2880,7 +2881,7 @@ def _prepare_qwen3_5_multimodal_spm(model, input_ids, pixel_values,
                                   (vision, "qwen3_5_vision", ("vision",))):
         for stage in stages:
             prepared_execution_plan_cache(owner, stage, None, prefix).clear()
-    state.prefill_graph_sig = None
+    state.prefill_graph_sig = state.prefill_debug_graph_sig = None
     state.prefill_plan = state.last_a6_plan = state.decode_plan = None
     state.decode_stage_descriptor = None
     vision._rpu_vision_graph_key = vision._rpu_vision_graph_sig = None

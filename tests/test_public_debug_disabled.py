@@ -1,4 +1,4 @@
-"""Public forward planning must work without private diagnostic API bindings."""
+"""Default inference keeps tensor diagnostics disabled."""
 import ast
 from contextlib import nullcontext
 from pathlib import Path
@@ -8,10 +8,10 @@ import pytest
 import torch
 
 
-def test_text_prefill_keeps_retained_owner_without_debug_api(monkeypatch):
+def test_text_prefill_keeps_retained_owner_with_debug_disabled(monkeypatch):
     from rpu_backend.adapters.qwen3_5 import text
 
-    assert not hasattr(torch.rpu, "get_debug_export")
+    assert torch.rpu.get_debug_export() is False
     calls = []
     retained = SimpleNamespace(
         is_frozen=lambda: False,
@@ -48,11 +48,11 @@ def test_text_prefill_keeps_retained_owner_without_debug_api(monkeypatch):
 
 
 @pytest.mark.parametrize("graph_disabled", [False, True])
-def test_vision_planning_preserves_explicit_graph_mode_without_debug_api(monkeypatch, graph_disabled):
+def test_vision_planning_preserves_explicit_graph_mode_with_debug_disabled(monkeypatch, graph_disabled):
     from rpu_backend.adapters.qwen3_5 import vision
     from rpu_backend.runtime import decoder
 
-    assert not hasattr(torch.rpu, "get_debug_export")
+    assert torch.rpu.get_debug_export() is False
     retained, plan = object(), object()
     owner = SimpleNamespace(_rpu_vision_graph_disable=graph_disabled,
                             _rpu_vision_kv_cache=SimpleNamespace(max_seq_len=1024),
@@ -72,7 +72,7 @@ def test_vision_planning_preserves_explicit_graph_mode_without_debug_api(monkeyp
 def test_nextdit_native_guard_needs_only_a_live_owner():
     from rpu_backend.adapters.internvla_n1.nextdit import NextDiTRPURuntime
 
-    assert not hasattr(torch.rpu, "get_debug_export")
+    assert torch.rpu.get_debug_export() is False
     owner = SimpleNamespace(_handle=1, _collect_layer_outputs=True, _debug_export=False)
     NextDiTRPURuntime._require_native(owner)
     owner._handle = None
@@ -80,12 +80,11 @@ def test_nextdit_native_guard_needs_only_a_live_owner():
         NextDiTRPURuntime._require_native(owner)
 
 
-def test_production_has_no_calls_to_unavailable_debug_bindings():
-    root = Path(__file__).resolve().parents[1] / "python/rpu_backend"
-    calls = []
-    for path in root.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                if node.func.attr in {"get_debug_export", "internvla_nextdit_set_debug_export"}:
-                    calls.append((str(path.relative_to(root)), node.lineno))
-    assert calls == []
+def test_tensor_debug_bindings_are_available_without_native_extension():
+    from rpu_backend.runtime import debug
+
+    for name in ("set_debug_export", "get_debug_export", "get_debug_tensor",
+                 "clear_debug_tensors", "list_debug_tensors"):
+        assert getattr(torch.rpu, name) is getattr(debug, name)
+    assert torch.rpu.list_debug_tensors() == []
+    assert torch.rpu.get_debug_tensor("missing").numel() == 0

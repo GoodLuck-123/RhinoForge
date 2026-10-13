@@ -23,6 +23,8 @@ def runtime(monkeypatch):
     monkeypatch.setattr(rpu_backend.graph, "GraphCache", graph_cache)
     monkeypatch.setattr(rpu_backend.graph, "GraphSignature", lambda **kw: SimpleNamespace(
         _impl=(kw["op_id"], tuple(kw["shapes"]), tuple(kw["dyn_dims"])), op_id=kw["op_id"]))
+    debug = [False]
+    monkeypatch.setattr(torch.rpu, "get_debug_export", lambda: debug[0])
     state = SimpleNamespace(handle=7, graph_cache=graph_cache(), prefill_graph_cache=graph_cache(max_entries=1),
         public_retained_prefill=True, num_layers=24, hidden_size=4, rotary_dim=4,
         rope_theta=10000, mrope_section=(1, 1, 0), prefill_rope_cache=None, prefill_rope_shape=None)
@@ -71,7 +73,7 @@ def runtime(monkeypatch):
         return text.run_qwen3_5_text(owner, torch.full((1, length, 4), value, dtype=torch.float16), kv,
             position_ids=positions, preflight_plan=(execution, 64, plan))
     return SimpleNamespace(state=state, owner=owner, kv=kv, events=events, native=native,
-                           caches=caches, run=run)
+                           caches=caches, run=run, debug=debug)
 
 
 def test_same_signature_replays_changed_input_and_position_values(runtime):
@@ -767,15 +769,38 @@ def test_logical_tail_is_keyed_even_when_physical_length_matches(runtime):
     assert [hit for _, hit in f.state.prefill_graph_cache._impl.touches] == [False, False, True]
 
 
+def test_shared_rope_reallocation_retires_normal_and_debug_then_rebuilds(runtime):
+    f = runtime
+    first = f.run()
+    f.debug[0] = True
+    f.run()
+    assert f.state.prefill_graph_cache.size() == f.state.prefill_debug_graph_cache.size() == 1
+    f.run(129, execution=192)
+    assert f.state.prefill_graph_cache.size() == 0
+    assert f.state.prefill_debug_graph_cache.size() == 1
+    f.debug[0] = False
+    restored = f.run()
+    assert torch.equal(first, restored)
+    assert f.state.prefill_debug_graph_cache.size() == 0
+    assert [hit for _, hit in f.state.prefill_graph_cache._impl.touches] == [False, False]
 
 
-@pytest.mark.parametrize("fault", ["length", "logical_tail"])
+@pytest.mark.parametrize("fault", ["length", "logical_tail", "missing_debug", "frozen_sibling"])
 def test_ready_miss_fails_before_native_setters_or_sibling_mutation(runtime, fault):
     f = runtime
     f.run()
     f.state.prefill_graph_cache.freeze()
+    if fault == "frozen_sibling":
+        f.debug[0] = True
+        # A pre-existing empty debug cache may plan, but it cannot replace the
+        # backing used by the frozen normal graph.
+        sibling = _cache()
+        sibling._runtime_policy = f.state.graph_cache.runtime_policy
+        f.state.prefill_debug_graph_cache = sibling
+    elif fault == "missing_debug":
+        f.debug[0] = True
     before = list(f.events)
-    length = 66 if fault == "logical_tail" else 129
+    length = 66 if fault == "logical_tail" else (65 if fault == "missing_debug" else 129)
     with pytest.raises(RuntimeError, match="READY"):
         f.run(length, execution=128 if length < 129 else 192)
     assert f.events == before and f.state.prefill_graph_cache.size() == 1
@@ -901,6 +926,11 @@ def test_9b_normal_retained_scope_does_not_add_debug_queue(runtime, arenas):
     f.run()
     f.run(value=1)
     assert [hit for _, hit in f.state.prefill_graph_cache._impl.touches] == [False, True]
+    before = list(f.events)
+    f.debug[0] = True
+    with pytest.raises(ValueError, match="retained debug prefill"):
+        f.run()
+    assert f.events == before
     assert not hasattr(f.state, "prefill_debug_graph_cache")
 
 

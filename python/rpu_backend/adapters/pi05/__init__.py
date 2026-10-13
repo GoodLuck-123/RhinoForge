@@ -2028,6 +2028,7 @@ class Pi05Adapter:
                 if not getattr(paligemma_model_cls, "_rpu_get_image_features_patched", False):
                     from .runtime import (
                         _load_pi05_probe_tensor,
+                        _pi05_probe_save,
                     )
                     def _rpu_get_image_features(self, pixel_values, **kwargs):
                         _pix_override = os.environ.get("RPU_PI05_LOAD_PIXEL_VALUES")
@@ -2040,7 +2041,9 @@ class Pi05Adapter:
                                 dtype=pixel_values.dtype,
                                 device=pixel_values.device,
                             )
+                        _pi05_probe_save("get_image_features_input", pixel_values)
                         image_outputs = self.vision_tower(pixel_values, return_dict=True)
+                        _pi05_probe_save("vision_tower_last_hidden_state", image_outputs.last_hidden_state)
                         image_outputs.pooler_output = image_outputs.last_hidden_state
                         return image_outputs
                     paligemma_model_cls.get_image_features = _rpu_get_image_features
@@ -2049,9 +2052,12 @@ class Pi05Adapter:
                 # embed_image: skip fp32 + *sqrt(hs) on device (they cancel).
                 pwe_cls = type(pawe)
                 if not getattr(pwe_cls, "_rpu_embed_image_patched", False):
+                    from .runtime import _pi05_probe_save
                     def _rpu_embed_image(self, image):
+                        _pi05_probe_save("embed_image_input", image)
                         image_outputs = self.paligemma.model.get_image_features(image)
                         out = image_outputs.pooler_output.half()
+                        _pi05_probe_save("embed_image_out", out)
                         return out
                     pwe_cls.embed_image = _rpu_embed_image
                     pwe_cls._rpu_embed_image_patched = True

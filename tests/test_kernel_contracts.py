@@ -290,7 +290,7 @@ def test_dinov3_example_preflights_before_weight_loading() -> None:
     )
 
 
-def test_public_release_has_no_activation_export_path() -> None:
+def test_public_release_limits_debug_exports_to_tensors() -> None:
     python_debug = (
         ROOT / "python/rpu_backend/runtime/debug.py"
     ).read_text(encoding="utf-8")
@@ -320,24 +320,29 @@ def test_public_release_has_no_activation_export_path() -> None:
         "list_debug_tensors",
         "clear_debug_tensors",
     ):
-        assert f"def {symbol}" not in python_debug
-        assert f'"{symbol}"' not in torch_namespace
-        assert f'm.def("{symbol}"' not in pybind
-    assert "void set_debug_export(" not in runtime_state
+        assert f"def {symbol}" in python_debug
+        assert symbol in torch_namespace
+        assert f'm.def("{symbol}"' in pybind
+    assert "void set_debug_export(" in runtime_state
     runtime_header = (ROOT / "src/core/rpu_runtime_state.h").read_text()
-    assert "inline constexpr bool get_debug_export() noexcept { return false; }" in runtime_header
+    assert "bool                      get_debug_export();" in runtime_header
     assert "RPU_GRAPH_HCB_CHECKSUM" not in graph_execute
     assert "[HCB-CK]" not in graph_execute
-    assert "RPU_PI05_PROBE_DIR" not in pi05
-    assert "torch.save(" not in pi05
-    # The shared forward implementations retain dormant capture branches, but
-    # the public runtime has no switch, operator binding, or environment reader
-    # that can activate or retrieve them.
+    assert "RPU_PI05_PROBE_DIR" in pi05
+    assert "torch.save(" in pi05
+    # Logical Tensor getters are public; raw memory and program inspection are not.
     bindings = (ROOT / "src/core/rpu_dispatch_registrations.inc").read_text()
     for name in re.findall(r'm\.(?:def|impl)\("([^"(]+)', bindings):
-        assert not any(part in name for part in ("debug_", "_dbg_", "flush_dumps"))
+        allowed = {"internvla_nextdit_set_debug_export",
+                   "qwen3_5_vision_get_dbg_hidden", "qwen3_5_vision_get_dbg_q",
+                   *("lingbot_v2_moe_debug_" + suffix for suffix in (
+                       "l0_out", "innorm", "router_h", "layer_in", "attn_resid"))}
+        assert name in allowed or not any(part in name for part in ("debug_", "_dbg_", "flush_dumps"))
     native_lingbot = (ROOT / "src/fused/rpu_lingbot_v2_moe_model.cpp").read_text()
-    assert not re.search(r'getenv\("(?:RPU_L2_(?:CAP|STAGES|DBG)|RPU_LINGBOT2_DEBUG)', native_lingbot)
+    tensor_capture = {"RPU_LINGBOT2_DEBUG_DUMP_ROUTER_H", "RPU_L2_CAP_RESID",
+                      "RPU_L2_CAPTURE_L0", "RPU_L2_CAPTURE_INNORM"}
+    controls = set(re.findall(r'getenv\("((?:RPU_L2_|RPU_LINGBOT2_DEBUG)[^"]+)"', native_lingbot))
+    assert controls <= tensor_capture
 
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     for pattern in ("*.pth", "*.ckpt", "*.safetensors", "*.npz", "*.onnx"):

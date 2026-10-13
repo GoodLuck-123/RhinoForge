@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, List, Sequence, Tuple
 
 import torch
+from rpu_backend.runtime.masks import versioned_cpu_mask
 
 import rpu_backend
 from rpu_backend.api._execution import (
@@ -1179,8 +1180,8 @@ def build_halo_action_expert(
         cache = RPUCache(
             num_layers=cfg.num_layers, batch_size=1, max_seq_len=max_seq_len,
             num_kv_heads=cfg.num_kv_heads, head_dim=cfg.head_dim, attn_tp=cfg.attn_tp)
-        attn_mask = torch.zeros(
-            1, 1, cfg.chunk_size, cfg.total_len, dtype=torch.float16)   # 非因果全注意，全 0
+        attn_mask = versioned_cpu_mask(torch.zeros(
+            1, 1, cfg.chunk_size, cfg.total_len, dtype=torch.float16))
         graph = rpu_backend.graph.GraphCache()
         resources.graphs.append(graph)
         runner = HaloStepRunner(
@@ -1250,7 +1251,8 @@ def build_cfg_branch(
     cache.reset_to_position(prefix_len)
     cos, sin = build_rope_tables(cfg, rope_position)
     # SDPA mask 宽 = 该分支 kv 跨度 prefix_len + cs(非因果全注意,全 0);三分支 kv_len 不同 → 宽不同。
-    attn_mask = torch.zeros(1, 1, cfg.chunk_size, prefix_len + cfg.chunk_size, dtype=torch.float16)
+    attn_mask = versioned_cpu_mask(torch.zeros(
+        1, 1, cfg.chunk_size, prefix_len + cfg.chunk_size, dtype=torch.float16))
     return HaloCfgBranch(
         name=name, branch_id=branch_id, cache=cache, cos=cos, sin=sin,
         prefix_len=prefix_len, rope_position=rope_position, attn_mask=attn_mask, epoch=epoch)
