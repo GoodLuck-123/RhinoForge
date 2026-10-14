@@ -1,7 +1,7 @@
 """Pi0.5 internal orchestrator (Pi05Adapter) + Q7 module-level swizzle lock.
 
 v5-02 / B3: this file is the canonical home for Pi05Adapter — the internal
-orchestrator that performs the irreversible CPU→RPU mutation triggered by
+orchestrator that performs the irreversible CPU→device mutation triggered by
 ``Pi05Policy.to('rpu')``. The class was previously co-located with
 ``Pi05Policy`` in ``transformers/pi05/policy.py``; v5-01a-2 split ownership
 so ``api/policy.py`` (Pi05Policy) is a thin lazy-import wrapper while this
@@ -68,17 +68,21 @@ def _fused_denoise_enabled() -> bool:
     return rpu_env_bool(_FUSED_ENV_VAR, default=True)
 
 
-def _pi05_graph_runtime_policy():
+def _pi05_graph_runtime_policy(runtime_policy=None):
     """Freeze Pi's Graph choices without mutating process-wide defaults."""
     from rpu_backend.graph import GraphRuntimePolicy
 
     # Vision, prefill, denoise and the first-call AdaRMS safety graph stay
     # resident; device prefix assembly also needs one transient queue.
-    inherited = GraphRuntimePolicy.from_environment(graph_arena_count=5)
+    if runtime_policy is not None and not isinstance(runtime_policy, GraphRuntimePolicy):
+        raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
+    inherited = (GraphRuntimePolicy.from_environment(graph_arena_count=5)
+                 if runtime_policy is None else runtime_policy)
     fast_replay = rpu_env_bool("RPU_WALL_OSS_FAST_REPLAY", default=True)
     deep_replay = rpu_env_bool("RPU_DEEP_FAST_REPLAY", default=True)
     return replace(
         inherited,
+        graph_arena_count=max(5, inherited.graph_arena_count),
         fmb_fast_replay=fast_replay,
         fmb_deep_fast_replay=deep_replay,
         provenance=inherited.provenance + (
@@ -89,7 +93,7 @@ def _pi05_graph_runtime_policy():
 
 
 def _validate_execution_geometry(adapter: "Pi05Adapter") -> None:
-    """Reject model-specific fixed chunks before irreversible RPU mutation."""
+    """Reject model-specific fixed chunks before irreversible device mutation."""
     model = adapter._lerobot_policy.model
     execution, vision, _text, action = adapter._resolve_execution(
         adapter._rpu_execution,
@@ -213,7 +217,7 @@ def _preflight_pi05_cold_model(lerobot_policy: Any, *, attn_tp: int = 8):
     quant_config = getattr(lerobot_policy, "_pi05_quant_config", {}) or {}
     int4_children = (int4_child_names(quant_config, component="vlm")
                      | int4_child_names(quant_config, component="expert"))
-    group_size = quant_config.get("int4_group_size", quant_config.get("group_size", 32))
+    group_size = quant_config.get("int4_group_size", 32)
     if type(group_size) is not int or group_size not in (32, 64, 128):
         raise ValueError("Pi0.5 int4_group_size must be 32, 64, or 128")
     return (
@@ -502,8 +506,8 @@ def _sync_adapter_runtime_state(adapter: Any, state: dict[str, Any]) -> None:
 def _selected_prefill_pair_rows(adapter) -> int:
     """Resolve only the explicitly selected cold text bucket, never tokenizer defaults."""
     text_tokens = getattr(adapter, "_rpu_prefill_text_tokens", 32)
-    if type(text_tokens) is not int or text_tokens not in (32, 64, 96, 128):
-        raise ValueError("Pi0.5 cold text bucket must be 32, 64, 96, or 128")
+    if type(text_tokens) is not int or text_tokens not in (32, 64, 96, 128, 160):
+        raise ValueError("Pi0.5 cold text bucket must be 32, 64, 96, 128, or 160")
     config = getattr(adapter._lerobot_policy, "config", None)
     if config is None:
         config = adapter._lerobot_policy.model.config
@@ -520,7 +524,11 @@ def _selected_prefill_pair_rows(adapter) -> int:
 class Pi05Adapter:
     """Internal orchestrator for `Pi05Policy.to('rpu')` mutation."""
 
-    def __init__(self, lerobot_policy: Any) -> None:
+    def __init__(self, lerobot_policy: Any, *, graph_runtime_policy=None) -> None:
+        if graph_runtime_policy is not None:
+            from rpu_backend.graph import GraphRuntimePolicy
+            if not isinstance(graph_runtime_policy, GraphRuntimePolicy):
+                raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
         self._lerobot_policy = lerobot_policy
         self._rpu_prefill_text_tokens = 32
         model = getattr(lerobot_policy, "model", lerobot_policy)
@@ -531,6 +539,12 @@ class Pi05Adapter:
                 "RPU_PI05_PREFILL_MASK_FP16", default=False
             )
         existing_session = getattr(model, "_execution_session", None)
+        if existing_session is not None and hasattr(existing_session, "_pi05_graph_policy_request"):
+            inherited_graph_policy = existing_session._pi05_graph_policy_request
+            if graph_runtime_policy is not None and graph_runtime_policy != inherited_graph_policy:
+                raise ValueError("Pi05 Graph runtime policy is already cold-bound to this owner")
+            graph_runtime_policy = inherited_graph_policy
+        self._graph_runtime_policy_request = graph_runtime_policy
         # A fresh model must reach A9 preinstall with public attributes only.
         # Keep these legacy environment requests on the adapter/session until
         # installation owns the model; mirrors reuse that exact cold snapshot.
@@ -538,10 +552,10 @@ class Pi05Adapter:
         if cold_pad16 is None:
             cold_pad16 = (
                 bool(model_state["_rpu_legacy_prefix_pad16_request"])
-                if "_rpu_legacy_prefix_pad16_request" in model_state
+                if state is not None
                 else bool(_prefix_pad16_enabled()),
                 bool(model_state["_rpu_legacy_kvinsert_pad16_request"])
-                if "_rpu_legacy_kvinsert_pad16_request" in model_state
+                if state is not None
                 else bool(_kvinsert_pad16_enabled()),
             )
         self._legacy_pad16_requests = cold_pad16
@@ -582,7 +596,6 @@ class Pi05Adapter:
             and existing_session.stats()["state"] in {"CLOSED", "POISONED"}
         )
         _reset_adapter_runtime_state(self)
-        state = _pi05_runtime_state(lerobot_policy)
         if state is not None:
             _sync_adapter_runtime_state(self, state)
             self._rpu_execution = getattr(
@@ -615,6 +628,7 @@ class Pi05Adapter:
             **session_callbacks,
         )
         self._execution_session._pi05_legacy_pad16_requests = self._legacy_pad16_requests
+        self._execution_session._pi05_graph_policy_request = self._graph_runtime_policy_request
         self._execution_session.register_config_view(self)
         # Prefix/denoise methods live on the policy model; standalone child
         # forwards use their real module objects. Both address the same cold
@@ -1181,7 +1195,6 @@ class Pi05Adapter:
         from .runtime import (
             _PI05_PREPARED_GRAPH_PROFILES,
             _pi05_graph_runtime_profile,
-            _validate_fused_parity,
         )
 
         if pi05_pytorch in _PI05_PREPARED_GRAPH_PROFILES:
@@ -1288,11 +1301,26 @@ class Pi05Adapter:
                     for entry in snapshots
                 ),
                 "invariant_ok": bool(cache.cache_invariant_ok()),
+                "instruction_snapshots": [
+                    {
+                        "batch_snapshot_mode": str(getattr(
+                            entry, "batch_snapshot_mode", "auto")),
+                        "batch_snapshot_available": bool(getattr(
+                            entry, "batch_snapshot_available", False)),
+                        "batch_snapshot_effective_contracts": int(getattr(
+                            entry, "batch_snapshot_effective_contracts", 0)),
+                        "batch_snapshot_fallback_reason": str(getattr(
+                            entry, "batch_snapshot_fallback_reason",
+                            "sdk_symbols_unavailable")),
+                    }
+                    for entry in snapshots
+                ],
             }
 
         try:
             build_value = self._lerobot_policy.predict_action_chunk(
-                batch, num_steps=steps, **({"noise": noise} if noise is not None else {})
+                batch, num_steps=steps,
+                **({"noise": noise} if noise is not None else {}),
             )
             if not isinstance(build_value, torch.Tensor):
                 raise RuntimeError(
@@ -1329,7 +1357,8 @@ class Pi05Adapter:
                 name: _stats(cache) for name, cache in frozen_caches
             }
             warm_value = self._lerobot_policy.predict_action_chunk(
-                batch, num_steps=steps, **({"noise": noise} if noise is not None else {})
+                batch, num_steps=steps,
+                **({"noise": noise} if noise is not None else {}),
             )
             warm_action = warm_value.detach().cpu().clone()
             after_warming_replay = {
@@ -1350,17 +1379,15 @@ class Pi05Adapter:
                     f"after={after_warming_replay}"
                 )
 
-            # Check the public CPU output boundary and record replay differences.
-            # Graph counts, recapture and invariants remain hard requirements.
-            # Floating-point metrics and exact equality are diagnostics.
-            build_replay_bit_equal = bool(torch.equal(build_action, warm_action))
-            build_replay_parity = _validate_fused_parity(
-                warm_action,
-                build_action,
-                where="Pi05 WARMING replay parity",
-                expected_shape=None,
+            build_replay_bit_equal = torch.equal(build_action, warm_action)
+            build_replay_max_abs = float(
+                (build_action.float() - warm_action.float()).abs().max()
             )
-            build_replay_max_abs = build_replay_parity["max_abs"]
+            if not build_replay_bit_equal:
+                raise RuntimeError(
+                    "Pi0.5 WARMING replay differs from the RECORDING action "
+                    f"(max_abs={build_replay_max_abs:.7g})"
+                )
             for _, cache in frozen_caches:
                 cache.freeze()
 
@@ -1368,7 +1395,8 @@ class Pi05Adapter:
                 name: _stats(cache) for name, cache in frozen_caches
             }
             ready_value = self._lerobot_policy.predict_action_chunk(
-                batch, num_steps=steps, **({"noise": noise} if noise is not None else {})
+                batch, num_steps=steps,
+                **({"noise": noise} if noise is not None else {}),
             )
             ready_action = ready_value.detach().cpu().clone()
             after_ready = {
@@ -1409,13 +1437,14 @@ class Pi05Adapter:
                     "Pi0.5 READY graph cache invariant failed: "
                     f"{after_ready}"
                 )
-            ready_replay_bit_equal = bool(torch.equal(warm_action, ready_action))
-            ready_replay_parity = _validate_fused_parity(
-                ready_action,
-                warm_action,
-                where="Pi05 READY replay parity",
-                expected_shape=None,
-            )
+            if not torch.equal(warm_action, ready_action):
+                max_abs = float(
+                    (warm_action.float() - ready_action.float()).abs().max()
+                )
+                raise RuntimeError(
+                    "Pi0.5 READY replay differs from the WARMING action "
+                    f"(max_abs={max_abs:.7g})"
+                )
         except Exception:
             for _, cache in caches:
                 cache.begin_warmup()
@@ -1429,15 +1458,10 @@ class Pi05Adapter:
             "graph_counts": graph_counts,
             "runtime": dict(runtime_profile),
             "ready_replay_validated": True,
-            "action_bit_equal": ready_replay_bit_equal,
+            "numerical_status": "DIAGNOSTIC",
+            "task_quality": "NOT_EVALUATED",
+            "action_bit_equal": True,
             "build_replay_bit_equal": build_replay_bit_equal,
-            "replay_parity": {
-                "build_vs_warming": build_replay_parity,
-                "warming_vs_ready": ready_replay_parity,
-                "contract": "pi05-runtime-boundary-and-numeric-diagnostics-v2",
-                "numerical_status": "DIAGNOSTIC",
-                "task_quality": "NOT_EVALUATED",
-            },
             "build_replay_max_abs": build_replay_max_abs,
             "ready_stats": after_ready,
         }
@@ -1553,7 +1577,7 @@ class Pi05Adapter:
                                       pi05_pytorch.action_out_proj)
 
         # Reuse cos/sin stashed by patch_gemma_model_for_rpu_all_layers_once
-        # (gemma.py:model._gemma_rope_cos/sin). RPU DDR is full after all weights
+        # (gemma.py:model._gemma_rope_cos/sin). device DDR is full after all weights
         # load; allocating 2×1 MB new cos/sin tensors fails with std::bad_alloc.
         # The stashed tensors are the same data already held by gemma_set_weights.
         cos_c = getattr(expert, "_gemma_rope_cos", None)
@@ -1731,7 +1755,7 @@ class Pi05Adapter:
         topology = core_topology(self._rpu_execution)
         validate_reduced_policy(self._lerobot_policy, topology)
 
-        # Reject the retired mixed CPU/RPU scaffold before claiming the live
+        # Reject the retired mixed CPU or device scaffold before claiming the live
         # instance, installing patches, or irreversibly transforming weights.
         _keep_cpu_raw = os.environ.get("RPU_PI05_KEEP_CPU", "").strip()
         if _keep_cpu_raw:
@@ -1739,7 +1763,7 @@ class Pi05Adapter:
                 "RPU_PI05_KEEP_CPU is a v3.0 bisection scaffold; "
                 "it is not supported under v4.0 fused-decoder path. "
                 "Set RPU_PI05_KEEP_CPU= (empty) to use the canonical v4 path. "
-                "Mixed CPU/RPU bisection is deferred to v4.1 or later."
+                "Mixed CPU/device bisection is deferred to v4.1 or later."
             )
 
         if not _SWIZZLE_LOCK.acquire(blocking=False):
@@ -1773,8 +1797,8 @@ class Pi05Adapter:
 
             self._validate_cold_pad16_requests()
             cold_model = _preflight_pi05_cold_model(self._lerobot_policy, attn_tp=topology.attn_tp)
-            graph_runtime_policy = _pi05_graph_runtime_policy()
-            if topology.num_cores != 8:
+            graph_runtime_policy = _pi05_graph_runtime_policy(self._graph_runtime_policy_request)
+            if graph_runtime_policy.execution_core_count != topology.num_cores:
                 graph_runtime_policy = replace(
                     graph_runtime_policy, execution_core_count=topology.num_cores,
                     provenance=graph_runtime_policy.provenance +
@@ -1785,7 +1809,7 @@ class Pi05Adapter:
             try:
                 # Pi retains thousands of weights and request buffers. Reuse
                 # their HostDDR mappings through the common, immutable tensor
-                # allocator policy before the first RPU tensor is materialized.
+                # allocator policy before the first device tensor is materialized.
                 torch.rpu.set_caching_allocator(True)
                 if not graph_runtime_policy.prepare_arenas():
                     raise RPUBackendError("Pi0.5 requires its cold Graph arena plan")
@@ -1794,7 +1818,7 @@ class Pi05Adapter:
                 raise
 
             # CR-R5 BLOCKER 4: outer transaction from the mutation marker to
-            # Step G. Once Step C starts, the broken owner may still hold RPU
+            # Step G. Once Step C starts, the broken owner may still hold device
             # tensors after native cleanup; keep the slot until owner GC.
             release_live_on_failure = True
             pi05_pytorch = None
@@ -1843,7 +1867,7 @@ class Pi05Adapter:
                 # not change defaults seen by GraphCaches created for other
                 # models later in this process.
                 # Unroll denoise into one graph with on-device FP16 Euler,
-                # avoiding per-step CPU/RPU round-trips. Preserve an explicit
+                # avoiding per-step CPU or device round-trips. Preserve an explicit
                 # RPU_PI05_DENOISE_UNROLL=0 opt-out.
                 os.environ.setdefault("RPU_PI05_DENOISE_UNROLL", "1")
 
@@ -1879,7 +1903,7 @@ class Pi05Adapter:
                 _quant_cfg = getattr(self._lerobot_policy, "_pi05_quant_config", {}) or {}
                 _vlm_int4 = int4_child_names(_quant_cfg, component="vlm")
                 _expert_int4 = int4_child_names(_quant_cfg, component="expert")
-                _int4_group_size = _quant_cfg.get("int4_group_size", _quant_cfg.get("group_size", 32))
+                _int4_group_size = _quant_cfg.get("int4_group_size", 32)
 
                 pad_decoder_mlp_inplace(vlm, topology)
                 pad_decoder_mlp_inplace(expert, topology)
@@ -1906,7 +1930,7 @@ class Pi05Adapter:
                 from .weights import swizzle_projector_inplace
                 swizzle_projector_inplace(projector, num_cores=topology.attn_tp)
 
-                # v5-05 D-01: SigLIP encoder swizzle runs on CPU before move-to-RPU.
+                # v5-05 D-01: SigLIP encoder swizzle runs on CPU before move-to-device.
                 # Helper lifted from _internal/patches/siglip_pi05.py to
                 # adapters/pi05/siglip.py (Task 2). Idempotence guard on
                 # `vit._rpu_siglip_weights_converted` short-circuits the inner call
@@ -1916,7 +1940,7 @@ class Pi05Adapter:
                     siglip_inner, w8a16_default=siglip_w8a16_default,
                     num_cores=topology.attn_tp)
 
-                # --- Step D: move subsystems to RPU ---
+                # --- Step D: move subsystems to device ---
                 vlm._rpu_attn_tp = vlm_attn_tp
                 vlm._rpu_max_seq_len = 2048
                 vlm.to('rpu')
@@ -1934,7 +1958,7 @@ class Pi05Adapter:
                 if getattr(expert, "norm", None) is not None:
                     expert.norm.to('cpu')
 
-                # Iteration 7: Move ONLY encoder + post_layernorm + projector to RPU;
+                # Iteration 7: Move ONLY encoder + post_layernorm + projector to device;
                 # keep vit.embeddings on CPU (match legacy pi05_converter.py:1409-1411).
                 siglip_inner.encoder.to('rpu')
                 siglip_inner.post_layernorm.to('rpu')
@@ -1999,6 +2023,7 @@ class Pi05Adapter:
                 if not getattr(paligemma_model_cls, "_rpu_get_image_features_patched", False):
                     from .runtime import (
                         _load_pi05_probe_tensor,
+                        _pi05_probe_save,
                     )
                     def _rpu_get_image_features(self, pixel_values, **kwargs):
                         _pix_override = os.environ.get("RPU_PI05_LOAD_PIXEL_VALUES")
@@ -2011,25 +2036,30 @@ class Pi05Adapter:
                                 dtype=pixel_values.dtype,
                                 device=pixel_values.device,
                             )
+                        _pi05_probe_save("get_image_features_input", pixel_values)
                         image_outputs = self.vision_tower(pixel_values, return_dict=True)
+                        _pi05_probe_save("vision_tower_last_hidden_state", image_outputs.last_hidden_state)
                         image_outputs.pooler_output = image_outputs.last_hidden_state
                         return image_outputs
                     paligemma_model_cls.get_image_features = _rpu_get_image_features
                     paligemma_model_cls._rpu_get_image_features_patched = True
 
-                # embed_image: skip fp32 + *sqrt(hs) on RPU (they cancel).
+                # embed_image: skip fp32 + *sqrt(hs) on device (they cancel).
                 pwe_cls = type(pawe)
                 if not getattr(pwe_cls, "_rpu_embed_image_patched", False):
+                    from .runtime import _pi05_probe_save
                     def _rpu_embed_image(self, image):
+                        _pi05_probe_save("embed_image_input", image)
                         image_outputs = self.paligemma.model.get_image_features(image)
                         out = image_outputs.pooler_output.half()
+                        _pi05_probe_save("embed_image_out", out)
                         return out
                     pwe_cls.embed_image = _rpu_embed_image
                     pwe_cls._rpu_embed_image_patched = True
 
                 # Step F (Iteration 5): keep 4 root Linears on CPU fp16.
                 # The denoise loop routes via rpu_adarms_model_forward which
-                # auto-routes CPU inputs to RPU + handles final PiGemmaRMSNorm.
+                # auto-routes CPU inputs to device + handles final PiGemmaRMSNorm.
                 # Step G: install sample_actions patch (runtime.py).
                 from .runtime import install_sample_actions_patch, _PI05_HANDLES
                 install_sample_actions_patch()
@@ -2037,7 +2067,7 @@ class Pi05Adapter:
                 runtime_device = next(vlm.layers[0].parameters()).device
                 if runtime_device.type != "rpu":
                     raise RPUBackendError(
-                        "Pi05Adapter.to_rpu(): VLM layer 0 did not remain on RPU "
+                        "Pi05Adapter.to_rpu(): VLM layer 0 did not remain on device "
                         f"after swizzle (device={runtime_device})."
                     )
                 pi05_pytorch._rpu_runtime_device = runtime_device

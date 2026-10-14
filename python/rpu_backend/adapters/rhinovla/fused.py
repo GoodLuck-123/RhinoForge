@@ -9,7 +9,7 @@ instance-LoRA merge, 0→1 denoise) live in the adapter / test harness, and LoRA
 is merged into base weights before set_weights so the C++ op never sees it.
 
 Prerequisites (required caller order):
-    expert = convert.convert_expert_for_rpu(expert)   # half() -> swizzle -> rpu
+    expert = convert.convert_expert_for_rpu(expert)   # half() -> swizzle -> device
     patch_rhino_vla_for_rpu(expert, prefix_len=P, suffix_len=S, cpu_rotary_emb=...)
 
 action_io + the final AdaRMSNorm stay on CPU fp32 (suffix construction + decode
@@ -25,6 +25,7 @@ from numbers import Integral
 import torch
 
 from rpu_backend.runtime import rpu_env_bool
+from rpu_backend.runtime.masks import versioned_cpu_mask
 from rpu_backend.runtime.decoder import plan_bounded_prefill_execution
 from rpu_backend.runtime.execution_planner import GRAPH_COMPOSITE_CHILD
 
@@ -302,7 +303,7 @@ def _snapshot_rhino_prefix_source(
     route_argument_digest="",
     execution_generation=0,
 ):
-    """Keep strong refs plus versions for the exact K/V layers copied to RPU."""
+    """Keep strong refs plus versions for the exact K/V layers copied to device."""
     return (
         prefix_key_values,
         int(prefix_layer_offset),
@@ -772,7 +773,7 @@ def patch_rhino_vla_for_rpu(expert, *, prefix_len, suffix_len, max_seq_len=2048,
             self._rpu_handle, logical_prefix_len
         )
 
-        # -- hidden_states -> RPU fp16 --
+        # -- hidden_states -> device fp16 --
         hidden_states = suffix_embeds
         if hidden_states.device.type != 'rpu':
             hidden_states = hidden_states.to(dtype=torch.float16, device='rpu')
@@ -791,7 +792,7 @@ def patch_rhino_vla_for_rpu(expert, *, prefix_len, suffix_len, max_seq_len=2048,
                 suffix_mask = torch.nn.functional.pad(suffix_mask, (0, pad_len), value=False)
         hidden_states = hidden_states.contiguous()
 
-        # -- cond -> [hidden_size] fp16 RPU contiguous --
+        # -- cond -> [hidden_size] fp16 device contiguous --
         hidden_size = self.config.width
         if adarms_cond is None:
             raise AssertionError("RhinoVLA fused: adarms_cond is required")
@@ -822,18 +823,9 @@ def patch_rhino_vla_for_rpu(expert, *, prefix_len, suffix_len, max_seq_len=2048,
 
         # -- attention mask --
         if prefix_mask is not None and suffix_mask is not None:
-            bool_mask = make_suffix_attn_mask(prefix_mask, suffix_mask)
-            attention_mask = bool_mask_to_attention_bias(bool_mask, torch.float16)
-            # Keep RhinoVLA SPM SDPA on v16-aligned K length; dummy cache lanes
-            # are masked below and the C++ launcher reads the aligned length.
-            pad_k = (-attention_mask.shape[-1]) % 16
-            if pad_k:
-                attention_mask = torch.nn.functional.pad(
-                    attention_mask,
-                    (0, pad_k),
-                    value=torch.finfo(attention_mask.dtype).min,
-                )
-            attention_mask = attention_mask.cpu().contiguous()
+            attention_mask = _cached_rhino_attention_bias(
+                self, prefix_mask, suffix_mask,
+                make_suffix_attn_mask, bool_mask_to_attention_bias)
             is_causal = False
         else:
             attention_mask = None

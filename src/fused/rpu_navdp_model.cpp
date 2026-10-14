@@ -6,7 +6,7 @@
 //               x += FFN( LN3(x) )                   # 384->1536->384, GELU
 //   d_model=384, nhead=8 (head_dim=48), ff=1536, memory_len=34, predict_size=32, action_dim=3.
 //
-// SCOPE: forward(tgt,memory) runs the 16 decoder layers on RPU for the host-driven path.
+// SCOPE: forward(tgt,memory) runs the 16 decoder layers on device for the host-driven path.
 //   denoise_loop_forward additionally keeps input_embed, out_pos add, final LayerNorm,
 //   action_head, and the fixed DDPM20 reverse loop in one device graph; Python prepares the
 //   per-step conditioning, coefficients, and noise tables.
@@ -14,9 +14,8 @@
 // Design/reuse: mirrors src/fused/rpu_gr00t_dit_model.cpp (build_self_attn_block /
 //   build_cross_attn_block / finish_attn_and_ffn), swapping AdaLN -> plain affine LayerNorm
 //   (learnable gamma/beta per norm) and adding a per-layer THREE-subblock structure.
-// Validation boundary: full-hidden metrics are record-only; the exact profile is admitted by
-// its final-action, action-MAE, performance, and Graph lifecycle gates.  Native handle creation
-// requires the controlled numeric-blocked evaluation selector before creating a handle.
+// Native handle creation requires the controlled evaluation selector and
+// the matching model profile before allocating device resources.
 //
 // set_weights ENDS with invalidate_model_state() (D-503).
 
@@ -25,6 +24,7 @@
 #include "rpu_ops.h"
 #include "rpu_helpers.h"
 #include <ATen/ATen.h>
+#include <ATen/MemoryOverlap.h>
 #include <c10/util/Half.h>
 #include <c10/util/ScopeExit.h>
 #include <algorithm>
@@ -60,6 +60,7 @@ constexpr int64_t kNavdpLoopOutputLinearSite = 5717796996455384990LL;
 constexpr int64_t kNavdpLoopNoiseDmaSite = 1326351836944110747LL;
 constexpr int64_t kNavdpLoopOutputDmaSite = 2600646422303964861LL;
 constexpr int64_t kNavdpMemoryDmaSite = 2072388790201406506LL;
+constexpr int64_t kNavdpForwardOutputDmaSite = 6950822195935408339LL;
 constexpr int64_t kNavdpSelfAllReduceSite = 2412992928182911522LL;
 constexpr int64_t kNavdpFormerCrossAllReduceSite = 985603305552088294LL;
 constexpr int64_t kNavdpCrossAllReduceSite = 81349817211229034LL;
@@ -107,7 +108,7 @@ private:
         TORCH_CHECK(tensor.scalar_type() == at::kHalf &&
                     tensor.device().type() == at::kPrivateUse1 &&
                     tensor.is_contiguous(),
-                    "navdp: ", name, " must be fp16 contiguous RPU tensor");
+                    "navdp: ", name, " must be fp16 contiguous device tensor");
     }
 
     void check_caches(
@@ -141,7 +142,7 @@ private:
                         vc.device().type() == at::kPrivateUse1 &&
                         kc.is_contiguous() && vc.is_contiguous(),
                         "navdp: cache[", i,
-                        "] must be fp16 contiguous RPU tensors");
+                        "] must be fp16 contiguous device tensors");
         }
     }
 
@@ -219,7 +220,7 @@ public:
                             list[i].device().type() == at::kPrivateUse1 &&
                             list[i].is_contiguous(),
                             "navdp_set_weights: ", name, "[", i,
-                            "] must be fp16 contiguous RPU tensor");
+                            "] must be fp16 contiguous device tensor");
             }
         };
         check_list(sq_w, "sq_w", {hidden_size, hidden_size});
@@ -274,7 +275,9 @@ public:
         std::vector<at::Tensor>& k_caches,
         std::vector<at::Tensor>& v_caches,
         const std::optional<at::Tensor>& causal_mask,
-        at::IntArrayRef planned_stage_descriptor = {})
+        at::IntArrayRef planned_stage_descriptor = {},
+        const std::optional<at::Tensor>& output = std::nullopt,
+        bool output_published = false)
     {
         TORCH_CHECK(weights_set_, "navdp forward: weights are not installed");
         TORCH_CHECK(execution_mode_ != ExecutionMode::Denoise,
@@ -284,6 +287,34 @@ public:
         check_rpu_half(tgt, "tgt", {1, predict_size_, hidden_size()});
         check_rpu_half(memory, "memory", {1, memory_len_, hidden_size()});
         check_caches(k_caches, v_caches, /*batch=*/1);
+        TORCH_CHECK(!output_published || output.has_value(),
+                    "navdp forward: output_published requires an explicit output");
+        if (output.has_value()) {
+            TORCH_CHECK(!former_mode_, "navdp forward: explicit output is unsupported for Former");
+            check_rpu_half(*output, "output", {1, predict_size_, hidden_size()});
+            TORCH_CHECK(output->device() == tgt.device() && !output->requires_grad(),
+                        "navdp forward: output must be an inference tensor on the input device");
+            at::assert_no_overlap(*output, tgt);
+            at::assert_no_overlap(*output, memory);
+            for (const auto& cache : k_caches) at::assert_no_overlap(*output, cache);
+            for (const auto& cache : v_caches) at::assert_no_overlap(*output, cache);
+        }
+        if (!former_mode_) {
+            // The host sampler owns one fresh output bank per timestep. Each
+            // sequential trajectory writes its slice without a CPU round trip.
+            // Direct callers still receive a fresh, independent tensor.
+            forward_output_ = output.has_value() ? *output : allocate_tracked_output(tgt.sizes());
+            if (output.has_value()) {
+                // A per-call promise: the caller already published all host
+                // writes, or owns a fresh buffer with no dirty host writes.
+                // Ordinary explicit-output callers keep the safe boundary.
+                if (!output_published)
+                    rpu_ddr_flush_force_sized(forward_output_.data_ptr(), forward_output_.nbytes());
+                if (RpuKernelGraph::has_active())
+                    RpuKernelGraph::active().keep_alive(forward_output_);
+            }
+            forward_output_dst_base_ = ::rhino_lkn::RpuGetDevAddr(forward_output_.data_ptr());
+        }
         execution_mode_ = ExecutionMode::Forward;
         // Model-owned SEPARATE cross-attn caches (gr00t alternates block types → never reuses a
         // cache for self-then-cross in one layer; sharing it here corrupted the cross SDPA).
@@ -295,7 +326,7 @@ public:
             for (auto& vc : v_caches) cross_vc_.push_back(at::zeros_like(vc.narrow(0, 0, 1)));
         }
         // Device DDR address (NOT the raw data_ptr) — the mutable broadcast's live_src_base must be
-        // the RPU device address (no internal conversion, unlike the fixed variant). Using the raw
+        // the device address (no internal conversion, unlike the fixed variant). Using the raw
         // ptr was the cross-attn bug (mis-diagnosed as fp16). Mirrors gr00t vl_src_base_.
         mem_src_base_ = ::rhino_lkn::RpuGetDevAddr(memory.data_ptr<c10::Half>());
         mem_loaded_this_forward_ = false;
@@ -403,6 +434,9 @@ protected:
                 &NavdpModel::emit_pre_layers_body);
             cfg.post_layers_fn = reinterpret_cast<void (FusedModelBase::*)()>(
                 &NavdpModel::emit_post_layers_body);
+        } else if (!former_mode_) {
+            cfg.post_fn = reinterpret_cast<void (FusedModelBase::*)()>(
+                &NavdpModel::emit_forward_output);
         }
         return cfg;
     }
@@ -586,6 +620,10 @@ protected:
             append_dma(
                 kNavdpMemoryDmaSite, NavdpDmaRoute::DDR_TO_SPM,
                 {memory_len_, hidden_size()});
+            if (!former_mode_) {
+                append_dma(kNavdpForwardOutputDmaSite, NavdpDmaRoute::SPM_TO_DDR,
+                           {predict_size_, hidden_size()});
+            }
         }
         append_fmb_shared_runtime_routes(
             manifest, plan, hidden_size(), FMB_SHARED_LAYER_INPUT_DMA);
@@ -1113,10 +1151,25 @@ protected:
                 seq * h, ValuOpType::ADD);
         }
 
-        if (!ctx().output_to_spm) emit_layer_output_dma(layer_idx, chunk, "residual");
+        if (!ctx().output_to_spm && (loop_mode_ || former_mode_))
+            emit_layer_output_dma(layer_idx, chunk, "residual");
     }
 
 private:
+    void emit_forward_output() {
+        post_output_tensor() = forward_output_;
+        ctx().consume_physical_route(
+            FmbRouteFamily::MUTABLE_DMA, kNavdpForwardOutputDmaSite,
+            static_cast<int64_t>(NavdpDmaRoute::SPM_TO_DDR),
+            /*resolved_flags=*/0, {predict_size_, hidden_size()});
+        rpu_launch_spm_copy_ddr_dma_mutable(
+            addr(0, "residual"), &forward_output_dst_base_, 0,
+            predict_size_ * hidden_size());
+    }
+
+    at::Tensor forward_output_;
+    uint64_t forward_output_dst_base_ = 0;
+
     KvInsertSegmentPlan resolve_kv_insert_plan(
         int64_t site_id, int64_t position, int64_t logical_rows) {
         const int64_t invocation = ctx().physical_route_invocation;
@@ -1234,13 +1287,13 @@ private:
     at::Tensor ie_w_, ie_b_, ah_w_, ah_b_, fln_w_, fln_b_;   // input_embed / action_head / final-LN
     at::Tensor out_pos_;                                     // [predict_size, H] positional add
     at::Tensor coeff_;                                       // [num_steps, 4] host fp32: A,B,C,D (baked per iter)
-    at::Tensor sigz_all_;                                    // [num_steps, predict_size, action_dim] rpu fp16 (sig*z)
+    at::Tensor sigz_all_;                                    // [num_steps, predict_size, action_dim] device fp16 (sig*z)
     at::Tensor na_stage_;                                    // DDR staging: pre-hook writes input_embed here; body reads
     uint64_t x0_src_base_ = 0, out_dst_base_ = 0;           // mutable: init-noise src, action out dst
     uint64_t mem_all_src_base_ = 0, sigz_src_base_ = 0;    // mutable: per-iter memory row, per-iter sig*z row
 
 public:
-    // Denoise glue weights (called once after set_weights). ie/ah/fln + out_pos, all fp16 rpu.
+    // Denoise glue weights (called once after set_weights). ie/ah/fln + out_pos, all fp16 on device.
     void set_denoise_glue(at::Tensor ie_w, at::Tensor ie_b, at::Tensor ah_w, at::Tensor ah_b,
                           at::Tensor fln_w, at::Tensor fln_b, at::Tensor out_pos) {
         TORCH_CHECK(weights_set_, "navdp_set_denoise_glue: weights are not installed");
@@ -1281,7 +1334,7 @@ public:
                     "navdp denoise: x0 must have shape [B*32, 16], got ", x0.sizes());
         TORCH_CHECK(x0.scalar_type() == at::kHalf &&
                     x0.device().type() == at::kPrivateUse1 && x0.is_contiguous(),
-                    "navdp denoise: x0 must be fp16 contiguous RPU tensor");
+                    "navdp denoise: x0 must be fp16 contiguous device tensor");
         const int64_t B = x0.size(0) / kPredictSize;
         check_rpu_half(mem_all, "mem_all", {kDenoiseSteps, kNavdpMemory, kHidden});
         check_rpu_half(sigz, "sigz", {kDenoiseSteps, B * kPredictSize, kActionDimPadded});
@@ -1319,12 +1372,12 @@ public:
             TORCH_CHECK(at::equal(coeff_, coeff),
                         "navdp denoise: DDPM20 coefficients are fixed after first dispatch");
         }
-        sigz_all_ = sigz;                             // rpu fp16 keepalive
+        sigz_all_ = sigz;                             // device fp16 keepalive
         x0_ref_ = x0; mem_all_ref_ = mem_all; out_ref_ = out;   // keepalives
-        rpu_ddr_flush_force(x0.data_ptr<c10::Half>());
-        rpu_ddr_flush_force(mem_all.data_ptr<c10::Half>());
-        rpu_ddr_flush_force(sigz.data_ptr<c10::Half>());
-        rpu_ddr_flush_force(out.data_ptr<c10::Half>());
+        rpu_ddr_flush_force_sized(x0.data_ptr<c10::Half>(), x0.nbytes());
+        rpu_ddr_flush_force_sized(mem_all.data_ptr<c10::Half>(), mem_all.nbytes());
+        rpu_ddr_flush_force_sized(sigz.data_ptr<c10::Half>(), sigz.nbytes());
+        rpu_ddr_flush_force_sized(out.data_ptr<c10::Half>(), out.nbytes());
         x0_src_base_      = ::rhino_lkn::RpuGetDevAddr(x0.data_ptr());
         mem_all_src_base_ = ::rhino_lkn::RpuGetDevAddr(mem_all.data_ptr());
         sigz_src_base_    = ::rhino_lkn::RpuGetDevAddr(sigz.data_ptr());
@@ -1410,7 +1463,7 @@ std::string rpu_navdp_kvinsert_cost_catalog_sha256(int64_t handle) {
 int64_t rpu_navdp_create(bool allow_numeric_blocked, bool spm_kv_by_mha) {
     TORCH_CHECK(
         allow_numeric_blocked,
-        "InternVLA-N1 RPU requires explicit controlled numeric-blocked admission");
+        "InternVLA-N1 device requires explicit controlled numeric-blocked admission");
     const int64_t handle = NavdpRegistry::create();
     NavdpRegistry::get(handle, "rpu_navdp_create")
         ->configure_cold_routes(spm_kv_by_mha);
@@ -1445,13 +1498,14 @@ at::Tensor rpu_navdp_forward(
     int64_t handle, const at::Tensor& tgt, const at::Tensor& memory,
     at::TensorList k_caches_list, at::TensorList v_caches_list,
     const std::optional<at::Tensor>& causal_mask,
-    at::IntArrayRef planned_stage_descriptor)
+    at::IntArrayRef planned_stage_descriptor,
+    const std::optional<at::Tensor>& output, bool output_published)
 {
     std::vector<at::Tensor> k_caches(k_caches_list.begin(), k_caches_list.end());
     std::vector<at::Tensor> v_caches(v_caches_list.begin(), v_caches_list.end());
     return NavdpRegistry::get(handle, "rpu_navdp")->forward(
         tgt, memory, k_caches, v_caches, causal_mask,
-        planned_stage_descriptor);
+        planned_stage_descriptor, output, output_published);
 }
 
 std::vector<int64_t> rpu_navdp_resolve_stage_domain(

@@ -92,7 +92,7 @@ def test_failed_load_releases_owner_and_does_not_install(tmp_path, monkeypatch):
     monkeypatch.setattr(asr, "_load_processor", lambda *args: (None, None, ""))
     monkeypatch.setattr(causal_lm, "_claim_live_instance", lambda owner: events.append("claim"))
     monkeypatch.setattr(causal_lm, "_release_live_instance", lambda owner: events.append("release"))
-    monkeypatch.setattr(Qwen3ASRModel, "_install_rpu", lambda self: pytest.fail("RPU accessed"))
+    monkeypatch.setattr(Qwen3ASRModel, "_install_rpu", lambda self: pytest.fail("device accessed"))
 
     def fail(*args):
         events.append("load")
@@ -164,11 +164,12 @@ def test_failed_retirement_does_not_release_owner(monkeypatch):
     def fail():
         raise RuntimeError("retirement failed")
 
-    model._text = SimpleNamespace(_rpu_decoder_retirement_state=SimpleNamespace(retire=fail))
+    model._text = SimpleNamespace(_rpu_decoder_retirement_state=SimpleNamespace(
+        retire=fail, retain_failure=lambda error, parent: events.append("retain")))
     head = model._head_weight = object()
     with pytest.raises(RuntimeError, match="retirement failed"):
         model.close()
-    assert events == [] and not model._closed and model._text is not None
+    assert events == ["retain"] and not model._closed and model._text is not None
     assert model._head_weight is head
     # No real native resource exists in this host test.
     model._closed = True

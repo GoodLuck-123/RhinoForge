@@ -18,20 +18,20 @@
     out.actions              # (49, 16) 双臂位姿（vendor 默认坐标约定，未认证真机）
     out.actions_normalized   # [50, 20] 模型原始输出（归一化），做精度对拍用
 
-形状选择的依据（都来自这个 ckpt 的 `config.json` 与既有 RPU 实现）：
+形状选择的依据（都来自这个 ckpt 的 `config.json` 与既有 device 实现）：
 
 * 没有离线 prepare 产物、也没有预量化 ckpt：三档精度都从**同一份 fp32/bf16
-  权重**在装载时量化，所以入口是 `from_checkpoint(...)`，`.to('rpu')` 触发构建
-  （约 12 s，权重 swizzle 上 RPU DDR）。
+  权重**在装载时量化，所以入口是 `from_checkpoint(...)`，`.to('rpu')` 触发构建、
+  权重布局转换和 device DDR 上传。
 * 模型每步吐 **32** 个 action 维，**只有前 20 维是真的**；[20:32] 从未对任何
   target 训练过。`actions_normalized` 是裁好的 `[50, 20]`；`actions_full` 保留
   未裁的网格，只应该用于调试。
 * 10 步 Euler 固化在图里，**不是**每次调用可传的参数。
 * `prefix_len`（S）在构造时固定 —— 它决定 SPM 布局与图签名，换值要重建。
 
-⚠️ **单实例单进程**：RPU 一次只服务一个 handle 集合。Hy-VLA 的原生
+⚠️ **单实例单进程**：device 一次只服务一个 handle 集合。Hy-VLA 的原生
 env 开关会在首次物化时固化，所以 `.to("rpu")` 一旦开始装载权重，该 Python
-进程就不能再装第二个 RPU 模型/policy。`close()` 会回收 handle、图和本 policy
+进程就不能再装第二个 device 模型/policy。`close()` 会回收 handle、图和本 policy
 改过的全局设置，但不会使进程可复用；换模型必须重启进程。要并发服务多个客户端，
 用 `serve.py` 那种"模型常驻 + 请求串行"的结构。
 """
@@ -271,7 +271,7 @@ class HyEmbodiedPolicy:
         ckpt_dir: str | os.PathLike[str],
         *,
         dtype: str = "fp16",
-        prefix_len: int = 240,
+        prefix_len: int | None = None,
         n_cameras: int = 3,
         norm_stats_path: str | os.PathLike[str] | None = None,
         umi_coord_frame: bool = True,
@@ -290,9 +290,10 @@ class HyEmbodiedPolicy:
         Args:
             dtype: 见 `_PROFILE_ENV`。当前 immutable-v2 认证档是 `fp16`；
                 W8 各档仅用于 legacy-bf16 受控评估。
-            prefix_len: S，`{16,32,…,240}`。240 覆盖 `tokenizer_max_length=64`
-                下的最坏 prompt，是交付默认；调小只为省时间，且必须 ≥
+            prefix_len: S，16 行对齐。省略时三相机取 240、两相机取 192，
+                覆盖 64 个语言槽位；显式调小可省时间，且必须 ≥
                 `ceil16(本条 observation 的有效行数)`。
+            n_cameras: 2 或 3，按 camera_names 顺序；两相机省略 hand_right。
             norm_stats_path: `norm_stats.pkl`。**必须显式给，不会自动探测**；
                 不给就拿不到物理动作（`out.actions` 会抛，只能读
                 `.actions_normalized`）。通常就是 `<ckpt_dir>/norm_stats.pkl`。
@@ -310,8 +311,13 @@ class HyEmbodiedPolicy:
         dtype = (dtype or "fp16").strip().lower()
         if dtype not in _PROFILE_ENV:
             raise ValueError(f"dtype 必须是 {sorted(_PROFILE_ENV)} 之一，得到 {dtype!r}")
-        if prefix_len % 16 or not 16 <= prefix_len <= 240:
-            raise ValueError(f"prefix_len 必须是 16 的倍数且在 [16,240]，得到 {prefix_len}")
+        if type(n_cameras) is not int or n_cameras not in (2, 3):
+            raise ValueError(f"Hy-Embodied-0.5-VLA-UMI 支持 2 或 3 相机，得到 {n_cameras}")
+        max_prefix = _ceil16(2 + n_cameras * 58 + 64)
+        if prefix_len is None:
+            prefix_len = max_prefix
+        if type(prefix_len) is not int or prefix_len % 16 or not 16 <= prefix_len <= max_prefix:
+            raise ValueError(f"prefix_len 必须是 16 的倍数且在 [16,{max_prefix}]，得到 {prefix_len}")
 
         import pathlib
 
@@ -321,18 +327,9 @@ class HyEmbodiedPolicy:
         inst._ckpt = d / "model.safetensors"
         inst._dtype = dtype
         inst._prefix_len = int(prefix_len)
-        # ⚠️ **UMI profile 固定 3 相机**，不接受任意 n_cameras。
-        #    整条链上有三处把 3 写死：`preprocess.CAMERA_ORDER` 恰好 3 项、
-        #    ckpt `config.json` 的 `image_features` 是这三个键、ViT packed 路径的
-        #    KV cache 按相机数定长。传别的值不会在这里报错，只会在更深处
-        #    产出错位的 prefix 布局或对不上的 KV 长度 —— 那时已经很难查了。
-        #    真要支持别的相机数，得先有对应的 ckpt 与 golden，不是改个参数。
-        from rpu_backend.adapters.hy_vla.preprocess import CAMERA_ORDER
-
-        if int(n_cameras) != len(CAMERA_ORDER):
-            raise ValueError(
-                f"Hy-Embodied-0.5-VLA-UMI 是 {len(CAMERA_ORDER)} 相机 profile"
-                f"（{', '.join(CAMERA_ORDER)}），不支持 n_cameras={n_cameras}。")
+        # Two-camera execution uses the first two configured views and omits
+        # the absent image segment (checkpoint empty_cameras=0). Packed Vision
+        # and prefix masks use the actual count; this does not certify task quality.
         inst._n_cameras = int(n_cameras)
         # ⚠️ **不自动探测 `norm_stats.pkl`**：物理动作解码必须由调用方**显式**打开。
         #    早先这里会在 ckpt 目录下自动找到就启用，那等于让"目录里碰巧有个文件"
@@ -474,11 +471,11 @@ class HyEmbodiedPolicy:
                 from rpu_backend.api.errors import RPUBackendError
 
                 raise RPUBackendError(
-                    "HyEmbodiedPolicy.to('rpu') 先前在权重/RPU 物化开始后失败。"
+                    "HyEmbodiedPolicy.to('rpu') 先前在权重/device 物化开始后失败。"
                     "部分 swizzle/handle 状态不能安全复用；请重启 Python 进程。")
 
             # Host-only preflight stays before process ownership. A malformed
-            # decoder file must not consume the only usable RPU lifetime.
+            # decoder file must not consume the only usable device lifetime.
             decoder = None
             if self._norm_stats_path is not None:
                 from rpu_backend.api.hy_action_decode import HyVlaActionDecoder
@@ -503,7 +500,7 @@ class HyEmbodiedPolicy:
             }
             cold_overrides.update(self._runtime_env)
             cold_plan = prepare_hy_vla_cold_plan(cold_overrides)
-            model_cfg = HyVlaConfig()
+            model_cfg = HyVlaConfig(num_cameras=self._n_cameras)
             preflight_hy_vla_checkpoint(self._ckpt, model_cfg)
             import rpu_backend  # noqa: F401  （注册 PrivateUse1 后端）
             from rpu_backend.api.causal_lm import (
@@ -608,7 +605,7 @@ class HyEmbodiedPolicy:
             self._rpu_build_lock.release()
 
     def close(self) -> None:
-        """Retire native resources; loading another RPU owner still needs restart."""
+        """Retire native resources; loading another device owner still needs restart."""
         with self._rpu_build_lock:
             if self._closed:
                 return
@@ -616,14 +613,14 @@ class HyEmbodiedPolicy:
                 from rpu_backend.api.errors import RPUBackendError
 
                 raise RPUBackendError(
-                    "HyEmbodiedPolicy 曾在 RPU 物化中失败，无法证明已安全回收；"
+                    "HyEmbodiedPolicy 曾在 device 物化中失败，无法证明已安全回收；"
                     "请删除对象并重启进程。")
 
             finalizer = self._runner_finalizer
             if finalizer is not None and finalizer.alive:
                 if finalizer() is not True:
                     raise RuntimeError(
-                        "Hy-VLA runner 清理失败；process-wide RPU slot 仍保留。"
+                        "Hy-VLA runner 清理失败；process-wide device slot 仍保留。"
                         "请重启进程后再加载 policy。")
             elif self._runner is not None:
                 self._runner.close()

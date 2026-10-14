@@ -386,7 +386,7 @@ def load_action_bundle(
 
     Instance-LoRA MLP weights are merged into their base weights before the
     bundle is returned. The caller must then use :func:`build_rpu_expert` for
-    the irreversible FP16 swizzle and RPU installation. ``model_root`` contains
+    the irreversible FP16 swizzle and device installation. ``model_root`` contains
     executable Python model definitions, so callers must explicitly set
     ``trust_model_code=True`` for a reviewed source tree.
     """

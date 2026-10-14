@@ -1,7 +1,7 @@
 """Qwen3.5 vision tower (== HF ``Qwen3_5VisionModel``) → rpu_backend.
 
-Based on the Qwen3-VL vision adapter (``qwen3_vl/vision.py``), without DeepStack.
-Qwen3.5's vision config carries ``deepstack_visual_indexes=[]``
+Uses the Qwen3-VL vision adapter structure (``qwen3_vl/vision.py``) without
+DeepStack. Qwen3.5's vision config carries ``deepstack_visual_indexes=[]``
 and the HF ``Qwen3_5VisionModel`` deletes the deepstack members, so the encoder is
 byte-for-byte the qwen3vl tower minus deepstack — profile-sized ViT (fused QKV +
 2D RoPE + GELU MLP), output ``BaseModelOutputWithPooling(last_hidden_state,
@@ -17,7 +17,7 @@ Public surface:
     requires an explicit controlled-evaluation opt-in. Idempotent; called lazily
     on the first image forward.
   - ``fuse_visual_embeds(model, hidden, input_ids, pixel_values, image_grid_thw, ...)``
-    — vision→text fusion: run the tower and merger on RPU, DMA merged rows directly
+    — vision→text fusion: run the tower and merger on device, DMA merged rows directly
     into ``hidden``, compute 3D M-RoPE ``position_ids``, return
     ``(hidden, position_ids[3, N])``.
 
@@ -156,6 +156,7 @@ def _validate_qwen3_5_moe_vision_policies(state, prepared_profile: str):
         or root_policy.execution_core_count != root_cores
         or root_policy.graph_arena_count != 4
         or root_policy.qwen35_legacy_27b_sdk_budget
+        or getattr(root_policy, "qwen35_dense_27b_sdk_budget", False)
         or getattr(
             getattr(state, "prefill_graph", None), "runtime_policy", None
         )
@@ -177,6 +178,7 @@ def _validate_qwen3_5_moe_vision_policies(state, prepared_profile: str):
         or vision_policy.execution_core_count != vision_cores
         or vision_policy.graph_arena_count != 4
         or vision_policy.qwen35_legacy_27b_sdk_budget
+        or getattr(vision_policy, "qwen35_dense_27b_sdk_budget", False)
         or (
             vision_policy is not root_policy
             if vision_cores == root_cores
@@ -604,7 +606,7 @@ def _resolve_qwen3_5_vision_attention_tp(num_heads: int, num_cores: int = 8) -> 
 
 
 def _qwen3_5_vision_padded_head_dim(head_dim: int) -> int:
-    """RPU attention layout width; RoPE/softmax still use the real head dim."""
+    """device attention layout width; RoPE/softmax still use the real head dim."""
     if isinstance(head_dim, bool) or not isinstance(head_dim, int) or head_dim <= 0:
         raise ValueError(
             f"Qwen3.5 vision head_dim must be a positive integer, got {head_dim!r}"
@@ -613,7 +615,7 @@ def _qwen3_5_vision_padded_head_dim(head_dim: int) -> int:
 
 
 def _qwen3_5_vision_padded_intermediate_size(intermediate_size: int) -> int:
-    """Apply the fp16 vision MLP alignment (model TP * 32)."""
+    """Match rhino-runtime's fp16 vision MLP alignment (model TP * 32)."""
     if (
         isinstance(intermediate_size, bool)
         or not isinstance(intermediate_size, int)
@@ -687,7 +689,8 @@ def build_vision_rope_tables(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _convert_vision_block_weights_for_rpu(
-    block, num_heads: int, hidden_size: int, *, num_cores: int = 8
+    block, num_heads: int, hidden_size: int, *, num_cores: int = 8,
+    _g05_w8a16: bool = False,
 ) -> None:
     """In-place swizzle of a single Qwen3_5VisionBlock's weights.
 
@@ -699,6 +702,8 @@ def _convert_vision_block_weights_for_rpu(
     """
     _resolve_qwen3_5_vision_attention_tp(num_heads, num_cores)
     if getattr(block, "_rpu_qwen3_5_vision_weights_converted", False):
+        if getattr(block, "_rpu_vision_w8a16", False) != _g05_w8a16:
+            raise RuntimeError("Qwen3.5 Vision projection precision is immutable")
         if getattr(block, "_rpu_vision_num_cores", 8) != num_cores:
             raise RuntimeError("Qwen3.5 Vision weights were swizzled for a different core count")
         return
@@ -756,6 +761,23 @@ def _convert_vision_block_weights_for_rpu(
                     f"Qwen3.5 vision {name} must have shape {expected}, got {actual}"
                 )
 
+        if _g05_w8a16:
+            if num_cores != 8 or num_heads != 16 or hidden_size != 1024 or intermediate_size != 4096:
+                raise ValueError("G05 W8 Vision requires the exact TP8 K1 block")
+            for weight in (qkv_w, o_w, fc1_w, fc2_w):
+                if (weight.device.type != "cpu" or weight.dtype != torch.float16
+                        or not bool(torch.isfinite(weight).all())):
+                    raise ValueError("G05 W8 Vision requires finite pristine CPU FP16 projection weights")
+
+        def quantize_projection(weight, name):
+            if not _g05_w8a16:
+                return weight
+            from rpu_backend.quant._common import quantize_linear_per_channel
+
+            quantized, scale = quantize_linear_per_channel(weight, bits=8)
+            setattr(block, name, scale.contiguous())
+            return quantized.contiguous()
+
         # Everything below is irreversible. Keep a poison marker until the
         # complete block is published so a failed partial assignment can never
         # be followed by a double swizzle.
@@ -787,9 +809,12 @@ def _convert_vision_block_weights_for_rpu(
             k_w, k_b = pad_qkv_output(k_w, k_b)
             v_w, v_b = pad_qkv_output(v_w, v_b)
 
-        q_w = tp_col_swizzle_mc_weight(q_w, num_cores=attention_tp)
-        k_w = tp_col_swizzle_mc_weight(k_w, num_cores=attention_tp)
-        v_w = tp_col_swizzle_mc_weight(v_w, num_cores=attention_tp)
+        q_w = quantize_projection(q_w, "_rpu_q_ws")
+        q_w = tp_col_swizzle_mc_weight(q_w, num_cores=attention_tp, **({"dwidth": 1} if _g05_w8a16 else {}))
+        k_w = quantize_projection(k_w, "_rpu_k_ws")
+        k_w = tp_col_swizzle_mc_weight(k_w, num_cores=attention_tp, **({"dwidth": 1} if _g05_w8a16 else {}))
+        v_w = quantize_projection(v_w, "_rpu_v_ws")
+        v_w = tp_col_swizzle_mc_weight(v_w, num_cores=attention_tp, **({"dwidth": 1} if _g05_w8a16 else {}))
 
         block._rpu_q_w, block._rpu_k_w, block._rpu_v_w = q_w, k_w, v_w
         block._rpu_q_b, block._rpu_k_b, block._rpu_v_b = q_b, k_b, v_b
@@ -800,7 +825,8 @@ def _convert_vision_block_weights_for_rpu(
                 o_w.view(hidden_size, num_heads, head_dim),
                 (0, padded_head_dim - head_dim),
             ).reshape(hidden_size, padded_attention_size).contiguous()
-        o_w = tp_row_swizzle_mc_weight(o_w, num_cores=attention_tp)
+        o_w = quantize_projection(o_w, "_rpu_o_ws")
+        o_w = tp_row_swizzle_mc_weight(o_w, num_cores=attention_tp, **({"dwidth": 1} if _g05_w8a16 else {}))
         block.attn.proj.weight = nn.Parameter(o_w, requires_grad=False)
         block._rpu_o_b = o_b.contiguous()
 
@@ -815,15 +841,20 @@ def _convert_vision_block_weights_for_rpu(
             fc1_w = F.pad(fc1_w, (0, 0, 0, intermediate_pad)).contiguous()
             fc1_b = F.pad(fc1_b, (0, intermediate_pad)).contiguous()
             fc2_w = F.pad(fc2_w, (0, intermediate_pad)).contiguous()
-        fc1_w = tp_col_swizzle_mc_weight(fc1_w, **({"num_cores": num_cores} if num_cores != 8 else {}))
+        fc1_w = quantize_projection(fc1_w, "_rpu_fc1_ws")
+        fc1_w = tp_col_swizzle_mc_weight(fc1_w, **({"num_cores": num_cores} if num_cores != 8 else {}),
+                                             **({"dwidth": 1} if _g05_w8a16 else {}))
         block.mlp.linear_fc1.weight = nn.Parameter(fc1_w, requires_grad=False)
         block._rpu_fc1_b = fc1_b
 
-        fc2_w = tp_row_swizzle_mc_weight(fc2_w, **({"num_cores": num_cores} if num_cores != 8 else {}))
+        fc2_w = quantize_projection(fc2_w, "_rpu_fc2_ws")
+        fc2_w = tp_row_swizzle_mc_weight(fc2_w, **({"num_cores": num_cores} if num_cores != 8 else {}),
+                                             **({"dwidth": 1} if _g05_w8a16 else {}))
         block.mlp.linear_fc2.weight = nn.Parameter(fc2_w, requires_grad=False)
         block._rpu_fc2_b = fc2_b.contiguous()
 
     block._rpu_vision_num_cores = num_cores
+    block._rpu_vision_w8a16 = _g05_w8a16
     block._rpu_qwen3_5_vision_weights_converted = True
     del block._rpu_qwen3_5_vision_conversion_started
 
@@ -857,7 +888,7 @@ def _compute_vision_position_idx_cpu(
     """Build ``[num_patches, 2]`` int16 (row_idx, col_idx) on CPU from grid_thw.
 
     Mirrors HF ``Qwen3_5VisionModel.rot_pos_emb`` body — same ``coords`` layout
-    (row, col stacked along the trailing dim of size 2). The RPU rope_2d kernel
+    (row, col stacked along the trailing dim of size 2). The device rope_2d kernel
     does the ``freq_table[pos_ids]`` lookup internally via position_idx +
     FreqCos/Sin table indexing. ``max_hw`` rejects indices outside that table.
     """
@@ -926,6 +957,15 @@ def _cached_vision_position_idx_cpu(
     return vision_model._rpu_vision_position_idx_cpu
 
 
+def _pack_temporal_step0_pos(pos: torch.Tensor, num_cores: int = 8) -> torch.Tensor:
+    """Pack [N,H] position rows into col-parallel [core,N,H/core] order."""
+    if pos.ndim != 2 or pos.size(1) % num_cores:
+        raise ValueError("temporal STEP0 position width must divide num_cores")
+    return pos.view(pos.size(0), num_cores, pos.size(1) // num_cores).permute(
+        1, 0, 2
+    ).contiguous()
+
+
 def _validate_vision_grid(grid_thw_cpu, spatial_merge_size, caller):
     """Return a non-empty positive grid compatible with spatial merging."""
     if grid_thw_cpu.dim() != 2 or grid_thw_cpu.size(-1) != 3:
@@ -991,9 +1031,11 @@ def _make_dummy_vision_kv_caches(
 ) -> RPUCache:
     """Create an RPUCache sized for bidirectional vision SDPA.
 
-    Vision encoder always inserts at position=0 and reads all tokens once — no
-    autoregressive growth. Size the cache to ``max_seq_len`` (worst-case
-    num_patches) so any forward shape fits. ``reset_to_position(0)`` per forward.
+    DDR attention routes insert at position=0 and read all tokens once, without
+    autoregressive growth. The exact G05 K1 raw-SPM transport keeps Q/K/V in
+    SPM and leaves these internal scratch mirrors unchanged. Cache contents
+    are not a Vision output. Keep the allocation at ``max_seq_len`` so DDR,
+    debug and other forward shapes remain valid; reset the cursor per forward.
     """
     return RPUCache(
         num_layers=num_layers,
@@ -1211,11 +1253,12 @@ def _plan_qwen3_5_vision_group(
         return tuple(sorted(rows, key=lambda row: row.identity()))
 
     diagnostic_oneshot = bool(
-        getattr(vision_model, "_rpu_vision_graph_disable", False))
+        getattr(vision_model, "_rpu_vision_graph_disable", False)
+        or torch.rpu.get_debug_export())
     plan_box = {}
     plan_bounded_prefill_execution(
         logical_len,
-        min(
+        4608 if int(temporal_num_frames) > 1 else 256*int(camera_batch_count) if int(camera_batch_count) in (2,3) else min(
             4096, int(getattr(vision_model._rpu_vision_kv_cache,
                               "max_seq_len", logical_len))),
         0,
@@ -1304,6 +1347,10 @@ _QWEN3_5_VISION_READY_ATTRS = (
     "_rpu_vision_num_layers",
     "_rpu_vision_hidden_size",
     "_rpu_vision_linear_acc32",
+    "_rpu_vision_w8a16",
+    "_rpu_vision_math_precision",
+    "_rpu_vision_k1_b3_available",
+    "_rpu_vision_k1_camera_group_available",
     "_rpu_vision_gelu_erf_mode",
     "_rpu_vision_chunk_size_cap",
     "_rpu_vision_exact_chunk_size",
@@ -1503,12 +1550,21 @@ def _rollback_qwen3_5_vision_install(vision_model, *, _graphs_retired=False) -> 
 
 
 def _qwen35_vision_precision(
-    execution_config, *, prepared_profile=None,
+    execution_config, *, certified_g05=False, prepared_profile=None,
+    g05_acc16_experiment=False, g05_w8a16=False,
 ):
     """Resolve independent MoE controls while preserving other profiles."""
     stage = (execution_config or {}).get("vision", {})
+    if type(g05_acc16_experiment) is not bool:
+        raise TypeError("_g05_acc16_experiment must be bool")
+    if g05_acc16_experiment and not (
+            certified_g05 is True
+            and stage.get("linear_acc32") is False and prepared_profile is None):
+        raise ValueError("G05 ACC16 Vision requires exact K1 FP16/W8A16 and explicit ACC16")
     if prepared_profile is not None:
         _qwen3_5_moe_vision_profile_layout(prepared_profile)
+        if certified_g05:
+            raise ValueError("MoE Vision precision cannot use the G0.5 profile")
         acc32 = stage.get("linear_acc32", False)
         ultra_erf = stage.get("gelu_erf_ultra", False)
         for name, value in (("linear_acc32", acc32), ("gelu_erf_ultra", ultra_erf)):
@@ -1517,11 +1573,14 @@ def _qwen35_vision_precision(
         return acc32, ultra_erf
     if "gelu_erf_ultra" in stage:
         raise ValueError("vision.gelu_erf_ultra is supported only by Qwen3.5-MoE")
-    acc32 = stage.get("linear_acc32", False)
+    acc32 = stage.get("linear_acc32", bool(certified_g05))
     if not isinstance(acc32, bool):
         raise TypeError("Qwen3.5 vision.linear_acc32 must be bool")
-    # Explicit ACC32 selects the same-formula ultra kernel; tanh blocks stay tanh.
-    ultra_erf = stage.get("linear_acc32") is True
+    if certified_g05 and not acc32 and not g05_acc16_experiment:
+        raise ValueError("the certified G0.5 K1 Vision profile requires ACC32")
+    # G0.5's existing evidence remains bound to ordinary ERF. Public explicit
+    # ACC32 selects the latest same-formula ultra kernel; tanh blocks stay tanh.
+    ultra_erf = stage.get("linear_acc32") is True and not certified_g05
     return acc32, ultra_erf
 
 
@@ -1535,7 +1594,11 @@ def install_qwen3_5_vision_for_rpu(
     _cold_numeric_opt_in: bool = False,
     _text_bridge: Qwen3_5MoeVisionTextBridge | None = None,
     max_hw: int = 128,        # 每维 patch 上限(2D rope 表 [max_hw,hd/4] 行数,~4KB 近乎免费)；128→单边 ≤2048px、~4:1 长宽比。原 48 卡 >768px
-    max_seq_len: int = 4096,  # Generic vision KV cache cap.
+    max_seq_len: int = 4096,  # generic vision KV cache cap; G0.5 B3 reuses it in isolated 768-row spatial minibatches
+    _allow_certified_g05_k1: bool = False,
+    _g05_w8a16: bool = False,
+    _g05_acc16_experiment: bool = False,
+    _g05_math_precision: str = "base",
     num_cores: int | None = None,
 ) -> int:
     """Install a controlled-evaluation Qwen3.5 vision profile transactionally.
@@ -1545,6 +1608,9 @@ def install_qwen3_5_vision_for_rpu(
     marker and require a model reload. Only successful resource retirement
     removes the in-flight owners and restores the pre-install forward; failed
     retirement preserves them and requires a fresh process.
+    ``_allow_certified_g05_k1`` is retained for the exact
+    module/class/config-selected G0.5 customer adapter call contract; profile
+    validation below remains shared by both callers.
     """
     from rpu_backend.api import causal_lm
 
@@ -1553,6 +1619,7 @@ def install_qwen3_5_vision_for_rpu(
             raise RuntimeError("Qwen3.5 Vision installation blocked by unsafe process state")
     vision_model = _resolve_vision_model(model)
     config = vision_config or vision_model.config
+    dense_27b_vision = getattr(config, "out_hidden_size", None) == 5120
     moe_35b_geometry = tuple(
         getattr(config, name, None)
         for name in (
@@ -1568,6 +1635,7 @@ def install_qwen3_5_vision_for_rpu(
         prepared_profile = _text_bridge.prepared_profile
     elif moe_35b_geometry or (
         getattr(config, "model_type", None) == "qwen3_5_moe"
+        and not _allow_certified_g05_k1
     ):
         raise ValueError(
             "Qwen3.5-MoE Vision requires its verified text bridge"
@@ -1610,9 +1678,11 @@ def install_qwen3_5_vision_for_rpu(
         if (_graph_runtime_policy.execution_core_count != num_cores
                 or _graph_runtime_policy.graph_arena_count != 4
                 or _graph_runtime_policy.qwen35_legacy_27b_sdk_budget
-                or _cold_numeric_opt_in is not True):
+                or _cold_numeric_opt_in is not True or _allow_certified_g05_k1):
             raise ValueError("Qwen3.5 Vision requires its prepared cold graph policy and numeric opt-in")
         if prepared_profile is not None:
+            if getattr(_graph_runtime_policy, "qwen35_dense_27b_sdk_budget", False):
+                raise ValueError("Qwen3.5-MoE Vision cannot use the dense 27B graph budget")
             if _graph_runtime_policy is not _text_bridge.state.vision_graph_policy:
                 raise RuntimeError(
                     "Qwen3.5-MoE Vision graph policy differs from its cold owner"
@@ -1621,18 +1691,41 @@ def install_qwen3_5_vision_for_rpu(
                 vision_model, config, num_cores, prepared_profile
             )
         else:
-            from rpu_backend.adapters.qwen3_5.cores import validate_dense_9b_vision_profile
+            from rpu_backend.adapters.qwen3_5.cores import validate_dense_large_vision_profile
 
-            validate_dense_9b_vision_profile(config)
+            validate_dense_large_vision_profile(config)
+            if (getattr(_graph_runtime_policy, "qwen35_dense_27b_sdk_budget", False)
+                    is not dense_27b_vision):
+                raise ValueError("Qwen3.5 Vision graph budget must match its exact dense profile")
+    elif dense_27b_vision:
+        raise ValueError("Qwen3.5 27B Vision requires its prepared cold graph policy")
     elif _cold_numeric_opt_in:
         raise ValueError("Qwen3.5 Vision cold numeric opt-in requires its prepared graph policy")
     elif prepared_profile is not None:
         raise ValueError(
             "Qwen3.5-MoE Vision requires its prepared cold graph policy"
         )
+    if type(_g05_w8a16) is not bool:
+        raise TypeError("_g05_w8a16 must be bool")
+    from rpu_backend.adapters.qwen3_5._g05_cold import normalize_math_precision, require_g05_high_math_native
+
+    math_precision = normalize_math_precision(_g05_math_precision)
+    if math_precision == "high":
+        if (not _allow_certified_g05_k1 or num_cores != 8 or prepared_profile is not None
+                or tuple(getattr(config, key, None) for key in
+                         ("depth", "num_heads", "hidden_size", "intermediate_size"))
+                != (24, 16, 1024, 4096)):
+            raise ValueError("HIGH Vision math is private to the exact G05 K1 profile")
+        require_g05_high_math_native(vision=True)
+    if _g05_w8a16 and (not _allow_certified_g05_k1 or num_cores != 8 or
+            tuple(getattr(config, key, None) for key in
+                  ("depth", "num_heads", "hidden_size", "intermediate_size"))
+            != (24, 16, 1024, 4096)):
+        raise ValueError("W8 Vision is private to the exact G05 K1 profile")
     requested_acc32, requested_ultra = _qwen35_vision_precision(
-        execution_config,
-        prepared_profile=prepared_profile)
+        execution_config, certified_g05=_allow_certified_g05_k1,
+        prepared_profile=prepared_profile,
+        g05_acc16_experiment=_g05_acc16_experiment, g05_w8a16=_g05_w8a16)
     if num_cores != 8:
         for name in ("qwen3_5_vision_set_execution_cores", "qwen3_5_vision_get_execution_topology"):
             if not hasattr(torch.ops.rpu, name):
@@ -1653,7 +1746,7 @@ def install_qwen3_5_vision_for_rpu(
                 )
                 policy_changed = (
                     installed_policy is not _graph_runtime_policy
-                    if _text_bridge is not None
+                    if _text_bridge is not None or dense_27b_vision
                     else installed_policy != _graph_runtime_policy
                 )
                 if policy_changed:
@@ -1662,6 +1755,10 @@ def install_qwen3_5_vision_for_rpu(
                     )
             if getattr(vision_model, "_rpu_vision_num_cores", 8) != num_cores:
                 raise RuntimeError("Qwen3.5 Vision core count is immutable after installation")
+            if getattr(vision_model, "_rpu_vision_w8a16", False) != _g05_w8a16:
+                raise RuntimeError("Qwen3.5 Vision projection precision is immutable after installation")
+            if getattr(vision_model, "_rpu_vision_math_precision", "base") != math_precision:
+                raise RuntimeError("Qwen3.5 Vision math precision is immutable after installation")
             if vision_model._rpu_vision_linear_acc32 != requested_acc32:
                 raise RuntimeError(
                     "Qwen3.5 vision Linear accumulation is immutable after "
@@ -1708,9 +1805,9 @@ def install_qwen3_5_vision_for_rpu(
                     )
                 else:
                     from rpu_backend.adapters.qwen3_5.cores import (
-                        validate_dense_9b_vision_weights, validate_cold_weight_dtype,
+                        validate_dense_large_vision_weights, validate_cold_weight_dtype,
                     )
-                    validate_dense_9b_vision_weights(vision_model, config)
+                    validate_dense_large_vision_weights(vision_model, config)
                     validate_cold_weight_dtype(vision_model, fp16=True)
             # Vision may install lazily inside an inference-mode request.
             # Its position backing and cache buffers must still support
@@ -1723,6 +1820,10 @@ def install_qwen3_5_vision_for_rpu(
                     resolved_options=resolved_options,
                     max_hw=max_hw,
                     max_seq_len=max_seq_len,
+                    _allow_certified_g05_k1=_allow_certified_g05_k1,
+                    _g05_w8a16=_g05_w8a16,
+                    _g05_acc16_experiment=_g05_acc16_experiment,
+                    _g05_math_precision=math_precision,
                     num_cores=num_cores,
                     _graph_runtime_policy=_graph_runtime_policy,
                     _cold_numeric_opt_in=_cold_numeric_opt_in,
@@ -1774,12 +1875,16 @@ def _install_qwen3_5_vision_for_rpu_impl(
     resolved_options=None,
     max_hw: int = 128,
     max_seq_len: int = 4096,
+    _allow_certified_g05_k1: bool = False,
+    _g05_w8a16: bool = False,
+    _g05_acc16_experiment: bool = False,
+    _g05_math_precision: str = "base",
     num_cores: int = 8,
     _graph_runtime_policy=None,
     _cold_numeric_opt_in: bool = False,
     _prepared_profile: str | None = None,
 ) -> int:
-    """Install RPU all-layers-once forward on the ``Qwen3_5VisionModel``.
+    """Install device all-layers-once forward on the ``Qwen3_5VisionModel``.
 
     ``model`` may be the top ``Qwen3_5ForConditionalGeneration``, the middle
     ``Qwen3_5Model`` fusion, or the ``Qwen3_5VisionModel`` itself — the vision
@@ -1847,7 +1952,8 @@ def _install_qwen3_5_vision_for_rpu_impl(
             f"{sorted(controlled_profiles)}."
         )
     if (
-        not _cold_numeric_opt_in
+        not _allow_certified_g05_k1
+        and not _cold_numeric_opt_in
         and os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") != "1"
     ):
         raise NotImplementedError(
@@ -1872,8 +1978,12 @@ def _install_qwen3_5_vision_for_rpu_impl(
         torch.ops.rpu, "qwen3_5_vision_set_linear_acc32", None
     )
     linear_acc32, ultra_erf = _qwen35_vision_precision(
-        execution_config,
-        prepared_profile=_prepared_profile)
+        execution_config, certified_g05=_allow_certified_g05_k1,
+        prepared_profile=_prepared_profile,
+        g05_acc16_experiment=_g05_acc16_experiment, g05_w8a16=_g05_w8a16)
+    if _g05_w8a16 and ((not linear_acc32 and not _g05_acc16_experiment) or ultra_erf or
+            not hasattr(torch.ops.rpu, "qwen3_5_vision_set_weight_scales")):
+        raise RuntimeError("G05 W8 Vision requires its cold accumulation policy and native scale installation")
     set_moe_precision = getattr(torch.ops.rpu, "qwen3_5_vision_set_moe_precision", None)
     if _prepared_profile is not None and set_moe_precision is None:
         raise RuntimeError("Qwen3.5-MoE vision binary lacks qwen3_5_vision_set_moe_precision; rebuild before installing")
@@ -1929,7 +2039,7 @@ def _install_qwen3_5_vision_for_rpu_impl(
     handle_finalizer = retirement_state.handle_finalizer = resource.finalizer
     vars(vision_model)["_rpu_vision_installing_finalizer"] = handle_finalizer
     # Bind both MoE choices atomically, before any weight transform/upload.
-    # Dense explicit ACC32 retains the ordinary setter semantics.
+    # Dense explicit ACC32 and G0.5 retain their existing setter semantics.
     if num_cores != 8:
         torch.ops.rpu.qwen3_5_vision_set_execution_cores(handle, num_cores)
     if _prepared_profile is not None:
@@ -1938,6 +2048,8 @@ def _install_qwen3_5_vision_for_rpu_impl(
         set_linear_acc32(handle, linear_acc32)
         if ultra_erf:
             set_gelu_erf_ultra(handle, True)
+    if _g05_math_precision == "high":
+        torch.ops.rpu.qwen3_5_vision_set_high_precision(handle, True)
     # Latch the per-handle cap before any forward.  Passing zero explicitly is
     # important: it prevents the native legacy getenv fallback from leaking a
     # process-wide environment value into a canonical ``auto`` request.
@@ -1949,7 +2061,8 @@ def _install_qwen3_5_vision_for_rpu_impl(
     # ------------------------------------------------------------------ #
     for block in vision_model.blocks:
         _convert_vision_block_weights_for_rpu(block, num_heads, hidden_size,
-                                            **({"num_cores": num_cores} if num_cores != 8 else {}))
+                                            **({"num_cores": num_cores} if num_cores != 8 else {}),
+                                            **({"_g05_w8a16": True} if _g05_w8a16 else {}))
 
     # ------------------------------------------------------------------ #
     # Step 3: gather per-layer weights into 16 lists (one per arg)
@@ -1960,14 +2073,15 @@ def _install_qwen3_5_vision_for_rpu_impl(
     q_b_list, k_b_list, v_b_list, o_b_list = [], [], [], []
     fc1_b_list, fc2_b_list = [], []
 
+    weight_dtype = torch.int8 if _g05_w8a16 else torch.float16
     for block in vision_model.blocks:
-        q_w_list.append(block._rpu_q_w.to(dtype=torch.float16, device="rpu"))
-        k_w_list.append(block._rpu_k_w.to(dtype=torch.float16, device="rpu"))
-        v_w_list.append(block._rpu_v_w.to(dtype=torch.float16, device="rpu"))
-        o_w_list.append(block.attn.proj.weight.to(dtype=torch.float16, device="rpu"))
+        q_w_list.append(block._rpu_q_w.to(dtype=weight_dtype, device="rpu"))
+        k_w_list.append(block._rpu_k_w.to(dtype=weight_dtype, device="rpu"))
+        v_w_list.append(block._rpu_v_w.to(dtype=weight_dtype, device="rpu"))
+        o_w_list.append(block.attn.proj.weight.to(dtype=weight_dtype, device="rpu"))
 
-        fc1_w_list.append(block.mlp.linear_fc1.weight.to(dtype=torch.float16, device="rpu"))
-        fc2_w_list.append(block.mlp.linear_fc2.weight.to(dtype=torch.float16, device="rpu"))
+        fc1_w_list.append(block.mlp.linear_fc1.weight.to(dtype=weight_dtype, device="rpu"))
+        fc2_w_list.append(block.mlp.linear_fc2.weight.to(dtype=weight_dtype, device="rpu"))
 
         ln1_w_list.append(block.norm1.weight.to(dtype=torch.float16, device="rpu"))
         ln1_b_list.append(block.norm1.bias.to(dtype=torch.float16, device="rpu"))
@@ -1999,6 +2113,24 @@ def _install_qwen3_5_vision_for_rpu_impl(
         num_heads, head_dim, hidden_size, intermediate_size,
         float(eps),
     )
+    if _g05_w8a16:
+        scale_lists = tuple(
+            [getattr(block, name).to(device="rpu", dtype=torch.float16).contiguous()
+             for block in vision_model.blocks]
+            for name in ("_rpu_q_ws", "_rpu_k_ws", "_rpu_v_ws", "_rpu_o_ws", "_rpu_fc1_ws", "_rpu_fc2_ws"))
+        resource.keepalive += scale_lists
+        torch.ops.rpu.qwen3_5_vision_set_weight_scales(handle, *scale_lists)
+        vision_model._rpu_g05_quant_inventory = [
+            {"name": f"blocks.{layer}.{name}", "method": "w8a16",
+             "weight_shape": list(weight.shape), "weight_dtype": str(weight.dtype),
+             "weight_bytes": weight.numel() * weight.element_size(),
+             "scale_shape": list(scale.shape), "scale_dtype": str(scale.dtype),
+             "scale_bytes": scale.numel() * scale.element_size()}
+            for name, weights, scales in zip(
+                ("attn.q", "attn.k", "attn.v", "attn.proj", "mlp.fc1", "mlp.fc2"),
+                (q_w_list,k_w_list,v_w_list,o_w_list,fc1_w_list,fc2_w_list), scale_lists)
+            for layer, (weight, scale) in enumerate(zip(weights, scales))
+        ]
     if num_cores != 8:
         actual = tuple(torch.ops.rpu.qwen3_5_vision_get_execution_topology(handle))
         if actual != (num_cores, num_cores, num_cores, 8):
@@ -2022,15 +2154,6 @@ def _install_qwen3_5_vision_for_rpu_impl(
     position_idx_keepalive = torch.ops.rpu.qwen3_5_vision_position_idx_keepalive(handle)
     vision_model._rpu_vision_position_idx_keepalive = position_idx_keepalive
 
-    # ------------------------------------------------------------------ #
-    # Step 6: fold patch_embed Conv3d → Linear weight.
-    #
-    # STEP 0 (patch_embed + exact HF position upload) runs in the fused graph unless
-    # RPU_VISION_STEP0=0 retains the CPU fallback. The device path must use
-    # column-swizzled patch weights and preserve the HF grid's token order.
-    # Prepare the full-grid position tensor before entering the graph;
-    # wrong weight layout or token order can silently change the output.
-    # ------------------------------------------------------------------ #
     pe = vision_model.patch_embed
     pe_w_folded = _fold_conv3d_to_linear_weight(pe.proj.weight.data)
     pe_b = pe.proj.bias.data if pe.proj.bias is not None else None
@@ -2047,10 +2170,18 @@ def _install_qwen3_5_vision_for_rpu_impl(
     if use_rpu_step0:
         if pe_b is None:
             raise RuntimeError(
-                "Qwen3.5 vision STEP 0: patch_embed has no bias, but the RPU path "
+                "Qwen3.5 vision STEP 0: patch_embed has no bias, but the device path "
                 "assumes one (set RPU_VISION_STEP0=0 to fall back to CPU)"
             )
-
+        # COL-parallel swizzle — patch_embed splits the OUTPUT hidden dim, matching
+        # rhino (qwen3_vl_vision_sisc_graph.cc:401 is_col_parallel=true). This is
+        # line-for-line rhino-ops ParallelLinearGenerator.py:346-353.
+        #
+        # Deliberately the col primitive rather than transform_linear_weight(w,
+        # partition): hidden=1024 satisfies BOTH the col (N%128) and row (N%16)
+        # asserts, so a wrong `partition` argument would raise nothing and just
+        # return wrong numbers — the exact F31 failure mode. Naming the primitive
+        # makes that unrepresentable.
         pe_w_swz = tp_col_swizzle_mc_weight(
             pe_w_folded.to(dtype=torch.float16, device="cpu").contiguous(),
             **({"num_cores": num_cores} if num_cores != 8 else {}),
@@ -2118,7 +2249,7 @@ def _install_qwen3_5_vision_for_rpu_impl(
     # The ordinary dense 2B pilot may repeat two image shapes in one request.
     # Retain that bounded working set; specialized/large profiles keep one slot.
     graph_entries = 2 if (
-        _prepared_profile is None
+        not _allow_certified_g05_k1 and _prepared_profile is None
         and (cfg.depth, hidden_size, intermediate_size, num_heads,
              getattr(cfg, "out_hidden_size", None)) == (24, 1024, 4096, 16, 2048)
     ) else 1
@@ -2140,6 +2271,8 @@ def _install_qwen3_5_vision_for_rpu_impl(
     vision_model._rpu_vision_num_cores = num_cores
     vision_model._rpu_vision_hidden_size = hidden_size
     vision_model._rpu_vision_linear_acc32 = linear_acc32
+    vision_model._rpu_vision_w8a16 = _g05_w8a16
+    vision_model._rpu_vision_math_precision = _g05_math_precision
     vision_model._rpu_vision_gelu_erf_mode = "ultra" if ultra_erf else "standard"
     vision_model._rpu_vision_chunk_size_cap = chunk_size_cap
     vision_model._rpu_vision_exact_chunk_size = exact_chunk_size
@@ -2157,6 +2290,13 @@ def _install_qwen3_5_vision_for_rpu_impl(
 
     # Publish the handle only after every dependent field and the replacement
     # forward are ready. Before this point rollback owns the temporary handle.
+    k1_b3_query = getattr(torch.ops.rpu,"qwen3_5_vision_k1_b3_available",None)
+    vision_model._rpu_vision_k1_b3_available = bool(k1_b3_query(handle)) if k1_b3_query else False
+    k1_group_query = getattr(torch.ops.rpu,"qwen3_5_vision_k1_camera_group_available",None)
+    vision_model._rpu_vision_k1_camera_group_available = tuple(
+        bool(k1_group_query(handle,batch)) if k1_group_query else
+        bool(batch == 3 and vision_model._rpu_vision_k1_b3_available)
+        for batch in (2,3))
     vision_model._rpu_vision_handle = handle
     vision_model._rpu_vision_handle_finalizer = handle_finalizer
     del vision_model._rpu_vision_installing_handle
@@ -2178,15 +2318,18 @@ def _install_qwen3_5_vision_for_rpu_impl(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs):
-    """RPU-dispatching forward for Qwen3_5VisionModel.
+    """device-dispatching forward for Qwen3_5VisionModel.
 
     Args (mirror HF):
-        hidden_states: ``[seq_len, cin*tp*ps*ps]`` pre-flattened pixel patches.
+        hidden_states: Normally ``[seq_len, cin*tp*ps*ps]`` pre-flattened pixel
+            patches. Canonical G0.5 B3/K6 may pass compact
+            ``[18,3,256,256]`` normalized FP16 frames instead.
         grid_thw: ``[n_images, 3]`` int (T, H, W) per image. Read on CPU to
             build position indices and the exact whole-grid position tensor.
 
     Returns ``BaseModelOutputWithPooling(last_hidden_state, pooler_output)`` (no
-    deepstack). Multi-image input runs once per image group.
+    deepstack). Generic multi-image input runs once per image. G0.5's exact
+    B_camera=3/K=6/P=256 profile may instead use one camera-major packed call.
     """
     from rpu_backend.api import causal_lm
 
@@ -2205,33 +2348,97 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
     fusion_run_starts = kwargs.pop("_rpu_fusion_run_starts", None)
     temporal_num_frames = int(kwargs.pop("_rpu_temporal_num_frames", 1))
     camera_batch_count = int(kwargs.pop("_rpu_camera_batch_count", 1))
-    if temporal_num_frames != 1:
-        raise ValueError("public Qwen3.5 Vision requires _rpu_temporal_num_frames=1")
-    if camera_batch_count != 1:
-        raise ValueError("public Qwen3.5 Vision requires _rpu_camera_batch_count=1")
+    if temporal_num_frames < 1:
+        raise ValueError("_rpu_temporal_num_frames must be positive")
+    if camera_batch_count not in (1, 2, 3):
+        raise ValueError("_rpu_camera_batch_count must be 1, 2 or 3")
     grid_thw_cpu = grid_thw.detach().cpu() if grid_thw.device.type != "cpu" else grid_thw
     _validate_vision_grid(
         grid_thw_cpu, spatial_merge_size, "Qwen3.5 vision forward")
     step0_on = getattr(self, "_rpu_vision_step0", False)
-    if hidden_states.dim() != 2:
-        raise ValueError("Qwen3.5 Vision requires flattened pixel patches")
-    compact_input = False
+    compact_input = hidden_states.dim() == 4
     num_cores = getattr(self, "_rpu_vision_num_cores", 8)
+    if num_cores != 8 and (temporal_num_frames != 1 or camera_batch_count != 1 or compact_input):
+        raise ValueError("reduced Qwen3.5 Vision supports ordinary still-image inputs only")
+    if compact_input and not step0_on:
+        raise RuntimeError("compact G0.5 vision input requires device STEP0")
+
     patches_per_image = grid_thw_cpu.prod(-1).tolist()  # [n_0, n_1, ...]
     total_patches = sum(patches_per_image)
-    if hidden_states.size(0) != total_patches:
+    if compact_input:
+        if (
+            tuple(hidden_states.shape) != (18, 3, 256, 256)
+            or temporal_num_frames != 6
+            or camera_batch_count != 3
+            or total_patches != 4608
+        ):
+            raise NotImplementedError(
+                "compact G0.5 vision supports only B_camera=3,K=6,C=3,"
+                "H=W=256,P=256"
+            )
+    elif hidden_states.size(0) != total_patches:
         raise RuntimeError(
             f"Qwen3.5 vision forward: patch input has {hidden_states.size(0)} "
             f"tokens but grid_thw implies {total_patches}"
         )
-    groups = [(index, count, count) for index, count in enumerate(patches_per_image)]
+    if len(patches_per_image) % temporal_num_frames:
+        raise ValueError(
+            "Qwen3.5 temporal vision requires a whole number of frame groups"
+        )
+    requested_k1_group = temporal_num_frames == 1 and camera_batch_count in (2,3)
+    group_capabilities = getattr(self,"_rpu_vision_k1_camera_group_available",())
+    if requested_k1_group and group_capabilities:
+        requested_batch = camera_batch_count
+        exact_group = (not compact_input and len(patches_per_image)==requested_batch and
+            set(patches_per_image)=={256} and bool(group_capabilities[requested_batch-2]) and
+            getattr(self,"_rpu_vision_exact_chunk_size",None) in (None,256*requested_batch) and
+            int(getattr(self,"_rpu_vision_chunk_size_cap",0)) in (0,256*requested_batch))
+        if not exact_group:
+            if requested_batch == 2:
+                raise ValueError("K1 camera group requires its exact installed mode/camera/chunk profile")
+            camera_batch_count = 1
+    elif temporal_num_frames == 1 and camera_batch_count == 2:
+        raise ValueError("K1 B2 camera group is unavailable in this archived runtime")
+    requested_k1_b3 = (temporal_num_frames == 1 and camera_batch_count == 3 and
+                        not group_capabilities)
+    if requested_k1_b3:
+        # Cold optional payload absence falls back to the original three K1 calls.
+        exact_k1 = (not compact_input and len(patches_per_image)==3 and
+                    set(patches_per_image)=={256} and
+                    bool(getattr(self,"_rpu_vision_k1_b3_available",False)) and
+                    getattr(self,"_rpu_vision_exact_chunk_size",None) in (None,768) and
+                    int(getattr(self,"_rpu_vision_chunk_size_cap",0)) in (0,768))
+        camera_batch_count = 3 if exact_k1 else 1
+    if camera_batch_count in (2,3) and temporal_num_frames == 1:
+        groups = [(0,total_patches,total_patches)]
+    elif camera_batch_count == 3:
+        if (
+            temporal_num_frames != 6
+            or len(patches_per_image) != 18
+            or set(patches_per_image) != {256}
+        ):
+            raise NotImplementedError(
+                "packed Qwen3.5 vision supports only B_camera=3,K=6,P=256"
+            )
+        groups = [(0, total_patches, 3 * 256)]
+    else:
+        groups = []
+        for grid_start in range(0, len(patches_per_image), temporal_num_frames):
+            counts = patches_per_image[
+                grid_start : grid_start + temporal_num_frames
+            ]
+            if temporal_num_frames > 1 and len(set(counts)) != 1:
+                raise NotImplementedError(
+                    "Qwen3.5 temporal vision requires equal patch counts across frames"
+                )
+            groups.append((grid_start, sum(counts), counts[-1]))
 
     merger_on = getattr(self, "_rpu_vision_has_merger", False)
     direct_fusion = fusion_target is not None
     if direct_fusion:
         if not merger_on:
-            raise RuntimeError("Qwen3.5 direct vision fusion requires the RPU merger")
-        expected_starts = len(groups)
+            raise RuntimeError("Qwen3.5 direct vision fusion requires the device merger")
+        expected_starts = camera_batch_count if camera_batch_count in (2,3) else len(groups)
         if fusion_run_starts is None or len(fusion_run_starts) != expected_starts:
             raise RuntimeError(
                 "Qwen3.5 direct vision fusion requires one run start per image")
@@ -2271,7 +2478,7 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
 
     if step0_on:
         # ----- STEP 0 runs in the fused graph: hand the tower RAW folded patches.
-        # No CPU patch-embedding GEMM and no RPU→CPU→RPU round trip. HF computes
+        # No CPU patch-embedding GEMM and no device→CPU→device round trip. HF computes
         # the small position tensor once per grid; pre_layers_fn uploads and adds
         # it after patch_embed + all_gather.
         embed_packed = (
@@ -2294,7 +2501,7 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
         embed_cpu = torch.nn.functional.linear(hidden_states_cpu, pe_w, pe_b)  # CPU fp16 [N_total, hidden]
         embed_packed = embed_cpu.to(device="rpu", dtype=torch.float16, non_blocking=False).contiguous()
 
-        # ----- fast_pos_embed_interpolate (CPU fp16 → RPU + add) (F32) --------
+        # ----- fast_pos_embed_interpolate (CPU fp16 → device + add) (F32) --------
         pos_embeds_cpu = type(self).fast_pos_embed_interpolate(self, grid_thw_cpu)  # [N_total, hidden] CPU fp16
         pos_embeds = pos_embeds_cpu.to(device=embed_packed.device, dtype=embed_packed.dtype).contiguous()
         embed_packed = embed_packed + pos_embeds  # rpu_add
@@ -2306,9 +2513,11 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
 
     last_hidden_per_image: list[torch.Tensor] = []
     graph_requests = []
-    if not getattr(self, "_rpu_vision_graph_disable", False):
+    if not (getattr(self, "_rpu_vision_graph_disable", False)
+            or torch.rpu.get_debug_export()):
         for (_, n_i, _), vision_plan in planned_groups:
-            embed_shape = (n_i, *tuple(embed_packed.shape[1:]))
+            embed_shape = (tuple(embed_packed.shape) if compact_input else
+                           (n_i, *tuple(embed_packed.shape[1:])))
             key = (
                 n_i, self._rpu_vision_hidden_size, num_layers,
                 temporal_num_frames, camera_batch_count, direct_fusion,
@@ -2337,9 +2546,21 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
             or not torch.equal(cached_grid, grid_thw_cpu)
         ):
             pos_cpu = type(self).fast_pos_embed_interpolate(self, grid_thw_cpu)
-            self._rpu_vision_step0_pos = pos_cpu.to(
-                device="rpu", dtype=torch.float16
-            ).contiguous()
+            if temporal_num_frames > 1:
+                packed = []
+                pos_offset = 0
+                for _, n_i, _ in groups:
+                    packed.append(
+                        _pack_temporal_step0_pos(
+                            pos_cpu.narrow(0, pos_offset, n_i), num_cores=num_cores
+                        ).to(device="rpu", dtype=torch.float16)
+                    )
+                    pos_offset += n_i
+                self._rpu_vision_step0_pos = tuple(packed)
+            else:
+                self._rpu_vision_step0_pos = pos_cpu.to(
+                    device="rpu", dtype=torch.float16
+                ).contiguous()
             self._rpu_vision_step0_pos_grid = grid_thw_cpu.clone()
             self._rpu_vision_step0_pos_temporal_num_frames = temporal_num_frames
             self._rpu_vision_step0_pos_camera_batch_count = camera_batch_count
@@ -2354,7 +2575,11 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
         plan_metadata = dict(
             vision_plan.selected.stage_tuple.physical_metadata
         )
-        embed_i = embed_packed.narrow(0, offset, n_i).contiguous()
+        embed_i = (
+            embed_packed
+            if compact_input
+            else embed_packed.narrow(0, offset, n_i).contiguous()
+        )
 
         pos_idx_cpu = _cached_vision_position_idx_cpu(
             self,
@@ -2372,20 +2597,26 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
         if getattr(self, "_rpu_vision_rope_disable", False):
             keepalive.narrow(0, 0, n_i).zero_()
         else:
-            keepalive.narrow(0, 0, n_i).copy_(pos_idx_cpu.to(keepalive.device))
+            keepalive.narrow(0, 0, n_i).copy_(pos_idx_cpu)
 
         cache.reset_to_position(0)
 
         embed_i_3d = embed_i.unsqueeze(0).contiguous()
         if step0_pos_all is None:
             step0_pos_i = None
+        elif temporal_num_frames > 1:
+            step0_pos_i = step0_pos_all[i]
         else:
             step0_pos_i = step0_pos_all.narrow(0, offset, n_i)
         op_args = (
             handle, embed_i_3d, k_caches, v_caches, n_i,
             step0_pos_i,
             fusion_target if direct_fusion else None,
-            [int(fusion_run_starts[i])] if direct_fusion else [],
+            (
+                [int(x) for x in fusion_run_starts]
+                if direct_fusion and camera_batch_count in (2, 3)
+                else [int(fusion_run_starts[i])] if direct_fusion else []
+            ),
             temporal_num_frames,
             camera_batch_count,
             int(plan_metadata["stage_plan_fingerprint_hi"]),
@@ -2399,6 +2630,13 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
         if getattr(self, "_rpu_vision_graph_disable", False):
             # Diagnostic fallback: bypass the retained GraphCache but keep the
             # complete physical manifest under an active one-shot lifecycle.
+            try:
+                out_3d = _run_vision_diagnostic_oneshot(self, op_args)
+            except BaseException:
+                _evict_vision_graph(self)
+                raise
+        elif torch.rpu.get_debug_export():
+            # Debug DMAs point at per-forward buffers, so never retain their addresses.
             try:
                 out_3d = _run_vision_diagnostic_oneshot(self, op_args)
             except BaseException:
@@ -2448,6 +2686,26 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
             # model buffer, so a second same-size image overwrites the first view.
             # The direct path does not consume last_hidden_state and skips this copy.
             live = out_3d.squeeze(0)
+            if temporal_num_frames > 1:
+                patches_per_frame = output_patches // camera_batch_count
+                if camera_batch_count == 1:
+                    live = live.narrow(
+                        0, n_i - patches_per_frame, patches_per_frame
+                    )
+                else:
+                    live = torch.cat(
+                        [
+                            live.narrow(
+                                0,
+                                (camera * temporal_num_frames
+                                 + temporal_num_frames - 1)
+                                * patches_per_frame,
+                                patches_per_frame,
+                            )
+                            for camera in range(camera_batch_count)
+                        ],
+                        dim=0,
+                    )
             last_hidden_per_image.append(live.clone())
 
         if merger_on and not direct_fusion:
@@ -2456,7 +2714,7 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
             # merged_buf_ is a stable per-model buffer overwritten by the next image's
             # forward, so appending a view would let image i+1 clobber image i.
             merged_i = torch.ops.rpu.qwen3_5_vision_get_merger_out(
-                handle)  # [1, n_i/sm², out_hidden] RPU fp16
+                handle)  # [1, n_i/sm², out_hidden] device fp16
             merged_per_image.append(merged_i.squeeze(0).clone())
         offset += n_i
 
@@ -2505,18 +2763,33 @@ def _lazy_vision_graph_options(text_state, *, prepared_profile=None):
                 "before to_rpu; reload the model"
             )
         raise RuntimeError(
-            "Qwen3.5 9B VL requires QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED=1 "
+            "Qwen3.5 large dense VL requires QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED=1 "
             "before to_rpu; reload the model to prepare its cold graph arenas")
     if prepared_profile is None:
         graph_cache = getattr(text_state, "graph_cache", None)
         policy = getattr(graph_cache, "runtime_policy", None)
-        topology = text_state.execution_topology
-        if (policy.graph_arena_count != 4
-                or policy.execution_core_count != topology.num_cores
-                or policy.qwen35_legacy_27b_sdk_budget):
+        topology = getattr(text_state, "execution_topology", None)
+        root_cores = getattr(topology, "num_cores", None)
+        if (getattr(policy, "graph_arena_count", None) != 4
+                or root_cores is None
+                or getattr(policy, "execution_core_count", None) != root_cores
+                or getattr(policy, "qwen35_legacy_27b_sdk_budget", True)):
             raise RuntimeError(
-                "Qwen3.5 9B VL cold graph arena ownership is incomplete"
+                "Qwen3.5 large dense VL cold graph arena ownership is incomplete"
             )
+        if getattr(policy, "qwen35_dense_27b_sdk_budget", False):
+            expected_topology = (
+                root_cores, 8 if root_cores == 8 else 4,
+                root_cores, 8 if root_cores == 8 else 4, 8,
+            )
+            actual_topology = tuple(getattr(topology, name, None) for name in (
+                "num_cores", "attn_tp", "mlp_tp", "lm_head_tp", "physical_kv_cores"))
+            if (not isinstance(policy, rpu_backend.graph.GraphRuntimePolicy)
+                    or root_cores not in (4, 6, 8)
+                    or actual_topology != expected_topology
+                    or getattr(getattr(text_state, "prefill_graph", None),
+                               "runtime_policy", None) is not policy):
+                raise RuntimeError("Qwen3.5 27B VL cold text graph owner is inconsistent")
     else:
         _validate_qwen3_5_moe_text_topology(
             text_state, prepared_profile, text_state.execution_topology
@@ -2526,13 +2799,18 @@ def _lazy_vision_graph_options(text_state, *, prepared_profile=None):
         )
         return {"_graph_runtime_policy": vision_policy,
                 "_cold_numeric_opt_in": True}
+    from dataclasses import replace
+
+    expected_vision_policy = (
+        policy if policy.execution_core_count == topology.attn_tp
+        else replace(policy, execution_core_count=topology.attn_tp))
     vision_policy = getattr(text_state, "vision_graph_policy", None)
     if vision_policy is None:
-        from dataclasses import replace
-
-        vision_policy = (policy if policy.execution_core_count == topology.attn_tp
-                         else replace(policy, execution_core_count=topology.attn_tp))
+        vision_policy = expected_vision_policy
         text_state.vision_graph_policy = vision_policy
+    elif (vision_policy is not policy if topology.num_cores == topology.attn_tp
+          else vision_policy != expected_vision_policy):
+        raise RuntimeError("Qwen3.5 large dense VL Vision graph policy differs from its cold owner")
     return {"_graph_runtime_policy": vision_policy,
             "_cold_numeric_opt_in": True}
 
@@ -2594,9 +2872,8 @@ def _prepare_qwen3_5_multimodal_spm(model, input_ids, pixel_values,
         "_text_bridge": _text_bridge,
     })
     vision_handle = _install_lazy_qwen3_5_vision(model, state, **vision_options)
-    # Existing graphs retain absolute temporary SPM addresses. Retire them
-    # before a new peer lowers the floor, including the earlier text-only
-    # decode graph and every normal/debug prefill owner.
+    # Existing graphs retain temporary SPM addresses. Retire them before a new
+    # peer lowers the floor, including the earlier text-only decode graph.
     _clear_qwen35_graphs((state,), vision)
     from rpu_backend.api._execution import prepared_execution_plan_cache
 
@@ -2635,12 +2912,12 @@ def fuse_visual_embeds(model, hidden, input_ids, pixel_values, image_grid_thw,
     ``model`` is the top ``Qwen3_5ForConditionalGeneration``; ``model.model`` is the
     ``Qwen3_5Model`` fusion (owns ``visual`` + ``get_image_features`` +
     ``compute_3d_position_ids``). ``hidden`` is ``[1, seq, hidden]`` embeds (fp16,
-    RPU). Replicates HF ``Qwen3_5Model.forward`` (modeling L1652-1683) minus
+    device). Replicates HF ``Qwen3_5Model.forward`` (modeling L1652-1683) minus
     DeepStack:
       1. vision encode and write the merger output directly into the contiguous
-         image-token runs of ``hidden`` on RPU.
+         image-token runs of ``hidden`` on device.
       2. Fall back to CPU ``masked_scatter`` only for fragmented token layouts or
-         when the RPU merger is disabled.
+         when the device merger is disabled.
       3. 3D ``position_ids`` via ``compute_3d_position_ids`` (get_rope_index) →
          return ``position_ids[:, 0, :]`` = ``[3, seq]`` for the prefill M-RoPE.
     """
@@ -2690,7 +2967,7 @@ def fuse_visual_embeds(model, hidden, input_ids, pixel_values, image_grid_thw,
 
     # Lazy install: first image forward swizzles + installs the vision tower.
     # Keeps text-only to_rpu byte-identical (BC — spec §9.1); vision touches the
-    # RPU only when an image actually arrives.
+    # device only when an image actually arrives.
     # The installer is a cheap locked no-op after commit and also validates
     # that an apparent existing handle still has a live finalizer.
     # Vision is lazy, but its immutable cold controls belong to the same

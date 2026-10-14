@@ -1,4 +1,4 @@
-"""Validation shared by public RPU execution-configuration entry points."""
+"""Validation shared by public device execution-configuration entry points."""
 from __future__ import annotations
 
 import functools
@@ -78,7 +78,7 @@ def _require_execution_process_safe() -> None:
     # Unlike a normal process-terminal owner (e.g. HY), uncertain native
     # cleanup forbids all subsequent execution, including already-bound owners.
     if _UNSAFE_PROCESS_REASON is not None:
-        raise RuntimeError(f"RPU process is unsafe: {_UNSAFE_PROCESS_REASON}; restart the process")
+        raise RuntimeError(f"device process is unsafe: {_UNSAFE_PROCESS_REASON}; restart the process")
 
 
 class _FrozenExecutionMapping(Mapping[str, Any]):
@@ -1768,7 +1768,7 @@ def native_execution_reconfigure(ops=None, *, token=None, journal=None):
     missing = [name for name in required if not hasattr(ops, name)]
     if missing:
         raise RuntimeError(
-            "RPU binary lacks native execution-reconfigure op(s): "
+            "device binary lacks native execution-reconfigure op(s): "
             + ", ".join(missing)
         )
     if token is None:

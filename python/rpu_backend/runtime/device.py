@@ -14,7 +14,7 @@ def extract_to_device_target(args, kwargs):
 
 
 def is_rpu_device_target(device, *, entry_point: str) -> bool:
-    """Classify a ``.to`` target without treating malformed RPU strings as RPU."""
+    """Classify a ``.to`` target without treating malformed device strings as device."""
     if isinstance(device, int):
         raise ValueError(
             f"{entry_point}: integer device indices are ambiguous; use "
@@ -28,7 +28,7 @@ def is_rpu_device_target(device, *, entry_point: str) -> bool:
         raw = str(device).strip().lower()
         if raw.startswith(("rpu", "privateuseone")):
             raise ValueError(
-                f"{entry_point}: invalid RPU device target {device!r}; use "
+                f"{entry_point}: invalid device device target {device!r}; use "
                 "'rpu' or 'rpu:0'"
             ) from exc
         return False
@@ -36,7 +36,7 @@ def is_rpu_device_target(device, *, entry_point: str) -> bool:
         return False
     if resolved.index not in {None, 0}:
         raise ValueError(
-            f"{entry_point}: only RPU device 0 is supported, got {device!r}"
+            f"{entry_point}: only device device 0 is supported, got {device!r}"
         )
     return True
 

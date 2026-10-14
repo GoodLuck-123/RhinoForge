@@ -6,8 +6,33 @@ from rpu_backend.adapters import qwen3_vl as qvl
 from rpu_backend.api.cache import RPUCache
 from rpu_backend.runtime import decoder
 from rpu_backend.tests.acceptance.test_qwen3_vl_install_lifecycle import (
-    _Model, _decode_descriptor, install_runtime,  # noqa: F401
+    _Model, _decode_descriptor, install_runtime as composite_runtime,  # noqa: F401
 )
+
+
+@pytest.fixture
+def install_runtime(composite_runtime, monkeypatch):
+    state = composite_runtime
+    state.update(decode_plans=[], plan_error=None)
+    install_text = qvl.install_qwen3_vl_text_for_rpu
+
+    def resolve_decode(handle, position=0):
+        assert handle == 22
+        state["decode_plans"].append(state["lm_head"])
+        if state["lm_head"] and state["plan_error"] is not None:
+            raise state["plan_error"]
+        return _decode_descriptor(state["lm_head"])
+
+    def install_text_with_lm_head_topology(model, **kwargs):
+        handle = install_text(model, **kwargs)
+        model._rpu_decode_stage_descriptor = resolve_decode(handle)
+        return handle
+
+    monkeypatch.setattr(qvl, "install_qwen3_vl_text_for_rpu",
+                        install_text_with_lm_head_topology)
+    monkeypatch.setattr(torch.ops.rpu, "causal_decoder_resolve_decode_stage_descriptor",
+                        resolve_decode, raising=False)
+    return state
 
 
 def _model(size):
@@ -51,10 +76,9 @@ def test_vl_final_lm_head_topology_is_planned_before_first_decode(install_runtim
     dispatched = []
 
     def forward(handle, hidden, keys, values, mask, position, causal, positions, visual, *rest):
-        # This models the same native family-9/site check that rejected the
-        # real board's first decode. No fallback permits the old topology.
+        # Decode must use the final LM-head topology.
         descriptor = tuple(rest[-1])
-        assert descriptor == _decode_descriptor(install_runtime["lm_head_set"])
+        assert descriptor == _decode_descriptor(install_runtime["lm_head"])
         assert position == 314
         dispatched.append(descriptor)
         return hidden.clone()

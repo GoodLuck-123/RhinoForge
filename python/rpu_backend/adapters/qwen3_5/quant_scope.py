@@ -1,7 +1,7 @@
 """Qwen3.5 quantization scope and per-projection precision contract.
 
 Shared by the offline converter (``rpu_backend.quant.convert_qwen3_5``), the
-checkpoint loader (``adapters/qwen3_5/loader.py``) and the RPU install path
+checkpoint loader (``adapters/qwen3_5/loader.py``) and the device install path
 (``text.py::_iter_text_projections``). Keeping one list avoids the failure mode
 where a checkpoint is converted over one set of modules and loaded over another.
 
@@ -23,13 +23,15 @@ LINEAR_ATTENTION = "linear_attention"
 FP16 = "fp16"
 W8A16 = "w8a16"
 W4A16_PGRP = "w4a16_pgrp"
-SUPPORTED_QUANT_METHODS = (FP16, W8A16, W4A16_PGRP)
+W4A16_AWQ = "w4a16_awq"
+QUANTTRIO_AWQ_PROFILE = "quanttrio_awq_g128"
+SUPPORTED_QUANT_METHODS = (FP16, W8A16, W4A16_PGRP, W4A16_AWQ)
 PGRP_SUPPORTED_GROUP_SIZES = (32, 64, 128)
 DECLARED_DTYPES = (FP16, W8A16, "w4a16")
 
 # The first Qwen3.8-27B W8A16 bundle predates the v1/v2 declaration used by
 # ``convert_qwen3_5``.  It quantizes the MLP and full-attention projections,
-# leaves all GDN projections in FP16, and stores MTP scales even though the RPU
+# leaves all GDN projections in FP16, and stores MTP scales even though the device
 # text path intentionally does not instantiate MTP.  Keep this policy explicit
 # instead of treating it as the v1 uniform-W8 format (which would silently ask
 # for scales on every GDN projection).
@@ -70,7 +72,7 @@ class QuantSpec:
                 f"unsupported Qwen3.5 quant method {self.method!r}; expected one of "
                 f"{SUPPORTED_QUANT_METHODS}"
             )
-        if self.method == W4A16_PGRP:
+        if self.method in (W4A16_PGRP, W4A16_AWQ):
             if (not isinstance(self.group_size, int)
                     or isinstance(self.group_size, bool)
                     or self.group_size not in PGRP_SUPPORTED_GROUP_SIZES):
@@ -78,6 +80,8 @@ class QuantSpec:
                     f"method={W4A16_PGRP} requires group_size in "
                     f"{PGRP_SUPPORTED_GROUP_SIZES}, got {self.group_size!r}"
                 )
+            if self.method == W4A16_AWQ and self.group_size != 128:
+                raise ValueError("w4a16_awq requires group_size=128")
         elif self.group_size is not None:
             raise ValueError(
                 f"method={self.method} does not accept group_size, got "
@@ -129,6 +133,99 @@ def _spec(value, name):
     if "method" not in value:
         raise ValueError(f"Qwen3.5 {name} requires method")
     return QuantSpec(value["method"], value.get("group_size"))
+
+
+def _quanttrio_policy(is_full):
+    """Versioned per-module declaration; v2 role semantics remain unchanged."""
+    return {
+        "format_version": 3, "architecture": "qwen3_5",
+        "profile": QUANTTRIO_AWQ_PROFILE, "activation_dtype": "float16",
+        "storage": "uint8", "scale_dtype": "float16",
+        "default": {"method": FP16},
+        "module_overrides": {
+            f"layers.{i}.{role}": {"method": W4A16_AWQ, "group_size": 128}
+            for i in range(1, len(is_full)) for role in _MLP_PROJECTIONS},
+    }
+
+
+def quanttrio_awq_config(config):
+    """Return a fresh exact QuantTrio policy, or None for another profile.
+
+    Accept JSON mappings and HF objects without modifying either. A claimed but
+    malformed AWQ declaration raises, including conflicting internal/external
+    declarations. This is shared by public preflight, loading and metadata checks.
+    """
+    get = _config_value
+    quant = get(config, "quant_config")
+    source = get(config, "quantization_config")
+    declared = isinstance(quant, Mapping) and quant.get("profile") == QUANTTRIO_AWQ_PROFILE
+    if source is None and not declared:
+        return None
+    if source is not None:
+        source = _mapping(source, "quantization_config")
+        expected = {"quant_method": "awq", "bits": 4, "group_size": 128,
+                    "version": "gemm", "zero_point": True}
+        if (any(source.get(k) != v or (type(v) in (int, bool) and type(source.get(k)) is not type(v))
+                for k, v in expected.items())
+                or set(source) - set(expected) - {"modules_to_not_convert"}
+                or not isinstance(source.get("modules_to_not_convert"), list)
+                or len(source["modules_to_not_convert"]) != 5
+                or not all(isinstance(name, str) for name in source["modules_to_not_convert"])
+                or set(source["modules_to_not_convert"]) != {
+                    "visual", "linear_attn", "self_attn", "model.layers.0.", "mtp"}):
+            raise ValueError("Qwen3.5 requires exact QuantTrio AWQ GEMM G128 direct-zero metadata")
+    tc = get(config, "text_config")
+    if tc is None or get(config, "model_type") != "qwen3_5":
+        raise ValueError("QuantTrio AWQ requires a Qwen3.5 conditional-generation config")
+    h = get(tc, "hidden_size")
+    shapes = {2048: (6144, 24, 8, 2, 16), 2560: (9216, 32, 16, 4, 32),
+              4096: (12288, 32, 16, 4, 32)}
+    row = shapes.get(h) if type(h) is int else None
+    if row is None:
+        raise ValueError("QuantTrio AWQ supports exact dense 2B/4B/9B geometry")
+    fields = dict(zip(("intermediate_size", "num_hidden_layers", "num_attention_heads",
+                       "num_key_value_heads", "linear_num_value_heads"), row))
+    fields.update(head_dim=256, linear_num_key_heads=16, linear_key_head_dim=128,
+                  linear_value_head_dim=128, linear_conv_kernel_dim=4, vocab_size=248320)
+    if any(type(get(tc, k)) is not int or get(tc, k) != v for k, v in fields.items()):
+        raise ValueError("QuantTrio AWQ requires the exact dense text geometry")
+    semantics = {"model_type": "qwen3_5_text", "hidden_act": "silu", "rms_norm_eps": 1e-6,
+                 "attention_bias": False, "attn_output_gate": True, "use_cache": True,
+                 "full_attention_interval": 4}
+    if (any(get(tc, k) != v or (type(v) is bool and type(get(tc, k)) is not bool)
+            for k, v in semantics.items())
+            or get(config, "tie_word_embeddings") is not (h != 4096)
+            or get(config, "image_token_id") != 248056
+            or any(get(owner, key) for owner in (config, tc) for key in
+                   ("num_experts", "adaptive_mode", "mlp_only_layers"))
+            or get(tc, "quant_config") is not None or get(tc, "quantization_config") is not None):
+        raise ValueError("QuantTrio AWQ requires the original dense text semantics")
+    layers = [FULL_ATTENTION if i % 4 == 3 else LINEAR_ATTENTION for i in range(row[1])]
+    if list(get(tc, "layer_types", ())) != layers:
+        raise ValueError("QuantTrio AWQ layer_types must match the original dense schedule")
+    rope = get(tc, "rope_parameters")
+    expected_rope = {"rope_type": "default", "rope_theta": 10_000_000,
+                     "partial_rotary_factor": 0.25, "mrope_interleaved": True,
+                     "mrope_section": [11, 11, 10]}
+    if not isinstance(rope, Mapping) or any(rope.get(k) != v for k, v in expected_rope.items()):
+        raise ValueError("QuantTrio AWQ requires the original partial interleaved M-RoPE")
+    canonical = _quanttrio_policy(is_full_from_layer_types(layers))
+    if quant is not None and quant != canonical:
+        raise ValueError("QuantTrio AWQ quant_config conflicts with its exact per-module scope")
+    return canonical
+
+
+def resolve_quant_config(config):
+    """Resolve raw checkpoint config to an executable policy without mutation."""
+    awq = quanttrio_awq_config(config)
+    if awq is not None:
+        return awq
+    quant = _config_value(config, "quant_config")
+    tc = _config_value(config, "text_config", config)
+    is_full = is_full_from_layer_types(_config_value(tc, "layer_types", ()))
+    quant = normalize_quant_config(is_full, quant)
+    resolve_quant_specs(is_full, quant)
+    return quant
 
 
 # Exact metadata of the pre-v1 bundle. Partial or conflicting legacy fields
@@ -214,6 +311,44 @@ def normalize_quant_config(is_full, quant_config):
     return quant_config
 
 
+def is_mlp_only_text_profile(config):
+    """Identify the named public recipe without constraining generic v2 scopes."""
+    quant = _config_value(config, "quant_config")
+    return isinstance(quant, Mapping) and quant.get("profile") == "w4_mlp_only"
+
+
+def validate_mlp_only_text_profile(config):
+    """Check named 2B recipe geometry and scope for source-only consumers.
+
+    Runtime admission additionally checks dense text semantics in cores.py.
+    Other v2 profiles and generic converter scopes retain their prior behavior.
+    """
+    if not is_mlp_only_text_profile(config):
+        return False
+    quant = _config_value(config, "quant_config")
+    if "layer_overrides" in quant:
+        raise ValueError("Qwen3.5 MLP-only W4 does not support layer_overrides; every layer must use the same MLP scope")
+    tc = _config_value(config, "text_config", config)
+    expected = dict(hidden_size=2048, intermediate_size=6144, num_hidden_layers=24,
+                    num_attention_heads=8, num_key_value_heads=2, head_dim=256,
+                    linear_num_key_heads=16, linear_num_value_heads=16,
+                    linear_key_head_dim=128, linear_value_head_dim=128,
+                    linear_conv_kernel_dim=4, vocab_size=248320)
+    if any(type(_config_value(tc, name)) is not int or _config_value(tc, name) != value
+           for name, value in expected.items()):
+        raise ValueError("Qwen3.5 MLP-only W4 requires exact 2B geometry")
+    layers = [FULL_ATTENTION if i % 4 == 3 else LINEAR_ATTENTION for i in range(24)]
+    if list(_config_value(tc, "layer_types", ())) != layers:
+        raise ValueError("Qwen3.5 MLP-only W4 requires the exact 2B hybrid schedule")
+    specs = resolve_quant_specs(is_full_from_layer_types(layers),
+                                _config_value(config, "quant_config"))
+    if any(spec.method != (W4A16_PGRP if ".mlp." in name else FP16)
+           or (".mlp." in name and spec.group_size != 32)
+           for name, spec in specs.items()):
+        raise ValueError("Qwen3.5 MLP-only W4 requires all-layer MLP W4 group32 with FP16 Attention/GDN")
+    return True
+
+
 def _config_value(config, name, default=None):
     if isinstance(config, Mapping):
         return config.get(name, default)
@@ -291,6 +426,94 @@ def validate_legacy_text_profile(config) -> bool:
     return True
 
 
+def validate_modern_27b_profile(config, *, allow_fp16=False) -> bool:
+    """Validate official 27B semantics and uniform quantization, without torch.
+
+    Other sizes and the independently validated legacy policy return False.
+    An apparent modern 27B with conflicting metadata raises before allocation.
+    ``allow_fp16`` is for source conversion/capacity inspection only; public
+    runtime admission currently requires uniform W8 or W4 group32.
+    """
+    tc = _config_value(config, "text_config", config)
+    if _config_value(tc, "hidden_size") != 5120:
+        return False
+    if validate_legacy_text_profile(config):
+        return False
+    bad = []
+    geometry = dict(_LEGACY_TEXT_GEOMETRY, vocab_size=248320)
+    for name, expected in geometry.items():
+        value = _config_value(tc, name)
+        if type(value) is not int or value != expected:
+            bad.append(name)
+    expected_layers = ([LINEAR_ATTENTION] * 3 + [FULL_ATTENTION]) * 16
+    if list(_config_value(tc, "layer_types", ()) or ()) != expected_layers:
+        bad.append("layer_types")
+    for name, expected in (("model_type", "qwen3_5_text"), ("hidden_act", "silu"),
+                           ("attention_bias", False), ("attn_output_gate", True),
+                           ("rms_norm_eps", 1e-6), ("use_cache", True)):
+        value = _config_value(tc, name, True if name == "attn_output_gate" else None)
+        if value != expected or (isinstance(expected, bool) and type(value) is not bool):
+            bad.append(name)
+    if _config_value(tc, "full_attention_interval", 4) != 4:
+        bad.append("full_attention_interval")
+    if _config_value(tc, "mlp_only_layers", ()):
+        bad.append("mlp_only_layers")
+    for owner in (config, tc):
+        for name in ("quantization_config", "num_experts", "adaptive_mode"):
+            if _config_value(owner, name):
+                bad.append(name)
+    if tc is not config and _config_value(tc, "quant_config") is not None:
+        bad.append("text_config.quant_config")
+    rope = _config_value(tc, "rope_parameters")
+    expected_rope = dict(rope_type="default", rope_theta=10_000_000,
+                         partial_rotary_factor=0.25, mrope_interleaved=True,
+                         mrope_section=[11, 11, 10])
+    if not isinstance(rope, Mapping):
+        bad.append("rope_parameters")
+    else:
+        for name, expected in expected_rope.items():
+            value = rope.get(name)
+            if name == "mrope_section" and isinstance(value, tuple):
+                value = list(value)
+            if value != expected or (isinstance(expected, bool) and type(value) is not bool):
+                bad.append("rope_parameters." + name)
+    if _config_value(config, "tie_word_embeddings") is not False:
+        bad.append("tie_word_embeddings")
+    if tc is not config:
+        if (_config_value(config, "model_type") != "qwen3_5"
+                or _config_value(config, "image_token_id") != 248056):
+            bad.append("conditional_generation")
+        vc = _config_value(config, "vision_config")
+        for name, expected in dict(depth=27, num_heads=16, hidden_size=1152,
+                intermediate_size=4304, out_hidden_size=5120, in_channels=3,
+                patch_size=16, temporal_patch_size=2, spatial_merge_size=2,
+                num_position_embeddings=2304).items():
+            value = _config_value(vc, name)
+            if type(value) is not int or value != expected:
+                bad.append("vision_config." + name)
+        if (_config_value(vc, "hidden_act") != "gelu_pytorch_tanh"
+                or _config_value(vc, "deepstack_visual_indexes", ())
+                or _config_value(vc, "quant_config")
+                or _config_value(vc, "quantization_config")):
+            bad.append("vision_config.semantics")
+    if bad:
+        raise ValueError("official Qwen3.5-27B requires exact dense semantics; mismatched fields: "
+                         + ", ".join(sorted(set(bad))))
+    quant = _config_value(config, "quant_config")
+    if quant is None:
+        if allow_fp16:
+            return True
+        raise ValueError("official Qwen3.5-27B FP16 is not admitted: long-VL capacity validation "
+                         "exceeds the supported board memory; use uniform W8 or W4 group32")
+    specs = set(resolve_quant_specs(is_full_from_layer_types(expected_layers), quant).values())
+    if (len(specs) != 1 or next(iter(specs)) not in
+            (QuantSpec(W8A16), QuantSpec(W4A16_PGRP, 32))):
+        raise ValueError("official Qwen3.5-27B requires uniform W8 or W4 group32 text projections")
+    if quant.get("storage", "int8") != "int8" or quant.get("scale_dtype", "float16") != "float16":
+        raise ValueError("official Qwen3.5-27B requires int8 raw storage and FP16 scales")
+    return True
+
+
 def resolve_quant_specs(is_full, quant_config=None):
     """Resolve ``config.json`` quant policy to ``{relative_path: QuantSpec}``.
 
@@ -332,6 +555,13 @@ def resolve_quant_specs(is_full, quant_config=None):
             "Qwen3.5 quant_config.format_version must be integer 1 or 2, got "
             f"{version!r}"
         )
+    if version == 3:
+        if quant_config != _quanttrio_policy(is_full):
+            raise ValueError("Qwen3.5 v3 requires the exact QuantTrio AWQ per-module scope")
+        return {name: _spec(quant_config["module_overrides"].get(name, quant_config["default"]), name)
+                for name in relpaths}
+    if "module_overrides" in quant_config:
+        raise ValueError("Qwen3.5 module_overrides requires format_version=3")
     if version == 1:
         if "default" in quant_config or "projection_overrides" in quant_config:
             raise ValueError(
@@ -343,11 +573,13 @@ def resolve_quant_specs(is_full, quant_config=None):
              if key in quant_config},
             "quant_config",
         )
+        if default.method == W4A16_AWQ:
+            raise ValueError("Qwen3.5 AWQ requires the exact version 3 profile")
         return {relpath: default for relpath in relpaths}
     if version != 2:
         raise ValueError(
             f"unsupported Qwen3.5 quant_config.format_version {version!r}; "
-            "expected 1 or 2"
+            "expected 1, 2 or 3"
         )
 
     if "method" in quant_config or "group_size" in quant_config:
@@ -376,6 +608,8 @@ def resolve_quant_specs(is_full, quant_config=None):
         role: _spec(value, f"quant_config.projection_overrides[{role!r}]")
         for role, value in overrides.items()
     }
+    if any(spec.method == W4A16_AWQ for spec in (default, *override_specs.values())):
+        raise ValueError("Qwen3.5 AWQ requires the exact version 3 profile")
     return {
         relpath: override_specs.get(projection_role(relpath), default)
         for relpath in relpaths
@@ -412,13 +646,13 @@ def validate_declared_dtype(layer_types, quant_config, declared_dtype):
         counts[spec.method] += 1
 
     if dtype == W8A16 and (
-        counts[W8A16] == 0 or counts[W4A16_PGRP] != 0
+        counts[W8A16] == 0 or counts[W4A16_PGRP] != 0 or counts[W4A16_AWQ] != 0
     ):
         raise ValueError(
             "Qwen3.5 dtype='w8a16' requires at least one W8 projection and no "
             f"W4 projections; resolved counts={counts}"
         )
-    if dtype == "w4a16" and counts[W4A16_PGRP] == 0:
+    if dtype == "w4a16" and counts[W4A16_PGRP] + counts[W4A16_AWQ] == 0:
         raise ValueError(
             "Qwen3.5 dtype='w4a16' requires at least one W4 projection; "
             f"resolved counts={counts}"
@@ -440,6 +674,9 @@ def validate_declared_dtype(layer_types, quant_config, declared_dtype):
                 "Qwen3.5 quant_config.profile must be a non-empty string when "
                 f"present, got {profile!r}"
             )
+    # Keep the existing metadata contract for FP16/W8/signed-W4 consumers.
+    if counts[W4A16_AWQ] == 0:
+        del counts[W4A16_AWQ]
     return {
         "declared_dtype": dtype,
         "profile": profile,

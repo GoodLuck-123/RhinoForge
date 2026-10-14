@@ -112,12 +112,12 @@ def test_g05_vision_reuses_qwen35_for_single_frame(monkeypatch):
     assert vision.forward("hidden", "grid", num_frames=1, bsz=1) == (
         ("hidden", "grid"), "pooler"
     )
-    assert forward_calls == [{}, {}]
-    with pytest.raises(NotImplementedError, match="single-frame"):
+    assert forward_calls == [{"_rpu_temporal_num_frames": 1, "_rpu_camera_batch_count": 1}] * 2
+    with pytest.raises(NotImplementedError, match="canonical B_camera"):
         vision.forward("hidden", "grid", num_frames=2, bsz=1)
-    with pytest.raises(NotImplementedError, match="bsz=1"):
+    with pytest.raises(NotImplementedError, match="canonical B_camera"):
         vision.forward("hidden", "grid", num_frames=1, bsz=2)
-    assert forward_calls == [{}, {}]
+    assert forward_calls == [{"_rpu_temporal_num_frames": 1, "_rpu_camera_batch_count": 1}] * 2
     assert module.patch_g05_vision_for_rpu(model) is model
     assert len(calls) == 1
 
@@ -588,7 +588,7 @@ def test_g05_host_packing_rejects_temporal_inputs(frames):
         config=types.SimpleNamespace(temporal_patch_size=2),
     )
     images = {"camera": torch.zeros(1, frames, 3, 4, 4)}
-    with pytest.raises(NotImplementedError, match=r"\[1,1,C,H,W\]"):
+    with pytest.raises(NotImplementedError, match="K=1 or 6"):
         module._pack_g05_vision(images, vision)
 
 
@@ -606,7 +606,7 @@ def test_g05_vision_rejects_temporal_configuration_before_cast(monkeypatch):
         half=lambda: pytest.fail("must reject before casting"),
     )
     model = types.SimpleNamespace(training=False, vision_tower=vision)
-    with pytest.raises(NotImplementedError, match="single-frame profile"):
+    with pytest.raises(NotImplementedError, match="canonical temporal profile"):
         module.patch_g05_vision_for_rpu(model)
     assert not hasattr(model, "_rpu_g05_vision_install_started")
     assert not module._VISION_PATCH_LOCK.locked()
@@ -619,6 +619,6 @@ def test_g05_data_processor_rejects_temporal_observations():
     processor = processor_type()
     processor.is_train = False
     processor.num_obs_steps = 2
-    with pytest.raises(NotImplementedError, match="single-frame"):
+    with pytest.raises(NotImplementedError, match="K=1/K=6"):
         module.patch_g05_data_processor_for_rpu(processor)
     assert not hasattr(processor, "_rpu_g05_data_processor_ready")

@@ -1,6 +1,6 @@
 // rpu_wall_oss_action_step_model.cpp — fused Wall-OSS-0.5 action-denoise step op.
 // See rpu_wall_oss_action_step_model.h and
-// rpu_wall_oss_action_step_model.h for the buffer and execution contracts.
+// docs/architecture.md for the design.
 //
 // Inherits v3::CausalDecoderModel (plain Qwen2.5 decoder body) and adds:
 //   - pre_layers_fn  : on-device action preprocessor (W_comb GEMM + B_step + SiLU + w3 GEMM)
@@ -32,6 +32,7 @@ namespace v3 {
 // Stable semantic site IDs from planner_owners.v1.json.  The call sites stay
 // in the hook bodies; the descriptor names the concrete route consumed there.
 constexpr int64_t WALL_ACTION_PRE_X_DMA_SITE = 5787673053685733969LL;
+constexpr int64_t WALL_ACTION_PRE_RTC_DMA_SITE = 2249601573061459051LL;
 constexpr int64_t WALL_ACTION_PRE_AE_DMA_SITE = 4362865405816001779LL;
 constexpr int64_t WALL_ACTION_PRE_AE_LINEAR_SITE = 1688526320245811297LL;
 constexpr int64_t WALL_ACTION_PRE_TE_DMA_SITE = 4402755508028461462LL;
@@ -43,8 +44,11 @@ constexpr int64_t WALL_ACTION_PRE_FULL_DMA_SITE = 1743102137601489253LL;
 constexpr int64_t WALL_ACTION_PRE_W3_LINEAR_SITE = 217794874262964361LL;
 constexpr int64_t WALL_ACTION_PRE_W3_ALL_GATHER_SITE = 5597784804649223890LL;
 constexpr int64_t WALL_ACTION_POST_PROJ_LINEAR_SITE = 5819548213260683213LL;
+constexpr int64_t WALL_ACTION_POST_VELOCITY_MASK_DMA_SITE = 6910905064174452185LL;
+constexpr int64_t WALL_ACTION_POST_VELOCITY_OVERRIDE_DMA_SITE = 6992886284476038409LL;
 constexpr int64_t WALL_ACTION_POST_V_TRAJ_DMA_SITE = 3467321171562977027LL;
 constexpr int64_t WALL_ACTION_POST_V_STEP_DMA_SITE = 6728649211428525293LL;
+constexpr int64_t WALL_ACTION_POST_RTC_DMA_SITE = 1296638727380006458LL;
 constexpr int64_t WALL_ACTION_POST_X_TRAJ_DMA_SITE = 2395865154258890852LL;
 constexpr int64_t WALL_ACTION_POST_X_STEP_DMA_SITE = 5413488959205014333LL;
 
@@ -64,6 +68,7 @@ constexpr int64_t wall_action_dma_route(WallActionMutableDmaRoute route) {
 WallOssActionStepModel::WallOssActionStepModel() {
     keep_explicit_mask_in_spm_ = true;
     pre_layers_residual1_ready_ = true;
+    wall_action_fuse_silu_mul_ = true;
 }
 WallOssActionStepModel::~WallOssActionStepModel() = default;
 
@@ -106,6 +111,45 @@ void WallOssActionStepModel::set_action_weights(
     invalidate_model_state();   // D-503
 }
 
+void WallOssActionStepModel::set_weight_residency(
+    const at::Tensor& core_major_bundle) {
+    TORCH_CHECK(!linear_acc32_, "Wall action weight residency requires ACC16");
+    TORCH_CHECK(get_last_resolved_chunk_size() == 0,
+                "Wall Action weight residency must be set before the first forward");
+    TORCH_CHECK(
+        num_layers() == 36 && hidden_size() == 1024 &&
+            intermediate_size() == 2048 && attn_tp() == NUM_CORES,
+        "Wall Action weight residency requires the exact 36-layer H1024/"
+        "I2048 TP8 model");
+    TORCH_CHECK(
+        core_major_bundle.device().type() == at::kPrivateUse1 &&
+            core_major_bundle.scalar_type() == at::kHalf &&
+            core_major_bundle.is_contiguous() &&
+            core_major_bundle.dim() == 2 &&
+            core_major_bundle.size(0) == NUM_CORES &&
+            core_major_bundle.size(1) * sizeof(c10::Half) ==
+                WALL_ACTION_WEIGHT_BYTES_PER_CORE,
+        "Wall Action resident bundle must be a contiguous device fp16 byte "
+        "carrier [8,", WALL_ACTION_WEIGHT_BYTES_PER_CORE / sizeof(c10::Half),
+        "], got ", core_major_bundle.sizes());
+    resident_weight_bundle_ = core_major_bundle;
+    wall_action_weight_residency_ = true;
+    invalidate_model_state();
+}
+
+void WallOssActionStepModel::set_kv_owner_fanout(bool enabled) {
+    TORCH_CHECK(get_last_resolved_chunk_size() == 0,
+                "Wall Action K/V owner fanout must be set before the first forward");
+    TORCH_CHECK(
+        !enabled ||
+            (num_layers() == 36 && hidden_size() == 1024 &&
+             intermediate_size() == 2048 && attn_tp() == NUM_CORES),
+        "Wall Action K/V owner fanout requires the exact 36-layer H1024/"
+        "I2048 TP8 model");
+    wall_action_kv_owner_fanout_ = enabled;
+    invalidate_model_state();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // declare_buffers / static_config / dynamic_config — Task 5 (stubs call base)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,6 +188,17 @@ std::vector<BufferDecl> WallOssActionStepModel::declare_buffers(const LayoutCont
     TORCH_CHECK(found_k && found_v && found_mask,
                 "Wall Action SPM optimization could not find base K/V/mask slots");
 
+    // One row-aligned reduce-scatter shard. Keep the largest local carry
+    // across layers: three rows for M20 and four rows for opted-in base M32.
+    if (wall_action_fused_rows_supported(ctx.chunk_size, wall_sorting_) &&
+        ctx.batch_size == 1 && !ctx.is_causal &&
+        ctx.use_attn_mask && h == 1024 && intermediate_size() == 2048 &&
+        num_layers() == 36 && attn_tp() == NUM_CORES) {
+        d.push_back({"action_compact_residual",
+                     A(wall_action_residual_rows(ctx.chunk_size, 0) * h * DW), 1, 8,
+                     SC::Temp, 0, nullptr, ALL});
+    }
+
     // BufferDecl: {name, size, phase_start, phase_end, storage, per_layer, alias_of, scope}.
     // Pre-hook temps live at phase 0..0 — dead before layer 0 (residual1 is 1..8), so the
     // overlap-only allocator may alias them onto residual1's slot (safe).
@@ -165,11 +220,26 @@ std::vector<BufferDecl> WallOssActionStepModel::declare_buffers(const LayoutCont
     // Post-hook output at phase 8..9 — must NOT alias residual1 (1..8), which the post-hook
     // reads (final-normed hidden). Coexists with lm_head_out (also 8..9) in a separate slot.
     d.push_back({"v_t_core0_spm", A(cs * action_dim_pad_ * DW), 8, 9, SC::Temp, 0, nullptr, ALL});
+    d.push_back({"velocity_blend_spm", A(cs * action_dim_pad_ * DW), 8, 9,
+                 SC::Temp, 0, nullptr, ALL});
+    if (wall_action_weight_residency_) {
+        // Four W8 layers or two FP16 layers use the same 6 MiB/core bundle.
+        // The M32 candidate keeps it live through all ten denoise bodies;
+        // ordinary native BufferDecl admission must fit it beside the actual
+        // prefix-dependent mask and Action scratch, without a budget override.
+        d.push_back({"action_resident_weights",
+                     A(WALL_ACTION_WEIGHT_BYTES_PER_CORE), 0, 9,
+                     SC::Temp, 0, nullptr, ALL});
+    }
     return d;
 }
 
 ModelStaticConfig WallOssActionStepModel::static_config() {
     ModelStaticConfig cfg = CausalDecoderModel::static_config();
+    if (wall_action_weight_residency_) {
+        cfg.preload_fn = reinterpret_cast<void (FusedModelBase::*)()>(
+            &WallOssActionStepModel::emit_weight_residency_preload);
+    }
     cfg.pre_layers_fn  = reinterpret_cast<void (FusedModelBase::*)()>(
         &WallOssActionStepModel::emit_pre_layers_body);
     cfg.post_layers_fn = reinterpret_cast<void (FusedModelBase::*)()>(
@@ -191,7 +261,8 @@ ModelDynamicConfig WallOssActionStepModel::dynamic_config(const ChunkPlan& plan)
 std::vector<int64_t> WallOssActionStepModel::resolve_action_stage_domain(
     int64_t horizon, int64_t prefix_len, int64_t mask_kv_len,
     int64_t requested_chunk_size, bool loop_mode, int64_t num_steps,
-    bool b_step_is_bias, bool have_te) {
+    bool b_step_is_bias, bool have_te, int64_t rtc_delay,
+    bool velocity_blend) {
     TORCH_CHECK(action_dim_pad_ > 0,
                 "RPU_PLANNER_REJECT:CAPABILITY: Wall action weights are not initialized");
     TORCH_CHECK(horizon > 0 && prefix_len >= 0 &&
@@ -213,7 +284,12 @@ std::vector<int64_t> WallOssActionStepModel::resolve_action_stage_domain(
     TORCH_CHECK(!have_te || b_step_is_bias,
                 "RPU_PLANNER_REJECT:CAPABILITY: Wall action te route requires "
                 "the row-constant bias route");
-
+    TORCH_CHECK(loop_mode || (rtc_delay == 0 && !velocity_blend),
+                "RPU_PLANNER_REJECT:CAPABILITY: RTC/velocity routes require "
+                "the fused loop owner");
+    TORCH_CHECK(rtc_delay >= 0 && rtc_delay <= horizon,
+                "RPU_PLANNER_REJECT:CAPABILITY: invalid Wall action RTC delay ",
+                rtc_delay);
     std::vector<int64_t> result;
     auto query_scope = capture_kvinsert_cost_layout_scope();
     query_scope([&] {
@@ -222,6 +298,8 @@ std::vector<int64_t> WallOssActionStepModel::resolve_action_stage_domain(
         planned_num_steps_ = num_steps;
         planned_b_step_is_bias_ = b_step_is_bias;
         planned_have_te_ = have_te;
+        planned_rtc_delay_ = rtc_delay;
+        planned_velocity_blend_ = velocity_blend;
         auto mask_shape = at::empty(
             {horizon, mask_kv_len},
             at::TensorOptions().dtype(at::kHalf).device(at::kCPU));
@@ -237,14 +315,14 @@ std::vector<int64_t> WallOssActionStepModel::resolve_action_stage_domain(
 
 void WallOssActionStepModel::validate_planned_action_route_profile(
     at::IntArrayRef descriptor, bool loop_mode, int64_t num_steps,
-    bool b_step_is_bias, bool have_te) {
+    bool b_step_is_bias, bool have_te, int64_t rtc_delay, bool velocity_blend) {
     // A prepared descriptor owns this request. A later dry query may have
     // described another graph, so its mutable oracle profile is not authority.
     const auto prepared_candidate = prepare_stage_candidate(descriptor);
     const auto& candidate = prepared_candidate->candidate();
     const auto& manifest = candidate.physical_manifest;
     const std::vector<int64_t> expected{
-        b_step_is_bias ? 1 : 0,
+        rtc_delay, b_step_is_bias ? 1 : 0, velocity_blend ? 1 : 0,
         loop_mode ? 1 : 0, have_te ? 1 : 0, num_steps};
     const auto route = std::find_if(manifest.routes.begin(), manifest.routes.end(),
         [](const FmbRouteManifestEntry& item) {
@@ -264,6 +342,8 @@ void WallOssActionStepModel::validate_planned_action_route_profile(
     planned_num_steps_ = num_steps;
     planned_b_step_is_bias_ = b_step_is_bias;
     planned_have_te_ = have_te;
+    planned_rtc_delay_ = rtc_delay;
+    planned_velocity_blend_ = velocity_blend;
 }
 
 void WallOssActionStepModel::consume_action_route(
@@ -333,7 +413,9 @@ WallOssActionStepModel::physical_manifest_for_candidate(
     // pre_layers: x is loaded once even for an unrolled graph; the remaining
     // sites are selected by the request-owned action route profile.
     append_broadcast(WALL_ACTION_PRE_X_DMA_SITE);
-
+    if (planned_rtc_delay_ > 0) {
+        append_broadcast(WALL_ACTION_PRE_RTC_DMA_SITE);
+    }
     if (planned_b_step_is_bias_) {
         if (planned_have_te_) {
             append_broadcast(WALL_ACTION_PRE_AE_DMA_SITE);
@@ -351,7 +433,8 @@ WallOssActionStepModel::physical_manifest_for_candidate(
     append(
         FmbRouteFamily::LINEAR, WALL_ACTION_PRE_W3_LINEAR_SITE,
         wall_action_linear_route(),
-        {planned_b_step_is_bias_ ? 1 : 0, planned_loop_mode_ ? 1 : 0,
+        {planned_rtc_delay_, planned_b_step_is_bias_ ? 1 : 0,
+         planned_velocity_blend_ ? 1 : 0, planned_loop_mode_ ? 1 : 0,
          planned_have_te_ ? 1 : 0, planned_num_steps_});
     append(
         FmbRouteFamily::COLLECTIVE,
@@ -362,10 +445,15 @@ WallOssActionStepModel::physical_manifest_for_candidate(
     // post_layers: proj_back is unconditional; mutable input/output sites are
     // present only in the branch that forward will actually dispatch.
     append_linear(WALL_ACTION_POST_PROJ_LINEAR_SITE);
-
+    if (planned_velocity_blend_) {
+        append_broadcast(WALL_ACTION_POST_VELOCITY_MASK_DMA_SITE);
+        append_broadcast(WALL_ACTION_POST_VELOCITY_OVERRIDE_DMA_SITE);
+    }
     append_store(planned_loop_mode_ ? WALL_ACTION_POST_V_TRAJ_DMA_SITE
                                     : WALL_ACTION_POST_V_STEP_DMA_SITE);
-
+    if (planned_rtc_delay_ > 0) {
+        append_broadcast(WALL_ACTION_POST_RTC_DMA_SITE);
+    }
     append_store(planned_loop_mode_ ? WALL_ACTION_POST_X_TRAJ_DMA_SITE
                                     : WALL_ACTION_POST_X_STEP_DMA_SITE);
 
@@ -392,6 +480,17 @@ WallOssActionStepModel::physical_manifest_forward_capability(
 // ─────────────────────────────────────────────────────────────────────────────
 // Hook bodies — Task 6 / Task 7
 // ─────────────────────────────────────────────────────────────────────────────
+void WallOssActionStepModel::emit_weight_residency_preload() {
+    TORCH_CHECK(resident_weight_bundle_.defined(),
+                "Wall Action resident bundle is not configured");
+    rpu_launch_ddr_scatter_spm_dma(
+        resident_weight_bundle_, /*src_offset_elements=*/0,
+        /*elements_per_core=*/WALL_ACTION_WEIGHT_BYTES_PER_CORE /
+            sizeof(c10::Half),
+        /*core_stride_bytes=*/WALL_ACTION_WEIGHT_BYTES_PER_CORE,
+        addr(0, "action_resident_weights"), /*num_cores=*/NUM_CORES);
+}
+
 void WallOssActionStepModel::emit_pre_layers_body() {
     const int64_t h = hidden_size(), cs = chunk_size_;
     // EXT-unroll: which iteration of the in-graph denoise loop we are emitting.
@@ -417,7 +516,19 @@ void WallOssActionStepModel::emit_pre_layers_body() {
             &x_t_src_base_, /*src_offset_bytes=*/0, /*num_elements=*/cs * k_comb_pad_,
             addr(0, "x_t_spm"), /*num_cores=*/NUM_CORES);
     }
+    // RTC hard pin at every Euler-step entry. rtc_delay_ is part of the Python
     // GraphSignature, while the prefix address/value is refreshed through the
+    // mutable base on every request. The stock rtc_delay_==0 path emits no node.
+    if (rtc_delay_ > 0) {
+        consume_action_route(
+            FmbRouteFamily::MUTABLE_DMA, WALL_ACTION_PRE_RTC_DMA_SITE,
+            wall_action_dma_route(
+                WallActionMutableDmaRoute::DDR_BROADCAST_TO_SPM));
+        rpu_launch_ddr_broadcast_spm_dma_mutable(
+            &rtc_prefix_src_base_, /*src_offset_bytes=*/0,
+            /*num_elements=*/rtc_delay_ * k_comb_pad_, addr(0, "x_t_spm"),
+            /*num_cores=*/1);
+    }
 
     if (b_step_is_bias_) {
         // Row-constant [hidden] bias -> b_step_spm (core 0), broadcast per-output-feature over
@@ -444,7 +555,8 @@ void WallOssActionStepModel::emit_pre_layers_body() {
                 rpu_launch_linear_spm_to_spm_acc16_kernel(
                     addr(0, "ae_spm"), w2_a_, addr(0, "ct_spm"),
                     /*M=*/1, /*N=*/h, /*K=*/h, /*partition=*/1, /*num_cores=*/1,
-                    /*bias_spm_addr=*/0);
+                    /*bias_spm_addr=*/0, /*scale=*/{}, /*nvfp4_tensor_scale_spm_addr=*/0,
+                    /*nvfp4_layer_id=*/0, /*force_acc32=*/linear_acc32_);
             }
             // [A1b] te_step [hidden] DDR -> te_spm; time = te @ w2_t.T -> ae_spm (M=1 GEMV).
             // te_off_b selects te_all[bit] in the loop (0 for single-step).
@@ -463,7 +575,8 @@ void WallOssActionStepModel::emit_pre_layers_body() {
             rpu_launch_linear_spm_to_spm_acc16_kernel(
                 addr(0, "te_spm"), w2_t_, addr(0, "ae_spm"),
                 /*M=*/1, /*N=*/h, /*K=*/h, /*partition=*/1, /*num_cores=*/1,
-                /*bias_spm_addr=*/0);
+                /*bias_spm_addr=*/0, /*scale=*/{}, /*nvfp4_tensor_scale_spm_addr=*/0,
+                    /*nvfp4_layer_id=*/0, /*force_acc32=*/linear_acc32_);
             // [A1c] b_step_spm = base + time (in-SPM, core 0; preserve operand order).
             rpu_launch_eltwise_binary_spm_kernel(
                 addr(0, "ct_spm"), addr(0, "ae_spm"), addr(0, "b_step_spm"),
@@ -486,7 +599,8 @@ void WallOssActionStepModel::emit_pre_layers_body() {
         rpu_launch_linear_spm_to_spm_acc16_kernel(
             addr(0, "x_t_spm"), w_comb_, addr(0, "ce_spm"),
             /*M=*/cs, /*N=*/h, /*K=*/k_comb_pad_,
-            /*partition=*/1, /*num_cores=*/1, /*bias_spm_addr=*/addr(0, "b_step_spm"));
+            /*partition=*/1, /*num_cores=*/1, /*bias_spm_addr=*/addr(0, "b_step_spm"), /*scale=*/{}, /*nvfp4_tensor_scale_spm_addr=*/0,
+                    /*nvfp4_layer_id=*/0, /*force_acc32=*/linear_acc32_);
     } else {
         // [H,hidden] B_step: GEMM (no bias) then a same-shape add at num_cores=1.
         consume_action_route(
@@ -496,7 +610,8 @@ void WallOssActionStepModel::emit_pre_layers_body() {
         rpu_launch_linear_spm_to_spm_acc16_kernel(
             addr(0, "x_t_spm"), w_comb_, addr(0, "ce_spm"),
             /*M=*/cs, /*N=*/h, /*K=*/k_comb_pad_,
-            /*partition=*/1, /*num_cores=*/1, /*bias_spm_addr=*/0);
+            /*partition=*/1, /*num_cores=*/1, /*bias_spm_addr=*/0, /*scale=*/{}, /*nvfp4_tensor_scale_spm_addr=*/0,
+                    /*nvfp4_layer_id=*/0, /*force_acc32=*/linear_acc32_);
         // full [H,hidden] B_step: b_all[bit] is this iteration's [cs,hidden] (full_off_b=0 single-step).
         consume_action_route(
             FmbRouteFamily::MUTABLE_DMA,
@@ -525,12 +640,14 @@ void WallOssActionStepModel::emit_pre_layers_body() {
     consume_action_route(
         FmbRouteFamily::LINEAR, WALL_ACTION_PRE_W3_LINEAR_SITE,
         wall_action_linear_route(),
-        {b_step_is_bias_ ? 1 : 0, loop_mode_ ? 1 : 0,
+        {rtc_delay_, b_step_is_bias_ ? 1 : 0,
+         velocity_blend_ ? 1 : 0, loop_mode_ ? 1 : 0,
          have_te_ == 1 ? 1 : 0, loop_mode_ ? num_steps_ : 1});
     rpu_launch_linear_spm_to_spm_acc16_kernel(
         addr(0, "b_step_spm"), w3_, addr(0, "emb_core0_spm"),
         /*M=*/cs, /*N=*/h, /*K=*/h, /*partition=*/1,
-        /*num_cores=*/NUM_CORES, /*bias_spm_addr=*/0);
+        /*num_cores=*/NUM_CORES, /*bias_spm_addr=*/0, /*scale=*/{}, /*nvfp4_tensor_scale_spm_addr=*/0,
+                    /*nvfp4_layer_id=*/0, /*force_acc32=*/linear_acc32_);
     const RpuAllGatherSchedule schedule =
         rpu_resolve_all_gather_schedule(h / NUM_CORES, sizeof(c10::Half));
     consume_action_route(
@@ -554,13 +671,48 @@ void WallOssActionStepModel::emit_post_layers_body() {
         wall_action_linear_route());
     rpu_launch_linear_spm_to_spm_acc16_kernel(
         addr(0, "residual1"), proj_back_, addr(0, "v_t_core0_spm"),
-        /*M=*/cs, /*N=*/np, /*K=*/h, /*partition=*/1, /*num_cores=*/1, /*bias_spm_addr=*/0);
+        /*M=*/cs, /*N=*/np, /*K=*/h, /*partition=*/1, /*num_cores=*/1, /*bias_spm_addr=*/0, /*scale=*/{}, /*nvfp4_tensor_scale_spm_addr=*/0,
+                    /*nvfp4_layer_id=*/0, /*force_acc32=*/linear_acc32_);
+    // Customer reference semantics for inactive action dimensions:
     //   v = model_v * dof_mask + (padding_action - x_initial) * (1 - dof_mask).
     // The two request-dependent tensors use mutable bases so same-signature replays
     // consume the current noise/mask values. Reuse one small SPM scratch sequentially.
+    if (velocity_blend_) {
+        consume_action_route(
+            FmbRouteFamily::MUTABLE_DMA,
+            WALL_ACTION_POST_VELOCITY_MASK_DMA_SITE,
+            wall_action_dma_route(
+                WallActionMutableDmaRoute::DDR_BROADCAST_TO_SPM));
+        rpu_launch_ddr_broadcast_spm_dma_mutable(
+            &velocity_mask_src_base_, /*src_offset_bytes=*/0,
+            /*num_elements=*/cs * np, addr(0, "velocity_blend_spm"),
+            /*num_cores=*/1);
+        rpu_launch_eltwise_binary_spm_kernel(
+            addr(0, "v_t_core0_spm"), addr(0, "velocity_blend_spm"),
+            addr(0, "v_t_core0_spm"), cs * np, ValuOpType::MUL,
+            c10::Half(1.0f), /*num_cores=*/1);
+        consume_action_route(
+            FmbRouteFamily::MUTABLE_DMA,
+            WALL_ACTION_POST_VELOCITY_OVERRIDE_DMA_SITE,
+            wall_action_dma_route(
+                WallActionMutableDmaRoute::DDR_BROADCAST_TO_SPM));
+        rpu_launch_ddr_broadcast_spm_dma_mutable(
+            &velocity_override_src_base_, /*src_offset_bytes=*/0,
+            /*num_elements=*/cs * np, addr(0, "velocity_blend_spm"),
+            /*num_cores=*/1);
+        rpu_launch_eltwise_binary_spm_kernel(
+            addr(0, "v_t_core0_spm"), addr(0, "velocity_blend_spm"),
+            addr(0, "v_t_core0_spm"), cs * np, ValuOpType::ADD,
+            c10::Half(1.0f), /*num_cores=*/1);
+    }
+    // Customer RTC runs its first Euler update before re-pinning, then returns zero
     // velocity for committed rows on subsequent ODE steps. Match that observable
     // trajectory exactly; the step-exit overwrite below hard-pins x after every step.
-
+    if (rtc_delay_ > 0 && bit > 0) {
+        rpu_launch_fill_spm_kernel(
+            addr(0, "v_t_core0_spm"), rtc_delay_ * np,
+            c10::Half(0.0f), /*num_cores=*/1);
+    }
     // [Z2] v_t_core0_spm -> DDR (MUTABLE). loop mode writes the per-iteration trajectory
     // slot v_traj[bit]; single-step writes v_t_buf at offset 0.
     if (loop_mode_) {
@@ -591,7 +743,17 @@ void WallOssActionStepModel::emit_post_layers_body() {
         cs * np, ValuOpType::ADD, dt_, /*num_cores=*/1);
     // Explicit step-exit/final pin. This restores the exact prefix bytes after the
     // first update and protects against drift on the later zero-velocity steps.
-
+    if (rtc_delay_ > 0) {
+        consume_action_route(
+            FmbRouteFamily::MUTABLE_DMA,
+            WALL_ACTION_POST_RTC_DMA_SITE,
+            wall_action_dma_route(
+                WallActionMutableDmaRoute::DDR_BROADCAST_TO_SPM));
+        rpu_launch_ddr_broadcast_spm_dma_mutable(
+            &rtc_prefix_src_base_, /*src_offset_bytes=*/0,
+            /*num_elements=*/rtc_delay_ * k_comb_pad_, addr(0, "x_t_spm"),
+            /*num_cores=*/1);
+    }
     // [Z4] x_t_spm (= x_new) -> DDR (MUTABLE). loop mode writes x_traj[bit] (final x =
     // x_traj[-1]); single-step writes x_out_buf at offset 0.
     if (loop_mode_) {
@@ -632,7 +794,12 @@ at::Tensor WallOssActionStepModel::step_forward(
                 "Wall action production forward requires its native A6 descriptor");
     validate_planned_action_route_profile(
         planned_stage_descriptor, /*loop_mode=*/false, /*num_steps=*/1,
-        b_step.dim() == 1, te_step.has_value());
+        b_step.dim() == 1, te_step.has_value(), /*rtc_delay=*/0,
+        /*velocity_blend=*/false);
+    rtc_delay_ = 0;                  // stepwise op is the stock non-RTC contract
+    rtc_prefix_ref_ = at::Tensor{};  // never leak a prior loop request's keepalive
+    velocity_blend_ = false;         // stepwise masked-DOF requests are rejected in Python
+    velocity_mask_ref_ = velocity_override_ref_ = at::Tensor{};
     // chunk_size (= horizon H) is runtime-determined by x_t. (Re)allocate the stable
     // emb_stage_ staging + force a rebuild when it changes (first step, or a new horizon).
     const int64_t H = x_t_rpu.size(1);
@@ -655,15 +822,15 @@ at::Tensor WallOssActionStepModel::step_forward(
     TORCH_CHECK(x_t_rpu.dim() == 3 && x_t_rpu.size(0) == 1 && x_t_rpu.size(1) == chunk_size_
         && x_t_rpu.size(2) == k_comb_pad_ && x_t_rpu.scalar_type() == at::kHalf
         && x_t_rpu.is_contiguous() && x_t_rpu.device().type() == at::kPrivateUse1,
-        "x_t_rpu must be [1,", chunk_size_, ",", k_comb_pad_, "] fp16 contig RPU");
+        "x_t_rpu must be [1,", chunk_size_, ",", k_comb_pad_, "] fp16 contig device");
     TORCH_CHECK(v_t_buf.dim() == 3 && v_t_buf.size(0) == 1 && v_t_buf.size(1) == chunk_size_
         && v_t_buf.size(2) == action_dim_pad_ && v_t_buf.scalar_type() == at::kHalf
         && v_t_buf.is_contiguous() && v_t_buf.device().type() == at::kPrivateUse1,
-        "v_t_buf must be [1,", chunk_size_, ",", action_dim_pad_, "] fp16 contig RPU");
+        "v_t_buf must be [1,", chunk_size_, ",", action_dim_pad_, "] fp16 contig device");
     TORCH_CHECK(x_out_buf.dim() == 3 && x_out_buf.size(0) == 1 && x_out_buf.size(1) == chunk_size_
         && x_out_buf.size(2) == k_comb_pad_ && x_out_buf.scalar_type() == at::kHalf
         && x_out_buf.is_contiguous() && x_out_buf.device().type() == at::kPrivateUse1,
-        "x_out_buf must be [1,", chunk_size_, ",", k_comb_pad_, "] fp16 contig RPU");
+        "x_out_buf must be [1,", chunk_size_, ",", k_comb_pad_, "] fp16 contig device");
     // dt is baked into the in-graph Euler eltwise at BUILD (step 0) and reused on every
     // REPLAY, so it MUST be identical across steps (it is: dt = 1/num_steps, constant).
     TORCH_CHECK(dt > 0.0, "dt must be > 0");
@@ -672,7 +839,7 @@ at::Tensor WallOssActionStepModel::step_forward(
     else TORCH_CHECK(dt_ == dt_half,
         "dt changed across steps (baked into the graph on the first step)");
     TORCH_CHECK(b_step.scalar_type() == at::kHalf && b_step.is_contiguous()
-        && b_step.device().type() == at::kPrivateUse1, "b_step must be fp16 contig RPU");
+        && b_step.device().type() == at::kPrivateUse1, "b_step must be fp16 contig device");
 
     // b_step mode: [hidden] row-constant bias vs [H,hidden] add. Inferred per call and
     // asserted stable across steps (the per-step graph is built on the first step).
@@ -696,7 +863,7 @@ at::Tensor WallOssActionStepModel::step_forward(
         TORCH_CHECK(te.dim() == 1 && te.size(0) == hidden_size()
             && te.scalar_type() == at::kHalf && te.is_contiguous()
             && te.device().type() == at::kPrivateUse1,
-            "te_step must be [hidden] fp16 contig RPU");
+            "te_step must be [hidden] fp16 contig device");
     }
     if (have_te_ < 0) have_te_ = want_te ? 1 : 0;
     else TORCH_CHECK((have_te_ == 1) == want_te,
@@ -766,13 +933,18 @@ void WallOssActionStepModel::denoise_loop_forward(
     double dt, int64_t prefix_len, int64_t num_steps,
     const std::optional<at::Tensor>& rope_cos_il,    // partial_mrope interleaved cos/sin (or nullopt)
     const std::optional<at::Tensor>& rope_sin_il,
+    const std::optional<at::Tensor>& rtc_prefix,
+    int64_t rtc_delay,
+    const std::optional<at::Tensor>& velocity_mask,
+    const std::optional<at::Tensor>& velocity_override,
     at::IntArrayRef planned_stage_descriptor) {
     TORCH_CHECK(action_dim_pad_ > 0, "denoise_loop_forward before set_action_weights");
     TORCH_CHECK(!planned_stage_descriptor.empty(),
                 "Wall action production forward requires its native A6 descriptor");
     validate_planned_action_route_profile(
         planned_stage_descriptor, /*loop_mode=*/true, num_steps,
-        te_all.has_value(), te_all.has_value());
+        te_all.has_value(), te_all.has_value(), rtc_delay,
+        velocity_mask.has_value() || velocity_override.has_value());
     TORCH_CHECK(num_steps > 0, "num_steps must be > 0");
     const int64_t H = x0_rpu.size(1);
     TORCH_CHECK(H > 0, "x0_rpu seq_len (horizon) must be > 0");
@@ -794,8 +966,7 @@ void WallOssActionStepModel::denoise_loop_forward(
         invalidate_model_state(/*planning_domain_changed=*/false);
     }
 
-    // Bound the unrolled graph below the SDK batch-entry limit. Per-forward setup
-    // is shared across bodies; reject oversized schedules before recording.
+    // Reserve margin below the SDK batch-entry limit for loop setup.
     TORCH_CHECK(num_steps * 1100 < 65536,
         "denoise unroll (", num_steps, " bodies × ~1035 nodes) would approach the 65536 "
         "batch-item cap; reduce num_steps");
@@ -803,20 +974,75 @@ void WallOssActionStepModel::denoise_loop_forward(
     TORCH_CHECK(x0_rpu.dim() == 3 && x0_rpu.size(0) == 1 && x0_rpu.size(1) == chunk_size_
         && x0_rpu.size(2) == k_comb_pad_ && x0_rpu.scalar_type() == at::kHalf
         && x0_rpu.is_contiguous() && x0_rpu.device().type() == at::kPrivateUse1,
-        "x0_rpu must be [1,", chunk_size_, ",", k_comb_pad_, "] fp16 contig RPU");
+        "x0_rpu must be [1,", chunk_size_, ",", k_comb_pad_, "] fp16 contig device");
     TORCH_CHECK(x_traj.dim() == 3 && x_traj.size(0) == num_steps && x_traj.size(1) == chunk_size_
         && x_traj.size(2) == k_comb_pad_ && x_traj.scalar_type() == at::kHalf
         && x_traj.is_contiguous() && x_traj.device().type() == at::kPrivateUse1,
-        "x_traj must be [", num_steps, ",", chunk_size_, ",", k_comb_pad_, "] fp16 contig RPU");
+        "x_traj must be [", num_steps, ",", chunk_size_, ",", k_comb_pad_, "] fp16 contig device");
     TORCH_CHECK(v_traj.dim() == 3 && v_traj.size(0) == num_steps && v_traj.size(1) == chunk_size_
         && v_traj.size(2) == action_dim_pad_ && v_traj.scalar_type() == at::kHalf
         && v_traj.is_contiguous() && v_traj.device().type() == at::kPrivateUse1,
-        "v_traj must be [", num_steps, ",", chunk_size_, ",", action_dim_pad_, "] fp16 contig RPU");
+        "v_traj must be [", num_steps, ",", chunk_size_, ",", action_dim_pad_, "] fp16 contig device");
+
+    TORCH_CHECK(rtc_delay >= 0 && rtc_delay <= chunk_size_,
+        "rtc_delay must be in [0,", chunk_size_, "], got ", rtc_delay);
+    TORCH_CHECK((rtc_delay > 0) == rtc_prefix.has_value(),
+        "rtc_prefix must be present iff rtc_delay > 0");
+    if (rtc_delay > 0) {
+        TORCH_CHECK(rtc_delay <= 10,
+            "rtc_delay exceeds the v728 training envelope (max 10): ", rtc_delay);
+        const at::Tensor& prefix = rtc_prefix.value();
+        TORCH_CHECK(prefix.dim() == 3 && prefix.size(0) == 1
+            && prefix.size(1) == chunk_size_ && prefix.size(2) == k_comb_pad_
+            && prefix.scalar_type() == at::kHalf && prefix.is_contiguous()
+            && prefix.device().type() == at::kPrivateUse1,
+            "rtc_prefix must be [1,", chunk_size_, ",", k_comb_pad_,
+            "] fp16 contig device");
+        rtc_prefix_ref_ = prefix;
+        rtc_prefix_src_base_ = ::rhino_lkn::RpuGetDevAddr(prefix.data_ptr());
+        rpu_ddr_flush_force_sized(prefix.data_ptr(), prefix.nbytes());
+    } else {
+        rtc_prefix_ref_ = at::Tensor{};
+        rtc_prefix_src_base_ = 0;
+    }
+    rtc_delay_ = rtc_delay;
+
+    TORCH_CHECK(velocity_mask.has_value() == velocity_override.has_value(),
+        "velocity_mask and velocity_override must be present together");
+    velocity_blend_ = velocity_mask.has_value();
+    if (velocity_blend_) {
+        const at::Tensor& mask = velocity_mask.value();
+        const at::Tensor& override_tensor = velocity_override.value();
+        auto valid_blend_tensor = [&](const at::Tensor& t) {
+            return t.dim() == 3 && t.size(0) == 1
+                && t.size(1) == chunk_size_ && t.size(2) == action_dim_pad_
+                && t.scalar_type() == at::kHalf && t.is_contiguous()
+                && t.device().type() == at::kPrivateUse1;
+        };
+        TORCH_CHECK(valid_blend_tensor(mask),
+            "velocity_mask must be [1,", chunk_size_, ",", action_dim_pad_,
+            "] fp16 contig device");
+        TORCH_CHECK(valid_blend_tensor(override_tensor),
+            "velocity_override must be [1,", chunk_size_, ",", action_dim_pad_,
+            "] fp16 contig device");
+        velocity_mask_ref_ = mask;
+        velocity_override_ref_ = override_tensor;
+        velocity_mask_src_base_ = ::rhino_lkn::RpuGetDevAddr(mask.data_ptr());
+        velocity_override_src_base_ = ::rhino_lkn::RpuGetDevAddr(override_tensor.data_ptr());
+        rpu_ddr_flush_force_sized(mask.data_ptr(), mask.nbytes());
+        rpu_ddr_flush_force_sized(override_tensor.data_ptr(), override_tensor.nbytes());
+    } else {
+        velocity_mask_ref_ = at::Tensor{};
+        velocity_override_ref_ = at::Tensor{};
+        velocity_mask_src_base_ = 0;
+        velocity_override_src_base_ = 0;
+    }
 
     // dt baked into the in-graph Euler at BUILD; identical across the N unrolled iterations.
     TORCH_CHECK(dt > 0.0, "dt must be > 0");
     const c10::Half dt_half = c10::Half(static_cast<float>(dt));
     // dt is baked per Python GraphSignature. Assign it for the active entry so
+    // the same handle may own both stock (1/N) and v728 RTC (0.999/N) graphs.
     dt_ = dt_half;
     dt_pinned_ = true;
 
@@ -827,7 +1053,7 @@ void WallOssActionStepModel::denoise_loop_forward(
     const bool want_te = te_all.has_value();
     const bool is_bias = want_te;   // non-te loop is always the full [steps,H,hidden] path
     TORCH_CHECK(b_all.scalar_type() == at::kHalf && b_all.is_contiguous()
-        && b_all.device().type() == at::kPrivateUse1, "b_all must be fp16 contig RPU");
+        && b_all.device().type() == at::kPrivateUse1, "b_all must be fp16 contig device");
     if (want_te) {
         TORCH_CHECK(b_all.dim() == 1 && b_all.size(0) == hidden_size(),
             "row-constant b_all (ae_dof) must be [hidden]");
@@ -835,7 +1061,7 @@ void WallOssActionStepModel::denoise_loop_forward(
         TORCH_CHECK(te.dim() == 2 && te.size(0) == num_steps && te.size(1) == hidden_size()
             && te.scalar_type() == at::kHalf && te.is_contiguous()
             && te.device().type() == at::kPrivateUse1,
-            "te_all must be [", num_steps, ", hidden] fp16 contig RPU");
+            "te_all must be [", num_steps, ", hidden] fp16 contig device");
         TORCH_CHECK(w2_t_.defined(), "te_all given but w2_t not set (set_action_weights)");
     } else {
         TORCH_CHECK(b_all.dim() == 3 && b_all.size(0) == num_steps && b_all.size(1) == chunk_size_
@@ -843,6 +1069,7 @@ void WallOssActionStepModel::denoise_loop_forward(
             "full b_all must be [", num_steps, ",", chunk_size_, ", hidden]");
     }
     // Bias mode is also baked per GraphSignature: stock row-constant graphs use
+    // ae_dof+te, RTC graphs use full per-token B. Set the active entry's mode;
     // GraphCache owns the distinct recorded op streams.
     b_step_mode_ = is_bias ? 1 : 0;
     have_te_ = want_te ? 1 : 0;
@@ -932,8 +1159,35 @@ int64_t rpu_wall_oss_action_step_create() {
     return WallOssActionStepRegistry::create();
 }
 
+void rpu_wall_oss_action_step_set_linear_acc32(int64_t handle, bool enabled) {
+    WallOssActionStepRegistry::get(handle, "rpu_wall_oss_action_step_set_linear_acc32")
+        ->set_linear_acc32(enabled);
+}
+
 void rpu_wall_oss_action_step_destroy(int64_t handle) {
     WallOssActionStepRegistry::destroy(handle, "rpu_wall_oss_action_step_destroy");
+}
+
+void rpu_wall_oss_action_step_set_weight_residency(
+    int64_t handle, const at::Tensor& core_major_bundle) {
+    WallOssActionStepRegistry::get(
+        handle, "rpu_wall_oss_action_step_set_weight_residency")
+        ->set_weight_residency(core_major_bundle);
+}
+
+void rpu_wall_oss_action_step_set_kv_owner_fanout(
+    int64_t handle, bool enabled) {
+    WallOssActionStepRegistry::get(
+        handle, "rpu_wall_oss_action_step_set_kv_owner_fanout")
+        ->set_kv_owner_fanout(enabled);
+}
+
+void rpu_wall_oss_action_step_set_wall_sorting_routes(
+    int64_t handle, int64_t mask, bool m224, bool silu, bool action_reuse,
+    bool prefill_row, bool prefill_mlp, bool paired) {
+    WallOssActionStepRegistry::get(handle, "rpu_wall_oss_action_step_set_wall_sorting_routes")
+        ->set_wall_sorting_routes(
+            mask, m224, silu, action_reuse, prefill_row, prefill_mlp, paired);
 }
 
 void rpu_wall_oss_action_step_set_weights(
@@ -993,7 +1247,7 @@ void rpu_wall_oss_action_step_set_weights(
     // override before the action model can apply its stricter one-chunk check.
     // Declared here because the bound is intrinsic to the subsystem, not an
     // adapter policy.
-    // See docs/roadmap/chunk_certified_envelope.md.
+    // See docs/runtime_config.md.
     m->set_chunk_envelope(/*max_kv_len=*/8192, /*chunk=*/chunk_size);
     m->set_action_weights(w_comb, w3, proj_back, w2_t, w2_a, action_dim, k_comb_pad, chunk_size);
 }
@@ -1020,12 +1274,13 @@ std::vector<int64_t> rpu_wall_oss_action_resolve_stage_domain(
     int64_t handle, int64_t horizon, int64_t prefix_len,
     int64_t mask_kv_len, int64_t requested_chunk_size,
     bool loop_mode, int64_t num_steps, bool b_step_is_bias,
-    bool have_te) {
+    bool have_te, int64_t rtc_delay, bool velocity_blend) {
     return WallOssActionStepRegistry::get(
                handle, "rpu_wall_oss_action_resolve_stage_domain")
         ->resolve_action_stage_domain(
             horizon, prefix_len, mask_kv_len, requested_chunk_size,
-            loop_mode, num_steps, b_step_is_bias, have_te);
+            loop_mode, num_steps, b_step_is_bias, have_te,
+            rtc_delay, velocity_blend);
 }
 
 int64_t rpu_wall_oss_action_get_resolved_chunk_size(int64_t handle) {
@@ -1058,11 +1313,16 @@ void rpu_wall_oss_action_denoise_loop_forward(
     at::Tensor x_traj, at::Tensor v_traj, double dt, int64_t prefix_len, int64_t num_steps,
     const std::optional<at::Tensor>& rope_cos_il,
     const std::optional<at::Tensor>& rope_sin_il,
+    const std::optional<at::Tensor>& rtc_prefix,
+    int64_t rtc_delay,
+    const std::optional<at::Tensor>& velocity_mask,
+    const std::optional<at::Tensor>& velocity_override,
     at::IntArrayRef planned_stage_descriptor)
 {
     WallOssActionStepRegistry::get(handle, "rpu_wall_oss_action_denoise_loop_forward")
         ->denoise_loop_forward(x0_rpu, k_caches, v_caches, b_all, te_all, attention_mask,
                                position_ids, x_traj, v_traj, dt, prefix_len, num_steps,
-                               rope_cos_il, rope_sin_il,
+                               rope_cos_il, rope_sin_il, rtc_prefix, rtc_delay,
+                               velocity_mask, velocity_override,
                                planned_stage_descriptor);
 }

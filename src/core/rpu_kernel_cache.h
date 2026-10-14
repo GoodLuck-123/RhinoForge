@@ -19,11 +19,10 @@
 #include "rpu_oplib_snapshot.h"
 
 // =============================================================================
-// Kernel ID 枚举 - 用于 O(1) 数组索引访问 (比 unordered_map 快 10x+)
+// Kernel ID 枚举 - 用于 O(1) 数组索引访问
 // =============================================================================
 // Host-side lookup ID; no serialized/device ABI stores its underlying bytes.
 enum class KernelId : uint16_t {
-    // Eltwise binary kernels - SPM versions
     BINARY_SAMESHAPE = 0,
     BINARY_NX1_NXC256_BATCH,
     BINARY_NX1_NXC256_BATCH_BOPA,
@@ -33,10 +32,9 @@ enum class KernelId : uint16_t {
     BINARY_1XC_NXC_V256_BATCH_BOPA,
     BINARY_1XC_NXC_V16_BATCH,
     BINARY_1XC_NXC_V16_BATCH_BOPA,
-    // Eltwise binary kernels - DDR versions
     BINARY_SAMESHAPE_DDR,
     BINARY_SCALAR_DDR,
-    BINARY_SCALAR,              // SPM version of binary_scalar
+    BINARY_SCALAR,
     BINARY_SCALAR_POWER_DDR,
     BINARY_NX1_NXC256_BATCH_DDR,
     BINARY_NX1_NXC256_BATCH_BOPA_DDR,
@@ -46,60 +44,31 @@ enum class KernelId : uint16_t {
     BINARY_1XC_NXC_V256_BATCH_BOPA_DDR,
     BINARY_1XC_NXC_V16_BATCH_DDR,
     BINARY_1XC_NXC_V16_BATCH_BOPA_DDR,
-    // Eltwise unary kernels
     UNARY_DDR,
-    // Other kernels
     SOFTMAX_C16_GAUTO,
     LAYER_NORM,
     LAYER_NORM_SIMPLE,
     LAYER_NORM_BF16,
-    SDPA_FLASH_ATTN_SPM,  // SPM version: Q input and output in SPM
+    SDPA_FLASH_ATTN_SPM,
     SDPA_FLASH_ATTN_SPM_16B,
     REDUCE_MEAN_LAST_DIM_DDR,
-    // RMSNorm kernels
-    // Note: llama_rms_norm_fp16 was dropped from rhinoOpLib v0.1.1_38977cf7 —
-    // the enum entry was unused (no GET_KERNEL caller) and is removed here.
     RMS_NORM_BF16,
-    RMS_NORM_BF16_SPM,  // SPM版本: input/output在SPM
-    // Newton-refined rsqrt variant, used only by explicit precision routes
-    // and isolated conformance probes. Ordinary routes retain their arithmetic.
+    RMS_NORM_BF16_SPM,
     RMS_NORM_NEWTON_SPM,
-    // RoPE kernel
     ROPE,
     ROPE_DDR,
-    // M-RoPE kernel (Qwen3-VL R-Phase 1):
-    //   position_ids live in DDR (typical prefill/decode path); cos/sin tables
-    //   share the 1D RoPE [max_seq, head_dim/2] format. Per-axis (T/H/W)
-    //   selection is performed at runtime via strobe masks set by the launcher.
     MROPE,
-    // Partial M-RoPE kernel (wall-oss prefill/denoise perf): host-precomputed
-    //   per-token interleaved cos/sin [seq, rotary_dim/2] streamed in DDR — no
-    //   in-kernel position_ids gather / strobe masks. Bit-exact to MROPE @ factor
-    //   1.0. See src/ops/rpu_mrope.cpp::rpu_launch_partial_mrope_spm_kernel.
     PARTIAL_MROPE,
-    // 2D RoPE kernel (Qwen3-VL R-Phase 3 vision encoder):
-    //   ROPE_2D_DDR: FreqCos / FreqSin tables live in DDR (vision-encoder default).
-    //   ROPE_2D_SPM: tables live in SPM (perf variant for small max_hw, currently
-    //   reserved — vision encoder uses the DDR variant only).
-    //   position_idx is [num_tokens, 2] int16 DDR (row, col pair per patch).
     ROPE_2D_DDR,
     ROPE_2D_SPM,
-    // Fast bilinear positional-embedding interpolation (Qwen3-VL / Qwen3.5
-    // vision STEP 0). Inputs live in DDR; output lives in SPM.
     FAST_POS_EMBED_INTERP,
-    // LLaMA KV-Cache kernels
     LLAMA_INSERT_VCACHE,
     LLAMA_INSERT_KCACHE,
-    LLAMA_INSERT_VCACHE_V16,   // 16 tokens/warp, aligned prefill (pos%16==0, seq%16==0)
+    LLAMA_INSERT_VCACHE_V16,
     LLAMA_INSERT_KCACHE_V16,
-    // Standalone all-gather kernels. All-reduce uses the fused ring family below.
     ALL_GATHER_MULTI_CORE,
     ALL_GATHER_MULTI_CORE_LITTLE_CHUNK,
-    // SPM unary kernels (for fused decoder layer MLP)
     UNARY_SPM,
-    // DDR to SPM memcpy (multi-core)
-    // SPM to DDR memcpy (multi-core)
-    // Argmax/Argmin kernels
     ARGMAX_REDUCEC_TILEN,
     ARGMAX_REDUCEC_TILEN_C128,
     ARGMAX_REDUCEC_TILEN_SLI,
@@ -112,17 +81,10 @@ enum class KernelId : uint16_t {
     ARGMIN_REDUCEC_TILEN_C128_SLI,
     ARGMIN_REDUCEN_TILEC,
     ARGMIN_REDUCEN_TILEC_SLI,
-    // SPM memset (zero-fill) multi-core
     MEMSET_SPM_MULTI_CORE_V2,
-    // SDPA vctxlen (dynamic context length)
     SDPA_FLASH_ATTN_SPM_VCTXLEN,
-    // SDPA vctxlen minibatch — per-image K/V slicing (image_batch_count in
-    // reg[34]); each image's queries attend only its own per_image_ctx_len K/V.
-    // Requires nKVHead == numHead (MHA). Used by multi-image vision packing.
     SDPA_FLASH_ATTN_SPM_VCTXLEN_MINIBATCH,
     SDPA_FLASH_ATTN_SPM_VCTXLEN_MINIBATCH_16B,
-    // Fixed-shape 16-bank variants used by the InternVLA standalone path.
-    // Conv2d SPM kernels (1core, tile_m=128, tile_n=128, univ)
     CONV_F1_W128X128_K48,
     CONV_F1_W128X128_K64,
     CONV_F1_W128X128_K96,
@@ -135,26 +97,19 @@ enum class KernelId : uint16_t {
     CONV_FN_W128X128_K64,
     CONV_FN_W128X128_K96,
     CONV_FN_W128X128_K128,
-    // Conv2d multi-core column kernels (coren, univ)
-    // tile_k=32 group
     CONV_MC_F1_W128X32_K32, CONV_MC_F3_W128X32_K32, CONV_MC_FN_W128X32_K32,
     CONV_MC_F1_W128X64_K32, CONV_MC_F3_W128X64_K32, CONV_MC_FN_W128X64_K32,
     CONV_MC_F1_W128X128_K32, CONV_MC_F3_W128X128_K32, CONV_MC_FN_W128X128_K32,
-    // tile_k=64 group
     CONV_MC_F1_W128X32_K64, CONV_MC_F3_W128X32_K64, CONV_MC_FN_W128X32_K64,
     CONV_MC_F1_W128X64_K64, CONV_MC_F3_W128X64_K64, CONV_MC_FN_W128X64_K64,
     CONV_MC_F1_W128X128_K64, CONV_MC_F3_W128X128_K64, CONV_MC_FN_W128X128_K64,
-    // Im2col kernels (multi-core, SPM in → SPM out)
     IM2COL_M64XN32,
     IM2COL_M128XN32,
     IM2COL_M64XN64,
     IM2COL_M128XN64,
-    // Pad kernel (constant fill, SPM in → SPM out)
     PAD_CONST_NXC,
-    // Transpose kernel (3D, SPM in → SPM out)
     TRANSPOSE_NCB_C16,
     TRANSPOSE_NBC_C16,
-    // Tiled NVFP4 ACC32, ordered by n_tile 128..32 for dispatch indexing.
     PL_AT_NVFP4_ACC32_M176N128,
     PL_AT_NVFP4_ACC32_M208N112,
     PL_AT_NVFP4_ACC32_M240N96,
@@ -162,59 +117,34 @@ enum class KernelId : uint16_t {
     PL_AT_NVFP4_ACC32_M320N64,
     PL_AT_NVFP4_ACC32_M384N48,
     PL_AT_NVFP4_ACC32_M480N32,
-    // Qwen3.5 GDN kernels. The auto-tile block below must remain contiguous
-    // because rpu_linear.cpp indexes it by arithmetic offset. This enum order
-    // must mirror KERNEL_ID_NAMES.
-    // Qwen3.5 partial RoPE 1D — DECODE. Same partial rotate-half, but position-lookup
-    // cos/sin (grid: NUM_ELT_PER_WRP=512, grid_y=num_tokens).
     PARTIAL_ROPE_1D,
-    // Qwen3.5 GDN decode 核心，由匹配的运行时资产提供。
     L2NORM,
     FLA_CONV1D,
-    // Qwen3.5 GDN gated-norm: fused silu(x)*y (default ref).
     LLAMA_SILU_MUL,
-    // Sum over rows (axis 0) of [rows, cols<256] → [cols] (default ref).
     REDUCE_SUM_NON_LAST_DIM_OUT_SEG,
-    // Qwen3.5 GDN prefill chunk: cumulative sum along last dim (default ref).
     CUMSUM,
-    // Qwen3.5 GDN prefill chunk: (I - M)^-1 for strict lower-tri 64x64 M (default ref).
     UNIT_TRIL_INV,
-    // --- unconditional generated auto-tile acc16 variants --------------------
-    // 7 w8a16 + 7 fp16 per-shape tiled parallel_linear[_w8a16]_m{m}n{n}k128. The
-    // order (w8a16 then fp16, n_tile 128->32) is LOAD-BEARING: rpu_linear.cpp's
-    // autotile_linear_kernel_id() indexes by arithmetic offset from
-    // PL_AT_W8A16_M288N128. Names in KERNEL_ID_NAMES below MUST match
-    // rpu_pl_tiling::autotile_kernel_name() exactly. m_tile = mtile_w8a16/_w16(n).
-    PL_AT_W8A16_M288N128,   // n_tile=128
-    PL_AT_W8A16_M320N112,   // n_tile=112
-    PL_AT_W8A16_M352N96,    // n_tile=96
-    PL_AT_W8A16_M400N80,    // n_tile=80
-    PL_AT_W8A16_M448N64,    // n_tile=64
-    PL_AT_W8A16_M512N48,    // n_tile=48
-    PL_AT_W8A16_M592N32,    // n_tile=32
-    PL_AT_FP16_M320N128,    // n_tile=128
-    PL_AT_FP16_M352N112,    // n_tile=112
-    PL_AT_FP16_M384N96,     // n_tile=96
-    PL_AT_FP16_M432N80,     // n_tile=80
-    PL_AT_FP16_M480N64,     // n_tile=64
-    PL_AT_FP16_M528N48,     // n_tile=48
-    PL_AT_FP16_M608N32,     // n_tile=32
-    // --- unconditional generated auto-tile group-wise int4 pgrp variants -----
-    // 7 per-shape tiled parallel_linear_wint4a16_pgrp_
-    // m{m}n{n}k128 (AWQ-style group-wise). Same load-bearing order (n_tile 128->32);
-    // m_tile = rpu_pl_tiling::mtile_int4(n). rpu_linear.cpp's autotile_pgrp_kernel_id()
-    // indexes by arithmetic offset from PL_AT_INT4_PGRP_M304N128. Names in
-    // KERNEL_ID_NAMES below MUST match rpu_pl_tiling::autotile_kernel_name_int4() exactly.
-    PL_AT_INT4_PGRP_M304N128,   // n_tile=128
-    PL_AT_INT4_PGRP_M336N112,   // n_tile=112
-    PL_AT_INT4_PGRP_M368N96,    // n_tile=96
-    PL_AT_INT4_PGRP_M416N80,    // n_tile=80
-    PL_AT_INT4_PGRP_M464N64,    // n_tile=64
-    PL_AT_INT4_PGRP_M512N48,    // n_tile=48
-    PL_AT_INT4_PGRP_M592N32,    // n_tile=32
-    // --- auto-tile ACC32 variants --------------------------------------
-    // Keep each 7-entry family contiguous in n_tile order 128 -> 32. The
-    // launchers select a member by arithmetic offset from the first ID.
+    PL_AT_W8A16_M288N128,
+    PL_AT_W8A16_M320N112,
+    PL_AT_W8A16_M352N96,
+    PL_AT_W8A16_M400N80,
+    PL_AT_W8A16_M448N64,
+    PL_AT_W8A16_M512N48,
+    PL_AT_W8A16_M592N32,
+    PL_AT_FP16_M320N128,
+    PL_AT_FP16_M352N112,
+    PL_AT_FP16_M384N96,
+    PL_AT_FP16_M432N80,
+    PL_AT_FP16_M480N64,
+    PL_AT_FP16_M528N48,
+    PL_AT_FP16_M608N32,
+    PL_AT_INT4_PGRP_M304N128,
+    PL_AT_INT4_PGRP_M336N112,
+    PL_AT_INT4_PGRP_M368N96,
+    PL_AT_INT4_PGRP_M416N80,
+    PL_AT_INT4_PGRP_M464N64,
+    PL_AT_INT4_PGRP_M512N48,
+    PL_AT_INT4_PGRP_M592N32,
     PL_AT_W8A16_ACC32_M192N128,
     PL_AT_W8A16_ACC32_M208N112,
     PL_AT_W8A16_ACC32_M240N96,
@@ -236,56 +166,80 @@ enum class KernelId : uint16_t {
     PL_AT_INT4_PGRP_ACC32_M352N64,
     PL_AT_INT4_PGRP_ACC32_M400N48,
     PL_AT_INT4_PGRP_ACC32_M496N32,
-    // Explicit high-accuracy unary formulas.
     UNARY_GELU_TANH_SPM,
     UNARY_GELU_ERF_SPM,
     UNARY_GELU_ERF_ULTRA_SPM,
     UNARY_SOFTPLUS_SPM,
-    // Fused ring all-reduce + residual. The launcher selects no-pace only for
-    // the sub-11-KiB/core envelope.
     LLM_ALL_REDUCE_RESIDUAL_RING_PACED,
     LLM_ALL_REDUCE_RESIDUAL_RING_NOPACE,
-    // Raw-SPM V transpose + by-MHA attention. Append-only to keep existing
-    // KernelId values stable; launchers validate the runtime shape.
+    PL_ACC32_OUT_BF16_M416N48,
+    PL_ACC32_OUT_BF16_M496N32,
+    LLM_ALL_REDUCE_BF16_PARTIAL_FP16_RESIDUAL,
+    LLM_ALL_REDUCE_BF16_PARTIAL_FP16_RESIDUAL_NOPACE,
+    LLM_ALL_REDUCE_FP16_PARTIAL_BF16_RESIDUAL,
+    LLM_ALL_REDUCE_FP16_PARTIAL_BF16_RESIDUAL_NOPACE,
+    RMS_NORM_BF16IN_FP16OUT_V32,
     V_TRANSPOSE_SPM_VCTXLEN,
     SDPA_BY_MHA_SPM_VCTXLEN,
-    // Compact-residual ring used by the public Vision owner.
     LLM_ALL_REDUCE_RESIDUAL_RING_LOCAL_SPM,
-    // `llama_rms_norm` multi-row payload family. Canonical selectors use the
-    // validated fixed grid.x=8 contract with reg[3]=M/8; append-only legacy
-    // selectors retain the former grid.x=M/V, reg[3]=V ABI. Both payloads are
-    // optional, so handles snapshot their actual availability at install time.
+    LLM_ALL_REDUCE_FP16_PARTIAL_BF16_RESIDUAL_LOCAL_SPM,
     RMS_NORM_SPM_V16,
     RMS_NORM_SPM_V32,
-    // 同族的 Newton 多行版只被 conformance 探针取用。
-    // Base Newton reuses the conformance-only RMS_NORM_NEWTON_SPM above.
     RMS_NORM_SPM_NEWTON_V16,
     RMS_NORM_SPM_NEWTON_V32,
-    // Optional per-core-SPM cos/sin table variant of llama_mrope_interleave.
-    // Its address encoding is distinct from the DDR-table ABI; callers must use
-    // that variant's register contract. Missing optional payloads are skipped.
     MROPE_SPM_TBL,
-    // Shared W8 Gate/Up/SwiGLU payload used by the public VL prefill owner.
-    FUSED_GATE_UP_SWIGLU_W8A16_M320N112,
+    WALL_QKV_W8A16_MULTIBASE_M448N64,
+    WALL_VISION_QKV_W8A16_MULTIBASE_M400N80,
+    WALL_ACTION_QKV_W8A16_MULTIBASE_M592N32,
+    WALL_ACTION_GATE_UP_W8A16_MULTIBASE_M592N32,
+    WALL_PREFILL_GATE_UP_SWIGLU_W8A16_M320N112,
+    WALL_RING_POSTNORM_FP16_PARTIAL_BF16_RESIDUAL_M320N2048,
+    WALL_RING_POSTNORM_FP16_PARTIAL_BF16_RESIDUAL_LOCAL_INOUT_M320N2048,
+    WALL_VISION_GATE_UP_SWIGLU_W8A16_M352N96,
+    WALL_DOWN_POSTNORM_M576_FP16_PARTIAL_FP16_RESIDUAL,
+    WALL_DOWN_POSTNORM_M576_BF16_PARTIAL_FP16_RESIDUAL,
+    WALL_DOWN_POSTNORM_M576_FP16_PARTIAL_BF16_RESIDUAL,
+    WALL_WINDOW_SDPA_BY_MHA_B3S576H16D80,
+    WALL_RING_POSTNORM_M576_FP16_PARTIAL_FP16_RESIDUAL_LOCAL_INOUT,
+    WALL_RING_POSTNORM_M576_BF16_PARTIAL_FP16_RESIDUAL_LOCAL_INOUT,
+    WALL_RING_POSTNORM_M576_FP16_PARTIAL_BF16_RESIDUAL_LOCAL_INOUT,
+    WALL_QKV_W8A16_MULTIBASE_M320X2N64,
+    WALL_DOWN_WEIGHT_OUTER_W8A16_C320X2_N64,
+    WALL_PREFILL_GATE_UP_SWIGLU_W8A16_M128X5N96K128,
+    WALL_OPROJ_WEIGHT_OUTER_W8A16_C320X2_N64,
+    WALL_VISION_GATE_UP_SWIGLU_W8A16_MULTIBASE_M192X3N96,
+    WALL_VISION_QKV_W8A16_MULTIBASE_M192X3N96,
+    WALL_ACTION_QKV_PARTIAL_MROPE_W8A16_M20N64,
+    WALL_ACTION_LINEAR_RING_POSTNORM_W8A16_M20N1024K256,
+    WALL_RING_POSTNORM_PAIR_FP16_PARTIAL_BF16_RESIDUAL_LOCAL_INOUT_M320X2N2048,
     FLA_CONV1D_NOINPLACE,
-    // Decode-only fused GDN kernels shipped by the main op-lib ref.
     QWEN3_5_RMS_NORM_GATED,
     QWEN3_5_RANK1_FMA,
     QWEN3_5_MUL_REDUCE_ROWS,
-    // Shared decode-only M=1 GEMV kernels. Appended to preserve every existing
-    // KernelId; Linear keeps this route opt-in.
     LLAMA_GEMV,
     LLAMA_GEMV_WINT8,
-    // Controlled Qwen3-VL routes in the standard expansion library.
     QWEN3VL_PARTIAL_MROPE_QK_FUSED,
     QWEN3VL_INSERT_KV_CACHE_V16,
     QWEN3VL_INSERT_KV_CACHE_DECODE,
     QWEN3VL_RMS_NORM_MULTIWARP_V64,
     QWEN3VL_PREFILL_QKV_PLANAR_DIRECT,
     QWEN3VL_SILU_MUL_EXACT_STRIDED,
-    // Bounded shared row W8A16 schedule: one N80 weight tile across M blocks.
-    // Optional expansion payload; append-only to preserve existing identities.
+    GROUPED_PARALLEL_LINEAR_ACC16,
+    GROUPED_PARALLEL_LINEAR_8BIT_ACC16,
+    MOE_TOPK_SCALAR_FP16,
+    MOE_TOPK_BY_KVSORT_FP16,
+    MOE_BINCOUNT_SCALAR,
+    MOE_TOPK_PROB_NORM_FP16,
+    CAST_UINT16_INT32,
+    GATHER_SCALAR_FP16,
+    GATHER_FP16,
+    MOE_GATHER_MUL_V2_FP16,
+    SCATTERND_ADD_INT16_FP16,
     W8A16_ROW_WEIGHT_REUSE_M352N80K256,
+    QWEN3VL_GATEUP_SWIGLU_GEMV,
+    QWEN3VL_QK_NORM_MROPE_D128,
+    QWEN3VL_QK_NORM_MROPE_KV_INSERT_D128,
+    QWEN3VL_O_RING_NORM_M1_H2560_W8,
     PI05_GATE_UP_GEGLU_W8A16_M400N80,
     PI05_ADARMS_NORM_SHIFT_H1024,
     PI05_GATED_RESIDUAL_H1024,
@@ -303,27 +257,13 @@ enum class KernelId : uint16_t {
     PI05_PREFILL_O_WEIGHT_OUTER_W8A16_C400X2_M128N80K128,
     PI05_VISION_FC_WEIGHT_OUTER_W8A16_M768N80K128,
     PI05_DENOISE_Q_PAIR16_ROPE_M50N256K1024,
-    // Exact Pi0.5 denoise continuation: XOR3 sum, FP16 gate, residual add.
     PI05_XOR3_GATED_RESIDUAL_M50N1024,
-    // Owner-local alias of the generated M592/N32/K128 W8A16 program.  The
-    // distinct ID makes KV1 typed-census counts independent of other linears.
     PI05_KV1_STRIPE_W8A16_M592N32,
-    // Optional expansion payload: consumes pair-mapped compact K/V stripes
-    // and writes the exact P800/M50/PAD64 physical-KV8 cache suffix.
     PI05_DENOISE_KV1_DIRECT_CACHE_M50D256P64,
-    // Optional expansion payload: reads the installed full replicated K/V
-    // W8A16 owners and emits both pair-mapped compact projections at once.
     PI05_DENOISE_KV1_PAIR_OWNER_W8A16_M50N32X2K1024,
-    // Optional exact-prefill expansion payload: reads the installed K2048
-    // physical-KV8 owners and emits compact logical-KV1 K/V together.
     PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M400N32X2K2048,
-    // Optional exact-prefill expansion payload: applies K RoPE to the compact
-    // pair and writes one aligned C400 segment directly to physical-KV8 cache.
     PI05_PREFILL_KV1_DIRECT_CACHE_M400D256P400,
-    // Optional exact-prefill expansion payload: reuses each Gate/Up weight
-    // tile across both C400 halves and retires the production FP16 GeGLU.
     PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_W8A16_C400X2_M160N80K128,
-    // Exact M50/H1024/I4096: original N48 ACC16 Gate/Up plus FP16 GeGLU.
     PI05_DENOISE_GATE_UP_GEGLU_W8A16_M512N48K128,
     PI05_DENOISE_GATE_UP_GEGLU_WINT4A16_PGRP_M512N48K128,
     PI05_DENOISE_GATE_UP_GEGLU_WINT4A16_PGRP_M464N64K128,
@@ -333,11 +273,8 @@ enum class KernelId : uint16_t {
     PI05_OWNER_NORM_COMPACT_A8_M400N2048,
     PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_M48N32K2048,
     PI05_PREFILL_GATE_UP_GEGLU_ONLINE_W8A8_P544_C272,
-    // Optional exact Vision owner96 LayerNorm and compact-residual companion.
     PI05_VISION_OWNER_REDUCE_LAYERNORM_M768N1152,
     PI05_VISION_XOR3_COMPACT_RESIDUAL_RAW_FULL_M768N1152,
-    // Append-only Pi0.5 dtype/camera coverage variants. Internal IDs exceed
-    // 255; cache and graph name lookups must retain the complete index.
     PI05_DENOISE_KV1_PAIR_OWNER_FP16_M50N32X2K1024,
     PI05_DENOISE_GATE_UP_GEGLU_FP16_M608N32K128,
     PI05_VISION_OWNER_REDUCE_LAYERNORM_M512N1152,
@@ -393,35 +330,65 @@ enum class KernelId : uint16_t {
     PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M288N32X2K2048,
     PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_C288_M48N32K2048,
     PI05_RING_XOR3_M448N2048,
+    PI05_RING_XOR3_M464N2048,
     PI05_OWNER_NORM_FULL_RESIDUAL_M448N2048,
+    PI05_OWNER_NORM_FULL_RESIDUAL_M464N2048,
     PI05_OWNER_NORM_COMPACT_RESIDUAL_M448N2048,
+    PI05_OWNER_NORM_COMPACT_RESIDUAL_M464N2048,
     PI05_XOR3_COMPACT_RESIDUAL_RAW_FULL_M448N2048,
+    PI05_XOR3_COMPACT_RESIDUAL_RAW_FULL_M464N2048,
     PI05_OWNER_NORM_COMPACT_A8_M448N2048,
+    PI05_OWNER_NORM_COMPACT_A8_M464N2048,
     PI05_PREFILL_KV1_DIRECT_CACHE_M448D256P448,
+    PI05_PREFILL_KV1_DIRECT_CACHE_M464D256P464,
     PI05_PREFILL_O_WEIGHT_OUTER_FP16_C448X2_M96N80K128,
+    PI05_PREFILL_O_WEIGHT_OUTER_FP16_C464X2_M80N80K128,
     PI05_PREFILL_O_WEIGHT_OUTER_W8A16_C448X2_M96N80K128,
+    PI05_PREFILL_O_WEIGHT_OUTER_W8A16_C464X2_M80N80K128,
     PI05_DOWN_WEIGHT_OUTER_FP16_C448X2_M96N80K128,
+    PI05_DOWN_WEIGHT_OUTER_FP16_C464X2_M80N80K128,
     PI05_DOWN_WEIGHT_OUTER_W8A16_C448X2_M96N80K128,
+    PI05_DOWN_WEIGHT_OUTER_W8A16_C464X2_M80N80K128,
     PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_FP16_C448X2_M96N80K128,
+    PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_FP16_C464X2_M80N80K128,
     PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_W8A16_C448X2_M96N80K128,
+    PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_W8A16_C464X2_M80N80K128,
     PI05_PREFILL_KV1_PAIR_OWNER_FP16_M448N32X2K2048,
+    PI05_PREFILL_KV1_PAIR_OWNER_FP16_M464N32X2K2048,
     PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M448N32X2K2048,
+    PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M464N32X2K2048,
     PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_C448_M48N32K2048,
+    PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_C464_M48N32K2048,
     PI05_RING_XOR3_M320N2048,
+    PI05_RING_XOR3_M336N2048,
     PI05_OWNER_NORM_FULL_RESIDUAL_M320N2048,
+    PI05_OWNER_NORM_FULL_RESIDUAL_M336N2048,
     PI05_OWNER_NORM_COMPACT_RESIDUAL_M320N2048,
+    PI05_OWNER_NORM_COMPACT_RESIDUAL_M336N2048,
     PI05_XOR3_COMPACT_RESIDUAL_RAW_FULL_M320N2048,
+    PI05_XOR3_COMPACT_RESIDUAL_RAW_FULL_M336N2048,
     PI05_OWNER_NORM_COMPACT_A8_M320N2048,
+    PI05_OWNER_NORM_COMPACT_A8_M336N2048,
     PI05_PREFILL_KV1_DIRECT_CACHE_M320D256P320,
+    PI05_PREFILL_KV1_DIRECT_CACHE_M336D256P336,
     PI05_PREFILL_O_WEIGHT_OUTER_FP16_C320X2_M128N80K128,
+    PI05_PREFILL_O_WEIGHT_OUTER_FP16_C336X2_M128N80K128,
     PI05_PREFILL_O_WEIGHT_OUTER_W8A16_C320X2_M128N80K128,
+    PI05_PREFILL_O_WEIGHT_OUTER_W8A16_C336X2_M128N80K128,
     PI05_DOWN_WEIGHT_OUTER_FP16_C320X2_M160N80K128,
+    PI05_DOWN_WEIGHT_OUTER_FP16_C336X2_M160N80K128,
     PI05_DOWN_WEIGHT_OUTER_W8A16_C320X2_M160N80K128,
+    PI05_DOWN_WEIGHT_OUTER_W8A16_C336X2_M160N80K128,
     PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_FP16_C320X2_M160N80K128,
+    PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_FP16_C336X2_M160N80K128,
     PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_W8A16_C320X2_M160N80K128,
+    PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_W8A16_C336X2_M160N80K128,
     PI05_PREFILL_KV1_PAIR_OWNER_FP16_M320N32X2K2048,
+    PI05_PREFILL_KV1_PAIR_OWNER_FP16_M336N32X2K2048,
     PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M320N32X2K2048,
+    PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M336N32X2K2048,
     PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_C320_M48N32K2048,
+    PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_C336_M48N32K2048,
     PI05_RING_XOR3_M432N2048,
     PI05_OWNER_NORM_FULL_RESIDUAL_M432N2048,
     PI05_OWNER_NORM_COMPACT_RESIDUAL_M432N2048,
@@ -452,26 +419,40 @@ enum class KernelId : uint16_t {
     PI05_PREFILL_KV1_PAIR_OWNER_FP16_M304N32X2K2048,
     PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M304N32X2K2048,
     PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_C304_M48N32K2048,
-    // Optional main-ref exact Qwen3-VL-4B W8 decode Gate/Up/SwiGLU.
-    QWEN3VL_GATEUP_SWIGLU_GEMV,
-    // Optional main-ref exact Qwen3-VL-4B W8 decode BASE RMS + M-RoPE.
-    QWEN3VL_QK_NORM_MROPE_D128,
-    // Same QK arithmetic followed by the original single-row V2 K/V writers.
-    QWEN3VL_QK_NORM_MROPE_KV_INSERT_D128,
-    // Exact W8 M1 O GEMV, canonical residual ring, and BASE post RMSNorm.
-    QWEN3VL_O_RING_NORM_M1_H2560_W8,
-    // Additional generic precision and sparse-MoE payloads.
-    GROUPED_PARALLEL_LINEAR_ACC16,
-    GROUPED_PARALLEL_LINEAR_8BIT_ACC16,
-    MOE_TOPK_SCALAR_FP16,
-    MOE_TOPK_BY_KVSORT_FP16,
-    MOE_BINCOUNT_SCALAR,
-    MOE_TOPK_PROB_NORM_FP16,
-    CAST_UINT16_INT32,
-    GATHER_SCALAR_FP16,
-    GATHER_FP16,
-    MOE_GATHER_MUL_V2_FP16,
-    SCATTERND_ADD_INT16_FP16,
+    WALL_ACTION_QKV_PARTIAL_MROPE_W8A16_M20N64_SPM_WEIGHT,
+    WALL_ACTION_GATE_UP_W8A16_MULTIBASE_M592N32_SPM_WEIGHT,
+    WALL_ACTION_LINEAR_RING_POSTNORM_W8A16_M20N1024K256_SPM_WEIGHT,
+    WALL_ACTION_QKV_OWNER_PARTIAL_MROPE_W8A16_M20N64,
+    WALL_ACTION_KV_OWNER_FANOUT_M20,
+    WALL_QKV_W8A16_MULTIBASE_TILE_OWNER_M320X2N64,
+    WALL_PREFILL_OWNER_DIRECT_KV_M640,
+    WALL_VISION_ROW_WEIGHT_OUTER_W8A16_M256N80K448,
+    WALL_VISION_ROW_WEIGHT_OUTER_W8A16_M352N80K160,
+    WALL_ACTION_GATE_UP_W8A16_A16RESIDENT_SPM_WEIGHT_M20N32K1024,
+    WALL_PREFILL_ROW_W8A16_M160X4N96K128,
+    WALL_PREFILL_GATE_UP_SWIGLU_W8A16_M160X4N96K128,
+    WALL_RING_POSTNORM_PAIR_TILE40_FP16_PARTIAL_BF16_RESIDUAL_LOCAL_INOUT_M320X2N2048,
+    WALL_VISION_QKV_FP16_MULTIBASE_M192X3N96K128,
+    WALL_VISION_GATE_UP_SWIGLU_FP16_MULTIBASE_M192X3N96K128,
+    WALL_VISION_ROW_WEIGHT_OUTER_FP16_M352N80K160,
+    WALL_VISION_ROW_WEIGHT_OUTER_FP16_M256N80K448,
+    WALL_PREFILL_QKV_FP16_M448N64K128,
+    WALL_PREFILL_QKV_FP16_M320X2N64K128,
+    WALL_PREFILL_QKV_FP16_TILE_OWNER_M320X2N64K128,
+    WALL_PREFILL_GATE_UP_SWIGLU_FP16_M320N112K128,
+    WALL_PREFILL_GATE_UP_SWIGLU_FP16_M160X4N96K128,
+    WALL_PREFILL_GATE_UP_SWIGLU_FP16_M224X3N96K128,
+    WALL_PREFILL_DOWN_FP16_C320X2_N64K128,
+    WALL_PREFILL_OPROJ_FP16_C320X2_N64K128,
+    WALL_PREFILL_ROW_FP16_M160X4N96K128,
+    WALL_ACTION_GATE_UP_FP16_M592N32K128,
+    WALL_ACTION_GATE_UP_FP16_SPM_WEIGHT_M592N32K128,
+    WALL_ACTION_GATE_UP_FP16_A16RESIDENT_SPM_WEIGHT_M20N32K1024,
+    WALL_ACTION_QKV_FP16_PARTIAL_MROPE_M20N64K128,
+    WALL_ACTION_QKV_FP16_OWNER_PARTIAL_MROPE_M20N64K128,
+    WALL_ACTION_QKV_FP16_PARTIAL_MROPE_SPM_WEIGHT_M20N64K128,
+    WALL_ACTION_FP16_LINEAR_RING_POSTNORM_M20N1024K256,
+    WALL_ACTION_FP16_LINEAR_RING_POSTNORM_SPM_WEIGHT_M20N1024K256,
     GROUPED_PARALLEL_LINEAR_ACC32,
     GROUPED_PARALLEL_LINEAR_8BIT_ACC32,
     PL_AT_NVFP4_ACC16_M176N128,
@@ -488,6 +469,218 @@ enum class KernelId : uint16_t {
     RHINOVLA_NEWTON_NORM_SHIFT_H1024,
     RHINOVLA_SILU_HIGH_MUL,
     UNARY_GELU_TANH_HIGH_PRECISION,
+    GR00T_FF1_RESIDENT_W8A16_M512N48K128,
+    GR00T_QKV_MULTIBASE_W8A16_M592N32K128,
+    GR00T_ALL_REDUCE_RESIDUAL_XOR3_M41N1536,
+    GROUPED_UINT4_ACC16_M288N32,
+    GROUPED_UINT4_ACC16_M256N48,
+    GROUPED_UINT4_ACC16_M224N64,
+    GROUPED_UINT4_ACC16_M192N80,
+    GROUPED_UINT4_ACC16_M160N96,
+    GROUPED_UINT4_ACC16_M144N112,
+    GROUPED_UINT4_ACC16_M128N128,
+    HYVLA_EXPERT_O_RING_POSTNORM_S51,
+    HYVLA_EXPERT_QK_ROPE_S51,
+    HYVLA_EXPERT_GATEUP_W8_S51_N48,
+    HYVLA_W8_RESIDENT_SWIGLU_S51,
+    HYVLA_EXPERT_O_RING_POSTNORM_W8_S51,
+    HYVLA_EXPERT_O_RESIDENT_W8_S51,
+    HYVLA_NVFP4_GATEUP_SWIGLU_S51,
+    HYVLA_NVFP4_GATEUP_RESIDENT_S51,
+    HYVLA_EXPERT_O_RING_POSTNORM_NVFP4_S51,
+    HYVLA_EXPERT_O_RING_POSTNORM_NVFP4_S51_N128,
+    HYVLA_NVFP4_GATEUP_SWIGLU_INPUT_REUSE_S51,
+    HYVLA_EXPERT_DOWN_NVFP4_S51_N128,
+    HYVLA_EXPERT_DOWN_NEXTNORM_NVFP4_S51,
+    HYVLA_EXPERT_DOWN_NEXTNORM_NVFP4_S51_N128,
+    HYVLA_EXPERT_QK_ROPE_NORM_S51,
+    HYVLA_EXPERT_KV_NVFP4_S51,
+    HYVLA_EXPERT_QKV_NVFP4_S51,
+    HYVLA_EXPERT_QK_ROPE_NORM_KV_S51,
+    HYVLA_NVFP4_RESIDENT_SWIGLU_S51,
+    HYVLA_EXPERT_Q_NVFP4_S51_N32,
+    HYVLA_EXPERT_Q_NVFP4_S51_OVERLAP,
+    HYVLA_NVFP4_RESIDENT_SCALES_S51,
+    HYVLA_NVFP4_RESIDENT_SCALES_SWIGLU_S51,
+    HYVLA_EXPERT_QKV_NVFP4_S51_OVERLAP,
+    HYVLA_EXPERT_SDPA_M16_S51,
+    HYVLA_EXPERT_O_RING_POSTNORM_NVFP4_S51_N128_OVERLAP,
+    HYVLA_EXPERT_DOWN_NEXTNORM_NVFP4_S51_OVERLAP,
+    HYVLA_NVFP4_GATEUP_SWIGLU_S51_OVERLAP,
+    HYVLA_NVFP4_RESIDENT_SWIGLU_S51_OVERLAP,
+    HYVLA_EXPERT_SDPA_K128_S51,
+    HYVLA_VLM_VISION_GU176_W8,
+    HYVLA_EXPERT_KV_FP16_S51,
+    HYVLA_EXPERT_KV_W8_S51,
+    HYVIT2_VISION_OWNER_LAYERNORM_M392N1152,
+    HYVIT2_VISION_COMPACT_RESIDUAL_M392N1152,
+    WALL_BASE_NVFP4_QKV_BIAS_BARRIER_N64,
+    WALL_BASE_NVFP4_QKV_BIAS_BARRIER_N32,
+    WALL_BASE_NVFP4_O_RING_NORM_H32,
+    WALL_BASE_NVFP4_DOWN_RING_NORM_H32,
+    WALL_BASE_PARTIAL_MROPE_QK_H32,
+    WALL_BASE_NVFP4_GATE_UP_PARALLEL_H32,
+    WALL_BASE_NVFP4_KV_PARALLEL_BIAS_H32,
+    WALL_BASE_NVFP4_QKV_PARALLEL_BIAS_H32,
+    WALL_BASE_NVFP4_QKV_BIAS_ROPE_H32,
+    WALL_BASE_NVFP4_GATE_UP_PARALLEL_SILU_H32,
+    WALL_BASE_NVFP4_GATE_UP_SHARED_SILU_H32,
+    WALL_BASE_PREFILL_GATE_UP_SHARED_A_M384N48K128,
+    WALL_BASE_PREFILL_GATE_UP_SHARED_SILU_M384N48K128,
+    WALL_BASE_PREFILL_GATE_UP_SHARED_SILU_NOUP_M384N48K128,
+    WALL_BASE_VISION_OWNER_RING_NORM_M672,
+    WALL_BASE_VISION_DOWN_OWNER_RING_NORM_M672,
+    WALL_BASE_VISION_QK_ROPE_2D_SPM,
+    WALL_BASE_VISION_RAGGED_SDPA,
+    WALL_BASE_PREFILL_O_OWNER_RING_NORM_M224,
+    WALL_BASE_PREFILL_GATE_UP_SHARED_SILU_FP16_M320N80K128,
+    G05_GATEUP_RESIDENT_FP16_ACC32_M304N80K128,
+    G05_KV_OWNER_FP16_ACC32_M32N256K1024,
+    G05_KV_OWNER_FANOUT_M32D256,
+    G05_VISION_OWNER_REDUCE_LAYERNORM_M256N1024,
+    G05_VISION_XOR3_COMPACT_RESIDUAL_RAW_FULL_M256N1024,
+    G05_Q_GATE_FP16_ACC32_M32N256K1024,
+    G05_GATE_UP_FP16_ACC32_M32N512K1024,
+    G05_SILU_ROUND_MUL_M32N512,
+    G05_VISION_QKV_FP16_ACC32_M256N128K1024,
+    G05_TEXT_GATE_UP_FP16_ACC32_M256N768K2048,
+    G05_GATEUP_RESIDENT_W8A16_ACC32_M240N96K128,
+    G05_KV_OWNER_W8A16_ACC32_M32N256K1024,
+    G05_Q_GATE_W8A16_ACC32_M32N256K1024,
+    G05_GATE_UP_W8A16_ACC32_M32N512K1024,
+    G05_VISION_QKV_W8A16_ACC32_M256N128K1024,
+    G05_TEXT_GATE_UP_W8A16_ACC32_M256N768K2048,
+    G05_QKV_GATE_OWNER_W8A16_ACC32_M32N256K1024,
+    G05_K_OWNER_RMS_NORM_M32D256,
+    G05_K_OWNER_PARTIAL_MROPE_M32D256R64,
+    G05_OWNER_INSERT_KCACHE_MULTIWARP,
+    G05_OWNER_INSERT_KCACHE_MULTIWARP_V16,
+    G05_OWNER_INSERT_VCACHE_MULTIWARP,
+    G05_OWNER_INSERT_VCACHE_MULTIWARP_V16,
+    G05_GATEUP_RESIDENT_W8A16_ACC16_M352N96K128,
+    G05_KV_OWNER_W8A16_ACC16_M32N256K1024,
+    G05_Q_GATE_W8A16_ACC16_M32N256K1024,
+    G05_GATE_UP_W8A16_ACC16_M32N512K1024,
+    G05_VISION_QKV_W8A16_ACC16_M256N128K1024,
+    G05_TEXT_GATE_UP_W8A16_ACC16_M256N768K2048,
+    G05_QKV_GATE_OWNER_W8A16_ACC16_M32N256K1024,
+    G05_SUB_GATED_RESIDUAL_H1024,
+    G05_RTC_ADARMS_NORM_SHIFT_M32H1024,
+    G05_O_RESIDENT_W8A16_ACC16_M32N1024K256,
+    G05_RTC_SUB_GATED_RESIDUAL_M32H1024,
+    G05_O_RESIDENT_W8A16_ACC16_M32N1024K256_N128,
+    G05_RING_RTC_SUB_GATED_RESIDUAL_M32H1024,
+    G05_DOWN_PARTIAL672_W8A16_ACC16_M32N1024K512,
+    G05_VISION_FC2_WEIGHT_OUTER_W8A16_ACC16_M768N1024K512,
+    G05_GATE_UP_PAIRED_NVFP4_ACC16_M32N512K1024_N128,
+    G05_O_RESIDENT_NVFP4_ACC16_M32N1024K256_N80,
+    G05_DOWN_RESIDENT_NVFP4_ACC16_M32N1024K512_N64,
+    G05_GATE_UP_SWIGLU_NVFP4_ACC16_M32N512K1024_N128,
+    G05_GATE_KV_OWNER_W8A16_ACC16_M32N256K1024_N128,
+    G05_Q_NORM_PARTIAL_ROPE_M32D256R64_GROUP4,
+    G05_K_OWNER_NORM_PARTIAL_ROPE_M32D256R64_GROUP4,
+    G05_TEXT_RING_OWNER_RMS_M256H2048,
+    G05_OWNER_INSERT_KV_CACHE_M32D256_P0,
+    G05_OWNER_INSERT_KV_CACHE_M32D256_P245,
+    G05_ATTN_SIGMOID_ROUND_MUL_M32D256,
+    G05_RING_RTC_THEN_NORM_SHIFT_M32H1024,
+    G05_GATE_UP_FP16_ACC16_M32N512K1024,
+    G05_TEXT_GATE_UP_FP16_ACC16_M256N768K2048,
+    G05_GATE_UP_PAIRED_NVFP4_ACC32_M32N512K1024_N128,
+    G05_O_RESIDENT_NVFP4_ACC32_M32N1024K256_N80,
+    G05_DOWN_RESIDENT_NVFP4_ACC32_M32N1024K512_N64,
+    G05_GATE_UP_SWIGLU_NVFP4_ACC32_M32N512K1024_N128,
+    HYVLA_EXPERT_RMSNORM_V16_BITCOPY,
+    // Optional LingBot2 FP16 grouped GateUp; older refs retain the base route.
+    LINGBOT2_GROUPED_GATEUP_EXPERT_Y4_ACC16,
+    // Optional fixed-profile compaction of the selector's exact membership.
+    LINGBOT2_ROUTE_COMPACT_E32_T51_TP64,
+    // Existing fused top-k/normalization payload; model admission is separate.
+    MOE_EXACT_TOPK_DENSE_ROUTE_FP16,
+    // Optional MAIN payloads for the exact LingBot2 dense-bank Gate/Up route.
+    LINGBOT2_ROUTED_COL_FP16_M608N32,
+    LINGBOT2_ROUTED_COL_W8_M592N32,
+    // Guarded fused top-k; never substitute the unguarded MAIN payload.
+    LINGBOT2_TOPK_DENSE_ROUTE_SAFE,
+    // Optional no-gamma normalization for cold-bound folded weights.
+    RMSNORM_NOGAMMA,
+    RMSNORM_NOGAMMA_V16,
+    RMSNORM_NOGAMMA_V32,
+    // Optional exact-profile ordered FP16 sparse combine; old refs use scatter.
+    LINGBOT2_COMBINE_T51_R204_H768_SCAN,
+    // Optional fixed E32/K4 lane-pair selection with the unchanged SAFE numeric tail.
+    LINGBOT2_TOPK_E32_K4_LANE2_SAFE,
+    LINGBOT2_SWIGLU_ROUTE_R204_D64,
+    LINGBOT2_COMBINE_T51_R204_H768_INVERSE,
+    LINGBOT2_ROUTE_COMPACT_INVERSE_E32_T51_TP64,
+    // Optional INT8-weight GateUp with the same TP8/expert-y4 ownership.
+    LINGBOT2_GROUPED_GATEUP_W8A16_EXPERT_Y4_ACC16,
+    // Ordered routed combine followed by one FP16 shared-expert ADD.
+    LINGBOT2_COMBINE_SHARED_T51_R204_H768_INVERSE,
+    // Optional raw-U16 routed input loads; preserve the existing y4 math.
+    LINGBOT2_GROUPED_GATEUP_ROUTED_EXPERT_Y4_ACC16,
+    LINGBOT2_GROUPED_GATEUP_ROUTED_W8A16_EXPERT_Y4_ACC16,
+    // Optional same-warp routed GateUp, FP16 SwiGLU and routed-weight multiply.
+    LINGBOT2_GROUPED_GATEUP_ROUTED_FP16_SWIGLU_ROUTE,
+    LINGBOT2_GROUPED_GATEUP_ROUTED_W8_SWIGLU_ROUTE,
+    // Optional fixed-profile W8 Down with one combined scale shuffle.
+    LINGBOT2_GROUPED_DOWN_W8A16_ACC16_SCALE_SHUFFLE,
+    // Optional exact51 paired K/V writer; preserves the physical tail rows.
+    LINGBOT2_INSERT_KV_T51,
+    // Optional exact shared SiLU with compact sixteen-half vector scheduling.
+    LINGBOT2_SHARED_SILU_T51_D96_VECTOR,
+    // Optional exact Action QKV dispatch, preserving each auto ACC16 tile.
+    LINGBOT2_QKV_MULTIBASE_FP16_T51,
+    LINGBOT2_QKV_MULTIBASE_W8_T51,
+    // Optional exact Action SDPA with an effective 32-key final tile.
+    LINGBOT2_SDPA_T51_K275_TAIL,
+    // Optional exact M768/H1024/I4096 Vision FC1 + original BASE tanh-GELU.
+    LINGBOT2_VISION_FC1_GELU_FP16,
+    LINGBOT2_VISION_FC1_GELU_W8,
+    // Optional exact language-prefill QKV dispatch with unchanged auto tiles.
+    LINGBOT2_PREFILL_QKV_MULTIBASE_FP16_M224,
+    LINGBOT2_PREFILL_QKV_MULTIBASE_W8_M224,
+    // Optional original 32b minibatch Vision SDPA with raw SPM K/V inputs.
+    LINGBOT2_VISION_SDPA_SPM_B3S256H16D64_32B,
+    // Optional original N64 Down followed by ordered Top4 and shared FP16 ADDs.
+    LINGBOT2_GROUPED_DOWN_FP16_ORDERED_COMBINE,
+    LINGBOT2_GROUPED_DOWN_W8_ORDERED_COMBINE,
+    // Optional T51/Tp64 lane2 Top4, bit transposes and inverse route compact.
+    LINGBOT2_TOPK_COMPACT_INVERSE_E32_T51_TP64,
+    // Optional exact H768 AdaRMS bit-diagonal shuffle; LingBot only.
+    LINGBOT2_ADARMS_NORM_SHIFT_H768_DIAGONAL,
+    // Optional exact M768/N1024/K1024 Vision QKV with independent bias owners.
+    LINGBOT2_VISION_QKV_JOINT_FP16_M768,
+    LINGBOT2_VISION_QKV_JOINT_W8_M768,
+    // Optional exact Action paired RoPE followed by same-tile paired KV writes.
+    LINGBOT2_QK_ROPE_KV_T51,
+    // Optional exact W8 M224 Prefill shared-A Gate/Up and original SwiGLU.
+    LINGBOT2_PREFILL_GATEUP_SHARED_A_W8_M224,
+    // Optional exact T51/H768/E32 Router ACC32 + BASE sigmoid + Tp64 ones.
+    LINGBOT2_ROUTER_SIGMOID_PAD_T51,
+    // Optional exact T51/H768/localI96 W8 shared Gate/Up + resident SiLU.
+    LINGBOT2_SHARED_GATEUP_RESIDENT_SILU_W8_T51,
+    // Optional exact T51/H768/localI96 FP16 shared Gate/Up + resident SiLU.
+    LINGBOT2_SHARED_GATEUP_RESIDENT_SILU_FP16_T51,
+    // Optional exact T51/H768 post-attention ring + original AdaRMS norm/shift.
+    LINGBOT2_ATTN_ALL_REDUCE_ADARMS_T51_H768,
+    // Optional M224 learned-gamma V32 Q/K norms plus original partial RoPE.
+    LINGBOT2_PREFILL_QK_NORM_ROPE_M224,
+    // Shared main UINT4 ABI; existing signed W4 IDs retain expansion ABI.
+    PL_AT_UINT4_PGRP_M304N128,
+    PL_AT_UINT4_PGRP_M336N112,
+    PL_AT_UINT4_PGRP_M368N96,
+    PL_AT_UINT4_PGRP_M416N80,
+    PL_AT_UINT4_PGRP_M464N64,
+    PL_AT_UINT4_PGRP_M512N48,
+    PL_AT_UINT4_PGRP_M592N32,
+    PL_AT_UINT4_PGRP_ACC32_M208N128,
+    PL_AT_UINT4_PGRP_ACC32_M224N112,
+    PL_AT_UINT4_PGRP_ACC32_M256N96,
+    PL_AT_UINT4_PGRP_ACC32_M304N80,
+    PL_AT_UINT4_PGRP_ACC32_M352N64,
+    PL_AT_UINT4_PGRP_ACC32_M400N48,
+    PL_AT_UINT4_PGRP_ACC32_M496N32,
     _COUNT
 };
 static_assert(static_cast<size_t>(KernelId::_COUNT) <= UINT16_MAX,
@@ -515,7 +708,13 @@ public:
                  bool qwen3vl_o_ring_norm = false,
                  bool rmsnorm_newton = false,
                  bool rmsnorm_newton_v16 = false,
-                 bool rmsnorm_newton_v32 = false) {
+                 bool rmsnorm_newton_v32 = false,
+                 bool wall_prefill_qkv = false,
+                 bool pi05_norm_shift = false,
+                 bool pi05_gated_residual = false,
+                 bool nvfp4_v2_m320n64 = false,
+                 bool nvfp4_v2_m384n48 = false,
+                 bool qwen3vl_silu_mul_exact_strided = false) {
         uint32_t flags = 0;
         if (w8a16_row_weight_reuse) flags |= kW8A16RowWeightReuse;
         if (rmsnorm_v16) flags |= kRmsNormV16;
@@ -530,6 +729,12 @@ public:
         if (rmsnorm_newton) flags |= kRmsNormNewton;
         if (rmsnorm_newton_v16) flags |= kRmsNormNewtonV16;
         if (rmsnorm_newton_v32) flags |= kRmsNormNewtonV32;
+        if (wall_prefill_qkv) flags |= kWallPrefillQkv;
+        if (pi05_norm_shift) flags |= kPi05NormShift;
+        if (pi05_gated_residual) flags |= kPi05GatedResidual;
+        if (nvfp4_v2_m320n64) flags |= kNvfp4V2M320N64;
+        if (nvfp4_v2_m384n48) flags |= kNvfp4V2M384N48;
+        if (qwen3vl_silu_mul_exact_strided) flags |= kQwen3VlSiluMulExactStrided;
         // The complete capability set is one immutable publication, even when
         // it spans multiple machine words. Allocate before changing state so
         // allocation failure cannot expose a partial table.
@@ -548,6 +753,18 @@ public:
         TORCH_CHECK(state,
             "KernelCache loaded-kernel query requires initialized runtime");
         switch (id) {
+            case KernelId::WALL_QKV_W8A16_MULTIBASE_M448N64:
+                return (state->flags & kWallPrefillQkv) != 0;
+            case KernelId::PARALLEL_LINEAR_NVFP4_V2_M320N64:
+                return (state->flags & kNvfp4V2M320N64) != 0;
+            case KernelId::PARALLEL_LINEAR_NVFP4_V2_M384N48:
+                return (state->flags & kNvfp4V2M384N48) != 0;
+            case KernelId::PI05_ADARMS_NORM_SHIFT_H1024:
+                return (state->flags & kPi05NormShift) != 0;
+            case KernelId::PI05_GATED_RESIDUAL_H1024:
+                return (state->flags & kPi05GatedResidual) != 0;
+            case KernelId::QWEN3VL_SILU_MUL_EXACT_STRIDED:
+                return (state->flags & kQwen3VlSiluMulExactStrided) != 0;
             case KernelId::RMS_NORM_NEWTON_SPM:
                 return (state->flags & kRmsNormNewton) != 0;
             case KernelId::RMS_NORM_SPM_NEWTON_V16:
@@ -600,6 +817,12 @@ private:
     static constexpr uint32_t kRmsNormNewton = 1u << 11;
     static constexpr uint32_t kRmsNormNewtonV16 = 1u << 12;
     static constexpr uint32_t kRmsNormNewtonV32 = 1u << 13;
+    static constexpr uint32_t kWallPrefillQkv = 1u << 14;
+    static constexpr uint32_t kPi05NormShift = 1u << 15;
+    static constexpr uint32_t kPi05GatedResidual = 1u << 16;
+    static constexpr uint32_t kNvfp4V2M320N64 = 1u << 17;
+    static constexpr uint32_t kNvfp4V2M384N48 = 1u << 18;
+    static constexpr uint32_t kQwen3VlSiluMulExactStrided = 1u << 19;
     struct Snapshot {
         uint32_t flags;
         ExtendedPayloads extended;
@@ -612,7 +835,7 @@ private:
 
 // Kernel 名称映射表 (与 KernelId 枚举顺序对应)
 static constexpr const char* KERNEL_ID_NAMES[] = {
-    // SPM binary kernels (no _ddr suffix)
+
     "binary_sameshape",
     "binary_Nx1_NxC256_batch",
     "binary_Nx1_NxC256_batch_bopa",
@@ -622,7 +845,7 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "binary_1xC_NxC_v256_batch_bopa",
     "binary_1xC_NxC_v16_batch",
     "binary_1xC_NxC_v16_batch_bopa",
-    // DDR binary kernels (_ddr suffix)
+
     "binary_sameshape_ddr",
     "binary_scalar_ddr",
     "binary_scalar",
@@ -635,45 +858,45 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "binary_1xC_NxC_v256_batch_bopa_ddr",
     "binary_1xC_NxC_v16_batch_ddr",
     "binary_1xC_NxC_v16_batch_bopa_ddr",
-    // Unary kernels
+
     "unary_ddr",
     "softmax_c16_gauto",
     "layer_norm",
     "layer_norm_simple",
     "layer_norm_bf16",
-    "llm_fp16_32b_prefill_flash_attn_univ_dp",  // SPM version
+    "llm_fp16_32b_prefill_flash_attn_univ_dp",
     "llm_fp16_16b_prefill_flash_attn_univ_dp",
     "reduce_mean_last_dim_ddr",
     "llama_rms_norm_bf16_ddr",
-    "llama_rms_norm",  // SPM版本 (renamed from llama_rms_norm_bf16 in v0.1.1_38977cf7)
-    "llama_rms_norm_newton",  // Explicit Newton-refined rsqrt opt-in
-    // RoPE kernel
+    "llama_rms_norm",
+    "llama_rms_norm_newton",
+
     "llama_rope",
     "llama_rope_ddr",
-    // M-RoPE kernel (Qwen3-VL R-Phase 1)
+
     "llama_mrope_interleave",
-    // Partial M-RoPE kernel (wall-oss prefill/denoise perf)
+
     "partial_mrope",
-    // 2D RoPE kernel (Qwen3-VL R-Phase 3 vision encoder)
+
     "rope_2d_ddr",
     "rope_2d_spm",
-    // Fast bilinear pos-embed interpolation (Qwen3-VL / Qwen3.5 vision STEP 0)
+
     "fast_pos_embed_interpolate",
-    // LLaMA KV-Cache kernels
+
     "llama_insert_vcache_multiwarp",
     "llama_insert_kcache_multiwarp",
     "llama_insert_vcache_multiwarp_v16",
     "llama_insert_kcache_multiwarp_v16",
-    // Standalone all-gather kernels
+
     "all_gather_multi_core",
     "all_gather_multi_core_little_chunk",
-    // SPM unary kernels
+
     "unary",
-    // DDR to SPM memcpy (multi-core)
-    // SPM to DDR memcpy (multi-core)
-    // DDR to SPM memcpy v2 (nested loop fix)
-    // SPM to DDR memcpy v2 (nested loop fix)
-    // Argmax/Argmin kernels
+
+
+
+
+
     "argmax_reduceC_tileN",
     "argmax_reduceC_tileN_C128",
     "argmax_reduceC_tileN_sli",
@@ -686,14 +909,14 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "argmin_reduceC_tileN_C128_sli",
     "argmin_reduceN_tileC",
     "argmin_reduceN_tileC_sli",
-    // SPM memset (zero-fill) multi-core
+
     "memset_spm_multi_core_v2",
-    // SDPA vctxlen (dynamic context length)
+
     "llm_fp16_32b_prefill_flash_attn_univ_vctxlen",
-    // SDPA vctxlen minibatch (per-image K/V slicing)
+
     "llm_fp16_32b_prefill_flash_attn_univ_vctxlen_minibatch",
     "llm_fp16_16b_prefill_flash_attn_univ_vctxlen_minibatch",
-    // Conv2d SPM kernels
+
     "conv_fp16_f1_spm_16b_w128x128_k48_1core_buf1_lpaddr_univ",
     "conv_fp16_f1_spm_16b_w128x128_k64_1core_buf1_lpaddr_univ",
     "conv_fp16_f1_spm_16b_w128x128_k96_1core_buf1_lpaddr_univ",
@@ -706,7 +929,7 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "conv_fp16_fn_spm_16b_w128x128_k64_1core_buf1_lpaddr_univ",
     "conv_fp16_fn_spm_16b_w128x128_k96_1core_buf1_lpaddr_univ",
     "conv_fp16_fn_spm_16b_w128x128_k128_1core_buf1_lpaddr_univ",
-    // Conv2d multi-core column kernels (tile_k=32, tile_n=32/64/128)
+
     "conv_fp16_f1_spm_column_w128x32_k32_coren_buf1_sIsWsO_univ",
     "conv_fp16_f3_spm_column_w128x32_k32_coren_buf1_sIsWsO_univ",
     "conv_fp16_fn_spm_column_w128x32_k32_coren_buf1_sIsWsO_univ",
@@ -716,7 +939,7 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "conv_fp16_f1_spm_column_w128x128_k32_coren_buf1_sIsWsO_univ",
     "conv_fp16_f3_spm_column_w128x128_k32_coren_buf1_sIsWsO_univ",
     "conv_fp16_fn_spm_column_w128x128_k32_coren_buf1_sIsWsO_univ",
-    // Conv2d multi-core column kernels (tile_k=64, tile_n=32/64/128)
+
     "conv_fp16_f1_spm_column_w128x32_k64_coren_buf1_sIsWsO_univ",
     "conv_fp16_f3_spm_column_w128x32_k64_coren_buf1_sIsWsO_univ",
     "conv_fp16_fn_spm_column_w128x32_k64_coren_buf1_sIsWsO_univ",
@@ -726,14 +949,14 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "conv_fp16_f1_spm_column_w128x128_k64_coren_buf1_sIsWsO_univ",
     "conv_fp16_f3_spm_column_w128x128_k64_coren_buf1_sIsWsO_univ",
     "conv_fp16_fn_spm_column_w128x128_k64_coren_buf1_sIsWsO_univ",
-    // Im2col kernels
+
     "im2col_coren_m64xn32_buf1_sIsO",
     "im2col_coren_m128xn32_buf1_sIsO",
     "im2col_coren_m64xn64_buf1_sIsO",
     "im2col_coren_m128xn64_buf1_sIsO",
-    // Pad kernel
+
     "pad_const_NxC_NxCP",
-    // Transpose kernel
+
     "transpose_ncb_c16",
     "transpose_nbc_c16",
     "parallel_linear_wnvfp4a16_acc32_m176n128k128",
@@ -743,7 +966,7 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "parallel_linear_wnvfp4a16_acc32_m320n64k128",
     "parallel_linear_wnvfp4a16_acc32_m384n48k128",
     "parallel_linear_wnvfp4a16_acc32_m480n32k128",
-    // Qwen3.5 GDN names; order must match KernelId above.
+
     "partial_rope_1d",
     "l2norm",
     "llm_fla_conv1d_w16a16_acc16",
@@ -751,8 +974,8 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "reduce_sum_non_last_dim_out_seg",
     "cumsum_reduceC_tileN",
     "unit_tril_inv",
-    // auto-tile acc16 variants — MUST match the KernelId order above and
-    // rpu_pl_tiling::autotile_kernel_name(is_fp16, mtile_w8a16/_w16(n), n).
+
+
     "parallel_linear_w8a16_m288n128k128",
     "parallel_linear_w8a16_m320n112k128",
     "parallel_linear_w8a16_m352n96k128",
@@ -767,8 +990,8 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "parallel_linear_m480n64k128",
     "parallel_linear_m528n48k128",
     "parallel_linear_m608n32k128",
-    // auto-tile group-wise int4 pgrp variants — MUST match the KernelId order above
-    // and rpu_pl_tiling::autotile_kernel_name_int4(mtile_int4(n), n).
+
+
     "parallel_linear_wint4a16_pgrp_m304n128k128",
     "parallel_linear_wint4a16_pgrp_m336n112k128",
     "parallel_linear_wint4a16_pgrp_m368n96k128",
@@ -776,7 +999,7 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "parallel_linear_wint4a16_pgrp_m464n64k128",
     "parallel_linear_wint4a16_pgrp_m512n48k128",
     "parallel_linear_wint4a16_pgrp_m592n32k128",
-    // auto-tile W8A16 ACC32 variants
+
     "parallel_linear_w8a16_acc32_m192n128k128",
     "parallel_linear_w8a16_acc32_m208n112k128",
     "parallel_linear_w8a16_acc32_m240n96k128",
@@ -784,7 +1007,7 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "parallel_linear_w8a16_acc32_m336n64k128",
     "parallel_linear_w8a16_acc32_m400n48k128",
     "parallel_linear_w8a16_acc32_m496n32k128",
-    // auto-tile FP16 ACC32 variants
+
     "parallel_linear_acc32_m208n128k128",
     "parallel_linear_acc32_m240n112k128",
     "parallel_linear_acc32_m272n96k128",
@@ -792,7 +1015,7 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "parallel_linear_acc32_m352n64k128",
     "parallel_linear_acc32_m416n48k128",
     "parallel_linear_acc32_m496n32k128",
-    // auto-tile W4A16 pgrp ACC32 variants
+
     "parallel_linear_wint4a16_pgrp_acc32_m208n128k128",
     "parallel_linear_wint4a16_pgrp_acc32_m224n112k128",
     "parallel_linear_wint4a16_pgrp_acc32_m256n96k128",
@@ -806,16 +1029,48 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "unary_softplus",
     "llm_all_reduce_residual",
     "llm_all_reduce_residual_nopace",
+
+    "parallel_linear_acc32_out_bf16_m416n48k128",
+    "parallel_linear_acc32_out_bf16_m496n32k128",
+    "llm_all_reduce_residual_bf16_partial_fp16_residual",
+    "llm_all_reduce_residual_bf16_partial_fp16_residual_nopace",
+    "llm_all_reduce_residual_fp16_partial_bf16_residual",
+    "llm_all_reduce_residual_fp16_partial_bf16_residual_nopace",
+    "llama_rms_norm_bf16in_fp16out_v32",
     "llm_fp16_32b_prefill_trans_prjv_dp_vctxlen",
     "llm_fp16_16b_prefill_flash_attn_by_mha_univ_vctxlen",
     "llm_all_reduce_residual_local_spm",
-    // Hy-VLA optional RMSNorm/M-RoPE variants and FP16 ACC32 probes.
+    "llm_all_reduce_residual_fp16_partial_bf16_residual_local_spm",
+
     "llama_rms_norm_v16",
     "llama_rms_norm_v32",
     "llama_rms_norm_newton_v16",
     "llama_rms_norm_newton_v32",
     "llama_mrope_interleave_local_spm_tbl",
+    "qkv_parallel_w8a16_multibase_m448n64k128",
+    "qkv_parallel_w8a16_multibase_m400n80k128",
+    "qkv_parallel_w8a16_multibase_m592n32k128",
+    "gate_up_parallel_w8a16_multibase_m592n32k128",
     "fused_gate_up_swiglu_w8a16_m320n112k128",
+    "wall_ring_postnorm_fp16_partial_bf16_residual_m320n2048",
+    "wall_ring_postnorm_fp16_partial_bf16_residual_local_inout_m320n2048",
+    "fused_gate_up_swiglu_w8a16_m352n96k128",
+    "wall_down_postnorm_m576_fp16_partial_fp16_residual",
+    "wall_down_postnorm_m576_bf16_partial_fp16_residual",
+    "wall_down_postnorm_m576_fp16_partial_bf16_residual",
+    "llm_fp16_16b_prefill_flash_attn_by_mha_wall_window_b3s576h16d80",
+    "wall_ring_postnorm_m576_fp16_partial_fp16_residual_local_inout_xor3",
+    "wall_ring_postnorm_m576_bf16_partial_fp16_residual_local_inout_xor3",
+    "wall_ring_postnorm_m576_fp16_partial_bf16_residual_local_inout_xor3",
+    "qkv_parallel_w8a16_multibase_m320x2n64k128",
+    "wall_down_weight_outer_w8a16_c320x2_n64k128",
+    "fused_gate_up_swiglu_w8a16_m128x5n96k128",
+    "wall_oproj_weight_outer_w8a16_c320x2_n64k128",
+    "fused_gate_up_swiglu_w8a16_multibase_m192x3n96k128",
+    "qkv_parallel_w8a16_multibase_m192x3n96k128",
+    "qkv_parallel_w8a16_multibase_partial_mrope_m20n64k128",
+    "wall_action_w8a16_n128_linear_ring_postnorm_m20n1024k256",
+    "wall_ring_postnorm_pair_fp16_partial_bf16_residual_local_inout_m320x2n2048",
     "llm_fla_conv1d_noinplace_w16a16_acc16",
     "qwen3_5_rms_norm_gated",
     "qwen3_5_rank1_fma",
@@ -828,7 +1083,22 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "llama_rms_norm_multiwarp_n_v64",
     "parallel_linear_w8a16_m448n64k128_qkv_planar",
     "llama_silu_mul_exact_strided",
+    "grouped_parallel_linear_acc16",
+    "grouped_parallel_linear_w8a16_acc16",
+    "topk_scalar_fp16",
+    "topk_by_kvsort_fp16",
+    "bincount_scalar",
+    "llm_topk_prob_norm",
+    "unary_cast_uint16_int32",
+    "gather_scalar",
+    "gather",
+    "llm_gather_mul_v2",
+    "scatternd_int16_reduction",
     "w8a16_row_weight_reuse_m352n80k256",
+    "qwen3vl_gateup_swiglu_gemv",
+    "qwen3vl_qk_norm_mrope_d128",
+    "qwen3vl_qk_norm_mrope_kv_insert_d128",
+    "qwen3vl_o_ring_norm_m1_h2560_w8",
     "pi05_gate_up_geglu_w8a16_m400n80k128",
     "pi05_adarms_norm_shift_h1024",
     "pi05_gated_residual_h1024",
@@ -919,35 +1189,65 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "pi05_prefill_kv1_pair_owner_w8a16_m288n32x2k2048",
     "pi05_prefill_gate_up_geglu_w8a8_split_c288_m48n32k2048",
     "pi05_all_reduce_residual_xor3_m448n2048",
+    "pi05_all_reduce_residual_xor3_m464n2048",
     "pi05_owner_norm_full_residual_m448n2048",
+    "pi05_owner_norm_full_residual_m464n2048",
     "pi05_owner_norm_compact_residual_m448n2048",
+    "pi05_owner_norm_compact_residual_m464n2048",
     "pi05_xor3_compact_residual_raw_full_m448n2048",
+    "pi05_xor3_compact_residual_raw_full_m464n2048",
     "pi05_owner_norm_compact_a8_m448n2048",
+    "pi05_owner_norm_compact_a8_m464n2048",
     "pi05_prefill_kv1_direct_cache_m448d256p448",
+    "pi05_prefill_kv1_direct_cache_m464d256p464",
     "pi05_prefill_o_weight_outer_fp16_c448x2_m96n80k128",
+    "pi05_prefill_o_weight_outer_fp16_c464x2_m80n80k128",
     "pi05_prefill_o_weight_outer_w8a16_c448x2_m96n80k128",
+    "pi05_prefill_o_weight_outer_w8a16_c464x2_m80n80k128",
     "pi05_down_weight_outer_fp16_c448x2_m96n80k128",
+    "pi05_down_weight_outer_fp16_c464x2_m80n80k128",
     "pi05_down_weight_outer_w8a16_c448x2_m96n80k128",
+    "pi05_down_weight_outer_w8a16_c464x2_m80n80k128",
     "pi05_prefill_gate_up_geglu_weight_outer_fp16_c448x2_m96n80k128",
+    "pi05_prefill_gate_up_geglu_weight_outer_fp16_c464x2_m80n80k128",
     "pi05_prefill_gate_up_geglu_weight_outer_w8a16_c448x2_m96n80k128",
+    "pi05_prefill_gate_up_geglu_weight_outer_w8a16_c464x2_m80n80k128",
     "pi05_prefill_kv1_pair_owner_fp16_m448n32x2k2048",
+    "pi05_prefill_kv1_pair_owner_fp16_m464n32x2k2048",
     "pi05_prefill_kv1_pair_owner_w8a16_m448n32x2k2048",
+    "pi05_prefill_kv1_pair_owner_w8a16_m464n32x2k2048",
     "pi05_prefill_gate_up_geglu_w8a8_split_c448_m48n32k2048",
+    "pi05_prefill_gate_up_geglu_w8a8_split_c464_m48n32k2048",
     "pi05_all_reduce_residual_xor3_m320n2048",
+    "pi05_all_reduce_residual_xor3_m336n2048",
     "pi05_owner_norm_full_residual_m320n2048",
+    "pi05_owner_norm_full_residual_m336n2048",
     "pi05_owner_norm_compact_residual_m320n2048",
+    "pi05_owner_norm_compact_residual_m336n2048",
     "pi05_xor3_compact_residual_raw_full_m320n2048",
+    "pi05_xor3_compact_residual_raw_full_m336n2048",
     "pi05_owner_norm_compact_a8_m320n2048",
+    "pi05_owner_norm_compact_a8_m336n2048",
     "pi05_prefill_kv1_direct_cache_m320d256p320",
+    "pi05_prefill_kv1_direct_cache_m336d256p336",
     "pi05_prefill_o_weight_outer_fp16_c320x2_m128n80k128",
+    "pi05_prefill_o_weight_outer_fp16_c336x2_m128n80k128",
     "pi05_prefill_o_weight_outer_w8a16_c320x2_m128n80k128",
+    "pi05_prefill_o_weight_outer_w8a16_c336x2_m128n80k128",
     "pi05_down_weight_outer_fp16_c320x2_m160n80k128",
+    "pi05_down_weight_outer_fp16_c336x2_m160n80k128",
     "pi05_down_weight_outer_w8a16_c320x2_m160n80k128",
+    "pi05_down_weight_outer_w8a16_c336x2_m160n80k128",
     "pi05_prefill_gate_up_geglu_weight_outer_fp16_c320x2_m160n80k128",
+    "pi05_prefill_gate_up_geglu_weight_outer_fp16_c336x2_m160n80k128",
     "pi05_prefill_gate_up_geglu_weight_outer_w8a16_c320x2_m160n80k128",
+    "pi05_prefill_gate_up_geglu_weight_outer_w8a16_c336x2_m160n80k128",
     "pi05_prefill_kv1_pair_owner_fp16_m320n32x2k2048",
+    "pi05_prefill_kv1_pair_owner_fp16_m336n32x2k2048",
     "pi05_prefill_kv1_pair_owner_w8a16_m320n32x2k2048",
+    "pi05_prefill_kv1_pair_owner_w8a16_m336n32x2k2048",
     "pi05_prefill_gate_up_geglu_w8a8_split_c320_m48n32k2048",
+    "pi05_prefill_gate_up_geglu_w8a8_split_c336_m48n32k2048",
     "pi05_all_reduce_residual_xor3_m432n2048",
     "pi05_owner_norm_full_residual_m432n2048",
     "pi05_owner_norm_compact_residual_m432n2048",
@@ -978,21 +1278,40 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "pi05_prefill_kv1_pair_owner_fp16_m304n32x2k2048",
     "pi05_prefill_kv1_pair_owner_w8a16_m304n32x2k2048",
     "pi05_prefill_gate_up_geglu_w8a8_split_c304_m48n32k2048",
-    "qwen3vl_gateup_swiglu_gemv",
-    "qwen3vl_qk_norm_mrope_d128",
-    "qwen3vl_qk_norm_mrope_kv_insert_d128",
-    "qwen3vl_o_ring_norm_m1_h2560_w8",
-    "grouped_parallel_linear_acc16",
-    "grouped_parallel_linear_w8a16_acc16",
-    "topk_scalar_fp16",
-    "topk_by_kvsort_fp16",
-    "bincount_scalar",
-    "llm_topk_prob_norm",
-    "unary_cast_uint16_int32",
-    "gather_scalar",
-    "gather",
-    "llm_gather_mul_v2",
-    "scatternd_int16_reduction",
+    "qkv_parallel_w8a16_multibase_partial_mrope_m20n64k128_spm_weight",
+    "gate_up_parallel_w8a16_multibase_spm_weight_m592n32k128",
+    "wall_action_w8a16_n128_linear_ring_postnorm_spm_weight_m20n1024k256",
+    "qkv_parallel_w8a16_multibase_owner_partial_mrope_m20n64k128",
+    "kv_owner_fanout_m20",
+    "qkv_parallel_w8a16_multibase_tile_owner_m320x2n64k128",
+    "owner_direct_kv_m640",
+    "wall_vision_row_weight_outer_w8a16_m256n80k448",
+    "wall_vision_row_weight_outer_w8a16_m352n80k160",
+    "wall_action_gate_up_w8a16_a16resident_spm_weight_m20n32k1024",
+    "wall_prefill_row_w8a16_m160x4n96k128",
+    "wall_prefill_gate_up_swiglu_w8a16_m160x4n96k128",
+    "wall_ring_postnorm_pair_tile40_fp16_partial_bf16_residual_local_inout_m320x2n2048",
+    "wall_vision_qkv_fp16_multibase_m192x3n96k128",
+    "wall_vision_gate_up_swiglu_fp16_multibase_m192x3n96k128",
+    "wall_vision_row_weight_outer_fp16_m352n80k160",
+    "wall_vision_row_weight_outer_fp16_m256n80k448",
+    "wall_prefill_qkv_fp16_m448n64k128",
+    "wall_prefill_qkv_fp16_m320x2n64k128",
+    "wall_prefill_qkv_fp16_tile_owner_m320x2n64k128",
+    "wall_prefill_gate_up_swiglu_fp16_m320n112k128",
+    "wall_prefill_gate_up_swiglu_fp16_m160x4n96k128",
+    "wall_prefill_gate_up_swiglu_fp16_m224x3n96k128",
+    "wall_prefill_down_fp16_c320x2_n64k128",
+    "wall_prefill_oproj_fp16_c320x2_n64k128",
+    "wall_prefill_row_fp16_m160x4n96k128",
+    "wall_action_gate_up_fp16_m592n32k128",
+    "wall_action_gate_up_fp16_spm_weight_m592n32k128",
+    "wall_action_gate_up_fp16_a16resident_spm_weight_m20n32k1024",
+    "wall_action_qkv_fp16_partial_mrope_m20n64k128",
+    "wall_action_qkv_fp16_owner_partial_mrope_m20n64k128",
+    "wall_action_qkv_fp16_partial_mrope_spm_weight_m20n64k128",
+    "wall_action_fp16_linear_ring_postnorm_m20n1024k256",
+    "wall_action_fp16_linear_ring_postnorm_spm_weight_m20n1024k256",
     "grouped_parallel_linear_acc32",
     "grouped_parallel_linear_w8a16_acc32",
     "parallel_linear_wnvfp4a16_acc16_m176n128k128",
@@ -1009,6 +1328,186 @@ static constexpr const char* KERNEL_ID_NAMES[] = {
     "rhinovla_newton_norm_shift_h1024",
     "rhinovla_silu_high_mul",
     "unary_gelu_tanh_high_precision",
+    "gr00t_ff1_resident_w8a16_m512n48k128",
+    "gr00t_qkv_multibase_w8a16_m592n32k128",
+    "gr00t_all_reduce_residual_xor3_m41n1536",
+    "grouped_parallel_linear_wuint4a16_pgrp_m288n32k256",
+    "grouped_parallel_linear_wuint4a16_pgrp_m256n48k256",
+    "grouped_parallel_linear_wuint4a16_pgrp_m224n64k256",
+    "grouped_parallel_linear_wuint4a16_pgrp_m192n80k256",
+    "grouped_parallel_linear_wuint4a16_pgrp_m160n96k256",
+    "grouped_parallel_linear_wuint4a16_pgrp_m144n112k256",
+    "grouped_parallel_linear_wuint4a16_pgrp_m128n128k256",
+    "hyvla_expert_o_ring_postnorm_s51",
+    "hyvla_expert_qk_rope_s51",
+    "hyvla_expert_gateup_w8_s51_m512n48k128",
+    "hyvla_w8_resident_swiglu_s51",
+    "hyvla_expert_o_ring_postnorm_w8_s51",
+    "hyvla_expert_o_resident_w8_s51",
+    "hyvla_nvfp4_gateup_swiglu_s51",
+    "hyvla_nvfp4_gateup_resident_s51",
+    "hyvla_expert_o_ring_postnorm_nvfp4_s51",
+    "hyvla_expert_o_ring_postnorm_nvfp4_s51_n128",
+    "hyvla_nvfp4_gateup_swiglu_input_reuse_s51",
+    "hyvla_expert_down_nvfp4_s51_n128",
+    "hyvla_expert_down_nextnorm_nvfp4_s51",
+    "hyvla_expert_down_nextnorm_nvfp4_s51_n128",
+    "hyvla_expert_qk_rope_norm_s51",
+    "hyvla_expert_kv_nvfp4_s51",
+    "hyvla_expert_qkv_nvfp4_s51",
+    "hyvla_expert_qk_rope_norm_kv_s51",
+    "hyvla_nvfp4_resident_swiglu_s51",
+    "hyvla_expert_q_nvfp4_s51_n32",
+    "hyvla_expert_q_nvfp4_s51_overlap",
+    "hyvla_nvfp4_resident_scales_s51",
+    "hyvla_nvfp4_resident_scales_swiglu_s51",
+    "hyvla_expert_qkv_nvfp4_s51_overlap",
+    "hyvla_expert_sdpa_m16_s51",
+    "hyvla_expert_o_ring_postnorm_nvfp4_s51_n128_overlap",
+    "hyvla_expert_down_nextnorm_nvfp4_s51_overlap",
+    "hyvla_nvfp4_gateup_swiglu_s51_overlap",
+    "hyvla_nvfp4_resident_swiglu_s51_overlap",
+    "hyvla_expert_sdpa_k128_s51",
+    "hyvla_vlm_vision_gu176_w8",
+    "hyvla_expert_kv_fp16_s51",
+    "hyvla_expert_kv_w8_s51",
+    "hyvit2_vision_owner_reduce_layernorm_m392n1152",
+    "hyvit2_vision_xor3_compact_residual_raw_full_m392n1152",
+    "wall_base_nvfp4_qkv_bias_barrier_n64",
+    "wall_base_nvfp4_qkv_bias_barrier_n32",
+    "wall_base_nvfp4_o_ring_norm_h32",
+    "wall_base_nvfp4_down_ring_norm_h32",
+    "wall_base_partial_mrope_qk_h32",
+    "wall_base_nvfp4_gate_up_parallel_h32",
+    "wall_base_nvfp4_kv_parallel_bias_h32",
+    "wall_base_nvfp4_qkv_parallel_bias_h32",
+    "wall_base_nvfp4_qkv_bias_rope_h32",
+    "wall_base_nvfp4_gate_up_parallel_silu_h32",
+    "wall_base_nvfp4_gate_up_shared_silu_h32",
+    "wall_base_prefill_gate_up_shared_a_m384n48k128",
+    "wall_base_prefill_gate_up_shared_silu_m384n48k128",
+    "wall_base_prefill_gate_up_shared_silu_noup_m384n48k128",
+    "wall_base_vision_owner_ring_norm_m672_h1280",
+    "wall_base_vision_down_owner_ring_norm_m672_h1280",
+    "wall_base_vision_qk_rope_2d_spm_m672_m324",
+    "wall_base_vision_ragged_sdpa_b1_s324_s336_h16d80",
+    "wall_base_prefill_o_owner_ring_norm_m224_h2048",
+    "wall_base_prefill_gate_up_shared_silu_fp16_m320n80k128",
+    "g05_linear_fp16_acc32_spm_weight_m304n80k128",
+    "g05_kv_owner_fp16_acc32_m32n256k1024",
+    "g05_kv_owner_fanout_m32d256",
+    "g05_vision_owner_reduce_layernorm_m256n1024",
+    "g05_vision_xor3_compact_residual_raw_full_m256n1024",
+    "g05_q_gate_fp16_acc32_m32n256k1024",
+    "g05_gate_up_fp16_acc32_m32n512k1024",
+    "g05_silu_round_mul_m32n512",
+    "g05_vision_qkv_fp16_acc32_m256n128k1024",
+    "g05_text_gate_up_fp16_acc32_m256n768k2048",
+    "g05_gateup_resident_w8a16_acc32_m240n96k128",
+    "g05_kv_owner_w8a16_acc32_m32n256k1024",
+    "g05_q_gate_w8a16_acc32_m32n256k1024",
+    "g05_gate_up_w8a16_acc32_m32n512k1024",
+    "g05_vision_qkv_w8a16_acc32_m256n128k1024",
+    "g05_text_gate_up_w8a16_acc32_m256n768k2048",
+    "g05_qkv_gate_owner_w8a16_acc32_m32n256k1024",
+    "g05_k_owner_rms_norm_m32d256",
+    "g05_k_owner_partial_mrope_m32d256r64",
+    "g05_owner_insert_kcache_multiwarp",
+    "g05_owner_insert_kcache_multiwarp_v16",
+    "g05_owner_insert_vcache_multiwarp",
+    "g05_owner_insert_vcache_multiwarp_v16",
+    "g05_gateup_resident_w8a16_acc16_m352n96k128",
+    "g05_kv_owner_w8a16_acc16_m32n256k1024",
+    "g05_q_gate_w8a16_acc16_m32n256k1024",
+    "g05_gate_up_w8a16_acc16_m32n512k1024",
+    "g05_vision_qkv_w8a16_acc16_m256n128k1024",
+    "g05_text_gate_up_w8a16_acc16_m256n768k2048",
+    "g05_qkv_gate_owner_w8a16_acc16_m32n256k1024",
+    "g05_sub_gated_residual_h1024",
+    "g05_rtc_adarms_norm_shift_m32h1024",
+    "g05_o_resident_w8a16_acc16_m32n1024k256",
+    "g05_rtc_sub_gated_residual_m32h1024",
+    "g05_o_resident_w8a16_acc16_m32n1024k256_n128",
+    "g05_ring_rtc_sub_gated_residual_m32h1024",
+    "g05_down_partial672_w8a16_acc16_m32n1024k512",
+    "g05_vision_fc2_weight_outer_w8a16_acc16_m768n1024k512",
+    "g05_gate_up_paired_nvfp4_acc16_m32n512k1024_n128",
+    "g05_o_resident_nvfp4_acc16_m32n1024k256_n80",
+    "g05_down_resident_nvfp4_acc16_m32n1024k512_n64",
+    "g05_gate_up_swiglu_nvfp4_acc16_m32n512k1024_n128",
+    "g05_gate_kv_owner_w8a16_acc16_m32n256k1024_n128",
+    "g05_q_norm_partial_rope_m32d256r64_group4",
+    "g05_k_owner_norm_partial_rope_m32d256r64_group4",
+    "g05_text_ring_owner_rms_m256h2048",
+    "g05_owner_insert_kv_cache_m32d256_p0",
+    "g05_owner_insert_kv_cache_m32d256_p245",
+    "g05_attn_sigmoid_round_mul_m32d256",
+    "g05_ring_rtc_then_norm_shift_m32h1024",
+    "g05_gate_up_fp16_acc16_m32n512k1024",
+    "g05_text_gate_up_fp16_acc16_m256n768k2048",
+    "g05_gate_up_paired_nvfp4_acc32_m32n512k1024_n128",
+    "g05_o_resident_nvfp4_acc32_m32n1024k256_n80",
+    "g05_down_resident_nvfp4_acc32_m32n1024k512_n64",
+    "g05_gate_up_swiglu_nvfp4_acc32_m32n512k1024_n128",
+    "hyvla_expert_rmsnorm_v16_bitcopy",
+    "grouped_parallel_linear_acc16_expert_y4",
+    "lingbot2_route_compact_e32_t51_tp64",
+    "topk_norm_scalar_fp16",
+    "routed_col_parallel_linear_m608n32k128",
+    "routed_col_parallel_linear_w8a16_m592n32k128",
+    "lingbot2_topk_dense_route_safe",
+    "llama_rms_norm_nogamma",
+    "llama_rms_norm_nogamma_v16",
+    "llama_rms_norm_nogamma_v32",
+    "lingbot2_combine_t51_r204_h768_scan",
+    "lingbot2_topk_e32_k4_lane2_safe",
+    "lingbot2_swiglu_route_r204_d64",
+    "lingbot2_combine_t51_r204_h768_inverse",
+    "lingbot2_route_compact_inverse_e32_t51_tp64",
+    "grouped_parallel_linear_w8a16_acc16_expert_y4",
+    "lingbot2_combine_shared_t51_r204_h768_inverse",
+    "lingbot2_grouped_gateup_routed_acc16_expert_y4",
+    "lingbot2_grouped_gateup_routed_w8a16_acc16_expert_y4",
+    "lingbot2_grouped_gateup_routed_fp16_swiglu_route",
+    "lingbot2_grouped_gateup_routed_w8_swiglu_route",
+    "lingbot2_grouped_down_w8a16_acc16_scale_shuffle",
+    "lingbot2_insert_kv_t51",
+    "lingbot2_shared_silu_t51_d96_vector",
+    "lingbot2_qkv_multibase_fp16_t51",
+    "lingbot2_qkv_multibase_w8_t51",
+    "lingbot2_sdpa_t51_k275_tail",
+    "lingbot2_vision_fc1_gelu_fp16_m384n96k128",
+    "lingbot2_vision_fc1_gelu_w8_m400n80k128",
+    "lingbot2_prefill_qkv_multibase_fp16_m224",
+    "lingbot2_prefill_qkv_multibase_w8_m224",
+    "lingbot2_vision_sdpa_spm_b3s256h16d64_32b",
+    "lingbot2_grouped_down_fp16_ordered_combine",
+    "lingbot2_grouped_down_w8_ordered_combine",
+    "lingbot2_topk_lane2_compact_inverse_e32_t51_tp64",
+    "lingbot2_adarms_norm_shift_h768_diagonal",
+    "lingbot2_vision_qkv_joint_fp16_m768",
+    "lingbot2_vision_qkv_joint_w8_m768",
+    "lingbot2_qk_rope_kv_t51",
+    "lingbot2_prefill_gateup_shared_a_w8_m224",
+    "lingbot2_router_sigmoid_pad_t51_h768_e32",
+    "lingbot2_shared_gateup_resident_silu_w8_t51_h768_i96",
+    "lingbot2_shared_gateup_resident_silu_fp16_t51_h768_i96",
+    "lingbot2_ring_adarms_norm_shift_t51_h768",
+    "lingbot2_prefill_qk_norm_rope_m224",
+    "parallel_linear_w4a16_pgrp_m304n128k128",
+    "parallel_linear_w4a16_pgrp_m336n112k128",
+    "parallel_linear_w4a16_pgrp_m368n96k128",
+    "parallel_linear_w4a16_pgrp_m416n80k128",
+    "parallel_linear_w4a16_pgrp_m464n64k128",
+    "parallel_linear_w4a16_pgrp_m512n48k128",
+    "parallel_linear_w4a16_pgrp_m592n32k128",
+    "parallel_linear_w4a16_pgrp_acc32_m208n128k128",
+    "parallel_linear_w4a16_pgrp_acc32_m224n112k128",
+    "parallel_linear_w4a16_pgrp_acc32_m256n96k128",
+    "parallel_linear_w4a16_pgrp_acc32_m304n80k128",
+    "parallel_linear_w4a16_pgrp_acc32_m352n64k128",
+    "parallel_linear_w4a16_pgrp_acc32_m400n48k128",
+    "parallel_linear_w4a16_pgrp_acc32_m496n32k128",
 };
 static_assert(sizeof(KERNEL_ID_NAMES) / sizeof(KERNEL_ID_NAMES[0]) == static_cast<size_t>(KernelId::_COUNT),
               "KERNEL_ID_NAMES size must match KernelId::_COUNT");
@@ -1016,6 +1515,7 @@ static_assert(sizeof(KERNEL_ID_NAMES) / sizeof(KERNEL_ID_NAMES[0]) == static_cas
 struct CachedKernel {
     std::unique_ptr<::rhino_lkn::Program_t> program;
     std::unique_ptr<::rhino_lkn::Kernel_t> kernel;
+    uint32_t graph_snapshot_contracts = 0;
 };
 
 class KernelCache {
@@ -1073,18 +1573,26 @@ public:
     std::vector<std::string> loaded_oplib_paths() const;
     std::vector<std::pair<std::string, std::string>> loaded_oplib_bytes() const;
 
+    // Cold Graph admission from successfully loaded, audited immutable payloads.
+    uint32_t graph_snapshot_program_contracts(const std::string& kernel_name) const;
+
     // 清空所有缓存的 kernel/program (用于 shutdown)
     void clear() {
         // Revoke capability discovery before destroying any pointer it was
         // derived from. Concurrent readers observe either the prior immutable
         // publication or an uninitialized-runtime rejection, never raw cache
         // storage participating in teardown.
+        std::atomic_store_explicit(
+            &graph_snapshot_contracts_,
+            std::shared_ptr<const std::unordered_map<std::string, uint32_t>>{},
+            std::memory_order_release);
         payload_availability_.withdraw();
         kernels_.clear();  // unique_ptr 会自动释放 Program_t/Kernel_t
         {
             std::lock_guard<std::mutex> lock(loaded_oplib_paths_mutex_);
             loaded_oplib_paths_.clear();
             oplib_symbols_.clear();
+            oplib_sha256_.clear();
             oplib_snapshots_.clear();  // Programs were destroyed before their files.
         }
         for (size_t i = 0; i < static_cast<size_t>(KernelId::_COUNT); ++i) {
@@ -1106,6 +1614,8 @@ private:
 
     // 填充快速缓存数组
     void populate_fast_cache();
+    std::shared_ptr<const std::unordered_map<std::string, uint32_t>>
+        graph_snapshot_contracts_snapshot() const;
     CachedKernel load_kernel_from_oplib(
         const std::string& path, const std::string& kernel_name);
     std::shared_ptr<OplibSnapshot> oplib_snapshot(const std::string& path);
@@ -1113,10 +1623,13 @@ private:
 
     bool initialized_;
     KernelPayloadAvailability payload_availability_;
+    std::shared_ptr<const std::unordered_map<std::string, uint32_t>>
+        graph_snapshot_contracts_;
     std::unordered_map<std::string, CachedKernel> kernels_;
     mutable std::mutex loaded_oplib_paths_mutex_;
     std::set<std::string> loaded_oplib_paths_;
     std::unordered_map<std::string, std::shared_ptr<OplibSnapshot>> oplib_snapshots_;
+    std::unordered_map<std::string, std::string> oplib_sha256_;
     std::unordered_map<std::string, std::unordered_set<std::string>> oplib_symbols_;
     // O(1) 访问的快速缓存数组 - 在 initialize() 时填充
     ::rhino_lkn::Kernel_t* fast_cache_[static_cast<size_t>(KernelId::_COUNT)];
@@ -1134,7 +1647,7 @@ private:
 
 // =============================================================================
 // Queue Cache Manager - 缓存 Queue_t 以减少每次调用的构造/析构开销
-// RPU 最多 8 个 core: 1 core = core0, 4 cores = 0,1,2,3
+// device 最多 8 个 core: 1 core = core0, 4 cores = 0,1,2,3
 // =============================================================================
 
 class QueueCache {
@@ -1161,6 +1674,16 @@ public:
         queues_[idx] = new ::rhino_lkn::Queue_t(static_cast<uint8_t>(core_num));
         if (fresh) *fresh = true;
         return queues_[idx];
+    }
+
+    // Failed preparation may leave pending work without a completed batch.
+    // Destroy only the queue owned by this caller before another graph reuses it.
+    void evict(int64_t core_num, ::rhino_lkn::Queue_t* expected) noexcept {
+        if (core_num < 1 || core_num > 8) return;
+        auto& queue = queues_[static_cast<size_t>(core_num - 1)];
+        if (queue != expected) return;
+        delete queue;
+        queue = nullptr;
     }
 
     // 清空所有缓存的 Queue (用于 shutdown)

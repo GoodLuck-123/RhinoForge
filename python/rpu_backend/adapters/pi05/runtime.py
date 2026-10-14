@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import threading
 import weakref
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -404,7 +405,7 @@ def _validate_prepared_graph_profile(self, num_steps: int) -> None:
         )
 
 
-# CR-R5 BLOCKER 9: allowlist of permitted `**kwargs` to the RPU-path sample_actions
+# CR-R5 BLOCKER 9: allowlist of permitted `**kwargs` to the device-path sample_actions
 # (from _adapter.py:480). Unknown kwargs raise instead of being silently dropped.
 _RPU_ALLOWED_SAMPLE_ACTIONS_KWARGS = {"num_steps"}
 
@@ -528,6 +529,23 @@ def _reset_prefix_mask_cache():
         _PREFIX_MASK_CACHE_MISSES = 0
 
 
+def _pi05_probe_save(name: str, tensor: Any) -> None:
+    """Save a named tensor when RPU_PI05_PROBE_DIR is configured."""
+    probe_dir = os.environ.get("RPU_PI05_PROBE_DIR")
+    if not probe_dir or tensor is None:
+        return
+    try:
+        os.makedirs(probe_dir, exist_ok=True)
+        t = tensor
+        if hasattr(t, "device") and t.device.type == "rpu":
+            t = t.cpu()
+        if hasattr(t, "dtype") and t.dtype in (torch.float16, torch.bfloat16):
+            t = t.float()
+        torch.save(t, os.path.join(probe_dir, f"{name}.pt"))
+    except Exception as exc:  # probes must never break the forward
+        _LOG.warning("Pi05 probe dump %s failed: %s", name, exc)
+
+
 def _load_pi05_probe_tensor(
     path: str,
     *,
@@ -572,7 +590,7 @@ def _pi05_destroy_handle_and_unmap(handle: int, model_ref: Any) -> None:
 # =============================================================================
 
 def _resolve_rpu_device(self):
-    """Helper 2: resolve RPU device from VLM layer 0 (from _adapter.py:565-586)."""
+    """Helper 2: resolve device device from VLM layer 0 (from _adapter.py:565-586)."""
     cached = getattr(self, "_rpu_runtime_device", None)
     if cached is not None:
         return cached
@@ -584,7 +602,7 @@ def _resolve_rpu_device(self):
     rpu_device = next(vlm.layers[0].parameters()).device
     if rpu_device.type != 'rpu':
         raise RPUBackendError(
-            f"Pi05 RPU path: vlm is not on RPU (device={rpu_device}). "
+            f"Pi05 device path: vlm is not on device (device={rpu_device}). "
             "adapter.to_rpu() Step D failed silently. Reload the policy.")
     return rpu_device
 
@@ -609,18 +627,62 @@ def _sample_noise(self, bsize, noise):
             name="RPU_PI05_LOAD_NOISE",
             expected_shape=actions_shape,
         ).to(dtype=torch.float32)
+    _pi05_probe_save("x_t_init", x_t)
     return x_t
+
+
+def _eligible_serial_siglip_slab(self, images):
+    """Return only the existing exact private CPU slab admitted for TP4/6."""
+    if not images or not all(type(image) is torch.Tensor for image in images):
+        return None
+    from rpu_backend.adapters.siglip import _shared_siglip_image_slab
+
+    shared_slab = _shared_siglip_image_slab(images)
+    batch_n = getattr(self, "_rpu_siglip_batch_n", 1)
+    shared_batch = (
+        batch_n > 1
+        and len(images) == batch_n
+        and shared_slab is not None
+    )
+    execution = vars(self).get("_rpu_execution")
+    model = execution.get("model") if isinstance(execution, Mapping) else None
+    model_cores = model.get("num_cores") if isinstance(model, Mapping) else None
+    serial_slab = (
+        not shared_batch
+        and vars(self).get("_rpu_siglip_batch_n") == 1
+        and type(model_cores) is int and model_cores in (4, 6)
+        and vars(self).get("training") is False
+        and type(shared_slab) is torch.Tensor
+        and shared_slab.device.type == "cpu"
+        and shared_slab.dtype == torch.float16
+        and tuple(shared_slab.shape) == (3, 3, 224, 224)
+        and shared_slab.is_contiguous()
+        and shared_slab.storage_offset() == 0
+        and shared_slab.untyped_storage().nbytes()
+        == shared_slab.numel() * shared_slab.element_size()
+        and not shared_slab.requires_grad
+        and not shared_slab.is_neg() and not shared_slab.is_conj()
+        and all(
+            type(image) is torch.Tensor
+            and image.device.type == "cpu" and image.dtype == torch.float16
+            and image.is_contiguous() and not image.requires_grad
+            and not image.is_neg() and not image.is_conj()
+            for image in images
+        )
+    )
+    return shared_slab if serial_slab else None
 
 
 def _prepare_prefill_siglip_inputs(
     self, images, img_masks, rpu_device
 ):
-    """Upload SigLIP inputs without splitting a marked multi-camera slab.
+    """Prepare SigLIP inputs without splitting a marked multi-camera slab.
 
     The batch-preprocessing path returns CPU dim-0 views of one camera slab.
     Keep those views intact until `_siglip_forward_images`, which performs one
-    packed upload. Dynamic/reference inputs retain the established per-image
-    upload. Masks stay on CPU: they only feed prefix-mask construction, and the
+    packed copy. Exact TP4/6 serial inputs retain CPU views for three private
+    native copies. Dynamic/reference inputs keep the per-image upload.
+    Masks stay on CPU: they only feed prefix-mask construction, and the
     fused Gemma path normalizes its attention mask on CPU.
     """
     if images is None:
@@ -629,12 +691,18 @@ def _prepare_prefill_siglip_inputs(
     batch_n = getattr(self, "_rpu_siglip_batch_n", 1)
     from rpu_backend.adapters.siglip import _shared_siglip_image_slab
 
+    shared_slab = (
+        _shared_siglip_image_slab(images)
+        if batch_n > 1 or all(type(image) is torch.Tensor for image in images)
+        else None
+    )
     shared_batch = (
         batch_n > 1
         and len(images) == batch_n
-        and _shared_siglip_image_slab(images) is not None
+        and shared_slab is not None
     )
-    if not shared_batch:
+    serial_slab = _eligible_serial_siglip_slab(self, images)
+    if serial_slab is None and not shared_batch:
         images = [image.to(rpu_device) for image in images]
     return images, img_masks
 
@@ -778,9 +846,9 @@ def _prefill_prefix_embs(self, images, img_masks, tokens, masks, rpu_device):
     # Iteration 6: VLM's embed_tokens now lives on CPU (matches legacy
     # pi05_converter.py:1230-1231), so tokens MUST stay on CPU; they'd
     # otherwise hit a dtype/device mismatch inside torch.embedding. masks
-    # stay on CPU for lerobot mask ops. Images go to RPU only when SigLIP
-    # is on RPU — lerobot's patched `embed_image` then passes them to the
-    # RPU vision_tower.
+    # stay on CPU for lerobot mask ops. Images go to device only when SigLIP
+    # is on device — lerobot's patched `embed_image` then passes them to the
+    # device vision_tower.
     _siglip_param = next(
         self.paligemma_with_expert.paligemma.model.vision_tower.parameters(),
         None,
@@ -788,10 +856,34 @@ def _prefill_prefix_embs(self, images, img_masks, tokens, masks, rpu_device):
     _siglip_on_rpu = (
         _siglip_param is not None and _siglip_param.device.type == 'rpu'
     )
+    if not _siglip_on_rpu:
+        vision_tower = self.paligemma_with_expert.paligemma.model.vision_tower
+        vision_inner = getattr(vision_tower, "vision_model", vision_tower)
+        native_handle = getattr(vision_inner, "_rpu_vision_handle", None)
+        # Installed SigLIP retains CPU embeddings. Extend the legacy device
+        # probe only for the already admitted private serial camera slab.
+        _siglip_on_rpu = (
+            type(native_handle) is int and native_handle > 0
+            and _eligible_serial_siglip_slab(self, images) is not None
+        )
     if _siglip_on_rpu and images is not None:
         images, img_masks = _prepare_prefill_siglip_inputs(
             self, images, img_masks, rpu_device
         )
+    elif images is not None and vars(vision_inner).get("_rpu_vision_num_cores") == 4:
+        # A nonadmitted whole list must not authorize native CPU ingress from
+        # its individually intact camera marks. Drop only local view metadata;
+        # the caller's tensors, bytes and addresses remain unchanged.
+        images = [
+            image.view_as(image)
+            if (type(image) is torch.Tensor and image.device.type == "cpu"
+                and image.dtype == torch.float16 and image.is_contiguous()
+                and not image.requires_grad and not image.is_neg() and not image.is_conj()
+                and type(getattr(image, "_pi05_batch_slab", None)) is torch.Tensor
+                and type(getattr(image, "_pi05_batch_index", None)) is int)
+            else image
+            for image in images
+        ]
 
     # --- VLM prefill (matches lerobot sample_actions:812-825) ---
     prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
@@ -849,6 +941,9 @@ def _prefill_prefix_embs(self, images, img_masks, tokens, masks, rpu_device):
         prefix_att_masks,
         execution_prefix_len - logical_prefix_len,
     )
+    _pi05_probe_save("prefix_embs", prefix_embs)
+    _pi05_probe_save("prefix_pad_masks", prefix_pad_masks)
+    _pi05_probe_save("prefix_att_masks", prefix_att_masks)
     # B3·A·2 (2026-05-27): cache hit returns last (mask4d, pos_ids) verbatim;
     # cache miss with all-zero att uses pad-outer-product fast-path; otherwise
     # calls upstream make_att_2d_masks. Spec §5.2.
@@ -858,6 +953,8 @@ def _prefill_prefix_embs(self, images, img_masks, tokens, masks, rpu_device):
             self, "_pi05_prefill_mask_fp16", False
         ) else None),
     )
+    _pi05_probe_save("prefix_att_2d_masks_4d", prefix_att_2d_masks_4d)
+    _pi05_probe_save("prefix_position_ids", prefix_position_ids)
     self.paligemma_with_expert.paligemma.model.language_model.config._attn_implementation = "eager"  # noqa: SLF001
 
     vlm = self.paligemma_with_expert.paligemma.model.language_model
@@ -917,6 +1014,15 @@ def _prefill_prefix_embs(self, images, img_masks, tokens, masks, rpu_device):
     })
     prefix_len = int(prefix_pad_masks.shape[1])
     past_key_values._prefix_len = prefix_len
+    # Save selected logical KV tensors after prefill.
+    if os.environ.get("RPU_PI05_PROBE_DIR"):
+        _pi05_probe_save("kv_post_prefill_L0_k", past_key_values.k_caches[0])
+        _pi05_probe_save("kv_post_prefill_L0_v", past_key_values.v_caches[0])
+        _pi05_probe_save("kv_post_prefill_L8_k", past_key_values.k_caches[8])
+        _pi05_probe_save("kv_post_prefill_L8_v", past_key_values.v_caches[8])
+        _pi05_probe_save("kv_post_prefill_L17_k", past_key_values.k_caches[17])
+        _pi05_probe_save("kv_post_prefill_L17_v", past_key_values.v_caches[17])
+
     return past_key_values, prefix_pad_masks, prefix_len
 
 
@@ -1016,7 +1122,7 @@ def _kv_prefix_full_hash(past_key_values, prefix_len: int) -> bytes:
 
 def _run_denoise_python_baseline(self, x_t, prefix_pad_masks, past_key_values,
                                   num_steps, prefix_len, bsize):
-    """Legacy denoise loop — CPU/RPU AdaRMS-per-step path (from _adapter.py:666-748).
+    """Legacy denoise loop — CPU or device AdaRMS-per-step path (from _adapter.py:666-748).
 
     Preserves all existing behavior verbatim including Diff-B fix (CPU fp32
     Euler accumulator) and PERF E3/E4/E5 hoisting.
@@ -1097,6 +1203,11 @@ def _run_denoise_python_baseline(self, x_t, prefix_pad_masks, past_key_values,
                 [1] + [0] * (chunk_size - 1),
                 dtype=suffix_embs.dtype, device=suffix_embs.device,
             )[None, :].expand(bsize, chunk_size)
+        if step == 0:
+            _pi05_probe_save("suffix_embs_step0", suffix_embs)
+            _pi05_probe_save("adarms_cond_step0", adarms_cond)
+            _pi05_probe_save("suffix_pad_masks_step0", suffix_pad_masks)
+            _pi05_probe_save("suffix_att_masks_step0", suffix_att_masks)
 
         # L2 mask construction once at step 0 (data_ptr stable across
         # 5 forwards → C++ AdaRMSModel mask cache hits on steps 1-4).
@@ -1111,10 +1222,12 @@ def _run_denoise_python_baseline(self, x_t, prefix_pad_masks, past_key_values,
             prefix_offsets = torch.sum(prefix_pad_masks, dim=-1)[:, None]
             position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
             full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
+            _pi05_probe_save("att_mask_4d_step0", full_att_2d_masks_4d)
+            _pi05_probe_save("position_ids_step0", position_ids)
 
         # Expert forward via paligemma_with_expert — routes through
         # `rpu_adarms_model_forward` (patched in Step E). That function:
-        #   - auto-routes CPU inputs to RPU
+        #   - auto-routes CPU inputs to device
         #   - invokes torch.ops.rpu.adarms_forward (fused AdaRMS C++ op)
         #   - applies final PiGemmaRMSNorm(output, adarms_cond)  ← Diff-A fix
         #   - returns `BaseModelOutputWithPast(last_hidden_state=...)` on CPU
@@ -1127,6 +1240,8 @@ def _run_denoise_python_baseline(self, x_t, prefix_pad_masks, past_key_values,
             adarms_cond=[None, adarms_cond],
         )
         suffix_out = outputs_embeds[1]
+        if step == 0:
+            _pi05_probe_save("suffix_out_step0_full", suffix_out)
 
         # Match legacy semantics (pi05_converter.py:369-372):
         #   - take last chunk_size tokens (take_len precomputed above)
@@ -1134,12 +1249,18 @@ def _run_denoise_python_baseline(self, x_t, prefix_pad_masks, past_key_values,
         #   - action_out_proj on CPU fp32 -> v_t is fp16 (post-hook cast)
         suffix_out = suffix_out[:, -take_len:]
         suffix_out = suffix_out.to(dtype=torch.float32)
+        if step == 0:
+            _pi05_probe_save("suffix_out_step0_sliced", suffix_out)
         v_t = self.action_out_proj(suffix_out)
+        if step == 0:
+            _pi05_probe_save("v_t_step0", v_t)
 
         # Preserve the legacy Euler arithmetic: dt * v_t keeps v_t's dtype;
         # adding it to the FP32 state produces FP32. This is not equivalent
         # to the fused loop's FP16 state and rounded scalar.
         x_t = x_t + dt * v_t
+        if step == 0:
+            _pi05_probe_save("x_t_after_step0", x_t)
 
     action_plan = getattr(
         self.paligemma_with_expert.gemma_expert.model,
@@ -1165,7 +1286,7 @@ def _run_denoise_fused(self, x_t_cpu_fp32, prefix_pad_masks, past_key_values,
     """Spec §2.4 fused denoise loop.
 
     Mirrors _run_denoise_python_baseline at the boundary (x_t CPU fp32 in/out);
-    inside the loop x_t lives RPU fp16, Euler accumulator stays CPU fp32
+    inside the loop x_t lives device fp16, Euler accumulator stays CPU fp32
     (Diff-B fix preserved per spec §10).
     """
     import torch.nn.functional as F
@@ -1326,7 +1447,10 @@ def _run_denoise_loop(self, x_t_cpu_fp32, prefix_pad_masks, past_key_values,
             f"exceeds k_cache.max_seq_len={cache_max_seq}.")
 
     cond_all = _precompute_adarms_cond_all(self, num_steps)  # [num_steps, h_ada]
-    x0 = torch.empty(bsize, cs, mad, dtype=torch.float16, device='rpu')
+    # CPU noise stays on CPU until native owns its one DDR publication.
+    # Other input devices retain the original device copy path.
+    x0_device = 'cpu' if x_t_cpu_fp32.device.type == 'cpu' else 'rpu'
+    x0 = torch.empty(bsize, cs, mad, dtype=torch.float16, device=x0_device)
     x0.copy_(x_t_cpu_fp32.to(torch.float16))
     x_out = torch.empty(bsize, cs, mad, dtype=torch.float16, device='rpu')
 
@@ -1433,7 +1557,7 @@ def install_sample_actions_patch() -> None:
                                       noise, num_steps, kwargs):
         handle = _PI05_HANDLES.get(self)
         if handle is None:
-            # Not RPU-swizzled for this instance -> CPU original fallback.
+            # Not device-swizzled for this instance -> CPU original fallback.
             return (False, _orig_sample_actions(
                 self, images, img_masks, tokens, masks,
                 noise=noise, num_steps=num_steps, **kwargs))
@@ -1448,15 +1572,15 @@ def install_sample_actions_patch() -> None:
         unexpected = set(kwargs) - _RPU_ALLOWED_SAMPLE_ACTIONS_KWARGS
         if unexpected:
             raise RPUBackendError(
-                f"Pi05Policy RPU-path sample_actions received unsupported kwargs: "
+                f"Pi05Policy device-path sample_actions received unsupported kwargs: "
                 f"{sorted(unexpected)}. Either extend "
                 f"_RPU_ALLOWED_SAMPLE_ACTIONS_KWARGS in runtime.py or disable the "
-                f"RPU path for this inference call.")
+                f"device path for this inference call.")
 
         bsize = tokens.shape[0]
         if bsize != 1:
             raise RPUBackendError(
-                f"Pi05 RPU path requires batch_size=1, got {bsize}. Phase 3 is "
+                f"Pi05 device path requires batch_size=1, got {bsize}. Phase 3 is "
                 "single-batch only (see CONTEXT §deferred).")
 
         return (True, None)
@@ -1564,7 +1688,7 @@ def install_sample_actions_patch() -> None:
         # `_patched_denoise_step` semantics in-tree (no env-guarded fallback).
         # =====================================================================
 
-        # Helper 2: resolve RPU device (top-level)
+        # Helper 2: resolve device device (top-level)
         rpu_device = _resolve_rpu_device(self)
 
         # Helper 3: noise sampling (top-level)

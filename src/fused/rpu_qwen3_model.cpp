@@ -150,7 +150,7 @@ void CausalDecoderModel::validate_wall_oss_z1_mrope_inputs(
                     position_ids.device().type() == at::kPrivateUse1 &&
                     position_ids.scalar_type() == at::kInt &&
                     position_ids.is_contiguous(),
-                "Wall-OSS text Z1 position_ids must be stable contiguous RPU "
+                "Wall-OSS text Z1 position_ids must be stable contiguous device "
                 "int32 [192,3]");
     TORCH_CHECK(rope_cos_il.defined() && rope_sin_il.defined() &&
                     rope_cos_il.dim() == 2 &&
@@ -163,7 +163,7 @@ void CausalDecoderModel::validate_wall_oss_z1_mrope_inputs(
                     rope_sin_il.scalar_type() == at::kHalf &&
                     rope_cos_il.is_contiguous() && rope_sin_il.is_contiguous(),
                 "Wall-OSS text Z1 rope_cos_il/rope_sin_il must be stable "
-                "contiguous RPU FP16 [192,64]");
+                "contiguous device FP16 [192,64]");
 }
 
 void CausalDecoderModel::prime_wall_oss_z1_inputs(
@@ -198,6 +198,7 @@ void CausalDecoderModel::prime_wall_oss_z1_inputs(
         position_ids_keepalive_.narrow(0, /*start=*/0, execution_len);
     auto cos_dst = cos_il_keepalive_.narrow(0, /*start=*/0, execution_len);
     auto sin_dst = sin_il_keepalive_.narrow(0, /*start=*/0, execution_len);
+    invalidate_cpu_position_keepalive(0, execution_len);
     position_dst.copy_(position_ids);
     cos_dst.copy_(rope_cos_il);
     sin_dst.copy_(rope_sin_il);
@@ -235,7 +236,7 @@ void CausalDecoderModel::prime_wall_oss_z1_inputs(
     TORCH_CHECK(wall_z1_position_ids_addr_ != 0 &&
                     wall_z1_rope_cos_il_addr_ != 0 &&
                     wall_z1_rope_sin_il_addr_ != 0,
-                "Wall-OSS text Z1 input prime resolved a zero RPU address");
+                "Wall-OSS text Z1 input prime resolved a zero device address");
     wall_z1_inputs_primed_ = true;
 }
 
@@ -396,7 +397,7 @@ at::Tensor CausalDecoderModel::forward_wall_oss_z1(
                     hidden_shape_carrier.device().type() == at::kPrivateUse1 &&
                     hidden_shape_carrier.scalar_type() == at::kHalf &&
                     hidden_shape_carrier.is_contiguous(),
-                "Wall-OSS text Z1 shape carrier must be contiguous RPU FP16 "
+                "Wall-OSS text Z1 shape carrier must be contiguous device FP16 "
                 "[1,192,2048]");
     validate_wall_oss_z1_mrope_inputs(
         position_ids, rope_cos_il, rope_sin_il);
@@ -555,7 +556,7 @@ void CausalDecoderModel::validate_qwen3vl_pooler_z1_model_profile(
                 tensor.device().type() == at::kPrivateUse1 &&
                 tensor.layout() == c10::Layout::Strided &&
                 tensor.is_contiguous() && tensor.numel() >= min_numel,
-            "Qwen3-VL pooler Z1 requires contiguous FP16 RPU ", name,
+            "Qwen3-VL pooler Z1 requires contiguous FP16 device ", name,
             " with at least ", min_numel, " elements at layer ", layer);
     };
     auto require_fp16_vector = [&require_fp16_owner](
@@ -638,7 +639,7 @@ void CausalDecoderModel::validate_qwen3vl_pooler_z1_model_profile(
                         c10::Layout::Strided &&
                     position_ids_keepalive_.is_contiguous(),
                 "Qwen3-VL pooler Z1 position owner must be contiguous int32 "
-                "RPU [>=128,3]");
+                "device [>=128,3]");
 }
 
 bool CausalDecoderModel::
@@ -830,7 +831,7 @@ void CausalDecoderModel::validate_qwen3vl_pooler_z1_position_ids(
                     position_ids.device().type() == at::kPrivateUse1 &&
                     position_ids.scalar_type() == at::kInt &&
                     position_ids.is_contiguous(),
-                "Qwen3-VL pooler Z1 position_ids must be contiguous RPU "
+                "Qwen3-VL pooler Z1 position_ids must be contiguous device "
                 "int32 [128,3]");
 }
 
@@ -857,7 +858,7 @@ void CausalDecoderModel::validate_qwen3vl_pooler_z1_rope_il(
             rope_sin_il.scalar_type() == at::kHalf &&
             rope_cos_il.is_contiguous() && rope_sin_il.is_contiguous(),
         "Qwen3-VL pooler partial M-RoPE tables must be matching "
-        "contiguous RPU FP16 [128,head_dim/2]");
+        "contiguous device FP16 [128,head_dim/2]");
 }
 
 void CausalDecoderModel::validate_qwen3vl_pooler_z1_contract() const {
@@ -905,7 +906,7 @@ void CausalDecoderModel::prime_qwen3vl_pooler_z1_inputs(
     const uint64_t position_ids_addr =
         RpuGetDevAddr(position_ids.data_ptr<int32_t>());
     TORCH_CHECK(position_ids_addr != 0,
-                "Qwen3-VL pooler Z1 input prime resolved a zero RPU address");
+                "Qwen3-VL pooler Z1 input prime resolved a zero device address");
     if (qwen3vl_pooler_z1_inputs_primed_) {
         TORCH_CHECK(qwen3vl_pooler_z1_position_ids_addr_ == position_ids_addr,
                     "Qwen3-VL pooler Z1 input re-prime address drifted");
@@ -913,6 +914,7 @@ void CausalDecoderModel::prime_qwen3vl_pooler_z1_inputs(
 
     auto position_dst = position_ids_keepalive_.narrow(
         0, /*start=*/0, QWEN3VL_POOLER_Z1_CANARY_EXECUTION_LEN);
+    invalidate_cpu_position_keepalive(0, QWEN3VL_POOLER_Z1_CANARY_EXECUTION_LEN);
     position_dst.copy_(position_ids);
     rpu_ddr_flush_force_sized(
         position_dst.data_ptr<int32_t>(),
@@ -1215,7 +1217,7 @@ at::Tensor CausalDecoderModel::forward_qwen3vl_pooler_z1(
                     hidden_shape_carrier.device().type() == at::kPrivateUse1 &&
                     hidden_shape_carrier.scalar_type() == at::kHalf &&
                     hidden_shape_carrier.is_contiguous(),
-                "Qwen3-VL pooler Z1 shape carrier must be contiguous RPU "
+                "Qwen3-VL pooler Z1 shape carrier must be contiguous device "
                 "FP16 [1,128,2048]");
     validate_qwen3vl_pooler_z1_position_ids(position_ids);
     const uint64_t position_ids_addr =
@@ -1483,7 +1485,7 @@ void CausalDecoderModel::validate_qwen3vl_multiview_text_position_ids(
             position_ids.device().type() == at::kPrivateUse1 &&
             position_ids.scalar_type() == at::kInt &&
             position_ids.is_contiguous(),
-        "Qwen3-VL multiview Text position_ids must be contiguous RPU "
+        "Qwen3-VL multiview Text position_ids must be contiguous device "
         "int32 [225,3]");
 }
 
@@ -1502,7 +1504,7 @@ void CausalDecoderModel::validate_qwen3vl_multiview_text_rope_il(
             rope_sin_il.scalar_type() == at::kHalf &&
             rope_cos_il.is_contiguous() && rope_sin_il.is_contiguous(),
         "Qwen3-VL multiview Text rope_cos_il/rope_sin_il must be matching "
-        "contiguous RPU FP16 [225,64]");
+        "contiguous device FP16 [225,64]");
 }
 
 void CausalDecoderModel::validate_qwen3vl_multiview_text_contract() const {
@@ -1757,12 +1759,12 @@ void CausalDecoderModel::prime_qwen3vl_multiview_text_inputs(
         TORCH_CHECK(
             rope_cos_il_addr != 0 && rope_sin_il_addr != 0,
             "Qwen3-VL multiview Text partial M-RoPE source resolved a zero "
-            "RPU address");
+            "device address");
     }
     const uint64_t position_ids_addr =
         RpuGetDevAddr(position_ids.data_ptr<int32_t>());
     TORCH_CHECK(position_ids_addr != 0,
-                "Qwen3-VL multiview Text position resolved a zero RPU address");
+                "Qwen3-VL multiview Text position resolved a zero device address");
     if (qwen3vl_multiview_text_composite_inputs_primed_) {
         TORCH_CHECK(
             qwen3vl_multiview_text_composite_position_ids_addr_ ==
@@ -1775,6 +1777,7 @@ void CausalDecoderModel::prime_qwen3vl_multiview_text_inputs(
     }
     auto position_dst = position_ids_keepalive_.narrow(
         0, /*start=*/0, QWEN3VL_MULTIVIEW_TEXT_EXECUTION_LEN);
+    invalidate_cpu_position_keepalive(0, QWEN3VL_MULTIVIEW_TEXT_EXECUTION_LEN);
     position_dst.copy_(position_ids);
     rpu_ddr_flush_force_sized(
         position_dst.data_ptr<int32_t>(),
@@ -1891,7 +1894,7 @@ at::Tensor CausalDecoderModel::forward_qwen3vl_multiview_text_composite(
             hidden_states.device().type() == at::kPrivateUse1 &&
             hidden_states.scalar_type() == at::kHalf &&
             hidden_states.is_contiguous(),
-        "Qwen3-VL multiview Text input must be contiguous RPU FP16 "
+        "Qwen3-VL multiview Text input must be contiguous device FP16 "
         "[1,225,2560]");
     validate_qwen3vl_multiview_text_position_ids(position_ids);
     TORCH_CHECK(
@@ -2021,7 +2024,7 @@ void CausalDecoderModel::bind_qwen3vl_multiview_text_outer_fast_input(
             hidden_states.scalar_type() == at::kHalf &&
             hidden_states.layout() == c10::Layout::Strided &&
             hidden_states.is_contiguous(),
-        "Qwen3-VL multiview Text outer-fast input must be contiguous RPU "
+        "Qwen3-VL multiview Text outer-fast input must be contiguous device "
         "FP16 [1,225,2560]");
     TORCH_CHECK(
         std::all_of(
@@ -2904,9 +2907,25 @@ void rpu_causal_decoder_set_linear_acc32(int64_t handle, bool enabled) {
         ->set_linear_acc32(enabled);
 }
 
+void rpu_causal_decoder_set_lingbot_prefill_mode(
+    int64_t handle, bool folded_rmsnorm, bool kv_only) {
+    CausalDecoderRegistry::get(handle, "rpu_causal_decoder_set_lingbot_prefill_mode")
+        ->set_lingbot_prefill_mode(folded_rmsnorm, kv_only);
+}
+
 void rpu_causal_decoder_set_rhinovla_high_precision(int64_t handle, bool enabled) {
     CausalDecoderRegistry::get(handle, "rpu_causal_decoder_set_rhinovla_high_precision")
         ->set_rhinovla_high_precision(enabled);
+}
+
+void rpu_causal_decoder_set_lingbot_prefill_kv_pair(int64_t handle, bool enabled) {
+    CausalDecoderRegistry::get(handle, "rpu_causal_decoder_set_lingbot_prefill_kv_pair")
+        ->set_lingbot_prefill_kv_pair(enabled);
+}
+
+void rpu_causal_decoder_set_lingbot_prefill_qk_norm_rope(int64_t handle, bool enabled) {
+    CausalDecoderRegistry::get(handle, "rpu_causal_decoder_set_lingbot_prefill_qk_norm_rope")
+        ->set_lingbot_prefill_qk_norm_rope(enabled);
 }
 
 void rpu_causal_decoder_set_rhinovla_high_precision_fusions(int64_t handle, bool enabled) {
@@ -2994,7 +3013,7 @@ int64_t rpu_causal_decoder_get_chunk_size_override(int64_t handle) {
 
 // MR-A: declare this handle's CERTIFIED chunk envelope. Deny-by-default —
 // without it the planner refuses to prefill. Allowlist + evidence rules:
-// docs/roadmap/chunk_certified_envelope.md.
+// docs/runtime_config.md.
 void rpu_causal_decoder_set_chunk_envelope(int64_t handle, int64_t max_kv_len,
                                            int64_t chunk) {
     CausalDecoderRegistry::get(handle, "rpu_causal_decoder_set_chunk_envelope")
@@ -3018,7 +3037,7 @@ void rpu_causal_decoder_set_adarms_step(
         ->set_adarms_step(input_scales, input_shifts, post_scales, post_shifts);
 }
 
-// Replay-safe variant: each arg is one [num_layers, hidden] fp16 RPU tensor (not a list).
+// Replay-safe variant: each arg is one [num_layers, hidden] fp16 device tensor (not a list).
 // First call builds the mutable graph; subsequent calls refresh keepalives in place (no
 // rebuild) so the expert graph replays across Euler steps. See rpu_qwen3_model.h.
 void rpu_causal_decoder_set_adarms_step_mutable(
@@ -3058,6 +3077,35 @@ at::Tensor rpu_causal_decoder_forward(
         planned_stage_descriptor);
 }
 
+void rpu_causal_decoder_prefill_kv_only(
+    int64_t handle,
+    const at::Tensor& hidden_states,
+    at::TensorList k_caches_list,
+    at::TensorList v_caches_list,
+    const std::optional<at::Tensor>& attention_mask,
+    int64_t position,
+    bool is_causal,
+    const std::optional<at::Tensor>& position_ids,
+    const std::optional<std::vector<at::Tensor>>& deepstack_dense_visual_embeds,
+    const std::optional<at::Tensor>& rope_cos_il,
+    const std::optional<at::Tensor>& rope_sin_il,
+    int64_t cos_sin_offset,
+    int64_t batch_slot,
+    bool allow_batch_decode,
+    int64_t planned_chunk_size,
+    at::IntArrayRef planned_stage_descriptor) {
+    std::vector<at::Tensor> k_caches(k_caches_list.begin(), k_caches_list.end());
+    std::vector<at::Tensor> v_caches(v_caches_list.begin(), v_caches_list.end());
+    // As with Gemma's cache-only entry, FMB can retain an internal output
+    // allocation. Its final DMA is absent and its unwritten contents are not
+    // returned across the public op boundary.
+    (void)CausalDecoderRegistry::get(handle, "rpu_causal_decoder_prefill_kv_only")->forward(
+        hidden_states, k_caches, v_caches, attention_mask, position, is_causal,
+        position_ids, deepstack_dense_visual_embeds, rope_cos_il, rope_sin_il,
+        cos_sin_offset, batch_slot, allow_batch_decode, planned_chunk_size,
+        planned_stage_descriptor, /*kv_only_entry=*/true);
+}
+
 // TASK-1.5 (codex round-3 path-(b) BC2-01 closure): per-handle resolved chunk_size.
 // Returns 0 if no forward has run yet for this handle (sentinel default).
 // Used by tests/library/test_llama_rpu_for_causal_lm.py BC2-01 3-step protocol.
@@ -3080,6 +3128,15 @@ void rpu_causal_decoder_prepare_persistent_spm(
     CausalDecoderRegistry::get(handle, "rpu_causal_decoder_prepare_persistent_spm")
         ->prepare_persistent_spm(
             execution_len, position, is_causal, mask_kv_len);
+}
+
+void rpu_causal_decoder_enable_resident_preloads(int64_t handle) {
+    CausalDecoderRegistry::get(handle, "causal_decoder_enable_resident_preloads")
+        ->enable_lingbot_resident_preloads();
+}
+void rpu_causal_decoder_prime_resident_preloads(int64_t handle, at::IntArrayRef descriptor) {
+    CausalDecoderRegistry::get(handle, "causal_decoder_prime_resident_preloads")
+        ->prime_resident_preloads(descriptor);
 }
 
 std::vector<int64_t> rpu_causal_decoder_resolve_prefill_stage_domain(
@@ -3107,4 +3164,22 @@ std::vector<int64_t> rpu_causal_decoder_resolve_decode_stage_descriptor(
     return CausalDecoderRegistry::get(
         handle, "rpu_causal_decoder_resolve_decode_stage_descriptor")
         ->resolve_decode_stage_descriptor(position);
+}
+
+
+void rpu_causal_decoder_set_wall_prefill_routes(
+    int64_t handle, bool mixed_precision, bool staged_mlp,
+    int64_t rmsnorm_capability, bool owner_direct_kv) {
+    CausalDecoderRegistry::get(handle, "rpu_causal_decoder")
+        ->set_wall_prefill_routes(
+            mixed_precision, staged_mlp, rmsnorm_capability, owner_direct_kv);
+}
+
+
+void rpu_causal_decoder_set_wall_sorting_routes(
+    int64_t handle, int64_t mask, bool m224, bool silu, bool action_reuse,
+    bool prefill_row, bool prefill_mlp, bool paired) {
+    CausalDecoderRegistry::get(handle, "rpu_causal_decoder_set_wall_sorting_routes")
+        ->set_wall_sorting_routes(
+            mask, m224, silu, action_reuse, prefill_row, prefill_mlp, paired);
 }

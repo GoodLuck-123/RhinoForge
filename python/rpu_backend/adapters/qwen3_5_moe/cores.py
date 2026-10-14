@@ -3,12 +3,18 @@ from rpu_backend.api.errors import UnsupportedModelError
 from rpu_backend.runtime.topology import DecoderTopology
 
 
-def core_topology(execution=None):
+def core_topology(execution=None, *, config=None):
     cores = (execution or {}).get("model", {}).get("num_cores", 8)
     if type(cores) is not int or cores not in (4, 6, 8):
         raise UnsupportedModelError(
             "Qwen3.5-35B-A3B requires fixed model.num_cores=4, 6 or 8"
         )
+    if config is not None:
+        from .quant_scope import runtime_capabilities, validate_exact_profile
+
+        capabilities = runtime_capabilities(validate_exact_profile(config)["profile"])
+        if cores not in capabilities.allowed_cores:
+            raise UnsupportedModelError("Qwen3.5 routed INT4 profile requires TP8")
     attention = 8 if cores == 8 else 4
     return DecoderTopology(cores, attention, cores, attention)
 

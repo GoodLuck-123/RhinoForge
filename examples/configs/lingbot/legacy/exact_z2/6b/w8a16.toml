@@ -1,0 +1,25 @@
+# 已归档的 exact-Z2 复现配置；当前 FP16/W8A16 输入见 ../../v2/README.md。
+# 本配置保留历史掩码与固定 P225 执行合同。
+[example]
+profile_id = "lingbot-vla-v2-6b.w8a16.exact-z2"
+registry_alias = "lingbot-vla-v2-6b"
+target = "lingbot2"
+dtype = "w8a16"
+
+[example.opt_in]
+RPU_LINGBOT2_ALLOW_UNVALIDATED = "1"
+RPU_LINGBOT2_MULTIVIEW_SPM_Z2 = "1"
+
+[input]
+observation = "/path/to/lingbot2_exact_z2_observation.pt"
+prefix_length_range = [215, 225]
+seed = 0
+
+[run]
+warmup = 2
+runs = 3
+hwperf = false
+profile = false
+seed = 0
+
+[rpu_execution]

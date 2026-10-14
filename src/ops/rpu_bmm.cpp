@@ -274,7 +274,7 @@ void rpu_launch_bmm_kernel(const at::Tensor &input_a, const at::Tensor &input_b,
 //   - multi-core broadcast: each of num_cores cores runs the batched gemm on its
 //     OWN per-core SPM at the same offsets (for the GDN chunk, batch = heads/core).
 // No-C path (hasCType=4) -> stores raw A@B (alpha/beta/C ignored, exactly like the
-// eager; see [[bmm-no-c-skips-alpha-beta]]). Assumes M,N,K % 16 == 0 so the v16 SPM
+// eager; see the no-C alpha/beta contract). Assumes M,N,K % 16 == 0 so the v16 SPM
 // layout equals the plain contiguous fp16 layout (true for GDN chunk: C=64, Dk=Dv=128).
 // batch applies to BOTH operands (symmetric per-head); add separate flags later if a
 // chunk bmm needs an operand shared across batch.
@@ -436,7 +436,7 @@ at::Tensor rpu_bmm_spm_test(const at::Tensor& input_a, const at::Tensor& input_b
   TORCH_CHECK(input_a.scalar_type() == at::kHalf && input_b.scalar_type() == at::kHalf,
               "bmm_spm_test: fp16 only");
   TORCH_CHECK(input_a.device().type() == at::kPrivateUse1,
-              "bmm_spm_test: input must be on RPU");
+              "bmm_spm_test: input must be on device");
   TORCH_CHECK(mode >= 0 && mode <= 3, "bmm_spm_test: mode must be 0..3");
   const int64_t batch = input_a.size(0);
   TORCH_CHECK(input_b.size(0) == batch, "bmm_spm_test: batch mismatch");

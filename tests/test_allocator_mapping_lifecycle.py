@@ -11,7 +11,7 @@ import torch
 pytestmark = pytest.mark.skipif(
     os.environ.get("RHINOFORGE_RUN_BOARD_TESTS") != "1"
     or not torch.rpu.is_available(),
-    reason="requires explicit RHINOFORGE_RUN_BOARD_TESTS=1 and an idle, locked RPU",
+    reason="requires explicit RHINOFORGE_RUN_BOARD_TESTS=1 and an idle, locked device",
 )
 
 
@@ -31,7 +31,7 @@ def clean_allocator():
         torch.rpu.empty_cache()
 
 def test_many_logical_allocations_keep_hostddr_mappings_bounded(clean_allocator) -> None:
-    """Exercise the real allocator/Launch mapping lifecycle on an RPU host."""
+    """Exercise the real allocator/Launch mapping lifecycle on an device host."""
     tensors = clean_allocator
     tensors.extend(
         torch.empty(1, dtype=torch.uint8, device="rpu") for _ in range(5000)

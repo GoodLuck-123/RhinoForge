@@ -90,7 +90,7 @@ public:
         at::TensorList q_bias_list, at::TensorList k_bias_list,
         at::TensorList v_bias_list,
         const at::Tensor& final_norm_gen_w,
-        const at::Tensor& row_mask,        // [query_len] fp16 RPU {0,1}; 1=und(text)行
+        const at::Tensor& row_mask,        // [query_len] fp16 device {0,1}; 1=und(text)行
         int64_t query_len);                // = 1378 (= 行掩码长度; 非 SDPA chunk plan)
 
     void set_execution_envelope(int64_t max_kv_len);
@@ -98,7 +98,7 @@ public:
         int64_t prefix_len, int64_t requested_chunk_size);
 
     // 一次 image flow denoise step。I/O 契约:
-    //   x_emb       [1, seq=1378, hidden=1536] fp16 RPU contig — host 已合成
+    //   x_emb       [1, seq=1378, hidden=1536] fp16 device contig — host 已合成
     //               (vae 行 = vae2llm(x_t)+time_embed+latent_pos; text 行 =
     //                embed_tokens(start/end_of_image))。
     //   k/v_caches  基类 7-D swizzled KV cache; 本步在 prefix_len 处追加 1378 行。
@@ -108,7 +108,7 @@ public:
     //               cfg_img 7; C++ 与分支无关, 全在调用方传参)。
     // 全 attend 非因果 mask 在内部合成 (Gemma forward 同款), 调用方不传 SDPA mask
     // (行掩码在 set_gen_weights 时绑定)。KV_FIRST 内部自动多块, 不传 chunk_size。
-    // 返回: 末隐藏 [1, 1378, hidden] fp16 RPU。调用方须在 capture 作用域**退出后**
+    // 返回: 末隐藏 [1, 1378, hidden] fp16 device。调用方须在 capture 作用域**退出后**
     //   读 (fused_model_base.cpp:1066-1086 契约)。host 随后 llm2vae → slice 1376 vae
     //   行 → velocity。
     at::Tensor step_forward(

@@ -1,0 +1,23 @@
+[example]
+profile_id = "internvla-n1-navdp.fp16.system2-rgbd-navdp"
+registry_alias = "internvla-n1-controlled"
+target = "internvla_n1"
+dtype = "fp16"
+
+[example.opt_in]
+RPU_INTERNVLA_N1_ALLOW_NUMERIC_BLOCKED = "1"
+
+[input]
+fixture = "/path/to/full_chain_fixture.pt"
+asset_manifest = "/path/to/asset_manifest.json"
+sample_num = 4
+seed = 1
+
+[run]
+warmup = 2
+runs = 3
+hwperf = false
+profile = false
+seed = 0
+
+[rpu_execution]

@@ -932,17 +932,17 @@ void RpuKernelGraph::record_barrier(uint8_t self_stream, uint8_t target_stream) 
 //   ctor:
 //     - 录 args_template 骨架(tensor 槽 = at::Tensor()占位,scalar/list = 实值)
 //     - 收集 tensor_arg_indices, output_arg_indices(由 collect_output_arg_indices)
-//     - 给 input RPU tensor 登记 boundary_flush(host 跑前 RPU 写入需要可见)
+//     - 给 input device tensor 登记 boundary_flush(host 跑前 device 写入需要可见)
 //     - 所有 Tier:output_pool / output_pool_dev_addrs 留空,由 adopt_returns
 //       (Tier 1+2)或 adopt_dynamic_return(Tier 3)在 CPU op 跑完后填
 //     - 最后 capture_data<HostCallbackNodeData>(...) push 节点;node_idx_ 记下
 //   adopt_returns (Tier 1+2,旧名 adopt_functional_return):
-//     - CPU op 跑完后,stack returns 是 fresh CPU/RPU tensor
-//     - 给每个 return 在 RPU device 上 at::empty() + copy_(),作为 graph-owned
+//     - CPU op 跑完后,stack returns 是 fresh CPU/device tensor
+//     - 给每个 return 在 device 上 at::empty() + copy_(),作为 graph-owned
 //       稳定 buffer;dev_addr 跨 replay 不变
-//     - 替换 stack 返回 slot 为稳定 buffer(下游 RPU op capture 时看到稳定 dev_addr)
+//     - 替换 stack 返回 slot 为稳定 buffer(下游 device op capture 时看到稳定 dev_addr)
 //     - 写 output_pool / output_pool_dev_addrs / output_pool_bytes
-//     - 给稳定 buffer 登记 boundary_flush(post-CPU host 写入需要 RPU 可见)
+//     - 给稳定 buffer 登记 boundary_flush(post-CPU host 写入需要 device 可见)
 //     注:Tier 1 的 .out= 输入 arg 不再被 trust(Dynamo 总是 functional 形式,
 //        PT runtime 每次 alloc fresh .out=,trust 不成立);统一走 stable buffer。
 //   adopt_dynamic_return (Tier 3):
@@ -952,16 +952,16 @@ void RpuKernelGraph::record_barrier(uint8_t self_stream, uint8_t target_stream) 
 // dtor 当前为空(预留位置;未来 A5+A6.5 接入 executor 时再决定是否需要 dtor 收尾)
 //
 // 数据流时序的 v1 简化:CPU op 在 ctor → run_cpu_fallback_zerocopy 期间 eager
-// 跑;此时 prefix RPU kernel 尚未 launch(在 end() 才 launch),所以本轮 ctor
+// 跑;此时 prefix device kernel 尚未 launch(在 end() 才 launch),所以本轮 ctor
 // 跑 CPU op 看到的是 prefix kernel 写出之前的 DDR 旧值。executor (#14) 在 end
 // 阶段会 re-execute CPU op(那时 prefix segment 已 SYNC launch 完成),覆盖正确
-// 输出。下游 RPU kernel 节点 capture 时记下的 dev_addr 仍然正确,因为 dev_addr
+// 输出。下游 device kernel 节点 capture 时记下的 dev_addr 仍然正确,因为 dev_addr
 // 跨 ctor / executor 一致(同一个 .out= input arg 或 stable buffer)。
 // 详见 plan §2.7.4 + §2.7.11("scope 内 .item() 读到 stale value" 的 v1 限制)。
 
 namespace {
 
-// 取一个 tensor IValue 的 RPU dev_addr;如果不是 RPU device 或 ptr 为空,返回 0。
+// 取一个 tensor IValue 的 device dev_addr;如果不是 device 或 ptr 为空,返回 0。
 // 用于 Tier1 的 .out= input arg 预记录 + executor 校验。
 uint64_t rpu_dev_addr_of(const at::Tensor& t) {
     if (!t.defined() || t.device().type() != c10::DeviceType::PrivateUse1) {
@@ -1019,7 +1019,7 @@ HostCallbackCapture::HostCallbackCapture(RpuKernelGraph& g,
             // stream 重跑时 capture_host_callback_replay_args 会用本轮新 tensor
             // 覆盖。executor 直接用 live_tensor_args + args_template 重建 stack。
             data.live_tensor_args.push_back(t);
-            // RPU input tensor 跑 CPU op 前需要 DDR 对 host 可见 → 登记 pre-flush
+            // device input tensor 跑 CPU op 前需要 DDR 对 host 可见 → 登记 pre-flush
             if (t.defined() &&
                 t.device().type() == c10::DeviceType::PrivateUse1) {
                 g.record_boundary_flush(t.data_ptr());
@@ -1099,8 +1099,8 @@ HostCallbackNodeData& HostCallbackCapture::node_data() {
 
 void HostCallbackCapture::adopt_returns(torch::jit::Stack& stack) {
     // Tier 1+2 共用:CPU op 跑完后,把 stack returns 的 fresh tensor 数据
-    // copy 到 graph-owned stable RPU buffer,替换 stack slot,登记 post-CPU
-    // boundary flush。这样下游 RPU op 永远看到稳定 dev_addr。Tier 3 走
+    // copy 到 graph-owned stable device buffer,替换 stack slot,登记 post-CPU
+    // boundary flush。这样下游 device op 永远看到稳定 dev_addr。Tier 3 走
     // adopt_dynamic_return(non-replayable,只 keep-alive 防 GC)。
     TORCH_CHECK(tier_ == HostCallbackTier::Tier1 ||
                 tier_ == HostCallbackTier::Tier2,
@@ -1123,7 +1123,7 @@ void HostCallbackCapture::adopt_returns(torch::jit::Stack& stack) {
                     " must be Tensor; op=", node.op_handle->schema().name(),
                     " got ", iv.tagKind());
         at::Tensor fresh_out = iv.toTensor();
-        // 在 RPU device 上分配同 shape/dtype 的稳定 buffer,copy 数据过去。
+        // 在 device 上分配同 shape/dtype 的稳定 buffer,copy 数据过去。
         // 不能让 buffer 落 CPU 后再 .to(rpu) —— 那样每次新 dev_addr。
         at::Tensor stable = at::empty(
             fresh_out.sizes(),
@@ -1133,9 +1133,9 @@ void HostCallbackCapture::adopt_returns(torch::jit::Stack& stack) {
         node.output_pool.push_back(stable);
         node.output_pool_dev_addrs.push_back(dev);
         node.output_pool_bytes.push_back(stable.numel() * stable.element_size());
-        // 替换 stack slot:下游 op 读到稳定 RPU buffer
+        // 替换 stack slot:下游 op 读到稳定 device buffer
         iv = stable;
-        // 登记 post-CPU boundary flush(host 写入要让 RPU 可见)
+        // 登记 post-CPU boundary flush(host 写入要让 device 可见)
         if (stable.defined()) {
             g_->record_boundary_flush(stable.data_ptr());
         }
@@ -1158,12 +1158,8 @@ void HostCallbackCapture::adopt_returns(torch::jit::Stack& stack) {
             e && *e && *e != '0') {
             const at::Tensor& iv_t = iv.toTensor();
             std::cerr << "[ADOPT-RET] r=" << r
-                      << " stable.data_ptr=0x" << std::hex
-                      << reinterpret_cast<uintptr_t>(stable.data_ptr())
-                      << " stable.dev=0x" << dev
-                      << " iv.data_ptr=0x"
-                      << reinterpret_cast<uintptr_t>(iv_t.data_ptr())
-                      << std::dec << "\n";
+                      << " stable_bytes=" << stable.nbytes()
+                      << " input_bytes=" << iv_t.nbytes() << "\n";
         }
     }
 }
@@ -1220,7 +1216,7 @@ void RpuKernelGraph::capture_host_callback_replay_args(
                         live.tagKind());
             hc.live_tensor_args.push_back(live.toTensor());
             ++next_t;
-            // 当前轮 input tensor 也要 boundary flush(host 跑 CPU op 前 RPU
+            // 当前轮 input tensor 也要 boundary flush(host 跑 CPU op 前 device
             // 写入要可见;executor 调 flush_boundary_ptrs 时会一并下发)
             const at::Tensor& t = live.toTensor();
             if (t.defined() &&
@@ -1334,7 +1330,7 @@ void RpuKernelGraph::capture_tier3_oneshot_replay_args(
             t.live_tensor_args.push_back(live.toTensor());
             ++next_t;
             const at::Tensor& t_arg = live.toTensor();
-            // 当前轮 input tensor 也要 boundary flush(host 跑 CPU op 前 RPU
+            // 当前轮 input tensor 也要 boundary flush(host 跑 CPU op 前 device
             // 写入要可见)
             if (t_arg.defined() &&
                 t_arg.device().type() == c10::DeviceType::PrivateUse1) {
@@ -1349,7 +1345,7 @@ void RpuKernelGraph::capture_tier3_oneshot_replay_args(
 
     // 合成返回值给 op stream:transient buffer 引用(跨 replay dev_addr 稳定,
     // 内容由本轮 execute_data_node 真跑后 copy 进去 — op stream 期 Python 拿
-    // 到 tensor 时内容是上轮 stale 的,但下游 RPU op 的实际跑时机是 end()
+    // 到 tensor 时内容是上轮 stale 的,但下游 device op 的实际跑时机是 end()
     // 之后,那时候内容已被刷成本步 RNG 真值)。
     const size_t num_returns = schema.returns().size();
     TORCH_CHECK(t.transient_resource_ids.size() == num_returns,
@@ -1439,7 +1435,7 @@ Tier3OneshotCapture::Tier3OneshotCapture(RpuKernelGraph& g,
             data.args_template.push_back(at::Tensor{});
             const at::Tensor& t = iv.toTensor();
             data.live_tensor_args.push_back(t);
-            // RPU input tensor 跑 CPU op 前需 DDR 对 host 可见 → 登记 pre-flush
+            // device input tensor 跑 CPU op 前需 DDR 对 host 可见 → 登记 pre-flush
             if (t.defined() &&
                 t.device().type() == c10::DeviceType::PrivateUse1) {
                 g.record_boundary_flush(t.data_ptr());
@@ -1505,13 +1501,13 @@ void Tier3OneshotCapture::adopt_returns(torch::jit::Stack& stack) {
         if (iv.isTensor()) {
             at::Tensor fresh = iv.toTensor();
             // m2-4 — alloc graph-managed transient buffer:同 shape/dtype,
-            // RPU device,跨 replay dev_addr 稳定。fresh return 内容 copy 进去,
+            // device,跨 replay dev_addr 稳定。fresh return 内容 copy 进去,
             // stack slot 替换为 transient buffer 让下游消费者读稳定 dev_addr。
             // 跟 HostCallback Tier1/2 stable buffer 同模式,只差语义上不承诺
             // 内容稳定(每步 RNG 由 m2-5 REPLAYING 真跑后重 copy 进去)。
             //
             // 不能让 buffer 落 CPU 后再 .to(rpu) — 那样每步新 dev_addr,
-            // m2-5 REPLAYING 期下游 RPU kernel 拿到上轮录的 dev_addr 就崩。
+            // m2-5 REPLAYING 期下游 device kernel 拿到上轮录的 dev_addr 就崩。
             at::Tensor transient = at::empty(
                 fresh.sizes(),
                 fresh.options().device(c10::DeviceType::PrivateUse1));
@@ -1532,8 +1528,8 @@ void Tier3OneshotCapture::adopt_returns(torch::jit::Stack& stack) {
             // m2-4 之后 transient buffer 已被 owner tree 持引用,output_keepalives
             // 实际 redundant;留作以后清理。
             node.output_keepalives.push_back(fresh);
-            // post-write boundary flush:transient buffer host 写入对后续 RPU
-            // 可见(executor 跑下游 RPU kernel 前会 flush)。
+            // post-write boundary flush:transient buffer host 写入对后续 device
+            // 可见(executor 跑下游 device kernel 前会 flush)。
             if (transient.defined()) {
                 g_->record_boundary_flush(transient.data_ptr());
             }

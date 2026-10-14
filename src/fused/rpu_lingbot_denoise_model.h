@@ -5,7 +5,7 @@
 // body from v3::CausalDecoderModel with per-layer AdaRMS FiLM (set_adarms_unroll:
 // the fold is read at a body_iter offset), and adds pi05/wall-oss-style pre/post
 // layer hooks that run the fused suffix encoder + out_proj + in-graph Euler on-device,
-// so the noisy action x never leaves the RPU between steps.
+// so the noisy action x never leaves the device between steps.
 //
 // Deltas vs WallOssActionStepModel (the structural template):
 //   - Encoder = fused [action_dim→768] W_comp GEMM + per-step time bias + SiLU +
@@ -40,10 +40,10 @@ public:
     // (needs num_layers()/hidden_size()) and BEFORE set_adarms_unroll.
     //   wc        [hidden, k_comb_pad]   single-core col-swizzled fp16 (W_comp, K padded)
     //   mo        [hidden, hidden]       single-core col-swizzled fp16 (action_time_mlp_out)
-    //   mo_bias   [hidden]               fp16 RPU
+    //   mo_bias   [hidden]               fp16 device
     //   op        [action_dim_pad, hidden] single-core col-swizzled fp16 (action_out_proj, out padded)
-    //   op_bias   [action_dim_pad]       fp16 RPU (out padded, tail zero)
-    //   time_all  [num_steps, hidden]    fp16 RPU (per-step W_comp GEMM bias)
+    //   op_bias   [action_dim_pad]       fp16 device (out padded, tail zero)
+    //   time_all  [num_steps, hidden]    fp16 device (per-step W_comp GEMM bias)
     void set_action_weights(
         const at::Tensor& wc, const at::Tensor& mo, const at::Tensor& mo_bias,
         const at::Tensor& op, const at::Tensor& op_bias, const at::Tensor& time_all,
@@ -63,12 +63,12 @@ public:
     // N-step in-graph unroll. ONE forward emits num_steps × [pre-encoder → 36 layers →
     // out_proj → Euler]; x persists in x_t_spm across iterations; final x = x_traj[-1].
     void unroll_forward(
-        const at::Tensor& x0_rpu,          // [1, cs, k_comb_pad] fp16 RPU (row 0 = 0, rows 1:cs = padded noise)
+        const at::Tensor& x0_rpu,          // [1, cs, k_comb_pad] fp16 device (row 0 = 0, rows 1:cs = padded noise)
         std::vector<at::Tensor>& k_caches,
         std::vector<at::Tensor>& v_caches,
-        const at::Tensor& state_emb,       // [hidden] fp16 RPU — emb_stage_ row 0 (set once)
+        const at::Tensor& state_emb,       // [hidden] fp16 device — emb_stage_ row 0 (set once)
         const std::optional<at::Tensor>& attention_mask,  // [cs, prefix_len+cs] fp16 2D additive
-        at::Tensor& x_traj,                // [num_steps, cs, k_comb_pad] fp16 RPU (per-step x)
+        at::Tensor& x_traj,                // [num_steps, cs, k_comb_pad] fp16 device (per-step x)
         double dt, int64_t prefix_len, int64_t num_steps,
         at::IntArrayRef planned_stage_descriptor = {});
 

@@ -1,15 +1,15 @@
-"""LingBot-VLA V2 (robbyant/lingbot-vla-v2-6b) — checkpoint loader / RPU converter.
+"""LingBot-VLA V2 (robbyant/lingbot-vla-v2-6b) — checkpoint loader / device converter.
 
-Reads the OFFICIAL stacked-expert safetensors layout directly and produces the fp16 RPU
+Reads the OFFICIAL stacked-expert safetensors layout directly and produces the fp16 device
 weight set consumed by the `lingbot_v2_moe_*` op family.
 
-⚠️  IMPORT CONTRACT (deliverable 5): this module MUST stay importable on a host with NO RPU.
+⚠️  IMPORT CONTRACT (deliverable 5): this module MUST stay importable on a host with NO device.
     There is NO module-level `import rpu_backend` (importing the package loads the built .so,
     whose module init touches /dev/rpu). Every rpu_backend symbol is imported INSIDE the
-    function that needs it, and only the RPU-building functions do so. The CPU-only surface
+    function that needs it, and only the device-building functions do so. The CPU-only surface
     (`ckpt_reader`, `load_moe_layer_weights`, `expert_slice`, `load_host_weights`, `SWIZZLE_PLAN`)
     is pure torch + safetensors, so `tests/model/test_lingbot_vla_v2_moe_cpu.py` can exec this
-    file standalone (spec_from_file_location) with no RPU present. Keep it that way: do NOT add
+    file standalone (spec_from_file_location) with no device present. Keep it that way: do NOT add
     a module-level rpu_backend import and do NOT add relative (`from .x import`) imports.
 
 Stacked expert layout (bare nn.Parameter — NO `.weight` suffix; Qwen2FusedExperts):
@@ -21,8 +21,7 @@ Stacked expert layout (bare nn.Parameter — NO `.weight` suffix; Qwen2FusedExpe
     mlp.shared_expert.{gate,up}_proj.weight [704, 768]
     mlp.shared_expert.down_proj.weight      [768, 704]
 
-Pitfall P1 (docs/pitfalls.md:304-330) — `.half()` BEFORE swizzle, never after. Swizzle-before-half
-gives e2e cos -0.19. Every builder below is written half -> (pad) -> swizzle -> .to('rpu').
+Convert dtype before changing layout: half -> (pad) -> swizzle -> .to('rpu').
 Pitfall B-1 — never `torch.ones/zeros(device='rpu')`; build on CPU then `.to('rpu')`.
 """
 from __future__ import annotations
@@ -103,8 +102,8 @@ def _default_geom() -> dict:
 # Explicit per-tensor classification (P1 / RC-3).
 #
 # EVERY Linear-like tensor in the action expert is classified here as either
-# swizzled-and-fused (-> RPU, with an exact swizzle + core count) or KEPT OUT
-# (-> host fp32, never uploaded). A module left on the RPU un-swizzled corrupts
+# swizzled-and-fused (-> device, with an exact swizzle + core count) or KEPT OUT
+# (-> host fp32, never uploaded). A module left on the device un-swizzled corrupts
 # SILENTLY, so "unclassified" is not an allowed state.
 #
 #   swizzle: "col" = output-partitioned (N split over cores) -> tp_col_swizzle_mc_weight
@@ -127,7 +126,7 @@ SWIZZLE_PLAN: dict[str, dict] = {
     "input_layernorm.weight":            dict(shape=(EXP_HID,), swizzle=None, cores=0, dest="input_norm"),
     "post_attention_layernorm.weight":   dict(shape=(EXP_HID,), swizzle=None, cores=0, dest="post_norm"),
     # gamma/beta are [768,768] LINEARS (not norm scales). They consume ada_cond on the HOST and
-    # never touch the RPU — folding them per (step, layer, slot) is what set_adarms_step_mutable eats.
+    # never touch the device — folding them per (step, layer, slot) is what set_adarms_step_mutable eats.
     "input_layernorm.gamma.weight":          dict(shape=(EXP_HID, EXP_HID), swizzle="HOST", cores=0, dest="host:norm_W"),
     "input_layernorm.gamma.bias":            dict(shape=(EXP_HID,),         swizzle="HOST", cores=0, dest="host:norm_W"),
     "input_layernorm.beta.weight":           dict(shape=(EXP_HID, EXP_HID), swizzle="HOST", cores=0, dest="host:norm_W"),
@@ -141,12 +140,12 @@ SWIZZLE_PLAN: dict[str, dict] = {
     # The brief said "router gate.weight must stay FP32 and must NOT be swizzled". The as-built
     # kernel disagrees on BOTH counts and would throw / silently misread if we obeyed the brief:
     #   * rpu_lingbot_v2_moe_model.cpp:110-119 TORCH_CHECKs router_gate_w AND router_bias are
-    #     `fp16 RPU` (at::kHalf + kPrivateUse1). An fp32 tensor raises at set_weights.
+    #     `fp16 device` (at::kHalf + kPrivateUse1). An fp32 tensor raises at set_weights.
     #   * rpu_lingbot_v2_moe_model.cpp:275-280 feeds router_gate_[L] straight into
     #     rpu_launch_linear_spm_to_spm_kernel(..., partition=1, num_cores=1), i.e. it expects a
     #     SINGLE-CORE COL-SWIZZLED operand. An un-swizzled matrix is read in the wrong order
     #     (silent corruption — exactly the RC-3 failure the brief warns about).
-    #   * rpu_lingbot_v2_moe_model.h:73 documents the intent: "single-core col-swizzled fp16 RPU".
+    #   * rpu_lingbot_v2_moe_model.h:73 documents the intent: "single-core col-swizzled fp16 device".
     # The kernel does use the acc32 (not acc16) linear for the router — "highest-precision router
     # available" per its [D1] comment — but the OPERANDS are fp16. The CPU reference deliberately
     # runs this GEMM in TRUE fp32 (lb2_moe_reference.py:146, autocast disabled) because bf16/fp16
@@ -171,7 +170,7 @@ SWIZZLE_PLAN: dict[str, dict] = {
     # ---------------- expert final norm (model-level, not per layer) ----------------
     # final_norm_adanorm: false (YAML:45) => plain RMSNorm; the checkpoint has no norm.gamma/beta.
     "norm.weight": dict(shape=(EXP_HID,), swizzle=None, cores=0, dest="final_norm_w", model_level=True),
-    # ---------------- host-only heads (KEPT OUT of the RPU entirely) ----------------
+    # ---------------- host-only heads (KEPT OUT of the device entirely) ----------------
     # The mandated default Euler loop is the HOST loop (V1's proven default), so the suffix
     # encoders + the action head run as CPU fp32 F.linear and are never swizzled/uploaded.
     "model.state_proj":         dict(shape=(EXP_HID, STATE_DIM),      swizzle="HOST", cores=0, dest="host:head_W"),
@@ -255,7 +254,7 @@ def expert_slice(stacked: torch.Tensor, e: int) -> torch.Tensor:
     """THE stacked-expert contract: expert e's Linear.weight is `stacked[e]`.
 
     `stacked` is [E, out, in] (gate/up: [32,512,768]; down: [32,768,512]). This is the single
-    place that defines the mapping; the RPU builder and the CPU golden test both go through it,
+    place that defines the mapping; the device builder and the CPU golden test both go through it,
     so the test genuinely validates what the converter uploads.
     """
     if stacked.dim() != 3:
@@ -305,7 +304,7 @@ def load_moe_layer_weights(ckpt_path_or_gw, layer: int, geom=None) -> dict[str, 
 
 
 def load_router_correction_biases(ckpt_path_or_gw, geom=None) -> list[torch.Tensor]:
-    """Preflight every router correction bias before any RPU upload.
+    """Preflight every router correction bias before any device upload.
 
     Nonzero values are supported: the device adds them to the FP16 sigmoid
     scores for strict top-k selection and gathers final weights from the
@@ -486,13 +485,13 @@ def head_pad_width(dim: int, multiple: int = 16) -> int:
 
 
 def verify_head_partition() -> tuple[int, int]:
-    """Check the action head's padded width is a LEGAL RPU linear shape BEFORE committing to it.
+    """Check the action head's padded width is a LEGAL device linear shape BEFORE committing to it.
 
     action_dim 55 fails the native-width check, so an on-device head would pad 55 -> 64
     (roundup16). This asserts `get_linear_partition(768, 64, fp16) != -1`. Returns (pad, partition).
 
     NOTE: importing `rpu_backend.runtime.weights` pulls the rpu_backend package (and its .so), so
-    this is NOT callable on an RPU-less host and is NOT called by the CPU golden test. The DEFAULT
+    this is NOT callable on a device-less host and is NOT called by the CPU golden test. The DEFAULT
     runtime keeps the action head on the HOST in fp32 (V1's proven default Euler loop), so 55->64
     is currently an unexercised contract kept here for a future on-device head.
     """
@@ -501,22 +500,22 @@ def verify_head_partition() -> tuple[int, int]:
     part = get_linear_partition(EXP_HID, pad, 2)     # in=768, out=64, dwidth=2 (fp16)
     if part == -1:
         raise ValueError(
-            f"lingbot2: action head pad {ACTION_DIM}->{pad} is not a legal RPU linear "
+            f"lingbot2: action head pad {ACTION_DIM}->{pad} is not a legal device linear "
             f"(get_linear_partition(768, {pad}, fp16) == -1). Pick another pad width."
         )
     return pad, part
 
 
 # =============================================================================
-# RPU-touching surface (rpu_backend imported lazily, inside the functions)
+# device-touching surface (rpu_backend imported lazily, inside the functions)
 # =============================================================================
 def _h(t: torch.Tensor) -> torch.Tensor:
-    """fp32/any -> fp16 RPU contiguous. P1: callers must have swizzled AFTER .half() already."""
+    """fp32/any -> fp16 device contiguous. P1: callers must have swizzled AFTER .half() already."""
     return t.detach().to(torch.float16).to("rpu").contiguous()
 
 
 def _h_256b(t: torch.Tensor) -> torch.Tensor:
-    """fp32/any -> retained contiguous fp16 RPU view with a 256-byte data pointer."""
+    """fp32/any -> retained contiguous fp16 device view with a 256-byte data pointer."""
     source = t.detach().to(torch.float16).contiguous()
     element_size = source.element_size()
     alignment = 256
@@ -528,19 +527,19 @@ def _h_256b(t: torch.Tensor) -> torch.Tensor:
     offset_bytes = (-storage.data_ptr()) % alignment
     if offset_bytes % element_size:
         raise RuntimeError(
-            f"cannot form a {alignment}-byte aligned fp16 RPU view"
+            f"cannot form a {alignment}-byte aligned fp16 device view"
         )
     result = storage.narrow(
         0, offset_bytes // element_size, source.numel()
     ).view(source.shape)
     result.copy_(source)
     if not result.is_contiguous() or result.data_ptr() % alignment:
-        raise RuntimeError("failed to retain a contiguous 256-byte aligned RPU view")
+        raise RuntimeError("failed to retain a contiguous 256-byte aligned device view")
     return result
 
 
 def _q(t: torch.Tensor) -> torch.Tensor:
-    """dtype-PRESERVING RPU upload, for W8A16 int8 packed weights.
+    """dtype-PRESERVING device upload, for W8A16 int8 packed weights.
 
     _h() force-casts to fp16, which silently turns an int8 weight back into fp16 and makes the
     W8A16 path a no-op (the C++ then rejects the scales with "packed weights are fp16, not int8").
@@ -549,7 +548,7 @@ def _q(t: torch.Tensor) -> torch.Tensor:
 
 
 def _build_rope_tables(head_dim: int, theta: float, max_seq: int):
-    """1-D RoPE cos/sin tables, fp16 RPU, shape [max_seq, head_dim/2]... (kernel format [max_seq, half*?]).
+    """1-D RoPE cos/sin tables, fp16 device, shape [max_seq, head_dim/2]... (kernel format [max_seq, half*?]).
 
     ⚠️ theta is the VLM's rope_theta (5e6 for Qwen3-VL-4B), NOT V1's 10000. The action expert does
     NOT own its RoPE: modeling_lingbot_vla_v2.py:275-277 `apply_mrope` rotates the expert's q/k with
@@ -562,9 +561,106 @@ def _build_rope_tables(head_dim: int, theta: float, max_seq: int):
     pos = torch.arange(max_seq, dtype=torch.float64)
     freqs = pos[:, None] * inv_freq[None, :]
     # partial_mrope encodes the table DDR addresses in 256-byte units.  Retain
-    # aligned views instead of relying on the RPU allocator's weaker base
+    # aligned views instead of relying on the device allocator's weaker base
     # alignment; the Tensor view keeps its padded storage owner alive.
     return _h_256b(freqs.cos().float()), _h_256b(freqs.sin().float())
+
+
+def pack_sparse_expert_projection(
+    weight: torch.Tensor, *, partition: str, num_cores: int = 8,
+    quantized: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Pack logical [E,N,K] for runtime GroupedParallelLinear on the CPU.
+
+    W8 retains the dense grouped path's quantization: Gate/Up have one scale
+    per expert/output row; Down shares each output scale across all experts.
+    The runtime sparse ABI stores that Down scale as repeated [E,N] rows.
+    """
+    from rpu_backend.quant.fp8 import pack_grouped_weight
+
+    if weight.dim() != 3 or not weight.is_floating_point():
+        raise ValueError("sparse expert weight must be floating [E,N,K]")
+    if partition not in ("col", "row"):
+        raise ValueError("sparse expert partition must be col or row")
+    source = weight.detach().to(device="cpu", dtype=torch.float16).contiguous()
+    if not bool(torch.isfinite(source).all()):
+        raise ValueError("sparse expert weight must remain finite in FP16")
+    experts, output_dim, input_dim = source.shape
+    scale = None
+    if quantized:
+        from rpu_backend.quant._common import quantize_linear_per_channel
+
+        if partition == "col":
+            codes, scale = quantize_linear_per_channel(
+                source.reshape(experts * output_dim, input_dim)
+            )
+            source = codes.reshape(experts, output_dim, input_dim)
+            scale = scale.reshape(experts, output_dim).contiguous()
+        else:
+            codes, scale = quantize_linear_per_channel(
+                source.permute(1, 0, 2).reshape(output_dim, experts * input_dim)
+            )
+            source = codes.reshape(output_dim, experts, input_dim).permute(1, 0, 2)
+            scale = scale.unsqueeze(0).expand(experts, -1).contiguous()
+    return pack_grouped_weight(
+        source, partition=partition, num_cores=num_cores
+    ), scale
+
+
+def pack_sparse_expert_gate_up(
+    gate: torch.Tensor, up: torch.Tensor, *, num_cores: int = 8,
+    quantized: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Pack each expert's [gate_core, up_core] output for one TP projection.
+
+    Interleave by core before the grouped column swizzle: concatenating whole
+    Gate/Up matrices would assign different projections to different cores.
+    Per-output W8 quantization preserves both original codes and scales.
+    """
+    if (gate.dim() != 3 or up.dim() != 3 or gate.shape != up.shape or
+            not gate.is_floating_point() or not up.is_floating_point()):
+        raise ValueError("sparse Gate/Up weights must be matching floating [E,I,H]")
+    experts, intermediate, hidden = gate.shape
+    if num_cores < 1 or intermediate % num_cores:
+        raise ValueError("sparse Gate/Up intermediate dimension must divide across cores")
+    shape = (experts, num_cores, intermediate // num_cores, hidden)
+    gate = gate.detach().to(device="cpu", dtype=torch.float16).reshape(shape)
+    up = up.detach().to(device="cpu", dtype=torch.float16).reshape(shape)
+    combined = torch.cat((gate, up), dim=2).reshape(experts, 2 * intermediate, hidden)
+    return pack_sparse_expert_projection(
+        combined, partition="col", num_cores=num_cores, quantized=quantized
+    )
+
+
+def pack_shared_gate_up(gate: torch.Tensor, up: torch.Tensor, *,
+                        num_cores: int = 8, quantized: bool = False):
+    """Return one CPU physical bank, original scales and core-interleaved scales.
+
+    Gate/Up are padded logical matrices. Concatenating their already-swizzled
+    bytes preserves both old contiguous views and yields per-core [Gate, Up].
+    """
+    from rpu_backend.runtime.weights import tp_col_swizzle_mc_weight
+
+    if (gate.ndim != 2 or gate.shape != up.shape or
+            not gate.is_floating_point() or not up.is_floating_point()):
+        raise ValueError("shared Gate/Up requires matching floating matrices")
+    gate = gate.detach().to(device="cpu", dtype=torch.float16).contiguous()
+    up = up.detach().to(device="cpu", dtype=torch.float16).contiguous()
+    if not bool(torch.isfinite(gate).all() & torch.isfinite(up).all()):
+        raise ValueError("shared Gate/Up must remain finite in FP16")
+    gate_scale = up_scale = joint_scale = None
+    if quantized:
+        from rpu_backend.quant._common import quantize_linear_per_channel
+        gate, gate_scale = quantize_linear_per_channel(gate)
+        up, up_scale = quantize_linear_per_channel(up)
+    packed = torch.cat([
+        tp_col_swizzle_mc_weight(value, num_cores, dwidth=value.element_size())
+        for value in (gate, up)
+    ], dim=0)
+    if quantized:
+        joint_scale = torch.cat((gate_scale.reshape(num_cores, -1),
+                                 up_scale.reshape(num_cores, -1)), dim=1).flatten()
+    return packed, gate_scale, up_scale, joint_scale
 
 
 def build_expert_moe(
@@ -596,6 +692,11 @@ def build_expert_moe(
     SHARED_INTER = _g["SHARED_INTER"]; SHARED_INTER_PAD = _g["SHARED_INTER_PAD"]
     ROUTED_SCALING = _g["ROUTED_SCALING"]; N_ACTION = _g["N_ACTION"]
     ATTN_TP = _g["ATTN_TP"]; MLP_CORES = _g["MLP_CORES"]; ROUTER_CORES = _g["ROUTER_CORES"]
+    sparse_experts_requested = getattr(runtime_config, "sparse_experts", False)
+    joint_shared_requested = (sparse_experts_requested and MLP_CORES == 8 and
+                              EXP_HID == SHARED_INTER_PAD == 768 and
+                              ROUTED_INTER == 512 and NUM_EXPERTS == 32 and
+                              TOP_K == 4 and N_ACTION + 1 == 51)
 
     # Complete CPU preflight before the first weight upload.  In particular,
     # nonzero correction bias is legal and must survive as a selection-only
@@ -604,8 +705,8 @@ def build_expert_moe(
     router_bias_cpu = load_router_correction_biases(gw, geom=_g)
 
     # RPU_LINGBOT2_BASE_W8A16=1 — int8 the action expert's attention q/k/v/o and the SHARED
-    # expert gate/up/down. The ROUTER is deliberately excluded (its N=32 GEMM is ~0.4% of the
-    # step and its precision is already the open blocker). Default OFF => fp16, unchanged.
+    # expert gate/up/down. The router retains its original precision.
+    # Disabled by default; the default path remains fp16.
     BASE_W8A16 = os.environ.get("RPU_LINGBOT2_BASE_W8A16") == "1"
     if BASE_W8A16:
         from rpu_backend.quant._common import quantize_linear_per_channel
@@ -616,6 +717,17 @@ def build_expert_moe(
 
     def row(w, cores):
         return _h(tp_row_swizzle_mc_weight(w.half(), cores))
+
+    def expert_bank(stacked, swizzle):
+        # Keep each expert's original physical bytes, but use one device
+        # allocation per layer/projection instead of one mapping per expert.
+        # Legal FP16 swizzle shapes give 256-byte-aligned expert strides;
+        # unbind returns contiguous views retaining the uploaded bank storage.
+        packed = torch.stack([
+            swizzle(expert_slice(stacked, e).half(), MLP_CORES)
+            for e in range(NUM_EXPERTS)
+        ])
+        return _h(packed).unbind(0)
 
     def col_q(w, cores, sink):
         """int8 col-swizzle + record the per-output-channel scale (dwidth=1 for int8)."""
@@ -632,6 +744,7 @@ def build_expert_moe(
     q_b, k_b, v_b = [], [], []
     in_norm, post_norm = [], []
     sh_gate, sh_up, sh_down = [], [], []
+    shared_joint, shared_joint_scale = [], []
     router_gate, router_bias = [], []
     exp_gate, exp_up, exp_down = [], [], []
 
@@ -660,7 +773,21 @@ def build_expert_moe(
         sg = F.pad(gw(p + "mlp.shared_expert.gate_proj.weight").half(), (0, 0, 0, npad))
         su = F.pad(gw(p + "mlp.shared_expert.up_proj.weight").half(), (0, 0, 0, npad))
         sd = F.pad(gw(p + "mlp.shared_expert.down_proj.weight").half(), (0, npad))
-        if BASE_W8A16:
+        if joint_shared_requested:
+            packed, gate_scale_cpu, up_scale_cpu, joint_scale_cpu = pack_shared_gate_up(
+                sg, su, num_cores=MLP_CORES, quantized=BASE_W8A16)
+            joint = _q(packed) if BASE_W8A16 else _h(packed)
+            shared_joint.append(joint)
+            sh_gate.append(joint[:SHARED_INTER_PAD])
+            sh_up.append(joint[SHARED_INTER_PAD:])
+            if BASE_W8A16:
+                shg_ws.append(_h(gate_scale_cpu))
+                shu_ws.append(_h(up_scale_cpu))
+                shared_joint_scale.append(_h(joint_scale_cpu))
+                sh_down.append(row_q(sd, MLP_CORES, shd_ws))
+            else:
+                sh_down.append(_h(tp_row_swizzle_mc_weight(sd, MLP_CORES)))
+        elif BASE_W8A16:
             sh_gate.append(col_q(sg, MLP_CORES, shg_ws))
             sh_up.append(col_q(su, MLP_CORES, shu_ws))
             sh_down.append(row_q(sd, MLP_CORES, shd_ws))
@@ -675,11 +802,10 @@ def build_expert_moe(
         eg = gw(p + "mlp.experts.gate_proj")
         eu = gw(p + "mlp.experts.up_proj")
         ed = gw(p + "mlp.experts.down_proj")
-        for e in range(NUM_EXPERTS):
-            # bank index is layer*E + e — the order these are appended IS the contract.
-            exp_gate.append(col(expert_slice(eg, e), MLP_CORES))
-            exp_up.append(col(expert_slice(eu, e), MLP_CORES))
-            exp_down.append(row(expert_slice(ed, e), MLP_CORES))
+        # Native bank index remains layer*E + e; keep owns these storage views.
+        exp_gate.extend(expert_bank(eg, tp_col_swizzle_mc_weight))
+        exp_up.extend(expert_bank(eu, tp_col_swizzle_mc_weight))
+        exp_down.extend(expert_bank(ed, tp_row_swizzle_mc_weight))
 
     cos, sin = _build_rope_tables(HD, rope_theta, max_seq)
     final_norm_w = _h(gw(EXP_P + "norm.weight"))       # plain RMS (final_norm_adanorm: false)
@@ -695,9 +821,16 @@ def build_expert_moe(
             exp_gate, exp_up, exp_down, cos, sin, final_norm_w)
     if BASE_W8A16:
         keep += (q_ws, k_ws, v_ws, o_ws, shg_ws, shu_ws, shd_ws)
+    if sparse_experts_requested:
+        # Original first20 and optional7 scale entries remain stable. Publish
+        # both joint owners before the fallible bind; sparse four-list tail stays last.
+        keep += (shared_joint, shared_joint_scale)
     gate_packed, up_packed, down_packed = [], [], []
     gate_scale, up_scale, down_scale = [], [], []
-    if grouped_experts_requested:
+    gate_up_packed, gate_up_scale = [], []
+    if sparse_experts_requested:
+        keep += (gate_up_packed, down_packed, gate_up_scale, down_scale)
+    elif grouped_experts_requested:
         keep += (gate_packed, up_packed, down_packed, gate_scale, up_scale, down_scale)
     handle = torch.ops.rpu.lingbot_v2_moe_create(
         rpu_env_bool("RPU_ADARMS_FUSED_BCAST"),
@@ -730,6 +863,30 @@ def build_expert_moe(
     if BASE_W8A16:
         torch.ops.rpu.lingbot_v2_moe_set_base_scales(handle, q_ws, k_ws, v_ws, o_ws,
                                                      shg_ws, shu_ws, shd_ws)
+    if sparse_experts_requested:
+        for layer in range(EXP_LAYERS):
+            prefix = f"{EXP_P}layers.{layer}.mlp.experts."
+            packed, scale = pack_sparse_expert_gate_up(
+                gw(prefix + "gate_proj"), gw(prefix + "up_proj"),
+                num_cores=MLP_CORES, quantized=runtime_config.sparse_w8a16,
+            )
+            gate_up_packed.append(_q(packed))
+            if scale is not None:
+                gate_up_scale.append(_h(scale))
+            packed, scale = pack_sparse_expert_projection(
+                gw(prefix + "down_proj"), partition="row",
+                num_cores=MLP_CORES, quantized=runtime_config.sparse_w8a16,
+            )
+            down_packed.append(_q(packed))
+            if scale is not None:
+                down_scale.append(_h(scale))
+        torch.ops.rpu.lingbot_v2_moe_set_sparse_weights(
+            handle, gate_up_packed, down_packed, gate_up_scale, down_scale,
+        )
+        if shared_joint:
+            torch.ops.rpu.lingbot_v2_moe_set_shared_gate_up_weights(
+                handle, shared_joint, shared_joint_scale,
+            )
     # ── GROUPED-EXPERTS opt-in: build core-slice-interleaved packed expert weights
     #    and bind them. Packed row/col order = c*(E*Ic) + e*Ic + s  (core c holds
     #    slice-c of EVERY expert), so the per-core packed GEMM computes all experts'
@@ -808,4 +965,7 @@ def build_expert_moe(
         torch.ops.rpu.lingbot_v2_moe_set_packed_weights(handle, gate_packed, up_packed, down_packed)
         if W8A16 or W4A16:
             torch.ops.rpu.lingbot_v2_moe_set_packed_scales(handle, gate_scale, up_scale, down_scale)
+    if getattr(runtime_config, "runtime_graph", False) or getattr(runtime_config, "routed_gemm", False):
+        torch.ops.rpu.lingbot_v2_moe_configure_runtime_graph(
+            handle, runtime_config.runtime_graph, runtime_config.routed_gemm)
     return handle, keep

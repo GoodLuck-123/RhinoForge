@@ -175,7 +175,7 @@ at::Tensor rpu_fast_pos_embed_interp_test(
                 "fast_pos_embed_interp_test: inputs must be contiguous");
     TORCH_CHECK(grid_mapping.device().type() == at::kPrivateUse1
                 && pos_embed_weight.device().type() == at::kPrivateUse1,
-                "fast_pos_embed_interp_test: inputs must be on RPU device");
+                "fast_pos_embed_interp_test: inputs must be on device");
     TORCH_CHECK(pos_embed_weight.size(0) == num_grid_h_side * num_grid_w_side,
                 "fast_pos_embed_interp_test: pos_embed_weight.size(0)=",
                 pos_embed_weight.size(0), " must equal H_side*W_side=",

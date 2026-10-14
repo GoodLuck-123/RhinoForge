@@ -19,9 +19,13 @@
 #include "rpu_spm_residency.h"
 #include "execution_coordinator.h"
 #include <ATen/record_function.h>
+#include <c10/core/InferenceMode.h>
 #include <c10/util/Half.h>
 #include <c10/util/ScopeExit.h>
+#include <array>
+#include <cstring>
 #include <cstdint>
+#include <cstdlib>
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -40,7 +44,7 @@ static inline int64_t gr00t_pad16(int64_t n) { return ((n + 15) / 16) * 16; }
 
 // W8A16 per-projection scale validation. Same four checks as the already-strong
 // sites (rpu_siglip_model.cpp:227, rpu_pi05_denoise_step_model.cpp:68): list
-// length, int8 weight dtype, 1D contiguous fp16 RPU scale, and
+// length, int8 weight dtype, 1D contiguous fp16 device scale, and
 // scale.numel() == output channels. Checking only the list length is not enough —
 // a wrong-length or wrong-dtype scale reaches the generated W8A16 family as garbage
 // per-channel multipliers, i.e. a silent numeric corruption rather than a crash.
@@ -68,7 +72,7 @@ static void check_gr00t_w8a16_scale_list(int64_t n_layers,
                         && s.device().type() == at::kPrivateUse1
                         && s.is_contiguous(),
                         ctx, ": ", name, "_scale[", i,
-                        "] must be 1D contiguous fp16 RPU tensor");
+                        "] must be 1D contiguous fp16 device tensor");
             TORCH_CHECK(s.numel() == w.size(0),
                         ctx, ": ", name, "_scale[", i, "].numel()=", s.numel(),
                         " != output dim=", w.size(0));
@@ -89,14 +93,73 @@ namespace {
 // unconditional parameter preload or graph output transfer.
 // Denoise-conditioned table/bias preloads and the other named sites are routes.
 constexpr int64_t GR00T_DIT_MASK_SCHEDULE_SITE = 4273136855374514935LL;
+constexpr int64_t GR00T_DIT_ADALN_TABLE_SCHEDULE_SITE = 4251372394969008273LL;
+constexpr int64_t GR00T_DIT_ADALN_TABLE_DMA_SITE = 6410548948878176467LL;
+constexpr int64_t GR00T_DIT_TIME_TABLE_SCHEDULE_SITE = 5760993072901643056LL;
+constexpr int64_t GR00T_DIT_TIME_TABLE_DMA_SITE = 6818841147164026446LL;
+constexpr int64_t GR00T_DIT_FF1_RESIDENT_SCHEDULE_SITE = 4042616317377446460LL;
+constexpr int64_t GR00T_DIT_FF1_RESIDENT_DMA_SITE = 719158113318470140LL;
+constexpr int64_t GR00T_DIT_FF1_RESIDENT_LINEAR_SITE = 3484526589911248235LL;
+constexpr int64_t GR00T_DIT_FF1_RESIDENT_BYTES = 1179648;
 enum class Gr00tDiTMaskSchedule : int64_t {
     UPLOAD_EACH_CROSS_BLOCK = 1,
     RETAIN_TEXT_AND_IMAGE = 2,
 };
 
+constexpr int64_t GR00T_DIT_CROSS_V_TRANSPOSE_SCHEDULE_SITE = 5771321946979058017LL;
+constexpr int64_t GR00T_DIT_CROSS_KV_SCHEDULE_SITE = 3879408591400702310LL;
+enum class Gr00tDiTCrossKvSchedule : int64_t {
+    PROJECT_EACH_BODY = 1,
+    REUSE_FIRST_BODY_DDR = 2,
+    REUSE_FIRST_BODY_SPM = 3,
+};
+
+bool gr00t_cross_kv_reuse_opt_in() {
+    const char* value = std::getenv("RPU_GR00T_CROSS_KV_REUSE");
+    if (value == nullptr || *value == '\0' || std::string(value) == "0") return false;
+    TORCH_CHECK(std::string(value) == "1", "RPU_GR00T_CROSS_KV_REUSE must be 0 or 1");
+    return true;
+}
+
+bool gr00t_kv_spm_only_opt_in() {
+    const char* value = std::getenv("RPU_GR00T_KV_SPM_ONLY");
+    if (value == nullptr || *value == '\0' || std::string(value) == "0") return false;
+    TORCH_CHECK(std::string(value) == "1", "RPU_GR00T_KV_SPM_ONLY must be 0 or 1");
+    return true;
+}
+
+bool gr00t_cross_v_transpose_reuse_opt_in() {
+    const char* value = std::getenv("RPU_GR00T_CROSS_V_TRANSPOSE_REUSE");
+    if (value == nullptr || *value == '\0' || std::string(value) == "0") return false;
+    TORCH_CHECK(std::string(value) == "1", "RPU_GR00T_CROSS_V_TRANSPOSE_REUSE must be 0 or 1");
+    return true;
+}
+
+bool gr00t_self_qkv_multibase_opt_in() {
+    const char* value = std::getenv("RPU_GR00T_SELF_QKV_MULTIBASE");
+    if (value == nullptr || *value == '\0' || std::string(value) == "0") return false;
+    TORCH_CHECK(std::string(value) == "1", "RPU_GR00T_SELF_QKV_MULTIBASE must be 0 or 1");
+    return true;
+}
+
+bool gr00t_ring_xor3_opt_in() {
+    const char* value = std::getenv("RPU_GR00T_RING_XOR3");
+    if (value == nullptr || *value == '\0' || std::string(value) == "0") return false;
+    TORCH_CHECK(std::string(value) == "1", "RPU_GR00T_RING_XOR3 must be 0 or 1");
+    return true;
+}
+
+bool gr00t_ff1_resident_w8_opt_in() {
+    const char* value = std::getenv("RPU_GR00T_FF1_RESIDENT_W8");
+    if (value == nullptr || *value == '\0' || std::string(value) == "0") return false;
+    TORCH_CHECK(std::string(value) == "1", "RPU_GR00T_FF1_RESIDENT_W8 must be 0 or 1");
+    return true;
+}
+
 constexpr int64_t GR00T_DIT_SC_LINEAR_SITE = 275862543721218402LL;
 constexpr int64_t GR00T_DIT_COND_DMA_SITE = 830444116670174423LL;
 constexpr int64_t GR00T_DIT_VL_DMA_SITE = 4588528469086136179LL;
+constexpr int64_t GR00T_DIT_SELF_QKV_MULTIBASE_SITE = 7389640756804652104LL;
 constexpr int64_t GR00T_DIT_SELF_Q_LINEAR_SITE = 7449164786571286334LL;
 constexpr int64_t GR00T_DIT_SELF_K_LINEAR_SITE = 5242062524892150705LL;
 constexpr int64_t GR00T_DIT_SELF_V_LINEAR_SITE = 4911590865261992265LL;
@@ -110,6 +173,8 @@ constexpr int64_t GR00T_DIT_CROSS_KV_INSERT_SITE = 803980681430785592LL;
 constexpr int64_t GR00T_DIT_CROSS_RAW_ATTENTION_SITE = 744437513311785286LL;
 constexpr int64_t GR00T_DIT_CROSS_DDR_ATTENTION_SITE = 4477641737292138302LL;
 constexpr int64_t GR00T_DIT_O_LINEAR_SITE = 2494940213169617053LL;
+constexpr int64_t GR00T_DIT_ATTN_RING_XOR3_SITE = 7023018689830422266LL;
+constexpr int64_t GR00T_DIT_FF_RING_XOR3_SITE = 7869571541108622222LL;
 constexpr int64_t GR00T_DIT_ATTN_ALL_REDUCE_SITE = 5952600852836303488LL;
 constexpr int64_t GR00T_DIT_FF1_LINEAR_SITE = 3924273869232540867LL;
 constexpr int64_t GR00T_DIT_FF2_LINEAR_SITE = 8734709123000487057LL;
@@ -126,9 +191,10 @@ constexpr int64_t GR00T_DIT_DENOISE_BIAS_PRELOAD_SITE =
 
 constexpr uint32_t GR00T_DIT_KV_CAPABILITIES =
     KV_INSERT_CAP_V2 | KV_INSERT_CAP_V16 | KV_INSERT_CAP_PAD16;
-// Both self and cross raw routes consume freshly-produced SPM K/V, but retain
-// the existing DDR cache write as a durable fallback/cache ABI mirror.
+// Raw attention retains its DDR mirror unless the exact cold policy selects
+// descriptor-owned SPM-only K/V for this invocation.
 constexpr int64_t GR00T_DIT_KV_FLAG_DDR_MIRROR = 1;
+constexpr int64_t GR00T_DIT_KV_FLAG_RAW_SPM_ONLY = 2;
 constexpr int64_t GR00T_DIT_ATTN_CAPABILITY_FALLBACK_DDR_REQUIRED = 1LL << 0;
 
 enum class Gr00tDiTMutableDmaRoute : int64_t {
@@ -158,7 +224,13 @@ public:
         at::Tensor adaln_ws;                           // AdaLN modulation GEMV scale (M=1 row, DMA-bound)
     };
 
-    Gr00tDiTModel() = default;
+    Gr00tDiTModel()
+        : cross_kv_reuse_opt_in_(gr00t_cross_kv_reuse_opt_in()),
+          kv_spm_only_opt_in_(gr00t_kv_spm_only_opt_in()),
+          cross_v_transpose_reuse_opt_in_(gr00t_cross_v_transpose_reuse_opt_in()),
+          ff1_resident_w8_opt_in_(gr00t_ff1_resident_w8_opt_in()),
+          self_qkv_multibase_opt_in_(gr00t_self_qkv_multibase_opt_in()),
+          ring_xor3_opt_in_(gr00t_ring_xor3_opt_in()) {}
 
     // ------------------------------------------------------------------ //
     // set_weights — per-layer DiT block weights + per-layer block type + global dims.
@@ -180,6 +252,10 @@ public:
         at::TensorList ff1_scale_list = {}, at::TensorList ff2_scale_list = {},
         at::TensorList adaln_scale_list = {})
     {
+        unroll_mask_publications_ = {};
+        check_ff1_resident_setter_state();
+        check_self_qkv_setter_state();
+        check_ring_xor3_setter_state();
         int64_t N = static_cast<int64_t>(to_q_list.size());
         TORCH_CHECK(N > 0, "gr00t_dit_set_weights: empty weight lists");
         TORCH_CHECK(num_heads > 0 && head_dim > 0 && hidden_size > 0 && ff_inter > 0 && cross_dim > 0,
@@ -200,7 +276,7 @@ public:
                             && l[i].device().type() == at::kPrivateUse1
                             && l[i].is_contiguous(),
                             "gr00t_dit_set_weights: ", n, "[", i,
-                            "] must be ", rank, "D contiguous RPU tensor");
+                            "] must be ", rank, "D contiguous device tensor");
             }
         };
         check_list(to_k_list,   "to_k",   2);
@@ -226,6 +302,11 @@ public:
         cross_dim_ = cross_dim;
 
         layer_weights_.clear();
+        self_qkv_multibase_ready_ = false;
+        ring_xor3_ready_ = false;
+        clear_adaln_table();
+        clear_time_tables();
+        clear_ff1_resident_weight();
         layer_weights_.reserve(N);
         for (int64_t i = 0; i < N; ++i) {
             layer_weights_.push_back({
@@ -271,6 +352,9 @@ public:
         ln_ones_  = at::ones ({hidden_size}, at::TensorOptions().dtype(at::kHalf)).to(dev);
         ln_zeros_ = at::zeros({hidden_size}, at::TensorOptions().dtype(at::kHalf)).to(dev);
 
+        install_ff1_resident_weight();
+        install_self_qkv_multibase();
+        install_ring_xor3();
         invalidate_model_state();  // D-503: last non-empty statement of set_weights
     }
 
@@ -298,12 +382,19 @@ public:
         const at::Tensor& dec1_scale = {}, const at::Tensor& dec2_scale = {},
         const at::Tensor& po1_scale = {}, const at::Tensor& po2_scale = {})
     {
+        unroll_mask_publications_ = {};
+        check_ff1_resident_setter_state();
+        check_self_qkv_setter_state();
+        check_ring_xor3_setter_state();
         TORCH_CHECK(num_layers() > 0, "set_denoise_weights must follow set_weights (32 DiT blocks)");
         TORCH_CHECK(action_dim_pad % 16 == 0, "action_dim_pad must be %16");
         TORCH_CHECK(cond_table.size(0) == num_steps && cond_table.size(1) == hidden_size(),
                     "cond_table must be [num_steps, hidden]");
         TORCH_CHECK(tau_table.size(0) == num_steps && tau_table.size(-1) == hidden_size(),
                     "tau_table must be [num_steps, AH, hidden]");
+        clear_adaln_table();
+        clear_time_tables();
+        clear_ff1_resident_weight();
         se1_w_ = se1_w; se1_b_ = se1_b; se2_w_ = se2_w; se2_b_ = se2_b;
         ae1_w_ = ae1_w; ae1_b_ = ae1_b; ae2a_w_ = ae2a_w; ae2t_w_ = ae2t_w; ae2_b_ = ae2_b;
         ae3_w_ = ae3_w; ae3_b_ = ae3_b;
@@ -326,7 +417,68 @@ public:
         dec_mid_       = dec1_b.size(0);                        // action_decoder layer1 out (1024)
         model_out_dim_ = po2_b.size(0);                        // proj_out_2 out (1024)
         denoise_ready_ = true;
+        install_ff1_resident_weight();
         invalidate_model_state();  // D-503
+    }
+
+    void prepare_adaln_table() {
+        RpuExecutionCoordinator::require_graph_quiescent("gr00t_dit_prepare_adaln_table");
+        RpuExecutionCoordinator::require_no_physical_claim("gr00t_dit_prepare_adaln_table");
+        auto execution = RpuExecutionCoordinator::enter_physical("gr00t_dit_prepare_adaln_table");
+        auto release = c10::make_scope_exit([&] {
+            RpuExecutionCoordinator::exit_physical_noexcept(execution);
+        });
+        check_adaln_prepare_state();
+        std::vector<at::Tensor> weights, biases, scales;
+        for (const auto& layer : layer_weights_) {
+            weights.push_back(layer.adaln_w);
+            biases.push_back(layer.adaln_b);
+            scales.push_back(layer.adaln_ws);
+        }
+        // Own the schedule bytes as well as its derived table. Later callers
+        // cannot mutate the original cond tensor behind the cold table.
+        auto cond = cond_table_t_.clone();
+        auto table = rpu_gr00t_precompute_adaln(cond, weights, biases, scales);
+        cond_table_t_ = std::move(cond);
+        adaln_table_ = std::move(table);
+        adaln_table_src_base_ = ::rhino_lkn::RpuGetDevAddr(adaln_table_.data_ptr());
+        ++adaln_table_generation_;
+        for (const auto& layer : layer_weights_) {
+            for (const auto* tensor : {&layer.adaln_w, &layer.adaln_b, &layer.adaln_ws}) {
+                if (!tensor->defined()) continue;
+                const auto& version = tensor->unsafeGetTensorImpl()->version_counter();
+                adaln_sources_.push_back({*tensor, static_cast<int64_t>(version.current_version())});
+            }
+        }
+        invalidate_model_state();
+    }
+
+    void prepare_time_tables() {
+        RpuExecutionCoordinator::require_graph_quiescent("gr00t_dit_prepare_time_tables");
+        RpuExecutionCoordinator::require_no_physical_claim("gr00t_dit_prepare_time_tables");
+        auto execution = RpuExecutionCoordinator::enter_physical("gr00t_dit_prepare_time_tables");
+        auto release = c10::make_scope_exit([&] {
+            RpuExecutionCoordinator::exit_physical_noexcept(execution);
+        });
+        check_time_prepare_state();
+        auto cond = cond_table_t_.clone();
+        auto tau = tau_table_.clone();
+        auto tables = rpu_gr00t_precompute_time_glue(
+            tau, cond, ae2t_w_, ae2t_ws_, po1_w_, po1_b_, po1_ws_);
+        // Keep raw owned schedule inputs for plain/step/Z2 fallback.
+        cond_table_t_ = std::move(cond);
+        tau_table_ = std::move(tau);
+        time_tau_table_ = std::move(std::get<0>(tables));
+        time_po1_table_ = std::move(std::get<1>(tables));
+        time_tau_src_base_ = ::rhino_lkn::RpuGetDevAddr(time_tau_table_.data_ptr());
+        time_po1_src_base_ = ::rhino_lkn::RpuGetDevAddr(time_po1_table_.data_ptr());
+        ++time_table_generation_;
+        for (const auto* tensor : {&ae2t_w_, &ae2t_ws_, &po1_w_, &po1_b_, &po1_ws_}) {
+            if (!tensor->defined()) continue;
+            const auto& version = tensor->unsafeGetTensorImpl()->version_counter();
+            time_sources_.push_back({*tensor, static_cast<int64_t>(version.current_version())});
+        }
+        invalidate_model_state();
     }
 
     void set_cache_envelope(int64_t max_kv_len, int64_t chunk) {
@@ -366,13 +518,16 @@ public:
         at::IntArrayRef planned_stage_descriptor = {})
     {
         RECORD_FUNCTION("gr00t_dit_forward", {});
+        begin_adaln_inference();
+        begin_time_inference();
+        begin_ff1_resident_inference();
         TORCH_CHECK(!z2_bound_,
                     "gr00t_dit_forward: Z2 lease is active; use the Z2 unroll op");
         TORCH_CHECK(cond.defined() && cond.dim() == 1
                     && cond.size(0) == hidden_size()
                     && cond.device().type() == at::kPrivateUse1
                     && cond.is_contiguous(),
-                    "gr00t_dit_forward: cond must be 1-D [hidden_size] contiguous RPU tensor");
+                    "gr00t_dit_forward: cond must be 1-D [hidden_size] contiguous device tensor");
 
         // Per-forward cond state (mirrors AdaRMS): scatter re-emits on each BUILD; the
         // mutable-DMA src is cursor-patched per REPLAY from cond_src_base_.
@@ -387,7 +542,7 @@ public:
             const at::Tensor& vl = vl_embeds.value();
             TORCH_CHECK(vl.size(-1) == cross_dim_ && vl.device().type() == at::kPrivateUse1
                         && vl.is_contiguous(),
-                        "gr00t_dit_forward: vl_embeds must be [..,S,cross_dim] contiguous RPU tensor");
+                        "gr00t_dit_forward: vl_embeds must be [..,S,cross_dim] contiguous device tensor");
             vl_ref_      = vl;
             vl_seq_      = vl.size(-2);
             vl_src_base_ = ::rhino_lkn::RpuGetDevAddr(vl.data_ptr());
@@ -433,13 +588,16 @@ public:
         at::IntArrayRef planned_stage_descriptor = {})
     {
         RECORD_FUNCTION("gr00t_denoise_step_forward", {});
+        begin_adaln_inference();
+        begin_time_inference();
+        begin_ff1_resident_inference();
         TORCH_CHECK(!z2_bound_,
                     "gr00t_denoise_step_forward: Z2 lease is active; use the Z2 unroll op");
         TORCH_CHECK(denoise_ready_, "step_forward before set_denoise_weights");
         TORCH_CHECK(actions_pad.dim() == 3 && actions_pad.size(1) == action_horizon_
                     && actions_pad.size(2) == action_dim_pad_ && actions_pad.scalar_type() == at::kHalf
                     && actions_pad.is_contiguous() && actions_pad.device().type() == at::kPrivateUse1,
-                    "actions_pad must be [1,AH,action_dim_pad] fp16 contig RPU");
+                    "actions_pad must be [1,AH,action_dim_pad] fp16 contig device");
         TORCH_CHECK(step_idx >= 0 && step_idx < num_steps_, "step_idx out of range");
         // Enter single-step denoise mode (rebuild if switching from plain/unroll path).
         if (!denoise_mode_ || loop_mode_) { denoise_mode_ = true; loop_mode_ = false; invalidate_model_state(/*planning_domain_changed=*/false); }
@@ -460,7 +618,7 @@ public:
         cond_loaded_this_forward_ = false;            // pre-hook scatters cond from the table
         const int64_t seq_q = action_horizon_ + 1;    // 41 (state + AH actions)
         TORCH_CHECK(vl_embeds.size(-1) == cross_dim_ && vl_embeds.device().type() == at::kPrivateUse1
-                    && vl_embeds.is_contiguous(), "vl_embeds must be [..,S,cross_dim] contig RPU");
+                    && vl_embeds.is_contiguous(), "vl_embeds must be [..,S,cross_dim] contig device");
         vl_ref_ = vl_embeds; vl_seq_ = vl_embeds.size(-2);
         vl_src_base_ = ::rhino_lkn::RpuGetDevAddr(vl_embeds.data_ptr());
         vl_loaded_this_forward_ = false;
@@ -490,13 +648,16 @@ public:
         at::IntArrayRef planned_stage_descriptor = {})
     {
         RECORD_FUNCTION("gr00t_denoise_unroll_forward", {});
+        begin_adaln_inference();
+        begin_time_inference();
+        begin_ff1_resident_inference();
         TORCH_CHECK(!z2_bound_,
                     "gr00t_denoise_unroll_forward: Z2 lease is active; use the Z2 unroll op");
         TORCH_CHECK(denoise_ready_, "unroll_forward before set_denoise_weights");
         TORCH_CHECK(noise_pad.dim() == 3 && noise_pad.size(1) == action_horizon_
                     && noise_pad.size(2) == action_dim_pad_ && noise_pad.scalar_type() == at::kHalf
                     && noise_pad.is_contiguous() && noise_pad.device().type() == at::kPrivateUse1,
-                    "noise_pad must be [1,AH,action_dim_pad] fp16 contig RPU");
+                    "noise_pad must be [1,AH,action_dim_pad] fp16 contig device");
         // Node-count backstop (wall_oss precedent): num_steps bodies must stay well below the
         // 32768 batch-item cap. GR00T body ≈ 32 blocks + glue ≈ ~360 nodes → 4×≈1.4k. Loud-fail margin.
         TORCH_CHECK(num_steps_ * 2000 < 32000, "unroll num_steps too large for the kernel-batch cap");
@@ -515,12 +676,11 @@ public:
         cond_loaded_this_forward_ = false;
         const int64_t seq_q = action_horizon_ + 1;
         TORCH_CHECK(vl_embeds.size(-1) == cross_dim_ && vl_embeds.device().type() == at::kPrivateUse1
-                    && vl_embeds.is_contiguous(), "vl_embeds must be [..,S,cross_dim] contig RPU");
+                    && vl_embeds.is_contiguous(), "vl_embeds must be [..,S,cross_dim] contig device");
         vl_ref_ = vl_embeds; vl_seq_ = vl_embeds.size(-2);
         vl_src_base_ = ::rhino_lkn::RpuGetDevAddr(vl_embeds.data_ptr());
         vl_loaded_this_forward_ = false;
-        prepared_cross_mask_     = prep_mask_into(tmask, seq_q, text_mask_slot_, /*ordinal=*/1);
-        prepared_cross_mask_img_ = prep_mask_into(imask, seq_q, image_mask_slot_, /*ordinal=*/2);
+        prepare_unroll_masks(tmask, imask, seq_q);
 
         run_all_layers(
             emb_stage_, k_caches, v_caches, std::nullopt,
@@ -741,6 +901,9 @@ public:
         bool use_prepared_masks = false)
     {
         RECORD_FUNCTION("gr00t_denoise_unroll_forward_z2", {});
+        begin_adaln_inference();
+        begin_time_inference();
+        begin_ff1_resident_inference();
         TORCH_CHECK(z2_bound_ && z2_epoch_ == epoch &&
                         z2_plan_hash_ == plan_hash,
                     "gr00t_denoise_unroll_forward_z2: stale epoch/plan hash");
@@ -753,14 +916,14 @@ public:
                         noise_pad.scalar_type() == at::kHalf &&
                         noise_pad.is_contiguous() &&
                         noise_pad.device().type() == at::kPrivateUse1,
-                    "noise_pad must be [1,AH,action_dim_pad] fp16 contig RPU");
+                    "noise_pad must be [1,AH,action_dim_pad] fp16 contig device");
         TORCH_CHECK(state_pad.defined() && state_pad.dim() == 3 &&
                         state_pad.size(0) == 1 && state_pad.size(1) == 1 &&
                         state_pad.size(2) == action_dim_pad_ &&
                         state_pad.scalar_type() == at::kHalf &&
                         state_pad.is_contiguous() &&
                         state_pad.device().type() == at::kPrivateUse1,
-                    "state_pad must be [1,1,action_dim_pad] fp16 contig RPU");
+                    "state_pad must be [1,1,action_dim_pad] fp16 contig device");
         TORCH_CHECK(num_steps_ * 2000 < 32000,
                     "unroll num_steps too large for the kernel-batch cap");
 
@@ -993,10 +1156,15 @@ protected:
 
     FmbPhysicalExecutionManifest physical_manifest_for_attention_routes(
         const FmbThreeStageChunkPlan& plan,
-        const LayoutContext& layout,
+        const LayoutContext& candidate_layout,
         int64_t physical_len, int64_t logical_len,
         int64_t position, bool self_raw_spm,
         bool cross_raw_spm) const {
+        LayoutContext layout = candidate_layout;
+        layout.attention_policy = self_raw_spm || cross_raw_spm
+            ? AttentionExecutionPolicy::SPM_KV_BY_MHA
+            : AttentionExecutionPolicy::DDR_KV;
+        layout.forward_operand_residency = ff1_residency_for_candidate(layout);
         TORCH_CHECK(
             position == 0 && plan.compute.chunks.size() == 1,
             "GR00T DiT COMPLETE descriptor requires one position-zero chunk");
@@ -1047,7 +1215,7 @@ protected:
             append(FmbRouteFamily::LINEAR, site_id,
                    static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE));
         };
-        const auto append_kv = [&](int64_t site_id, int64_t rows) {
+        const auto append_kv = [&](int64_t site_id, int64_t rows, bool raw_attention) {
             const KvInsertSegmentPlan kv_plan =
                 resolve_kvinsert_plan_auto(
                     site_id, manifest.graph_lifecycle,
@@ -1060,7 +1228,8 @@ protected:
             manifest.routes.push_back({
                 site_id, FmbRouteFamily::KV_INSERT,
                 static_cast<int64_t>(kv_plan.route()),
-                GR00T_DIT_KV_FLAG_DDR_MIRROR,
+                raw_attention && kv_spm_only_profile(chunk.len, layout.batch_size)
+                    ? GR00T_DIT_KV_FLAG_RAW_SPM_ONLY : GR00T_DIT_KV_FLAG_DDR_MIRROR,
                 {arguments.begin(), arguments.end()}, invocation});
         };
 
@@ -1074,6 +1243,18 @@ protected:
             append(FmbRouteFamily::GRAPH_SCHEDULE, GR00T_DIT_MASK_SCHEDULE_SITE,
                    mask_schedule_for_layout(mask_layout, /*complete=*/true),
                    mask_schedule_arguments(chunk.len));
+            if (cross_v_transpose_reuse_opt_in_) {
+                append(FmbRouteFamily::GRAPH_SCHEDULE,
+                       GR00T_DIT_CROSS_V_TRANSPOSE_SCHEDULE_SITE,
+                       cross_v_transpose_profile(chunk.len, layout.batch_size, cross_raw_spm) ? 2 : 1,
+                       cross_v_transpose_arguments(chunk.len, layout.batch_size, cross_raw_spm));
+            }
+            if (cross_kv_reuse_opt_in_) {
+                append(FmbRouteFamily::GRAPH_SCHEDULE,
+                       GR00T_DIT_CROSS_KV_SCHEDULE_SITE,
+                       cross_kv_schedule(chunk.len, layout.batch_size, cross_raw_spm),
+                       cross_kv_schedule_arguments(chunk.len, layout.batch_size));
+            }
         }
 
         if (!denoise_mode_) {
@@ -1086,19 +1267,49 @@ protected:
                    static_cast<int64_t>(
                        Gr00tDiTMutableDmaRoute::DDR_BROADCAST_TO_SPM));
         }
-        append(
-            FmbRouteFamily::LINEAR, GR00T_DIT_ADALN_LINEAR_SITE,
-            static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
-            adaln_route_arguments(denoise_mode_, loop_mode_, vl_seq_, step_idx_));
-        append(FmbRouteFamily::ALL_REDUCE,
-               GR00T_DIT_ADALN_ALL_REDUCE_SITE,
-               fmb_ring_all_reduce_route_selector(
-                   /*rows=*/1, /*cols=*/2 * hidden_size()));
+        const bool time_tables = time_table_profile(chunk.len, layout.batch_size);
+        if (time_tau_table_.defined() && denoise_mode_) {
+            append(FmbRouteFamily::GRAPH_SCHEDULE, GR00T_DIT_TIME_TABLE_SCHEDULE_SITE,
+                   time_tables ? 2 : 1, time_table_arguments(chunk.len, layout.batch_size));
+        }
+        if (time_tables) {
+            for (int64_t invocation = 0; invocation < 2 * num_steps_; ++invocation) {
+                manifest.routes.push_back({GR00T_DIT_TIME_TABLE_DMA_SITE,
+                    FmbRouteFamily::MUTABLE_DMA,
+                    static_cast<int64_t>(Gr00tDiTMutableDmaRoute::DDR_BROADCAST_TO_SPM), 0,
+                    time_table_arguments(chunk.len, layout.batch_size), invocation});
+            }
+        }
+        const bool adaln_table = adaln_table_profile(chunk.len, layout.batch_size);
+        if (adaln_table_.defined()) {
+            append(FmbRouteFamily::GRAPH_SCHEDULE, GR00T_DIT_ADALN_TABLE_SCHEDULE_SITE,
+                   adaln_table ? 2 : 1, adaln_table_arguments(chunk.len, layout.batch_size));
+        }
+        if (adaln_table) {
+            for (int64_t body = 0; body < num_steps_; ++body) {
+                manifest.routes.push_back({GR00T_DIT_ADALN_TABLE_DMA_SITE,
+                    FmbRouteFamily::MUTABLE_DMA,
+                    static_cast<int64_t>(Gr00tDiTMutableDmaRoute::DDR_BROADCAST_TO_SPM), 0,
+                    adaln_table_arguments(chunk.len, layout.batch_size), body});
+            }
+        } else {
+            append(FmbRouteFamily::LINEAR, GR00T_DIT_ADALN_LINEAR_SITE,
+                   static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
+                   adaln_route_arguments(denoise_mode_, loop_mode_, vl_seq_, step_idx_));
+            append(FmbRouteFamily::ALL_REDUCE, GR00T_DIT_ADALN_ALL_REDUCE_SITE,
+                   fmb_ring_all_reduce_route_selector(/*rows=*/1, /*cols=*/2 * hidden_size()));
+        }
         if (has_self) {
-            append_linear(GR00T_DIT_SELF_Q_LINEAR_SITE);
-            append_linear(GR00T_DIT_SELF_K_LINEAR_SITE);
-            append_linear(GR00T_DIT_SELF_V_LINEAR_SITE);
-            append_kv(GR00T_DIT_SELF_KV_INSERT_SITE, chunk.len);
+            if (self_qkv_multibase_profile(chunk.len, layout.batch_size)) {
+                append(FmbRouteFamily::LINEAR, GR00T_DIT_SELF_QKV_MULTIBASE_SITE,
+                       /*MULTIBASE_M592N32K128=*/2,
+                       self_qkv_multibase_arguments(chunk.len, layout.batch_size));
+            } else {
+                append_linear(GR00T_DIT_SELF_Q_LINEAR_SITE);
+                append_linear(GR00T_DIT_SELF_K_LINEAR_SITE);
+                append_linear(GR00T_DIT_SELF_V_LINEAR_SITE);
+            }
+            append_kv(GR00T_DIT_SELF_KV_INSERT_SITE, chunk.len, self_raw_spm);
             manifest.routes.push_back({
                 self_raw_spm
                     ? GR00T_DIT_SELF_RAW_ATTENTION_SITE
@@ -1117,7 +1328,7 @@ protected:
             append_linear(GR00T_DIT_CROSS_Q_LINEAR_SITE);
             append_linear(GR00T_DIT_CROSS_K_LINEAR_SITE);
             append_linear(GR00T_DIT_CROSS_V_LINEAR_SITE);
-            append_kv(GR00T_DIT_CROSS_KV_INSERT_SITE, vl_seq_);
+            append_kv(GR00T_DIT_CROSS_KV_INSERT_SITE, vl_seq_, cross_raw_spm);
             manifest.routes.push_back({
                 cross_raw_spm
                     ? GR00T_DIT_CROSS_RAW_ATTENTION_SITE
@@ -1133,14 +1344,40 @@ protected:
                 {}, invocation});
         }
         append_linear(GR00T_DIT_O_LINEAR_SITE);
-        append(FmbRouteFamily::ALL_REDUCE,
-               GR00T_DIT_ATTN_ALL_REDUCE_SITE,
-               fmb_ring_all_reduce_route_selector(chunk.len, hidden_size()));
+        if (ring_xor3_profile(chunk.len, layout.batch_size)) {
+            append(FmbRouteFamily::ALL_REDUCE, GR00T_DIT_ATTN_RING_XOR3_SITE,
+                   /*EXACT_XOR3=*/2,
+                   ring_xor3_arguments(chunk.len, layout.batch_size, /*ff=*/false));
+        } else {
+            append(FmbRouteFamily::ALL_REDUCE,
+                   GR00T_DIT_ATTN_ALL_REDUCE_SITE,
+                   fmb_ring_all_reduce_route_selector(chunk.len, hidden_size()));
+        }
         append_linear(GR00T_DIT_FF1_LINEAR_SITE);
+        if (ff1_resident_w8_opt_in_ && denoise_mode_) {
+            const bool resident = layout.forward_operand_residency ==
+                FmbForwardOperandResidency::FORWARD;
+            append(FmbRouteFamily::GRAPH_SCHEDULE, GR00T_DIT_FF1_RESIDENT_SCHEDULE_SITE,
+                   resident ? 2 : 1, ff1_resident_arguments(chunk.len, layout.batch_size));
+            if (resident) {
+                append(FmbRouteFamily::MUTABLE_DMA, GR00T_DIT_FF1_RESIDENT_DMA_SITE,
+                       static_cast<int64_t>(Gr00tDiTMutableDmaRoute::DDR_SCATTER_TO_SPM),
+                       ff1_resident_arguments(chunk.len, layout.batch_size));
+                append(FmbRouteFamily::LINEAR, GR00T_DIT_FF1_RESIDENT_LINEAR_SITE,
+                       /*SPM_WEIGHT_M512N48K128=*/2,
+                       ff1_resident_arguments(chunk.len, layout.batch_size));
+            }
+        }
         append_linear(GR00T_DIT_FF2_LINEAR_SITE);
-        append(FmbRouteFamily::ALL_REDUCE,
-               GR00T_DIT_FF_ALL_REDUCE_SITE,
-               fmb_ring_all_reduce_route_selector(chunk.len, hidden_size()));
+        if (ring_xor3_profile(chunk.len, layout.batch_size)) {
+            append(FmbRouteFamily::ALL_REDUCE, GR00T_DIT_FF_RING_XOR3_SITE,
+                   /*EXACT_XOR3=*/2,
+                   ring_xor3_arguments(chunk.len, layout.batch_size, /*ff=*/true));
+        } else {
+            append(FmbRouteFamily::ALL_REDUCE,
+                   GR00T_DIT_FF_ALL_REDUCE_SITE,
+                   fmb_ring_all_reduce_route_selector(chunk.len, hidden_size()));
+        }
         if (denoise_ready_) {
             const int64_t action_horizon = action_horizon_;
             const int64_t hidden = hidden_size();
@@ -1369,6 +1606,19 @@ protected:
             {"gemv_partial", adaln,   0, 0, StorageClass::Temp, 0, nullptr, ALL},
             {"cond",         cond_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL},
         };
+        append_cross_kv_buffers(v, ctx);
+        if (adaln_table_profile(ctx.chunk_size, ctx.batch_size)) {
+            v.push_back({"adaln_body_table", adaln_table_body_bytes(),
+                         0, 0, StorageClass::Temp, 0, nullptr, ALL});
+        }
+        if (ctx.forward_operand_residency == FmbForwardOperandResidency::FORWARD) {
+            TORCH_CHECK(ctx.chunk_size >= 41 && ff1_resident_profile(41, ctx.batch_size),
+                        "GR00T resident FF1 layout requires eligible installed weights");
+            // Live from body-0 preload through all admitted bodies. Never rely on
+            // a previous request's Temp contents or allocate outside this plan.
+            v.push_back({"ff1_resident_w8", GR00T_DIT_FF1_RESIDENT_BYTES,
+                         0, 0, StorageClass::Temp, 0, nullptr, ALL});
+        }
         // Cross-attn buffers (only when vl_embeds is in play).
         if (vl_seq_ > 0) {
             const int64_t vl_sz   = A(vl_seq_ * cross_dim_ * DWIDTH);                 // replicated [S,2048]
@@ -1518,6 +1768,12 @@ protected:
         const LayoutContext& layout, bool complete, bool* retained = nullptr) const {
         auto baseline = baseline_buffer_declarations(layout);
         if (retained) *retained = false;
+        // Prepared AdaLN table paths never read legacy AdaLN scratch.
+        // Its extra 6144-byte phase-1 slot, together with bias/partial, can
+        // cover a second mask without increasing the peak. Larger masks retain
+        // the original upload schedule if the actual no-growth proof fails.
+        const bool long_mask_profile = vl_seq_ > 96 &&
+            adaln_table_profile(layout.chunk_size, layout.batch_size);
         // Ordinary COMPLETE single-chunk public DiT geometry only. Z2 has an
         // independently sealed lease/register contract: its prepare has no
         // COMPLETE fingerprint and its prepared/bound executions stay baseline.
@@ -1526,7 +1782,7 @@ protected:
             layout.is_causal || layout.use_attn_mask ||
             hidden_size() != 1536 || intermediate_size() != 6144 ||
             num_q_heads() != 32 || head_dim() != 48 || cross_dim_ != 2048 ||
-            vl_seq_ <= 0 || vl_seq_ > 96 ||
+            vl_seq_ <= 0 || (vl_seq_ > 96 && !long_mask_profile) ||
             first_cross_mask_layer(false) < 0 || first_cross_mask_layer(true) < 0)
             return baseline;
 
@@ -1545,7 +1801,8 @@ protected:
             decl.phase_start = 0;
             decl.phase_end = 8;
             const std::string name = decl.name ? decl.name : "";
-            if (name == "bias_temp" || name == "gemv_partial") {
+            if (name == "bias_temp" || name == "gemv_partial" ||
+                (long_mask_profile && name == "adaln")) {
                 decl.phase_start = decl.phase_end = 1;
                 ++found;
             } else if (name == "q" || name == "k") {
@@ -1558,7 +1815,7 @@ protected:
                 ++found;
             }
         }
-        if (found != 5) return baseline;
+        if (found != (long_mask_profile ? 6 : 5)) return baseline;
         candidate.push_back(std::move(image_mask));
         const auto plan = detail::plan_forward_spm_residency(
             candidate, {"sdpa_mask", "sdpa_mask_image"});
@@ -1590,6 +1847,603 @@ protected:
                 first_cross_mask_layer(false) + 1, first_cross_mask_layer(true) + 1};
     }
 
+    bool kv_spm_only_profile(int64_t rows, int64_t batch) const {
+        return kv_spm_only_opt_in_ && denoise_ready_ && denoise_mode_ && loop_mode_ &&
+            (num_steps_ == 4 || num_steps_ == 10) && action_horizon_ == 40 && rows == 41 && batch == 1 &&
+            num_layers() == 32 && hidden_size() == 1536 && intermediate_size() == 6144 &&
+            num_q_heads() == 32 && num_kv_heads() == 32 && head_dim() == 48 &&
+            cross_dim_ == 2048 && attn_tp() == 8 && !z2_bound_ && z2_prepared_seq_len_ == 0;
+    }
+
+    int64_t kv_insert_flags(int64_t site_id, int64_t invocation) {
+        if (!ctx().has_complete_physical_manifest() ||
+            !kv_spm_only_profile(ctx().seq_len, ctx().batch_size))
+            return GR00T_DIT_KV_FLAG_DDR_MIRROR;
+        TORCH_CHECK(site_id == GR00T_DIT_SELF_KV_INSERT_SITE ||
+                        site_id == GR00T_DIT_CROSS_KV_INSERT_SITE,
+                    "GR00T SPM-only KV requires a self or cross insert site");
+        const int64_t raw_site = site_id == GR00T_DIT_SELF_KV_INSERT_SITE
+            ? GR00T_DIT_SELF_RAW_ATTENTION_SITE : GR00T_DIT_CROSS_RAW_ATTENTION_SITE;
+        for (const auto& route : ctx().physical_manifest().routes) {
+            if (route.family == FmbRouteFamily::ATTENTION &&
+                route.site_id == raw_site && route.invocation == invocation) {
+                TORCH_CHECK(ctx().physical_attention_policy_for_site(raw_site, invocation) ==
+                                AttentionExecutionPolicy::SPM_KV_BY_MHA,
+                            "GR00T SPM-only KV raw attention selector drift");
+                return GR00T_DIT_KV_FLAG_RAW_SPM_ONLY;
+            }
+        }
+        return GR00T_DIT_KV_FLAG_DDR_MIRROR;
+    }
+
+    void check_self_qkv_setter_state() const {
+        if (!self_qkv_multibase_opt_in_) return;
+        TORCH_CHECK(!RpuKernelGraph::has_active() && !inference_started_ &&
+                        get_last_resolved_chunk_size() == 0 && !z2_bound_ &&
+                        z2_prepared_seq_len_ == 0,
+                    "GR00T self-QKV policy must be installed before any forward or Z2 prepare");
+    }
+
+    void install_self_qkv_multibase() {
+        check_self_qkv_setter_state();
+        self_qkv_multibase_ready_ = false;
+        if (!self_qkv_multibase_opt_in_) return;
+        if (num_layers() != 32 || hidden_size() != 1536 || intermediate_size() != 6144 ||
+            num_q_heads() != 32 || num_kv_heads() != 32 || head_dim() != 48 ||
+            attn_tp() != 8 || cross_dim_ != 2048) return;
+        bool has_self = false;
+        for (const auto& layer : layer_weights_) {
+            if (layer.is_cross) continue;
+            has_self = true;
+            for (const auto* weight : {&layer.to_q_w, &layer.to_k_w, &layer.to_v_w}) {
+                if (!weight->defined() || weight->scalar_type() != at::kChar ||
+                    weight->device().type() != at::kPrivateUse1 || !weight->is_contiguous() ||
+                    weight->dim() != 2 || weight->size(0) != 1536 || weight->size(1) != 1536)
+                    return;
+            }
+            for (const auto* tensor : {&layer.to_q_b, &layer.to_k_b, &layer.to_v_b,
+                                      &layer.to_q_ws, &layer.to_k_ws, &layer.to_v_ws}) {
+                if (!tensor->defined() || tensor->scalar_type() != at::kHalf ||
+                    tensor->device().type() != at::kPrivateUse1 || !tensor->is_contiguous() ||
+                    tensor->dim() != 1 || tensor->size(0) != 1536) return;
+            }
+        }
+        if (!has_self) return;
+        TORCH_CHECK(KernelCache::instance().has_loaded(
+                        KernelId::GR00T_QKV_MULTIBASE_W8A16_M592N32K128),
+                    "GR00T self-QKV multibase requires its optional expansion payload");
+        self_qkv_multibase_ready_ = true;
+    }
+
+    bool self_qkv_multibase_profile(int64_t rows, int64_t batch) const {
+        return self_qkv_multibase_opt_in_ && self_qkv_multibase_ready_ &&
+            denoise_ready_ && denoise_mode_ && loop_mode_ &&
+            (num_steps_ == 4 || num_steps_ == 10) && vl_seq_ > 0 &&
+            action_horizon_ == 40 && num_layers() == 32 && rows == 41 && batch == 1 &&
+            hidden_size() == 1536 && intermediate_size() == 6144 &&
+            num_q_heads() == 32 && num_kv_heads() == 32 && head_dim() == 48 &&
+            cross_dim_ == 2048 && attn_tp() == 8 && !z2_bound_ && z2_prepared_seq_len_ == 0;
+    }
+
+    std::vector<int64_t> self_qkv_multibase_arguments(int64_t rows, int64_t batch) const {
+        std::vector<int64_t> args{rows, batch, vl_seq_, num_steps_, num_layers(), hidden_size(),
+            intermediate_size(), num_q_heads(), num_kv_heads(), head_dim(), attn_tp(), cross_dim_,
+            action_horizon_, denoise_mode_ ? 1 : 0, loop_mode_ ? 1 : 0,
+            self_qkv_multibase_opt_in_ ? 1 : 0, self_qkv_multibase_ready_ ? 1 : 0,
+            /*local_N=*/192, /*bias=*/1, /*tile=*/592, 32, 128, /*grid=*/18, 1, 1};
+        for (const auto& layer : layer_weights_) args.push_back(layer.is_cross ? 1 : 0);
+        return args;
+    }
+
+    bool emit_self_qkv_multibase(int layer_idx, const ChunkInfo& chunk, const LayerWeights& lw) {
+        if (!ctx().has_complete_physical_manifest() ||
+            !self_qkv_multibase_profile(chunk.len, ctx().batch_size) ||
+            layer_idx < 0 || layer_idx >= num_layers() || lw.is_cross) return false;
+        ctx().consume_physical_route(FmbRouteFamily::LINEAR, GR00T_DIT_SELF_QKV_MULTIBASE_SITE,
+            /*MULTIBASE_M592N32K128=*/2, 0,
+            self_qkv_multibase_arguments(chunk.len, ctx().batch_size), chunk.idx);
+        rpu_launch_gr00t_qkv_multibase_w8_kernel(
+            addr(0, "norm_hidden"), lw.to_q_w, lw.to_k_w, lw.to_v_w,
+            addr(0, "q"), addr(0, "k"), addr(0, "v"),
+            layer_addr(layer_idx, 0, "q_bias"), layer_addr(layer_idx, 0, "k_bias"),
+            layer_addr(layer_idx, 0, "v_bias"), lw.to_q_ws, lw.to_k_ws, lw.to_v_ws);
+        return true;
+    }
+
+    void check_ring_xor3_setter_state() const {
+        if (!ring_xor3_opt_in_) return;
+        TORCH_CHECK(!RpuKernelGraph::has_active() && !inference_started_ &&
+                        get_last_resolved_chunk_size() == 0 && !z2_bound_ &&
+                        z2_prepared_seq_len_ == 0,
+                    "GR00T XOR3 ring policy must be installed before any forward or Z2 prepare");
+    }
+
+    void install_ring_xor3() {
+        check_ring_xor3_setter_state();
+        ring_xor3_ready_ = false;
+        if (!ring_xor3_opt_in_) return;
+        if (num_layers() != 32 || layer_weights_.size() != 32 ||
+            hidden_size() != 1536 || intermediate_size() != 6144 ||
+            num_q_heads() != 32 || num_kv_heads() != 32 || head_dim() != 48 ||
+            attn_tp() != 8 || cross_dim_ != 2048) return;
+        // Both generated ACC16 producer families retire FP16 partial sums.
+        // The XOR3 payload only consumes those three SPM buffers; require a
+        // uniform producer precision and the corresponding original scales.
+        const auto precision = layer_weights_.front().to_out_w.scalar_type();
+        if (precision != at::kChar && precision != at::kHalf) return;
+        const bool w8 = precision == at::kChar;
+        for (const auto& layer : layer_weights_) {
+            for (const auto* weight : {&layer.to_out_w, &layer.ff2_w}) {
+                const int64_t k = weight == &layer.to_out_w ? 1536 : 6144;
+                if (!weight->defined() || weight->scalar_type() != precision ||
+                    weight->device().type() != at::kPrivateUse1 || !weight->is_contiguous() ||
+                    weight->dim() != 2 || weight->size(0) != 1536 || weight->size(1) != k)
+                    return;
+            }
+            for (const auto* tensor : {&layer.to_out_b, &layer.ff2_b}) {
+                if (!tensor->defined() || tensor->scalar_type() != at::kHalf ||
+                    tensor->device().type() != at::kPrivateUse1 || !tensor->is_contiguous() ||
+                    tensor->dim() != 1 || tensor->size(0) != 1536) return;
+            }
+            for (const auto* scale : {&layer.to_out_ws, &layer.ff2_ws}) {
+                if (!w8) {
+                    if (scale->defined()) return;
+                } else if (!scale->defined() || scale->scalar_type() != at::kHalf ||
+                           scale->device().type() != at::kPrivateUse1 || !scale->is_contiguous() ||
+                           scale->dim() != 1 || scale->size(0) != 1536) return;
+            }
+        }
+        TORCH_CHECK(KernelCache::instance().has_loaded(
+                        KernelId::GR00T_ALL_REDUCE_RESIDUAL_XOR3_M41N1536),
+                    "GR00T XOR3 residual ring requires its optional expansion payload");
+        ring_xor3_ready_ = true;
+    }
+
+    bool ring_xor3_profile(int64_t rows, int64_t batch) const {
+        return ring_xor3_opt_in_ && ring_xor3_ready_ &&
+            denoise_ready_ && denoise_mode_ && loop_mode_ &&
+            (num_steps_ == 4 || num_steps_ == 10) && vl_seq_ > 0 &&
+            action_horizon_ == 40 && num_layers() == 32 && rows == 41 && batch == 1 &&
+            hidden_size() == 1536 && intermediate_size() == 6144 &&
+            num_q_heads() == 32 && num_kv_heads() == 32 && head_dim() == 48 &&
+            cross_dim_ == 2048 && attn_tp() == 8 && !z2_bound_ && z2_prepared_seq_len_ == 0;
+    }
+
+    std::vector<int64_t> ring_xor3_arguments(int64_t rows, int64_t batch, bool ff) const {
+        return {/*ABI=*/1, /*residual2->1 vs residual1->2=*/ff ? 1 : 0,
+            rows, batch, vl_seq_, num_steps_, num_layers(), hidden_size(), intermediate_size(),
+            num_q_heads(), num_kv_heads(), head_dim(), attn_tp(), cross_dim_, action_horizon_,
+            denoise_mode_ ? 1 : 0, loop_mode_ ? 1 : 0,
+            ring_xor3_opt_in_ ? 1 : 0, ring_xor3_ready_ ? 1 : 0,
+            /*FP16=*/16, /*original paced reduction=*/2,
+            /*chunk elements/bytes/alignment=*/7872, 15744, 128,
+            /*full matrix bytes=*/125952, /*rounds=*/1, /*round capacity=*/63488,
+            /*actual grid=*/8, 1, 1, /*XOR gather stages=*/3, /*epochs=*/12,
+            /*full input/residual/output layouts=*/1, 1, 1,
+            /*all disjoint=*/1, /*DDR residual=*/0,
+            /*invocations per ordinary request/site=*/num_steps_ * num_layers()};
+    }
+
+    bool emit_attn_ring_xor3(const ChunkInfo& chunk) {
+        if (!ctx().has_complete_physical_manifest() ||
+            !ring_xor3_profile(chunk.len, ctx().batch_size)) return false;
+        ctx().consume_physical_route(FmbRouteFamily::ALL_REDUCE, GR00T_DIT_ATTN_RING_XOR3_SITE,
+            /*EXACT_XOR3=*/2, 0,
+            ring_xor3_arguments(chunk.len, ctx().batch_size, /*ff=*/false), chunk.idx);
+        rpu_launch_gr00t_all_reduce_residual_xor3_kernel(
+            addr(0, "oproj"), addr(0, "residual1"), addr(0, "residual2"));
+        return true;
+    }
+
+    bool emit_ff_ring_xor3(const ChunkInfo& chunk) {
+        if (!ctx().has_complete_physical_manifest() ||
+            !ring_xor3_profile(chunk.len, ctx().batch_size)) return false;
+        ctx().consume_physical_route(FmbRouteFamily::ALL_REDUCE, GR00T_DIT_FF_RING_XOR3_SITE,
+            /*EXACT_XOR3=*/2, 0,
+            ring_xor3_arguments(chunk.len, ctx().batch_size, /*ff=*/true), chunk.idx);
+        rpu_launch_gr00t_all_reduce_residual_xor3_kernel(
+            addr(0, "oproj"), addr(0, "residual2"), addr(0, "residual1"));
+        return true;
+    }
+
+    void check_ff1_resident_setter_state() const {
+        if (!ff1_resident_w8_opt_in_) return;
+        TORCH_CHECK(!RpuKernelGraph::has_active() && !inference_started_ &&
+                        get_last_resolved_chunk_size() == 0 && !z2_bound_ &&
+                        z2_prepared_seq_len_ == 0,
+                    "GR00T resident FF1 weights must be installed before any forward or Z2 prepare");
+    }
+
+    void clear_ff1_resident_weight() {
+        ff1_resident_weight_ = at::Tensor{};
+        ff1_resident_source_ = at::Tensor{};
+        ff1_resident_src_base_ = 0;
+        ff1_resident_source_version_ = 0;
+    }
+
+    void install_ff1_resident_weight() {
+        if (!ff1_resident_w8_opt_in_ || !denoise_ready_ || num_layers() != 32 ||
+            hidden_size() != 1536 || intermediate_size() != 6144 ||
+            num_q_heads() != 32 || num_kv_heads() != 32 || head_dim() != 48 ||
+            attn_tp() != 8 || cross_dim_ != 2048 || action_horizon_ != 40 ||
+            (num_steps_ != 4 && num_steps_ != 10) || layer_weights_[0].ff1_w.scalar_type() != at::kChar)
+            return;
+        check_ff1_resident_setter_state();
+        RpuExecutionCoordinator::require_graph_quiescent("gr00t_install_ff1_resident_w8");
+        RpuExecutionCoordinator::require_no_physical_claim("gr00t_install_ff1_resident_w8");
+        auto execution = RpuExecutionCoordinator::enter_physical("gr00t_install_ff1_resident_w8");
+        auto release = c10::make_scope_exit([&] {
+            RpuExecutionCoordinator::exit_physical_noexcept(execution);
+        });
+        const auto& layer = layer_weights_[0];
+        const auto& version = layer.ff1_w.unsafeGetTensorImpl()->version_counter();
+        TORCH_CHECK(version.enabled(), "GR00T resident FF1 requires a versioned weight owner");
+        const int64_t source_version = static_cast<int64_t>(version.current_version());
+        for (const auto* tensor : {&layer.ff1_b, &layer.ff1_ws}) {
+            TORCH_CHECK(tensor->defined() && tensor->scalar_type() == at::kHalf &&
+                            tensor->device().type() == at::kPrivateUse1 &&
+                            tensor->is_contiguous() && tensor->dim() == 1 && tensor->size(0) == 6144,
+                        "GR00T resident FF1 requires original fp16 bias and scale [6144]");
+        }
+        TORCH_CHECK(KernelCache::instance().has_loaded(
+                        KernelId::GR00T_FF1_RESIDENT_W8A16_M512N48K128),
+                    "GR00T resident FF1 requires its optional expansion payload");
+        auto packed = rpu_pack_gr00t_ff1_resident_w8(layer.ff1_w);
+        TORCH_CHECK(version.enabled() && static_cast<int64_t>(version.current_version()) == source_version,
+                    "GR00T resident FF1 source changed during cold installation");
+        ff1_resident_weight_ = std::move(packed);
+        ff1_resident_src_base_ = ::rhino_lkn::RpuGetDevAddr(ff1_resident_weight_.data_ptr());
+        ff1_resident_source_ = layer.ff1_w;
+        ff1_resident_source_version_ = source_version;
+        ++ff1_resident_generation_;
+    }
+
+    void begin_ff1_resident_inference() {
+        if (!ff1_resident_source_.defined()) return;
+        const auto& version = ff1_resident_source_.unsafeGetTensorImpl()->version_counter();
+        TORCH_CHECK(version.enabled() &&
+                        static_cast<int64_t>(version.current_version()) == ff1_resident_source_version_,
+                    "GR00T resident FF1 source was mutated after cold installation");
+    }
+
+    bool ff1_resident_profile(int64_t rows, int64_t batch) const {
+        return ff1_resident_w8_opt_in_ && ff1_resident_weight_.defined() &&
+            denoise_ready_ && denoise_mode_ && loop_mode_ &&
+            (num_steps_ == 4 || num_steps_ == 10) && vl_seq_ > 0 &&
+            action_horizon_ == 40 && num_layers() == 32 && rows == 41 && batch == 1 &&
+            hidden_size() == 1536 && intermediate_size() == 6144 &&
+            num_q_heads() == 32 && num_kv_heads() == 32 && head_dim() == 48 &&
+            cross_dim_ == 2048 && attn_tp() == 8 && !z2_bound_ && z2_prepared_seq_len_ == 0;
+    }
+
+    std::vector<int64_t> ff1_resident_arguments(int64_t rows, int64_t batch) const {
+        return {rows, batch, vl_seq_, num_steps_, num_layers(), hidden_size(), intermediate_size(),
+                num_q_heads(), num_kv_heads(), head_dim(), attn_tp(), action_horizon_,
+                denoise_mode_ ? 1 : 0, loop_mode_ ? 1 : 0, ff1_resident_w8_opt_in_ ? 1 : 0,
+                ff1_resident_weight_.defined() ? 1 : 0, ff1_resident_generation_,
+                /*layer=*/0, GR00T_DIT_FF1_RESIDENT_BYTES, /*bias=*/1, 512, 48, 128};
+    }
+
+    FmbForwardOperandResidency ff1_residency_for_candidate(
+        const LayoutContext& layout) const {
+        // A COMPLETE selection is immutable, including capacity fallback. Never
+        // consult live allocator occupancy while reconstructing/replaying it.
+        if (layout.forward_operand_residency != FmbForwardOperandResidency::UNSPECIFIED) {
+            TORCH_CHECK(layout.forward_operand_residency == FmbForwardOperandResidency::PER_LAYER ||
+                            (layout.forward_operand_residency == FmbForwardOperandResidency::FORWARD &&
+                             layout.chunk_size >= 41 && ff1_resident_profile(41, layout.batch_size)),
+                        "GR00T invalid bound resident FF1 selection");
+            return layout.forward_operand_residency;
+        }
+        if (!ff1_resident_profile(layout.chunk_size, layout.batch_size))
+            return FmbForwardOperandResidency::PER_LAYER;
+        const auto fits = [&](LayoutContext candidate) {
+            candidate.forward_operand_residency = FmbForwardOperandResidency::FORWARD;
+            return declared_spm_layout_fits(
+                planned_buffer_declarations(candidate, /*complete=*/true));
+        };
+        if (!fits(layout)) return FmbForwardOperandResidency::PER_LAYER;
+        if (layout.planning_chunk_capacity > 0 &&
+                layout.planning_chunk_capacity != layout.chunk_size) {
+            auto capacity = layout;
+            capacity.chunk_size = layout.planning_chunk_capacity;
+            if (!fits(capacity)) return FmbForwardOperandResidency::PER_LAYER;
+        }
+        return FmbForwardOperandResidency::FORWARD;
+    }
+
+    FmbForwardOperandResidency physical_forward_operand_residency(
+        const FmbPhysicalExecutionManifest& manifest) const override {
+        if (manifest.state != FmbPhysicalManifestState::COMPLETE ||
+                !ff1_resident_w8_opt_in_ || !denoise_mode_)
+            return FmbForwardOperandResidency::UNSPECIFIED;
+        const auto matches = [](const auto& route) {
+            return route.family == FmbRouteFamily::GRAPH_SCHEDULE &&
+                route.site_id == GR00T_DIT_FF1_RESIDENT_SCHEDULE_SITE;
+        };
+        const auto route = std::find_if(manifest.routes.begin(), manifest.routes.end(), matches);
+        TORCH_CHECK(route != manifest.routes.end() &&
+                        std::count_if(manifest.routes.begin(), manifest.routes.end(), matches) == 1 &&
+                        route->flags == 0 && route->invocation == 0 &&
+                        (route->selector == 1 || route->selector == 2),
+                    "GR00T requires one valid resident FF1 schedule");
+        const auto& args = route->arguments;
+        TORCH_CHECK(args.size() == 23 && args[0] == manifest.physical_length && args[1] > 0 &&
+                        args == ff1_resident_arguments(args[0], args[1]) &&
+                        (route->selector == 1 || ff1_resident_profile(args[0], args[1])),
+                    "GR00T resident FF1 schedule differs from its installed owner");
+        return route->selector == 2 ? FmbForwardOperandResidency::FORWARD
+                                    : FmbForwardOperandResidency::PER_LAYER;
+    }
+
+    bool ff1_resident_selected() const {
+        if (!ctx().has_complete_physical_manifest() || !ff1_resident_w8_opt_in_ || !denoise_mode_)
+            return false;
+        return physical_forward_operand_residency(ctx().physical_manifest()) ==
+            FmbForwardOperandResidency::FORWARD;
+    }
+
+    void load_ff1_resident_weight() {
+        if (!ff1_resident_w8_opt_in_ || !ctx().has_complete_physical_manifest()) return;
+        const bool active = ff1_resident_selected();
+        ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+            GR00T_DIT_FF1_RESIDENT_SCHEDULE_SITE, active ? 2 : 1, 0,
+            ff1_resident_arguments(ctx().seq_len, ctx().batch_size), 0);
+        if (!active) return;
+        TORCH_CHECK(ctx().body_iter >= 0 && ctx().body_iter < num_steps_,
+                    "GR00T resident FF1 body out of bounds");
+        if (ctx().body_iter != 0) return;
+        ctx().consume_physical_route(FmbRouteFamily::MUTABLE_DMA,
+            GR00T_DIT_FF1_RESIDENT_DMA_SITE,
+            static_cast<int64_t>(Gr00tDiTMutableDmaRoute::DDR_SCATTER_TO_SPM), 0,
+            ff1_resident_arguments(ctx().seq_len, ctx().batch_size), 0);
+        rpu_launch_gr00t_ff1_resident_w8_preload(
+            ff1_resident_src_base_, ff1_resident_weight_, addr(0, "ff1_resident_w8"));
+    }
+
+    void check_time_prepare_state() const {
+        TORCH_CHECK(!RpuKernelGraph::has_active() && !inference_started_ &&
+                        get_last_resolved_chunk_size() == 0 && !z2_bound_ &&
+                        z2_prepared_seq_len_ == 0 && !time_tau_table_.defined(),
+                    "GR00T time tables must be prepared once before any forward or Z2 prepare");
+        TORCH_CHECK(denoise_ready_ && (num_steps_ == 4 || num_steps_ == 10) && num_layers() == 32 &&
+                        hidden_size() == 1536 && intermediate_size() == 6144 &&
+                        num_q_heads() == 32 && num_kv_heads() == 32 && head_dim() == 48 &&
+                        attn_tp() == 8 && action_horizon_ == 40 && cross_dim_ == 2048,
+                    "GR00T time tables require the installed four- or ten-step TP8 public DiT profile");
+        for (const auto* source : {&ae2t_w_, &ae2t_ws_, &po1_w_, &po1_b_, &po1_ws_}) {
+            TORCH_CHECK(!source->defined() || source->unsafeGetTensorImpl()->version_counter().enabled(),
+                        "GR00T time preparation requires versioned weight/bias/scale owners");
+        }
+    }
+
+    void clear_time_tables() {
+        time_tau_table_ = at::Tensor{};
+        time_po1_table_ = at::Tensor{};
+        time_tau_src_base_ = time_po1_src_base_ = 0;
+        time_sources_.clear();
+    }
+
+    void begin_time_inference() {
+        for (const auto& source : time_sources_) {
+            const auto& version = source.first.unsafeGetTensorImpl()->version_counter();
+            TORCH_CHECK(version.enabled() &&
+                            static_cast<int64_t>(version.current_version()) == source.second,
+                        "GR00T time table source was mutated after cold preparation");
+        }
+    }
+
+    bool time_table_profile(int64_t rows, int64_t batch) const {
+        return time_tau_table_.defined() && time_po1_table_.defined() &&
+            denoise_ready_ && denoise_mode_ && loop_mode_ && action_horizon_ == 40 &&
+            (num_steps_ == 4 || num_steps_ == 10) && num_layers() == 32 && rows == 41 && batch == 1 &&
+            hidden_size() == 1536 && intermediate_size() == 6144 &&
+            num_q_heads() == 32 && num_kv_heads() == 32 && head_dim() == 48 &&
+            cross_dim_ == 2048 && attn_tp() == 8 && !z2_bound_ && z2_prepared_seq_len_ == 0;
+    }
+
+    std::vector<int64_t> time_table_arguments(int64_t rows, int64_t batch) const {
+        return {rows, batch, num_steps_, num_layers(), hidden_size(), intermediate_size(),
+                num_q_heads(), num_kv_heads(), head_dim(), attn_tp(), action_horizon_,
+                denoise_mode_ ? 1 : 0, loop_mode_ ? 1 : 0, time_table_generation_,
+                action_horizon_ * hidden_size() * DWIDTH, 2 * hidden_size() * DWIDTH};
+    }
+
+    bool time_tables_active() {
+        const bool active = ctx().has_complete_physical_manifest() &&
+            time_table_profile(ctx().seq_len, ctx().batch_size);
+        if (time_tau_table_.defined() && ctx().has_complete_physical_manifest()) {
+            ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+                GR00T_DIT_TIME_TABLE_SCHEDULE_SITE, active ? 2 : 1, 0,
+                time_table_arguments(ctx().seq_len, ctx().batch_size), 0);
+        }
+        return active;
+    }
+
+    void check_adaln_prepare_state() const {
+        TORCH_CHECK(!RpuKernelGraph::has_active() && !inference_started_ &&
+                        get_last_resolved_chunk_size() == 0 &&
+                        !z2_bound_ && z2_prepared_seq_len_ == 0 && !adaln_table_.defined(),
+                    "GR00T AdaLN table must be prepared once before any forward or Z2 prepare");
+        TORCH_CHECK(denoise_ready_ && (num_steps_ == 4 || num_steps_ == 10) && num_layers() == 32 &&
+                        hidden_size() == 1536 && intermediate_size() == 6144 &&
+                        num_q_heads() == 32 && num_kv_heads() == 32 && head_dim() == 48 &&
+                        attn_tp() == 8 && action_horizon_ == 40 && cross_dim_ == 2048,
+                    "GR00T AdaLN table requires the installed four- or ten-step TP8 public DiT profile");
+        for (const auto& layer : layer_weights_) {
+            for (const auto* source : {&layer.adaln_w, &layer.adaln_b, &layer.adaln_ws}) {
+                TORCH_CHECK(!source->defined() || source->unsafeGetTensorImpl()->version_counter().enabled(),
+                            "GR00T AdaLN cold preparation requires versioned weight/bias/scale owners");
+            }
+        }
+    }
+
+    void clear_adaln_table() {
+        adaln_table_ = at::Tensor{};
+        adaln_table_src_base_ = 0;
+        adaln_sources_.clear();
+    }
+
+    void begin_adaln_inference() {
+        // Monotonic: even a rejected/failed forward closes the cold API.
+        inference_started_ = true;
+        for (const auto& source : adaln_sources_) {
+            const auto& version = source.first.unsafeGetTensorImpl()->version_counter();
+            TORCH_CHECK(version.enabled() &&
+                            static_cast<int64_t>(version.current_version()) == source.second,
+                        "GR00T AdaLN table source was mutated after cold preparation");
+        }
+    }
+
+    bool adaln_table_profile(int64_t rows, int64_t batch) const {
+        return adaln_table_.defined() && denoise_ready_ && denoise_mode_ && loop_mode_ &&
+            (num_steps_ == 4 || num_steps_ == 10) && num_layers() == 32 && rows == 41 && batch == 1 &&
+            hidden_size() == 1536 && intermediate_size() == 6144 &&
+            num_q_heads() == 32 && num_kv_heads() == 32 && head_dim() == 48 &&
+            cross_dim_ == 2048 && attn_tp() == 8 &&
+            !z2_bound_ && z2_prepared_seq_len_ == 0;
+    }
+
+    int64_t adaln_table_body_bytes() const {
+        return num_layers() * 2 * hidden_size() * DWIDTH;
+    }
+
+    std::vector<int64_t> adaln_table_arguments(int64_t rows, int64_t batch) const {
+        return {rows, batch, num_steps_, num_layers(), hidden_size(), intermediate_size(),
+                num_q_heads(), num_kv_heads(), head_dim(), attn_tp(),
+                denoise_mode_ ? 1 : 0, loop_mode_ ? 1 : 0,
+                adaln_table_generation_, adaln_table_body_bytes()};
+    }
+
+    uint32_t adaln_layer_scale(int layer_idx, const ChunkInfo& chunk) {
+        const bool table = ctx().has_complete_physical_manifest() &&
+            adaln_table_profile(chunk.len, ctx().batch_size);
+        if (adaln_table_.defined() && ctx().has_complete_physical_manifest()) {
+            ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+                GR00T_DIT_ADALN_TABLE_SCHEDULE_SITE, table ? 2 : 1, 0,
+                adaln_table_arguments(chunk.len, ctx().batch_size), chunk.idx);
+        }
+        if (table) {
+            TORCH_CHECK(layer_idx >= 0 && layer_idx < num_layers() &&
+                            ctx().body_iter >= 0 && ctx().body_iter < num_steps_,
+                        "GR00T AdaLN table layer/body out of bounds");
+            return addr(0, "adaln_body_table") +
+                static_cast<uint32_t>(layer_idx * 2 * hidden_size() * DWIDTH);
+        }
+        const auto& lw = layer_weights_[layer_idx];
+        if (chunk.idx == 0) {
+            dit_adaln_gemv(addr(0, "cond"), lw.adaln_w, lw.adaln_b,
+                           addr(0, "adaln"), addr(0, "bias_temp"), addr(0, "gemv_partial"), lw.adaln_ws);
+        }
+        return addr(0, "adaln");
+    }
+
+    bool cross_kv_reuse_profile(int64_t rows, int64_t batch) const {
+        return cross_kv_reuse_opt_in_ && denoise_ready_ &&
+            denoise_mode_ && loop_mode_ && (num_steps_ == 4 || num_steps_ == 10) &&
+            !z2_bound_ && z2_prepared_seq_len_ == 0 &&
+            batch == 1 && rows == 41 && num_layers() == 32 &&
+            hidden_size() == 1536 && intermediate_size() == 6144 &&
+            num_q_heads() == 32 && num_kv_heads() == 32 && head_dim() == 48 &&
+            cross_dim_ == 2048 && vl_seq_ > 0;
+    }
+
+    int64_t cross_kv_schedule(int64_t rows, int64_t batch, bool cross_raw) const {
+        if (!cross_kv_reuse_profile(rows, batch))
+            return static_cast<int64_t>(Gr00tDiTCrossKvSchedule::PROJECT_EACH_BODY);
+        return static_cast<int64_t>(cross_raw
+            ? Gr00tDiTCrossKvSchedule::REUSE_FIRST_BODY_SPM
+            : Gr00tDiTCrossKvSchedule::REUSE_FIRST_BODY_DDR);
+    }
+
+    int64_t cross_kv_bank_stride() const {
+        return Align(gr00t_pad16(vl_seq_) *
+            (num_kv_heads() * head_dim() / NUM_CORES) * DWIDTH, int64_t{256});
+    }
+
+    int64_t cross_kv_bank_bytes() const {
+        return std::count_if(layer_weights_.begin(), layer_weights_.end(),
+            [](const LayerWeights& layer) { return layer.is_cross; }) * cross_kv_bank_stride();
+    }
+
+    uint32_t cross_kv_bank_offset(int layer_idx) const {
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < num_layers() &&
+                    layer_weights_[layer_idx].is_cross,
+                    "GR00T cross-KV bank requires a cross layer");
+        const int64_t ordinal = std::count_if(
+            layer_weights_.begin(), layer_weights_.begin() + layer_idx,
+            [](const LayerWeights& layer) { return layer.is_cross; });
+        const int64_t offset = ordinal * cross_kv_bank_stride();
+        TORCH_CHECK(offset >= 0 && offset + cross_kv_bank_stride() <= cross_kv_bank_bytes() &&
+                    cross_kv_bank_bytes() <= SpmAllocator::SPM_USABLE,
+                    "GR00T cross-KV bank extent is invalid");
+        return static_cast<uint32_t>(offset);
+    }
+
+    void append_cross_kv_buffers(std::vector<BufferDecl>& buffers, const LayoutContext& layout) const {
+        if (!cross_kv_reuse_profile(layout.chunk_size, layout.batch_size) ||
+            layout.attention_policy != AttentionExecutionPolicy::SPM_KV_BY_MHA) return;
+        const int64_t bytes = cross_kv_bank_bytes();
+        if (bytes == 0) return;
+        // Overall raw layout includes mixed self-raw/cross-DDR candidates.
+        // Budget both banks there too; all layers/bodies and hooks must preserve them.
+        // The mask residency planner extends these conservative 0..0 lifetimes
+        // with every other full-lifetime scratch buffer to 0..8.
+        buffers.push_back({"cross_k_bank", bytes, 0, 0, StorageClass::Temp, 0, nullptr, BufferScope::LayerWide});
+        buffers.push_back({"cross_v_bank", bytes, 0, 0, StorageClass::Temp, 0, nullptr, BufferScope::LayerWide});
+    }
+
+    std::vector<int64_t> cross_kv_schedule_arguments(int64_t rows, int64_t batch) const {
+        std::vector<int64_t> args{
+            denoise_mode_ ? 1 : 0, loop_mode_ ? 1 : 0,
+            num_steps_, num_layers(), rows, vl_seq_, batch,
+            hidden_size(), intermediate_size(), cross_dim_,
+            num_q_heads(), num_kv_heads(), head_dim(),
+            cross_kv_bank_stride(), cross_kv_bank_bytes()};
+        for (const auto& layer : layer_weights_) args.push_back(layer.is_cross ? 1 : 0);
+        return args;
+    }
+
+    bool cross_v_transpose_profile(int64_t rows, int64_t batch, bool cross_raw) const {
+        return cross_v_transpose_reuse_opt_in_ && cross_raw &&
+            cross_kv_reuse_profile(rows, batch) && attn_tp() == NUM_CORES;
+    }
+
+    std::vector<int64_t> cross_v_transpose_arguments(int64_t rows, int64_t batch, bool cross_raw) const {
+        auto args = cross_kv_schedule_arguments(rows, batch);
+        args.insert(args.end(), {cross_raw ? 1 : 0, cross_v_transpose_reuse_opt_in_ ? 1 : 0,
+                                attn_tp(), gr00t_pad16(vl_seq_)});
+        return args;
+    }
+
+    bool cross_v_transpose_reused(const ChunkInfo& chunk, AttentionExecutionPolicy policy) const {
+        const bool raw = policy == AttentionExecutionPolicy::SPM_KV_BY_MHA;
+        const bool active = ctx().has_complete_physical_manifest() &&
+            cross_v_transpose_profile(chunk.len, ctx().batch_size, raw);
+        if (cross_v_transpose_reuse_opt_in_ && ctx().has_complete_physical_manifest()) {
+            ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+                GR00T_DIT_CROSS_V_TRANSPOSE_SCHEDULE_SITE, active ? 2 : 1, 0,
+                cross_v_transpose_arguments(chunk.len, ctx().batch_size, raw), chunk.idx);
+        }
+        return active;
+    }
+
+    bool cross_kv_projection_needed(
+        const ChunkInfo& chunk, AttentionExecutionPolicy attention_policy) const {
+        if (!cross_kv_reuse_opt_in_ || !ctx().has_complete_physical_manifest()) return true;
+        const int64_t schedule = cross_kv_schedule(
+            chunk.len, ctx().batch_size,
+            attention_policy != AttentionExecutionPolicy::DDR_KV);
+        ctx().consume_physical_route(
+            FmbRouteFamily::GRAPH_SCHEDULE, GR00T_DIT_CROSS_KV_SCHEDULE_SITE,
+            schedule, /*resolved_flags=*/0,
+            cross_kv_schedule_arguments(chunk.len, ctx().batch_size), chunk.idx);
+        // A fixed graph position refreshes every layer on EVERY request/replay.
+        // Never use a host "loaded" flag: vl_embeds changes between observations.
+        return schedule == static_cast<int64_t>(Gr00tDiTCrossKvSchedule::PROJECT_EACH_BODY)
+            || ctx().body_iter == 0;
+    }
+
     // `vl_seq_` is the VLM prefix length and it is re-set on EVERY forward
     // (forward, step_forward, unroll_forward). It sizes non-aliased Temp decls
     // above — "k", "v", "sdpa_tmp" — and gates the existence of "vl_embeds" and
@@ -1608,6 +2462,51 @@ protected:
         int64_t h = detail::layout_mix(0, vl_seq_);
         h = detail::layout_mix(h, denoise_mode_ ? 1 : 0);
         h = detail::layout_mix(h, cross_dim_);
+        if (cross_kv_reuse_opt_in_) {
+            h = detail::layout_mix(h, loop_mode_ ? 1 : 0);
+            h = detail::layout_mix(h, num_steps_);
+        }
+        if (kv_spm_only_opt_in_) {
+            h = detail::layout_mix(h, kv_spm_only_opt_in_ ? 1 : 0);
+            h = detail::layout_mix(h, loop_mode_ ? 1 : 0);
+            h = detail::layout_mix(h, num_steps_);
+        }
+        if (cross_v_transpose_reuse_opt_in_) {
+            h = detail::layout_mix(h, GR00T_DIT_CROSS_V_TRANSPOSE_SCHEDULE_SITE);
+            h = detail::layout_mix(h, loop_mode_ ? 1 : 0);
+            h = detail::layout_mix(h, num_steps_);
+        }
+        if (adaln_table_.defined()) {
+            h = detail::layout_mix(h, adaln_table_generation_);
+            h = detail::layout_mix(h, adaln_table_body_bytes());
+            h = detail::layout_mix(h, loop_mode_ ? 1 : 0);
+            h = detail::layout_mix(h, num_steps_);
+        }
+        if (time_tau_table_.defined()) {
+            h = detail::layout_mix(h, time_table_generation_);
+            h = detail::layout_mix(h, loop_mode_ ? 1 : 0);
+            h = detail::layout_mix(h, num_steps_);
+        }
+        if (self_qkv_multibase_opt_in_) {
+            h = detail::layout_mix(h, GR00T_DIT_SELF_QKV_MULTIBASE_SITE);
+            h = detail::layout_mix(h, self_qkv_multibase_ready_ ? 1 : 0);
+            h = detail::layout_mix(h, loop_mode_ ? 1 : 0);
+            h = detail::layout_mix(h, num_steps_);
+        }
+        if (ring_xor3_opt_in_) {
+            h = detail::layout_mix(h, GR00T_DIT_ATTN_RING_XOR3_SITE);
+            h = detail::layout_mix(h, GR00T_DIT_FF_RING_XOR3_SITE);
+            h = detail::layout_mix(h, ring_xor3_ready_ ? 1 : 0);
+            h = detail::layout_mix(h, loop_mode_ ? 1 : 0);
+            h = detail::layout_mix(h, num_steps_);
+        }
+        if (ff1_resident_w8_opt_in_) {
+            h = detail::layout_mix(h, GR00T_DIT_FF1_RESIDENT_SCHEDULE_SITE);
+            h = detail::layout_mix(h, ff1_resident_generation_);
+            h = detail::layout_mix(h, ff1_resident_weight_.defined() ? 1 : 0);
+            h = detail::layout_mix(h, loop_mode_ ? 1 : 0);
+            h = detail::layout_mix(h, num_steps_);
+        }
         return h;
     }
 
@@ -1629,6 +2528,8 @@ protected:
             layout.is_causal = ctx().is_causal;
             layout.batch_size = ctx().batch_size;
             layout.attention_policy = ctx().attention_policy;
+            layout.forward_operand_residency =
+                physical_forward_operand_residency(ctx().physical_manifest());
             ctx().consume_physical_route(
                 FmbRouteFamily::GRAPH_SCHEDULE, GR00T_DIT_MASK_SCHEDULE_SITE,
                 mask_schedule_for_layout(layout, /*complete=*/true),
@@ -1668,7 +2569,8 @@ protected:
     }
 
     KvInsertSegmentPlan consume_kv_insert_plan(
-        int64_t site_id, int64_t true_seq, int64_t invocation) {
+        int64_t site_id, int64_t true_seq, int64_t invocation,
+        uint32_t k_spm = 0, uint32_t v_spm = 0) {
         const auto& route = ctx().find_physical_route(
             FmbRouteFamily::KV_INSERT, site_id, invocation);
         const KvInsertSegmentPlan plan =
@@ -1681,15 +2583,15 @@ protected:
         ctx().consume_physical_route(
             FmbRouteFamily::KV_INSERT, site_id,
             static_cast<int64_t>(plan.route()),
-            GR00T_DIT_KV_FLAG_DDR_MIRROR,
+            kv_insert_flags(site_id, invocation),
             route.arguments, invocation);
         if (plan.physical_rows() == true_seq) return plan;
         const int64_t local_qhd = (num_q_heads() * head_dim()) / NUM_CORES;
         const int64_t pad_elems =
             (plan.physical_rows() - true_seq) * local_qhd;
         const uint32_t off = static_cast<uint32_t>(true_seq * local_qhd * DWIDTH);
-        rpu_launch_memset_spm_multicore(addr(0, "k") + off, pad_elems);
-        rpu_launch_memset_spm_multicore(addr(0, "v") + off, pad_elems);
+        rpu_launch_memset_spm_multicore((k_spm ? k_spm : addr(0, "k")) + off, pad_elems);
+        rpu_launch_memset_spm_multicore((v_spm ? v_spm : addr(0, "v")) + off, pad_elems);
         return plan;
     }
 
@@ -1703,11 +2605,7 @@ protected:
         const int64_t FF          = intermediate_size();
         const int64_t local_inter = FF / NUM_CORES;
 
-        if (chunk.idx == 0) {
-            dit_adaln_gemv(addr(0, "cond"), lw.adaln_w, lw.adaln_b,
-                           addr(0, "adaln"), addr(0, "bias_temp"), addr(0, "gemv_partial"), lw.adaln_ws);
-        }
-        const uint32_t scale = addr(0, "adaln");
+        const uint32_t scale = adaln_layer_scale(layer_idx, chunk);
         const uint32_t shift = scale + static_cast<uint32_t>(h * DWIDTH);
 
         if (!ctx().input_in_spm) emit_layer_input_dma(layer_idx, chunk);
@@ -1718,6 +2616,7 @@ protected:
             scale, shift, seq_len, h, eps_, false, 0, NUM_CORES);
 
         // QKV (col-partition) + bias
+        if (!emit_self_qkv_multibase(layer_idx, chunk, lw)) {
         ctx().consume_physical_route(
             FmbRouteFamily::LINEAR, GR00T_DIT_SELF_Q_LINEAR_SITE,
             static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
@@ -1739,6 +2638,7 @@ protected:
         rpu_launch_linear_spm_to_spm_acc16_kernel(
             addr(0, "norm_hidden"), lw.to_v_w, addr(0, "v"),
             seq_len, nq * hd, h, 1, NUM_CORES, layer_addr(layer_idx, 0, "v_bias"), lw.to_v_ws);
+        }
 
         // KV-insert(pos 0) + self-SDPA (non-causal, MASK_NONE). v16-pad: insert pad16(seq_len)
         // (zeroed tail) so the unified insert uses v16; SDPA below still reads kv_seq_len=seq_len.
@@ -1746,19 +2646,27 @@ protected:
         auto& v_cache = (*ctx().v_caches)[layer_idx];
         const KvInsertSegmentPlan kv_plan = consume_kv_insert_plan(
             GR00T_DIT_SELF_KV_INSERT_SITE, seq_len, chunk.idx);
-        rpu_launch_insert_kvcache_spm_unified_with_plan(
-            k_cache, v_cache,
-            addr_offset("k").value, addr_offset("v").value,
-            nq, hd, NUM_CORES,
-            /*k_cache_batch_offset_elems=*/0,
-            /*v_cache_batch_offset_elems=*/0,
-            /*spm_rows=*/kv_plan.physical_rows(), kv_plan);
+        if (kv_insert_flags(GR00T_DIT_SELF_KV_INSERT_SITE, chunk.idx) == GR00T_DIT_KV_FLAG_DDR_MIRROR) {
+            rpu_launch_insert_kvcache_spm_unified_with_plan(
+                k_cache, v_cache,
+                addr_offset("k").value, addr_offset("v").value,
+                nq, hd, NUM_CORES,
+                /*k_cache_batch_offset_elems=*/0,
+                /*v_cache_batch_offset_elems=*/0,
+                /*spm_rows=*/kv_plan.physical_rows(), kv_plan);
+        }
         const double attn_scale = 1.0 / std::sqrt(static_cast<double>(hd));
-        const bool raw_attention = ctx().attention_policy ==
-            AttentionExecutionPolicy::SPM_KV_BY_MHA;
-        const int64_t attention_site = raw_attention
-            ? GR00T_DIT_SELF_RAW_ATTENTION_SITE
-            : GR00T_DIT_SELF_DDR_ATTENTION_SITE;
+        // The aggregate layout can also represent self DDR plus cross raw.
+        int64_t attention_site = GR00T_DIT_SELF_DDR_ATTENTION_SITE;
+        if (ctx().has_complete_physical_manifest()) {
+            for (const auto& route : ctx().physical_manifest().routes) {
+                if (route.family == FmbRouteFamily::ATTENTION &&
+                    route.invocation == chunk.idx &&
+                    route.site_id == GR00T_DIT_SELF_RAW_ATTENTION_SITE) {
+                    attention_site = route.site_id;
+                }
+            }
+        }
         const AttentionExecutionPolicy attention_policy =
             ctx().physical_attention_policy_for_site(
                 attention_site, chunk.idx);
@@ -1817,11 +2725,38 @@ protected:
         const int64_t local_inter = FF / NUM_CORES;
         TORCH_CHECK(S > 0, "gr00t_dit cross-attn block needs vl_embeds (vl_seq_>0)");
 
-        if (chunk.idx == 0) {
-            dit_adaln_gemv(addr(0, "cond"), lw.adaln_w, lw.adaln_b,
-                           addr(0, "adaln"), addr(0, "bias_temp"), addr(0, "gemv_partial"), lw.adaln_ws);
+        // Layout policy is a union: self raw-SPM can coexist with cross DDR.
+        // Resolve this consumer's actual route before deciding whether K/V is reusable.
+        int64_t attention_site = GR00T_DIT_CROSS_DDR_ATTENTION_SITE;
+        if (ctx().has_complete_physical_manifest()) {
+            for (const auto& route : ctx().physical_manifest().routes) {
+                if (route.family == FmbRouteFamily::ATTENTION &&
+                    route.invocation == chunk.idx &&
+                    route.site_id == GR00T_DIT_CROSS_RAW_ATTENTION_SITE) {
+                    attention_site = route.site_id;
+                }
+            }
         }
-        const uint32_t scale = addr(0, "adaln");
+        const AttentionExecutionPolicy attention_policy =
+            ctx().physical_attention_policy_for_site(attention_site, chunk.idx);
+        const bool raw_bank = ctx().has_complete_physical_manifest() &&
+            attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA &&
+            cross_kv_schedule(seq_len, ctx().batch_size, /*cross_raw=*/true) ==
+                static_cast<int64_t>(Gr00tDiTCrossKvSchedule::REUSE_FIRST_BODY_SPM);
+        const uint32_t bank_offset = raw_bank ? cross_kv_bank_offset(layer_idx) : 0;
+        const char* k_slot = raw_bank ? "cross_k_bank" : "k";
+        const bool transposed_bank = cross_v_transpose_reused(chunk, attention_policy);
+        TORCH_CHECK(!transposed_bank || raw_bank, "GR00T transposed V requires a raw cross-KV bank");
+        // Body0 projects into ordinary V scratch, then writes the transposed bank.
+        // Each bank has pad16(S)*local_heads*head_dim halfs in either layout.
+        const char* v_slot = raw_bank && !transposed_bank ? "cross_v_bank" : "v";
+        const uint32_t v_offset = raw_bank && !transposed_bank ? bank_offset : 0;
+        const uint32_t k_spm = addr(0, k_slot) + bank_offset;
+        const uint32_t v_spm = addr(0, v_slot) + v_offset;
+        auto& k_cache = (*ctx().k_caches)[layer_idx];
+        auto& v_cache = (*ctx().v_caches)[layer_idx];
+
+        const uint32_t scale = adaln_layer_scale(layer_idx, chunk);
         const uint32_t shift = scale + static_cast<uint32_t>(h * DWIDTH);
 
         if (!ctx().input_in_spm) emit_layer_input_dma(layer_idx, chunk);
@@ -1841,36 +2776,38 @@ protected:
             seq_len, nq * hd, h, 1, NUM_CORES, layer_addr(layer_idx, 0, "q_bias"), lw.to_q_ws);
 
         // K/V from vl_embeds: linear([S,cross_dim], to_k/to_v[hidden,cross_dim]) -> [S,hidden]
-        const uint32_t vl_input_addr =
-            z2_bound_ ? z2_port_addr_ : addr(0, "vl_embeds");
-        ctx().consume_physical_route(
-            FmbRouteFamily::LINEAR, GR00T_DIT_CROSS_K_LINEAR_SITE,
-            static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
-            /*resolved_flags=*/0, {}, chunk.idx);
-        rpu_launch_linear_spm_to_spm_acc16_kernel(
-            vl_input_addr, lw.to_k_w, addr(0, "k"),
-            S, nq * hd, cross_dim_, 1, NUM_CORES, layer_addr(layer_idx, 0, "k_bias"), lw.to_k_ws);
-        ctx().consume_physical_route(
-            FmbRouteFamily::LINEAR, GR00T_DIT_CROSS_V_LINEAR_SITE,
-            static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
-            /*resolved_flags=*/0, {}, chunk.idx);
-        rpu_launch_linear_spm_to_spm_acc16_kernel(
-            vl_input_addr, lw.to_v_w, addr(0, "v"),
-            S, nq * hd, cross_dim_, 1, NUM_CORES, layer_addr(layer_idx, 0, "v_bias"), lw.to_v_ws);
+        if (cross_kv_projection_needed(chunk, attention_policy)) {
+            const uint32_t vl_input_addr =
+                z2_bound_ ? z2_port_addr_ : addr(0, "vl_embeds");
+            ctx().consume_physical_route(
+                FmbRouteFamily::LINEAR, GR00T_DIT_CROSS_K_LINEAR_SITE,
+                static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
+                /*resolved_flags=*/0, {}, chunk.idx);
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                vl_input_addr, lw.to_k_w, k_spm,
+                S, nq * hd, cross_dim_, 1, NUM_CORES, layer_addr(layer_idx, 0, "k_bias"), lw.to_k_ws);
+            ctx().consume_physical_route(
+                FmbRouteFamily::LINEAR, GR00T_DIT_CROSS_V_LINEAR_SITE,
+                static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
+                /*resolved_flags=*/0, {}, chunk.idx);
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                vl_input_addr, lw.to_v_w, v_spm,
+                S, nq * hd, cross_dim_, 1, NUM_CORES, layer_addr(layer_idx, 0, "v_bias"), lw.to_v_ws);
 
-        // Insert S external K/V at pos 0, then cross-SDPA (seq_q=41, kv=S, MASK_2D). v16-pad:
-        // insert pad16(S) (zeroed tail) for the v16 insert; SDPA below still reads kv_seq_len=S.
-        auto& k_cache = (*ctx().k_caches)[layer_idx];
-        auto& v_cache = (*ctx().v_caches)[layer_idx];
-        const KvInsertSegmentPlan kv_plan = consume_kv_insert_plan(
-            GR00T_DIT_CROSS_KV_INSERT_SITE, S, chunk.idx);
-        rpu_launch_insert_kvcache_spm_unified_with_plan(
-            k_cache, v_cache,
-            addr_offset("k").value, addr_offset("v").value,
-            nq, hd, NUM_CORES,
-            /*k_cache_batch_offset_elems=*/0,
-            /*v_cache_batch_offset_elems=*/0,
-            /*spm_rows=*/kv_plan.physical_rows(), kv_plan);
+            // Insert S external K/V at pos 0, then cross-SDPA (seq_q=41, kv=S, MASK_2D). v16-pad:
+            // insert pad16(S) (zeroed tail) for the v16 insert; SDPA below still reads kv_seq_len=S.
+            const KvInsertSegmentPlan kv_plan = consume_kv_insert_plan(
+                GR00T_DIT_CROSS_KV_INSERT_SITE, S, chunk.idx, k_spm, v_spm);
+            if (kv_insert_flags(GR00T_DIT_CROSS_KV_INSERT_SITE, chunk.idx) == GR00T_DIT_KV_FLAG_DDR_MIRROR) {
+                rpu_launch_insert_kvcache_spm_unified_with_plan(
+                    k_cache, v_cache,
+                    addr_offset(k_slot).value + bank_offset, addr_offset(v_slot).value + v_offset,
+                    nq, hd, NUM_CORES,
+                    /*k_cache_batch_offset_elems=*/0,
+                    /*v_cache_batch_offset_elems=*/0,
+                    /*spm_rows=*/kv_plan.physical_rows(), kv_plan);
+            }
+        }
         // GR00T mask alternation (dit.py:391): cross blocks with global idx%4==0 attend
         // the TEXT subset, else the IMAGE subset (attend_text_every_n_blocks=2).
         const bool image_mask = layer_idx % 4 != 0;
@@ -1891,14 +2828,6 @@ protected:
             sdpa_dma_mask_to_spm(pm, addr_offset(mask_slot).value, seq_len, S, NUM_CORES);
         }
         const double attn_scale = 1.0 / std::sqrt(static_cast<double>(hd));
-        const bool raw_attention = ctx().attention_policy ==
-            AttentionExecutionPolicy::SPM_KV_BY_MHA;
-        const int64_t attention_site = raw_attention
-            ? GR00T_DIT_CROSS_RAW_ATTENTION_SITE
-            : GR00T_DIT_CROSS_DDR_ATTENTION_SITE;
-        const AttentionExecutionPolicy attention_policy =
-            ctx().physical_attention_policy_for_site(
-                attention_site, chunk.idx);
         if (attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA) {
             TORCH_CHECK(pm.mask_type == 4,
                         "GR00T DiT raw-SPM cross attention requires MASK_2D");
@@ -1908,11 +2837,17 @@ protected:
                 static_cast<int64_t>(
                     AttentionExecutionPolicy::SPM_KV_BY_MHA),
                 /*resolved_flags=*/0, {}, chunk.idx);
-            rpu_launch_v_transpose_spm(
-                addr(0, "v"), addr(0, "sdpa_tmp"),
-                /*batch=*/1, S, nq, hd, NUM_CORES);
+            const uint32_t transposed_v = transposed_bank
+                ? addr(0, "cross_v_bank") + bank_offset : addr(0, "sdpa_tmp");
+            TORCH_CHECK(!transposed_bank || (ctx().body_iter >= 0 && ctx().body_iter < num_steps_),
+                        "GR00T transposed V body out of bounds");
+            // Fixed body0 refreshes the bank on EVERY inference/Graph replay.
+            if (!transposed_bank || ctx().body_iter == 0) {
+                rpu_launch_v_transpose_spm(
+                    v_spm, transposed_v, /*batch=*/1, S, nq, hd, NUM_CORES);
+            }
             rpu_launch_sdpa_by_mha_spm(
-                addr(0, "q"), addr(0, "k"), addr(0, "sdpa_tmp"),
+                addr(0, "q"), k_spm, transposed_v,
                 addr(0, "sdpa_out"), addr(0, mask_slot), pm.mask_type,
                 attn_scale, /*batch=*/1, seq_len, S,
                 nq, nq, hd, NUM_CORES);
@@ -1959,14 +2894,16 @@ protected:
         rpu_launch_linear_spm_to_spm_acc16_kernel(
             addr(0, "sdpa_out"), lw.to_out_w, addr(0, "oproj"),
             seq_len, h, nq * hd, 0, NUM_CORES, layer_addr(layer_idx, 0, "out_bias"), lw.to_out_ws);
-        ctx().consume_physical_route(
-            FmbRouteFamily::ALL_REDUCE,
-            GR00T_DIT_ATTN_ALL_REDUCE_SITE,
-            fmb_ring_all_reduce_route_selector(seq_len, h),
-            /*resolved_flags=*/0, {}, chunk.idx);
-        rpu_launch_all_reduce_sum_residual_kernel(
-            addr(0, "oproj"), addr(0, "residual1"), addr(0, "residual2"),
-            seq_len, h, NUM_CORES, NUM_CORES);
+        if (!emit_attn_ring_xor3(chunk)) {
+            ctx().consume_physical_route(
+                FmbRouteFamily::ALL_REDUCE,
+                GR00T_DIT_ATTN_ALL_REDUCE_SITE,
+                fmb_ring_all_reduce_route_selector(seq_len, h),
+                /*resolved_flags=*/0, {}, chunk.idx);
+            rpu_launch_all_reduce_sum_residual_kernel(
+                addr(0, "oproj"), addr(0, "residual1"), addr(0, "residual2"),
+                seq_len, h, NUM_CORES, NUM_CORES);
+        }
 
         // norm3 = LayerNorm(affine=False) -> norm_hidden
         rpu_launch_layernorm_spm_kernel(
@@ -1975,6 +2912,15 @@ protected:
             seq_len, h, 1e-5, false, 0, NUM_CORES);
 
         // FFN: ff1(col)+bias -> GELU(tanh-approx) -> ff2(row)+bias + PLAIN residual
+        if (layer_idx == 0 && ctx().has_complete_physical_manifest() &&
+            ff1_resident_selected()) {
+            ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+                GR00T_DIT_FF1_RESIDENT_LINEAR_SITE, /*SPM_WEIGHT_M512N48K128=*/2, 0,
+                ff1_resident_arguments(seq_len, ctx().batch_size), chunk.idx);
+            rpu_launch_gr00t_ff1_resident_w8_kernel(
+                addr(0, "norm_hidden"), addr(0, "ff1_resident_w8"), addr(0, "ff_mid"),
+                layer_addr(layer_idx, 0, "ff1_bias"), lw.ff1_ws);
+        } else {
         ctx().consume_physical_route(
             FmbRouteFamily::LINEAR, GR00T_DIT_FF1_LINEAR_SITE,
             static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
@@ -1982,6 +2928,7 @@ protected:
         rpu_launch_linear_spm_to_spm_acc16_kernel(
             addr(0, "norm_hidden"), lw.ff1_w, addr(0, "ff_mid"),
             seq_len, FF, h, 1, NUM_CORES, layer_addr(layer_idx, 0, "ff1_bias"), lw.ff1_ws);
+        }
         rpu_launch_eltwise_unary_spm_kernel(
             addr(0, "ff_mid"), addr(0, "ff_mid"),
             seq_len * local_inter, ValuOpType::ADD,
@@ -1993,13 +2940,15 @@ protected:
         rpu_launch_linear_spm_to_spm_acc16_kernel(
             addr(0, "ff_mid"), lw.ff2_w, addr(0, "oproj"),
             seq_len, h, FF, 0, NUM_CORES, layer_addr(layer_idx, 0, "ff2_bias"), lw.ff2_ws);
-        ctx().consume_physical_route(
-            FmbRouteFamily::ALL_REDUCE, GR00T_DIT_FF_ALL_REDUCE_SITE,
-            fmb_ring_all_reduce_route_selector(seq_len, h),
-            /*resolved_flags=*/0, {}, chunk.idx);
-        rpu_launch_all_reduce_sum_residual_kernel(
-            addr(0, "oproj"), addr(0, "residual2"), addr(0, "residual1"),
-            seq_len, h, NUM_CORES, NUM_CORES);
+        if (!emit_ff_ring_xor3(chunk)) {
+            ctx().consume_physical_route(
+                FmbRouteFamily::ALL_REDUCE, GR00T_DIT_FF_ALL_REDUCE_SITE,
+                fmb_ring_all_reduce_route_selector(seq_len, h),
+                /*resolved_flags=*/0, {}, chunk.idx);
+            rpu_launch_all_reduce_sum_residual_kernel(
+                addr(0, "oproj"), addr(0, "residual2"), addr(0, "residual1"),
+                seq_len, h, NUM_CORES, NUM_CORES);
+        }
 
         if (!ctx().output_to_spm) emit_layer_output_dma(layer_idx, chunk);
     }
@@ -2039,10 +2988,43 @@ protected:
             gemv_out_spm_addr, c10::Half(1.0), gemv_out_spm_addr, h, ValuOpType::ADD);
     }
 
+    bool load_adaln_body_table() {
+        if (!ctx().has_complete_physical_manifest() ||
+            !adaln_table_profile(ctx().seq_len, ctx().batch_size)) return false;
+        const int64_t body = ctx().body_iter;
+        TORCH_CHECK(body >= 0 && body < num_steps_, "GR00T AdaLN table body out of bounds");
+        ctx().consume_physical_route(FmbRouteFamily::MUTABLE_DMA,
+            GR00T_DIT_ADALN_TABLE_DMA_SITE,
+            static_cast<int64_t>(Gr00tDiTMutableDmaRoute::DDR_BROADCAST_TO_SPM), 0,
+            adaln_table_arguments(ctx().seq_len, ctx().batch_size), body);
+        rpu_launch_ddr_broadcast_spm_dma_mutable(
+            adaln_table_src_base_, adaln_table_, body * adaln_table_body_bytes(),
+            adaln_table_body_bytes() / DWIDTH, addr(0, "adaln_body_table"), NUM_CORES);
+        return true;
+    }
+
+    bool load_time_table(bool tau) {
+        if (!ctx().has_complete_physical_manifest() ||
+            !time_table_profile(ctx().seq_len, ctx().batch_size)) return false;
+        const int64_t body = ctx().body_iter;
+        TORCH_CHECK(body >= 0 && body < num_steps_, "GR00T time table body out of bounds");
+        const int64_t elements = (tau ? action_horizon_ : 2) * hidden_size();
+        ctx().consume_physical_route(FmbRouteFamily::MUTABLE_DMA,
+            GR00T_DIT_TIME_TABLE_DMA_SITE,
+            static_cast<int64_t>(Gr00tDiTMutableDmaRoute::DDR_BROADCAST_TO_SPM), 0,
+            time_table_arguments(ctx().seq_len, ctx().batch_size), body * 2 + (tau ? 0 : 1));
+        rpu_launch_ddr_broadcast_spm_dma_mutable(
+            tau ? time_tau_src_base_ : time_po1_src_base_,
+            tau ? time_tau_table_ : time_po1_table_, body * elements * DWIDTH,
+            elements, addr(0, tau ? "enc2" : "so"), /*num_cores=*/1);
+        return true;
+    }
+
     // ============== Phase B/C — pre-hook: encoders -> sa_embs (emb_stage_) + cond ==============
     // All single-core (core 0); the cond scatter (8-core) feeds the multi-core DiT adaln.
     // step = step_idx_ (step form) or ctx().body_iter (unroll). See build_denoise_step.py design.
     void emit_pre_layers_body() {
+        load_ff1_resident_weight();
         const int64_t h = hidden_size();
         const int64_t AH = action_horizon_, NP = action_dim_pad_, EM = enc_mid_;
         const int64_t bit = ctx().body_iter;
@@ -2050,14 +3032,19 @@ protected:
         const int64_t cond_off = step * h;
         const uint32_t tau_step = addr(0, "tau_table") + static_cast<uint32_t>(step * AH * h * DWIDTH);
         const int64_t local_k = h / NUM_CORES;
+        const bool time_tables = time_tables_active();
 
         // cond[step]: 8-core scatter -> "cond" (DiT adaln) + core0 broadcast -> "cond_full" (norm_out)
-        rpu_launch_ddr_scatter_spm_dma(
-            cond_table_t_, cond_off, local_k, local_k * DWIDTH,
-            addr(0, "cond"), NUM_CORES);
-        rpu_launch_ddr_broadcast_spm_dma(
-            cond_table_t_, cond_off, h, addr(0, "cond_full"),
-            /*num_cores=*/1);
+        if (!load_adaln_body_table()) {
+            rpu_launch_ddr_scatter_spm_dma(
+                cond_table_t_, cond_off, local_k, local_k * DWIDTH,
+                addr(0, "cond"), NUM_CORES);
+        }
+        if (!time_tables) {
+            rpu_launch_ddr_broadcast_spm_dma(
+                cond_table_t_, cond_off, h, addr(0, "cond_full"),
+                /*num_cores=*/1);
+        }
 
         if (bit == 0) {
             // x_t (actions, zero-padded [AH,NP]) -> x_t_spm (mutable; iter-0 only — iters 1..N-1
@@ -2089,7 +3076,8 @@ protected:
         // action encoder: a_emb = x_t @ ae1 + b1 ; xx = silu(a_emb@W2a + b2 + tau@W2t) ; af = xx@W3 + b3 + pos
         sc_lin(addr(0, "x_t_spm"), ae1_w_, addr(0, "enc0"), AH, h, NP, addr(0, "ae1_bias"));
         sc_lin(addr(0, "enc0"), ae2a_w_, addr(0, "enc1"), AH, h, h, addr(0, "ae2_bias"), ae2a_ws_);   // + b2 (folded)
-        sc_lin(tau_step,        ae2t_w_, addr(0, "enc2"), AH, h, h, /*bias=*/0, ae2t_ws_);
+        if (time_tables) load_time_table(/*tau=*/true);
+        else sc_lin(tau_step, ae2t_w_, addr(0, "enc2"), AH, h, h, /*bias=*/0, ae2t_ws_);
         rpu_launch_eltwise_binary_spm_kernel(addr(0, "enc1"), addr(0, "enc2"), addr(0, "enc1"),
                                              AH * h, ValuOpType::ADD, c10::Half(1.0), 1);
         rpu_launch_eltwise_unary_spm_kernel(addr(0, "enc1"), addr(0, "enc1"),
@@ -2115,10 +3103,12 @@ protected:
 
         // norm_out (DISTINCT from DiT AdaLN): so = cond_full @ po1 + b1 ; shift=so[:h], scale=so[h:].
         // Fold the modulate into ONE LN: gamma=(1+scale), beta=shift, eps=1e-6, affine via so slices.
-        sc_lin(addr(0, "cond_full"), po1_w_, addr(0, "so"), 1, 2 * h, h, addr(0, "po1_bias"), po1_ws_);
         const uint32_t shift_a = addr(0, "so");
         const uint32_t scale_a = addr(0, "so") + static_cast<uint32_t>(h * DWIDTH);
-        rpu_launch_eltwise_binary_scalar_spm_kernel(scale_a, c10::Half(1.0), scale_a, h, ValuOpType::ADD);
+        if (!load_time_table(/*tau=*/false)) {
+            sc_lin(addr(0, "cond_full"), po1_w_, addr(0, "so"), 1, 2 * h, h, addr(0, "po1_bias"), po1_ws_);
+            rpu_launch_eltwise_binary_scalar_spm_kernel(scale_a, c10::Half(1.0), scale_a, h, ValuOpType::ADD);
+        }
         rpu_launch_layernorm_spm_kernel(addr(0, "residual1"), addr(0, "normed"),
                                         scale_a, shift_a, SQ, h, 1e-6, false, 0, /*num_cores=*/1);
         sc_lin(addr(0, "normed"), po2_w_, addr(0, "model_out"), SQ, MO, h, addr(0, "po2_bias"), po2_ws_);
@@ -2154,6 +3144,7 @@ protected:
     // so preparing image never overwrites text and needs no second DDR copy.
     PreparedMask prep_mask_into(const std::optional<at::Tensor>& m, int64_t seq_q,
                                 at::Tensor& slot, int64_t ordinal) {
+        unroll_mask_publications_ = {};
         PreparedMask pm = sdpa_prepare_mask(
             m, /*is_causal=*/false, seq_q, vl_seq_,
             sdpa_stable_mask_cache(), ordinal);
@@ -2162,6 +3153,155 @@ protected:
     }
 
 private:
+    // Only ordinary unroll may retain completed CPU publications. Every other
+    // cross-mask writer uses prep_mask_into and revokes both private receipts.
+    struct Gr00tMaskSpan {
+        const void* tensor_impl = nullptr;
+        const void* storage_impl = nullptr;
+        uintptr_t base = 0, data = 0;
+        size_t storage_bytes = 0, bytes = 0;
+        int64_t offset = 0, rows = 0, cols = 0, stride0 = 0, stride1 = 0;
+        bool snapshot(const at::Tensor& tensor) {
+            if (!tensor.defined() || tensor.device().type() != at::kPrivateUse1 ||
+                tensor.dim() != 2 || tensor.scalar_type() != at::kHalf ||
+                !tensor.is_contiguous() || tensor.nbytes() == 0)
+                return false;
+            const auto storage = tensor.storage();
+            *this = {tensor.unsafeGetTensorImpl(), storage.unsafeGetStorageImpl(),
+                reinterpret_cast<uintptr_t>(storage.data_ptr().get()),
+                reinterpret_cast<uintptr_t>(tensor.data_ptr()), storage.nbytes(), tensor.nbytes(),
+                tensor.storage_offset(), tensor.size(0), tensor.size(1),
+                tensor.stride(0), tensor.stride(1)};
+            const auto max = std::numeric_limits<uintptr_t>::max();
+            return base != 0 && data >= base && offset >= 0 &&
+                storage_bytes <= max - base && bytes <= max - data &&
+                data + bytes <= base + storage_bytes &&
+                static_cast<uint64_t>(offset) <= storage_bytes / sizeof(c10::Half) &&
+                data == base + static_cast<size_t>(offset) * sizeof(c10::Half);
+        }
+        bool operator==(const Gr00tMaskSpan& other) const {
+            return tensor_impl == other.tensor_impl && storage_impl == other.storage_impl &&
+                base == other.base && data == other.data && storage_bytes == other.storage_bytes &&
+                bytes == other.bytes && offset == other.offset && rows == other.rows &&
+                cols == other.cols && stride0 == other.stride0 && stride1 == other.stride1;
+        }
+        bool disjoint(uintptr_t other_base, size_t other_bytes) const {
+            const auto max = std::numeric_limits<uintptr_t>::max();
+            return other_base != 0 && other_bytes <= max - other_base &&
+                (base + storage_bytes <= other_base ||
+                 other_base + other_bytes <= base);
+        }
+    };
+    struct Gr00tMaskPublication {
+        PreparedMask mask;
+        Gr00tMaskSpan span;
+        uint64_t generation = 0;
+        int64_t logical_k = 0;
+        bool published = false;
+    };
+    std::array<Gr00tMaskPublication, 2> unroll_mask_publications_;
+
+    static bool unroll_mask_matches(const at::Tensor& source,
+                                    const Gr00tMaskPublication& receipt) {
+        const auto* input = source.data_ptr<c10::Half>();
+        const auto* target = receipt.mask.ddr_tensor.data_ptr<c10::Half>();
+        const c10::Half masked(-std::numeric_limits<float>::infinity());
+        for (int64_t row = 0; row < receipt.span.rows; ++row) {
+            if (std::memcmp(input + row * receipt.logical_k,
+                    target + row * receipt.span.cols,
+                    static_cast<size_t>(receipt.logical_k) * sizeof(c10::Half)) != 0)
+                return false;
+            for (int64_t col = receipt.logical_k; col < receipt.span.cols; ++col)
+                if (std::memcmp(target + row * receipt.span.cols + col,
+                        &masked, sizeof(c10::Half)) != 0)
+                    return false;
+        }
+        return true;
+    }
+
+    void prepare_unroll_masks(const at::Tensor& tmask, const at::Tensor& imask,
+                              int64_t seq_q) {
+        try {
+            const std::array<const at::Tensor*, 2> sources{&tmask, &imask};
+            std::array<uintptr_t, 2> source_base{};
+            std::array<size_t, 2> source_bytes{};
+            const auto maximum = std::numeric_limits<uintptr_t>::max();
+            const uint64_t generation = installed_model_state_generation();
+            bool cacheable = g_rpu_ddr_flush_force_enabled;
+            // Inspect BOTH original backings before either slot can hit or write.
+            // A narrowed CPU alias may overlap a private owner only in its tail.
+            for (size_t i = 0; cacheable && i < sources.size(); ++i) {
+                const auto& source = *sources[i];
+                cacheable = source.defined() && source.device().is_cpu() &&
+                    source.layout() == at::kStrided && source.dim() == 2 &&
+                    source.scalar_type() == at::kHalf && source.is_contiguous() &&
+                    !source.requires_grad() && !source.is_neg() && !source.is_conj() &&
+                    source.size(0) == seq_q &&
+                    source.size(1) == vl_seq_ && source.nbytes() != 0;
+                if (!cacheable) break;
+                const auto storage = source.storage();
+                source_base[i] = reinterpret_cast<uintptr_t>(storage.data_ptr().get());
+                source_bytes[i] = storage.nbytes();
+                const auto data = reinterpret_cast<uintptr_t>(source.data_ptr());
+                const auto offset = source.storage_offset();
+                cacheable = source_base[i] != 0 && source_bytes[i] != 0 &&
+                    source_bytes[i] <= maximum - source_base[i] &&
+                    data >= source_base[i] && source.nbytes() <= maximum - data &&
+                    data + source.nbytes() <= source_base[i] + source_bytes[i] &&
+                    offset >= 0 && static_cast<uint64_t>(offset) <= source_bytes[i] / sizeof(c10::Half) &&
+                    data == source_base[i] + static_cast<size_t>(offset) * sizeof(c10::Half);
+            }
+            for (const auto& receipt : unroll_mask_publications_) {
+                if (!cacheable || !receipt.published) continue;
+                Gr00tMaskSpan current;
+                cacheable = receipt.generation == generation &&
+                    current.snapshot(receipt.mask.ddr_tensor) && current == receipt.span &&
+                    current.disjoint(source_base[0], source_bytes[0]) &&
+                    current.disjoint(source_base[1], source_bytes[1]);
+            }
+            if (!cacheable) unroll_mask_publications_ = {};
+            std::array<PreparedMask*, 2> prepared{&prepared_cross_mask_, &prepared_cross_mask_img_};
+            std::array<at::Tensor*, 2> slots{&text_mask_slot_, &image_mask_slot_};
+            for (size_t i = 0; i < sources.size(); ++i) {
+                auto& receipt = unroll_mask_publications_[i];
+                if (cacheable && receipt.published && receipt.logical_k == vl_seq_ &&
+                    receipt.span.rows == seq_q &&
+                    receipt.span.cols == Align(vl_seq_, 16) &&
+                    (c10::InferenceMode::is_enabled() || !receipt.mask.ddr_tensor.is_inference()) &&
+                    unroll_mask_matches(*sources[i], receipt)) {
+                    *prepared[i] = receipt.mask;
+                    *slots[i] = receipt.mask.ddr_tensor;
+                    continue;
+                }
+                receipt.published = false;
+                // Keep shared preparation, public device acquisition and copy_ error
+                // behavior unchanged. A failed second copy revokes the whole pair.
+                *prepared[i] = sdpa_prepare_mask(*sources[i], false, seq_q, vl_seq_,
+                                                sdpa_stable_mask_cache(), i + 1);
+                *slots[i] = prepared[i]->mask_type == 4 ? prepared[i]->ddr_tensor : at::Tensor{};
+                if (!cacheable) continue;
+                Gr00tMaskSpan span;
+                bool valid = prepared[i]->mask_type == 4 && span.snapshot(*slots[i]) &&
+                    span.rows == seq_q && span.cols == Align(vl_seq_, 16) &&
+                    span.disjoint(source_base[0], source_bytes[0]) &&
+                    span.disjoint(source_base[1], source_bytes[1]);
+                const auto& other = unroll_mask_publications_[1 - i];
+                if (valid && other.published)
+                    valid = span.disjoint(other.span.base, other.span.storage_bytes);
+                if (!valid || !g_rpu_ddr_flush_force_enabled ||
+                    installed_model_state_generation() != generation) {
+                    unroll_mask_publications_ = {};
+                    cacheable = false;
+                } else {
+                    receipt = {*prepared[i], span, generation, vl_seq_, true};
+                }
+            }
+        } catch (...) {
+            unroll_mask_publications_ = {};
+            throw;
+        }
+    }
+
     std::vector<int64_t> kvinsert_cost_weight_identity() const override {
         if (layer_weights_.empty()) return {};
         std::vector<int64_t> identity{1};
@@ -2190,15 +3330,53 @@ private:
                 &dec2_ws_, &po1_ws_, &po2_ws_}) {
             append_kvinsert_cost_tensor_identity(identity, *tensor);
         }
+        if (adaln_table_.defined()) {
+            identity.insert(identity.end(), {adaln_table_generation_, num_steps_,
+                                             adaln_table_body_bytes()});
+            append_kvinsert_cost_tensor_identity(identity, cond_table_t_);
+            append_kvinsert_cost_tensor_identity(identity, adaln_table_);
+        }
+        if (time_tau_table_.defined()) {
+            identity.insert(identity.end(), {time_table_generation_, num_steps_, action_horizon_});
+            for (const auto* tensor : {&cond_table_t_, &tau_table_, &time_tau_table_, &time_po1_table_})
+                append_kvinsert_cost_tensor_identity(identity, *tensor);
+        }
+        if (self_qkv_multibase_opt_in_) {
+            identity.insert(identity.end(), {GR00T_DIT_SELF_QKV_MULTIBASE_SITE,
+                                             self_qkv_multibase_ready_ ? 1 : 0});
+            for (const auto& layer : layer_weights_) identity.push_back(layer.is_cross ? 1 : 0);
+        }
+        if (ring_xor3_opt_in_) {
+            identity.insert(identity.end(), {GR00T_DIT_ATTN_RING_XOR3_SITE,
+                GR00T_DIT_FF_RING_XOR3_SITE, ring_xor3_ready_ ? 1 : 0});
+        }
+        if (ff1_resident_weight_.defined()) {
+            identity.insert(identity.end(), {ff1_resident_generation_, GR00T_DIT_FF1_RESIDENT_BYTES});
+            append_kvinsert_cost_tensor_identity(identity, ff1_resident_weight_);
+        }
         return identity;
     }
 
     std::vector<LayerWeights> layer_weights_;
+    bool self_qkv_multibase_ready_ = false;
+    bool ring_xor3_ready_ = false;
+    at::Tensor ff1_resident_weight_, ff1_resident_source_;
+    uint64_t ff1_resident_src_base_ = 0;
+    int64_t ff1_resident_generation_ = 0, ff1_resident_source_version_ = 0;
+    at::Tensor time_tau_table_, time_po1_table_;
+    uint64_t time_tau_src_base_ = 0, time_po1_src_base_ = 0;
+    int64_t time_table_generation_ = 0;
+    std::vector<std::pair<at::Tensor, int64_t>> time_sources_;
+    at::Tensor adaln_table_;
+    uint64_t adaln_table_src_base_ = 0;
+    int64_t adaln_table_generation_ = 0;
+    bool inference_started_ = false;
+    std::vector<std::pair<at::Tensor, int64_t>> adaln_sources_;
     double eps_ = 1e-5;
     int64_t cross_dim_ = 2048;
     SdpaKernelType sdpa_kernel_ = SdpaKernelType::FLASH_ATTN_SPM;
 
-    // norm3 affine=False constants (gamma=1, beta=0), DDR-resident on rpu.
+    // norm3 affine=False constants (gamma=1, beta=0), DDR-resident on device.
     at::Tensor ln_ones_, ln_zeros_;
 
     // Per-forward cond (= SiLU(temb)) state (mirrors AdaRMS).
@@ -2207,6 +3385,12 @@ private:
     bool       cond_loaded_this_forward_ = false;
 
     // Per-forward vl_embeds (cross-attn K/V source) + prepared MASK_2D.
+    const bool cross_kv_reuse_opt_in_;        // cold handle policy; never reread during REPLAY
+    const bool kv_spm_only_opt_in_;
+    const bool cross_v_transpose_reuse_opt_in_;
+    const bool ff1_resident_w8_opt_in_;
+    const bool self_qkv_multibase_opt_in_;
+    const bool ring_xor3_opt_in_;
     at::Tensor   vl_ref_;
     uint64_t     vl_src_base_ = 0;
     int64_t      vl_seq_ = 0;
@@ -2302,6 +3486,14 @@ std::string rpu_gr00t_dit_kvinsert_cost_catalog_sha256(int64_t handle) {
 
 int64_t rpu_gr00t_dit_create() {
     return Gr00tDiTRegistry::create();
+}
+
+void rpu_gr00t_dit_prepare_time_tables(int64_t handle) {
+    Gr00tDiTRegistry::get(handle, "rpu_gr00t_dit_prepare_time_tables")->prepare_time_tables();
+}
+
+void rpu_gr00t_dit_prepare_adaln_table(int64_t handle) {
+    Gr00tDiTRegistry::get(handle, "rpu_gr00t_dit_prepare_adaln_table")->prepare_adaln_table();
 }
 
 void rpu_gr00t_dit_destroy(int64_t handle) {
@@ -2594,4 +3786,9 @@ at::Tensor rpu_gr00t_denoise_unroll_forward_z2(
         ->unroll_forward_z2(
             noise, state, k_caches, v_caches, tmask, imask,
             static_cast<uint64_t>(epoch), static_cast<uint64_t>(plan_hash));
+}
+
+void rpu_gr00t_dit_prepare_persistent_spm(int64_t handle, int64_t execution_len) {
+    Gr00tDiTRegistry::get(handle, "rpu_gr00t_dit_prepare_persistent_spm")
+        ->prepare_persistent_spm(execution_len, 0, false);
 }

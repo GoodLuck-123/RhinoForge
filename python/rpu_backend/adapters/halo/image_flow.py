@@ -1,4 +1,4 @@
-"""HALO image_flow_step（mode="gen" 图像 flow-matching 去噪单步）→ RPU（WS-2 组件 D）。
+"""HALO image_flow_step（mode="gen" 图像 flow-matching 去噪单步）→ device（WS-2 组件 D）。
 
 部署旁路口径（``use_goal_image=True``）下 ``Bagel._forward_flow``（bagel.py:1200）每步：
 host 合成 ``x_emb = vae2llm(x_t) + time_embedder(timestep) + latent_pos_embed[pos]``（:1239）
@@ -26,9 +26,6 @@ boundary（vae2llm/time/pos/embed_tokens/llm2vae）host（M1）。
   * **MASK_NONE 全 attend**：``step_forward`` 不传 mask（内部 ``run_all_layers`` nullopt +
     is_causal=false → MASK_NONE）；KV_FIRST 内部多块, 调用方不传 chunk_size。
 
-验收（分级，2026-06-17 锁定）：单步 v_t 硬门（native vs CUDA golden, proven-fp16
-cos≥0.999 ∧ MSE≤1e-3）+ final-latent 经验容差（49 步 rollout 末 latent，去噪累积，诊断）。
-proof 边界：数值正确性由 @hardware .81 测试对 golden gate，本模块自身不构成硬件证据。
 """
 from __future__ import annotations
 
@@ -111,7 +108,7 @@ class HaloImageFlowStep:
 
     单 handle（gen 孪生权重）+ 每 CFG 分支一个 RPUCache。``denoise_step`` 跑 1 步（3 分支
     forward + host renorm）；``rollout`` 跑完整 Euler 循环。
-    所有权：RPU 权重/cache 在 runner 存活期有效；``_handle`` 由 finalize 释放。
+    所有权：device 权重/cache 在 runner 存活期有效；``_handle`` 由 finalize 释放。
     """
 
     cfg: HaloConfig
@@ -247,7 +244,7 @@ class HaloImageFlowStep:
         )
 
     def _forward(self, x_emb: torch.Tensor, pb: _PreparedBranch) -> torch.Tensor:
-        """单分支 forward：x_emb [1,N,H] fp16 RPU → hidden [N,H] cpu fp32（post-final-norm）。
+        """单分支 forward：x_emb [1,N,H] fp16 device → hidden [N,H] cpu fp32（post-final-norm）。
 
         sig 含 prefix_len（KV 落位）+ N + rope_position（经 epoch 唯一 cos/sin 指针隐含）
         + epoch（DMA 指针代数）→ 防陈旧 replay 用错 KV 落位 / 错分支 cos/sin。
@@ -335,7 +332,7 @@ class HaloImageFlowStep:
     ) -> torch.Tensor:
         """一次去噪步（独立注入 3 分支 → forward → renorm）→ v_t [N,64] cpu fp32。
 
-        单步 v_t 硬门用此入口（scales=1 时退化为纯 cond 分支，隔离 RPU forward 正确性）。
+        单步 v_t 硬门用此入口（scales=1 时退化为纯 cond 分支，隔离 device forward 正确性）。
         """
         if cfg_text_scale > 1.0 and cfg_text is None:
             raise ValueError("cfg_text_scale>1 需提供 cfg_text 分支")

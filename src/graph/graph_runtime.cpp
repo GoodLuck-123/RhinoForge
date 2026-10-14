@@ -440,7 +440,7 @@ bool graph_has_retained_physical_arena_guard(uint64_t graph_lifetime_id) {
 
 uint64_t next_execution_token_locked(ProcessExecutionState& state) {
     TORCH_CHECK(state.generation != std::numeric_limits<uint64_t>::max(),
-                "RPU execution coordinator generation exhausted");
+                "device execution coordinator generation exhausted");
     return ++state.generation;
 }
 
@@ -1258,11 +1258,20 @@ void validate_graph_runtime_policy(
             runtime_policy.graph_arena_count == 0,
         "GraphRuntimePolicy legacy 27B arena plan cannot be combined with "
         "an explicit graph arena count");
+    TORCH_CHECK(
+        !runtime_policy.qwen35_dense_27b_sdk_budget ||
+            (!runtime_policy.qwen35_legacy_27b_sdk_budget &&
+             runtime_policy.graph_arena_count == 4),
+        "GraphRuntimePolicy dense 27B requires four arenas and no legacy owner");
     const auto defer_mode = static_cast<uint8_t>(
         runtime_policy.host_op_defer_mode);
     TORCH_CHECK(
         defer_mode <= static_cast<uint8_t>(GraphHostOpDeferMode::ForceOn),
         "GraphRuntimePolicy host-op defer mode is invalid: ", defer_mode);
+    TORCH_CHECK(
+        runtime_policy.batch_snapshot_mode == GraphBatchSnapshotMode::Auto ||
+            runtime_policy.batch_snapshot_mode == GraphBatchSnapshotMode::Off,
+        "GraphRuntimePolicy batch snapshot mode must be AUTO or OFF");
     TORCH_CHECK(
         runtime_policy.lkn_max_batch_entries > 0 &&
             runtime_policy.lkn_max_batch_entries <= (size_t{1} << 22),
@@ -1350,7 +1359,7 @@ RpuExecutionCoordinator::Claim RpuExecutionCoordinator::enter_graph(
         state.owner_tid = current;
     } else {
         TORCH_CHECK(state.owner_tid == current,
-                    operation, ": RPU execution is owned by another thread");
+                    operation, ": device execution is owned by another thread");
         TORCH_INTERNAL_ASSERT(state.graph_depth > 0 || state.physical_active);
     }
     const uint64_t token = next_execution_token_locked(state);
@@ -1911,7 +1920,7 @@ RpuExecutionCoordinator::enter_allocator_mutation(
                 "physical arena");
     if (state.graph_depth != 0) {
         TORCH_CHECK(state.owner_tid == current,
-                    operation, ": RPU execution is owned by another thread");
+                    operation, ": device execution is owned by another thread");
         graph_claim_active = true;
         return Claim{};
     }
@@ -1999,7 +2008,7 @@ void RpuExecutionCoordinator::check_current_thread_execution_allowed(
                 "reconfigure");
     TORCH_CHECK((state.graph_depth == 0 && !state.physical_active) ||
                     state.owner_tid == current,
-                operation, ": RPU execution is owned by another thread");
+                operation, ": device execution is owned by another thread");
 }
 
 bool RpuExecutionCoordinator::current_thread_execution_allowed_noexcept()
@@ -2056,31 +2065,31 @@ RpuExecutionGraphInvalidationGuard::~RpuExecutionGraphInvalidationGuard() {
 
 int64_t rpu_execution_reconfigure_begin(int64_t attempt_token) {
     TORCH_CHECK(attempt_token > 0,
-                "RPU hot reconfigure attempt token must be positive");
+                "device hot reconfigure attempt token must be positive");
     const uint64_t token = RpuExecutionCoordinator::begin_reconfigure(
         static_cast<uint64_t>(attempt_token),
         "rpu::execution_reconfigure_begin");
     TORCH_CHECK(token <= static_cast<uint64_t>(
                     std::numeric_limits<int64_t>::max()),
-                "RPU hot reconfigure token exceeds the dispatcher int range");
+                "device hot reconfigure token exceeds the dispatcher int range");
     return static_cast<int64_t>(token);
 }
 
 void rpu_execution_reconfigure_commit(int64_t token) {
-    TORCH_CHECK(token > 0, "RPU hot reconfigure token must be positive");
+    TORCH_CHECK(token > 0, "device hot reconfigure token must be positive");
     RpuExecutionCoordinator::commit_reconfigure(
         static_cast<uint64_t>(token), "rpu::execution_reconfigure_commit");
 }
 
 void rpu_execution_reconfigure_abort(int64_t token) {
-    TORCH_CHECK(token > 0, "RPU hot reconfigure token must be positive");
+    TORCH_CHECK(token > 0, "device hot reconfigure token must be positive");
     RpuExecutionCoordinator::abort_reconfigure(
         static_cast<uint64_t>(token), "rpu::execution_reconfigure_abort");
 }
 
 bool rpu_execution_reconfigure_abort_attempt(int64_t attempt_token) {
     TORCH_CHECK(attempt_token > 0,
-                "RPU hot reconfigure attempt token must be positive");
+                "device hot reconfigure attempt token must be positive");
     return RpuExecutionCoordinator::abort_reconfigure_attempt(
         static_cast<uint64_t>(attempt_token),
         "rpu::execution_reconfigure_abort_attempt");
@@ -3026,6 +3035,7 @@ void RpuKernelGraph::begin_impl(const std::optional<GraphSignature>& sig) {
     }
 
     if (state_ == State::RECORDING) {
+        ddr_buffer_lifetime_.reset();
         recording_physical_execution_token_ = entry_physical_token;
         semantic_dma_owner_generation_.reset();
         semantic_dma_expected_owner_generation_ = 0;
@@ -3151,7 +3161,7 @@ void RpuKernelGraph::end() {
                 ? topology_hash_for_window(0, nodes_.size()) : 0;
             // Replayable 路径：对 boundary ptr 做 pre + post 双 flush。
             //
-            // 仅靠 post-batch flush 无法覆盖本轮 kernel 之前就必须对 RPU 可见
+            // 仅靠 post-batch flush 无法覆盖本轮 kernel 之前就必须对 device 可见
             // 的 DDR 输入，例如：
             //   - CPU fallback / host tensor op 刚写完的 hidden_states
             //   - 每步新生成的 cos/sin / mask / cache metadata tensor
@@ -3218,7 +3228,7 @@ void RpuKernelGraph::end() {
         // 原因：虽然 data node 不会在 REPLAYING 期 eager 写 DDR，但本轮
         // forward 里仍可能有 CPU fallback / host tensor op 先产出 DDR 输入，
         // 对应的 rpu_ddr_flush(ptr) 会登记到 boundary_flush_ptrs_。这些输入
-        // 必须在 launch_prepared_batch() 前对 RPU 可见。
+        // 必须在 launch_prepared_batch() 前对 device 可见。
         {
             RECORD_FUNCTION("rpu_graph::flush_pre", {});
             flush_boundary_ptrs();
@@ -3463,6 +3473,7 @@ void RpuKernelGraph::invalidate_impl(bool from_abort) {
     // prepared resource above has been invalidated.  The external guard still
     // blocks physical release until its explicit retire() follows.
     mark_retained_physical_graph_invalidated(graph_lifetime_id_);
+    ddr_buffer_lifetime_.reset();
 }
 
 // =============================================================================
@@ -3471,7 +3482,7 @@ void RpuKernelGraph::invalidate_impl(bool from_abort) {
 //
 // 不调 sync_point()(保留 nodes_ 顺序),不动 cursor_,只翻 replayable_=false +
 // 写入 reason。end() 看到 !replayable_ 走 oneshot 路径,nodes_ 内的 HostCallback
-// Tier 3 节点在 oneshot 内按录制顺序穿插真跑,RPU 段不退化为逐 op launch。
+// Tier 3 节点在 oneshot 内按录制顺序穿插真跑,device 段不退化为逐 op launch。
 // 多次调用时只保留第一个 reason(避免后面 op 把更早的根因覆盖掉)。
 
 void RpuKernelGraph::mark_non_replayable(std::string reason) {
@@ -3550,7 +3561,7 @@ void RpuKernelGraph::flush_boundary_ptrs() {
 // S2 / G1.5 — _to_copy admission:HostCallback stable storage tracking
 // =============================================================================
 //
-// rpu_to_copy 决定要不要把 RPU→RPU dtype cast 推进 host_callback Tier2 deferred
+// rpu_to_copy 决定要不要把 device→device dtype cast 推进 host_callback Tier2 deferred
 // 时的关键判据:src 数据来源是不是 HostCallback Tier1/2 stable buffer。命中 →
 // defer(上游真值要等 executor 才刷,inline 会读 stale);否则 → inline。
 //
@@ -3576,7 +3587,7 @@ StableRangeView extract_range(const at::Tensor& t) {
     if (nbytes_t == 0) return r;
     r.host_base = reinterpret_cast<uintptr_t>(host_ptr);
     r.nbytes    = nbytes_t;
-    // RpuGetDevAddr 对非 RPU tensor 会返回 0/未定义;只 best-effort 拿。
+    // RpuGetDevAddr 对非 device tensor 会返回 0/未定义;只 best-effort 拿。
     if (t.device().type() == c10::DeviceType::PrivateUse1) {
         const uint64_t dev = rhino_lkn::RpuGetDevAddr(host_ptr);
         r.dev_base = static_cast<uintptr_t>(dev);
@@ -3654,9 +3665,7 @@ void RpuKernelGraph::register_host_callback_persistent_stable(
     if (v.host_base == 0 || v.nbytes == 0) return;
     push_unique_owner(host_callback_persistent_owners_, v);
     if (to_copy_log_enabled()) {
-        std::cerr << "[STABLE-REG persist] host=0x" << std::hex << v.host_base
-                  << " dev=0x" << v.dev_base << std::dec
-                  << " nbytes=" << v.nbytes
+        std::cerr << "[STABLE-REG persist] nbytes=" << v.nbytes
                   << " dtype=" << stable.scalar_type()
                   << " sizes=" << stable.sizes() << "\n";
     }
@@ -3668,9 +3677,7 @@ void RpuKernelGraph::register_host_callback_live_tier1_out(
     if (v.host_base == 0 || v.nbytes == 0) return;
     push_unique_range(host_callback_live_tier1_out_ranges_, v);
     if (to_copy_log_enabled()) {
-        std::cerr << "[STABLE-REG live] host=0x" << std::hex << v.host_base
-                  << " dev=0x" << v.dev_base << std::dec
-                  << " nbytes=" << v.nbytes
+        std::cerr << "[STABLE-REG live] nbytes=" << v.nbytes
                   << " dtype=" << fresh_out_arg.scalar_type()
                   << " sizes=" << fresh_out_arg.sizes() << "\n";
     }
@@ -3743,7 +3750,7 @@ size_t RpuKernelGraph::register_tier3_transient_buffer(
     TORCH_CHECK(buffer.defined(),
                 "register_tier3_transient_buffer: buffer not defined");
     TORCH_CHECK(buffer.device().type() == c10::DeviceType::PrivateUse1,
-                "register_tier3_transient_buffer: buffer must be on RPU; got ",
+                "register_tier3_transient_buffer: buffer must be on device; got ",
                 buffer.device());
     TORCH_CHECK(tier3_oneshot_transient_owners_.size() ==
                 tier3_oneshot_transient_tensors_.size(),
@@ -3780,6 +3787,18 @@ void RpuKernelGraph::keep_alive(const at::Tensor& t) {
     if (state_ == State::RECORDING || state_ == State::REPLAYING) {
         tensor_refs_.push_back(t);
     }
+}
+
+std::weak_ptr<const uint8_t> RpuKernelGraph::ddr_buffer_lifetime() {
+    TORCH_CHECK(scope_open_ &&
+                    (state_ == State::RECORDING || state_ == State::REPLAYING),
+                "DDR buffer lifetime requires an active recording/replay scope");
+    if (!ddr_buffer_lifetime_) {
+        TORCH_CHECK(state_ == State::RECORDING,
+                    "DDR buffer lifetime was not registered during BUILD");
+        ddr_buffer_lifetime_ = std::make_shared<const uint8_t>(0);
+    }
+    return ddr_buffer_lifetime_;
 }
 
 // =============================================================================

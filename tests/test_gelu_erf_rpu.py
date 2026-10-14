@@ -7,7 +7,7 @@ import rpu_backend
 
 
 pytestmark = pytest.mark.skipif(
-    not os.access("/dev/rpu", os.R_OK | os.W_OK), reason="requires the RPU board")
+    not os.access("/dev/rpu", os.R_OK | os.W_OK), reason="requires the device board")
 
 
 def test_gelu_erf_values_and_independent_outputs():

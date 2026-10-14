@@ -29,7 +29,7 @@ def _gemma_graph_enabled() -> bool:
     return rpu_env_bool("RPU_PI05_GEMMA_GRAPH", default=True)
 
 
-# patch-reason: (a) Gemma all-layers-once C++ handle lifecycle helper — §3a (a) run-different-op-on-RPU
+# patch-reason: (a) Gemma all-layers-once C++ handle lifecycle helper — §3a (a) run-different-op-on-device
 def _gemma_destroy_handle(h):
     """Raw destroy; the installed resource owns retirement failures."""
     torch.ops.rpu.gemma_destroy(h)
@@ -49,7 +49,7 @@ _GEMMA_RUNTIME_INSTALL_ATTRS = (
 )
 
 
-# patch-reason: (a) Gemma all-layers-once instance patch — §3a (a) run-different-op-on-RPU
+# patch-reason: (a) Gemma all-layers-once instance patch — §3a (a) run-different-op-on-device
 def patch_gemma_model_for_rpu_all_layers_once(
     model, *, runtime_policy=None, prefill_pair_rows=400,
 ) -> int:
@@ -71,7 +71,7 @@ def patch_gemma_model_for_rpu_all_layers_once(
     Uncertain retirement retains both installs and poisons the process.
 
     Prerequisites:
-      - model.to("rpu") must have been called (weights on RPU device)
+      - model.to("rpu") must have been called (weights on device device)
       - convert_linear_weights_inplace(model) must have been called
 
     Args:
@@ -171,9 +171,9 @@ def patch_gemma_model_for_rpu_all_layers_once(
             "layers[0].self_attn.rotary_emb)"
         )
 
-    # Always compute cos/sin through the patched rotary forward on RPU device
+    # Always compute cos/sin through the patched rotary forward on device device
     # to get kernel format [max_pos, head_dim/2]. The patched rotary returns
-    # [head_dim] on CPU but [head_dim/2] on RPU.
+    # [head_dim] on CPU but [head_dim/2] on device.
     # NOTE: next(model.parameters()).device may be CPU (embed_tokens kept on CPU),
     # so we must explicitly use "rpu" device.
     max_pos = getattr(rotary, "max_position_embeddings", 4096)
@@ -188,7 +188,7 @@ def patch_gemma_model_for_rpu_all_layers_once(
     sin_cached = sin_cached.to(dtype=torch.float16, device="rpu").contiguous()
 
     # CPU mirror of the same tables, kept for the per-forward position_ids
-    # gather below. Indexing the RPU copies would CPU-fallback and round-trip
+    # gather below. Indexing the device copies would CPU-fallback and round-trip
     # every forward; these are ~1 MB total and read-only.
     _cos_cpu = cos_cached.cpu()
     _sin_cpu = sin_cached.cpu()
@@ -205,7 +205,7 @@ def patch_gemma_model_for_rpu_all_layers_once(
     # ------------------------------------------------------------------ #
     # 5. Final norm weight
     # ------------------------------------------------------------------ #
-    # norm might be on CPU (for CPU FP32 final_norm). Ensure weight is on RPU for C++ set_weights.
+    # norm might be on CPU (for CPU FP32 final_norm). Ensure weight is on device for C++ set_weights.
     final_norm_w = model.norm.weight.to(dtype=torch.float16, device="rpu")
 
     # ------------------------------------------------------------------ #
@@ -263,15 +263,15 @@ def patch_gemma_model_for_rpu_all_layers_once(
         # ---------------------------------------------------------- #
         if output_attentions:
             raise AssertionError(
-                "Gemma (RPU all-layers-once): output_attentions is not supported"
+                "Gemma (device all-layers-once): output_attentions is not supported"
             )
         if output_hidden_states:
             raise AssertionError(
-                "Gemma (RPU all-layers-once): output_hidden_states is not supported"
+                "Gemma (device all-layers-once): output_hidden_states is not supported"
             )
         if use_cache is False:
             raise AssertionError(
-                "Gemma (RPU all-layers-once): use_cache=False is not supported "
+                "Gemma (device all-layers-once): use_cache=False is not supported "
                 "(caching path only; no-cache training scenario deferred)"
             )
 
@@ -281,22 +281,22 @@ def patch_gemma_model_for_rpu_all_layers_once(
         # ---------------------------------------------------------- #
         if input_ids is not None and inputs_embeds is not None:
             raise AssertionError(
-                "Gemma (RPU all-layers-once): must provide exactly one of "
+                "Gemma (device all-layers-once): must provide exactly one of "
                 "input_ids or inputs_embeds, got both"
             )
         if inputs_embeds is None:
             if input_ids is None:
                 raise AssertionError(
-                    "Gemma (RPU all-layers-once): must provide exactly one of "
+                    "Gemma (device all-layers-once): must provide exactly one of "
                     "input_ids or inputs_embeds, got neither"
                 )
-            # embed_tokens lives on CPU; embed then move to RPU
+            # embed_tokens lives on CPU; embed then move to device
             inputs_embeds = self.embed_tokens(input_ids)
             inputs_embeds = inputs_embeds.to(dtype=torch.float16, device="rpu")
 
         hidden_states = inputs_embeds
 
-        # Move to RPU + fp16 if needed (Pi0.5 pipeline passes CPU embeds)
+        # Move to device + fp16 if needed (Pi0.5 pipeline passes CPU embeds)
         if hidden_states.device.type != "rpu":
             hidden_states = hidden_states.to(dtype=torch.float16, device="rpu")
         if not hidden_states.is_contiguous():
@@ -318,7 +318,7 @@ def patch_gemma_model_for_rpu_all_layers_once(
 
         if not isinstance(past_key_values, RPUCache):
             raise AssertionError(
-                f"Gemma (RPU all-layers-once): past_key_values must be an "
+                f"Gemma (device all-layers-once): past_key_values must be an "
                 f"RPUCache instance, got {type(past_key_values).__name__}"
             )
 
@@ -332,29 +332,18 @@ def patch_gemma_model_for_rpu_all_layers_once(
             attention_mask = attention_mask.to(dtype=torch.float16).cpu().contiguous()
 
         # ---------------------------------------------------------- #
-        # RoPE positions. The fused prefill used to derive RoPE from the ROW
-        # INDEX because this op never forwarded `position_ids` — correct only
-        # while no masked row precedes a real one. Violating that renumbered
-        # every token after an absent camera and held the pi05 camera legs red
-        # at mse 0.696 until 2026-08-06, which was worked around by DROPPING
-        # absent cameras from the prefix (adapters/pi05/patches.py). Gathering
-        # the table by `position_ids` removes the constraint instead.
-        #
-        # Sent on EVERY forward, including when the positions ARE the row index:
-        # which table the kernel reads is decided at graph BUILD, so a handle
-        # that only sometimes sets it would replay one forward's choice against
-        # another's positions. Falling back to `arange + position` rather than
-        # skipping the call keeps that choice constant for the handle's whole
-        # life, and reproduces the old row-index behaviour exactly. Cost is a
-        # [seq, head_dim/2] gather + H2D — ~78 KB at pi05's prefix lengths,
-        # against a whole VLM prefill.
+        # Gather by position_ids so masked rows do not shift later tokens.
+        # Refresh every forward: Graph replay keeps the table choice from BUILD.
+        # Missing position_ids use arange + position for the same update path.
         if position_ids is None:
             _pos = torch.arange(seq_len) + int(past_key_values.position)
         else:
             _pos = position_ids[0] if position_ids.dim() == 2 else position_ids
             _pos = _pos.to(device="cpu", dtype=torch.long)
         if _prefill_rope_cache is None:
-            _cos_rows, _sin_rows = _cos_cpu[_pos].to("rpu"), _sin_cpu[_pos].to("rpu")
+            _cos_rows, _sin_rows = _cos_cpu[_pos], _sin_cpu[_pos]
+            # The native setter publishes current CPU FP16 rows into its stable
+            # slots for both FP16 and quantized decoder owners.
         else:
             _cos_rows, _sin_rows = _prefill_rope_cache.tables(_pos)
         # Always refresh the native stable slots, including a cache hit. BUILD
@@ -444,6 +433,21 @@ def patch_gemma_model_for_rpu_all_layers_once(
         # at pi05_converter.py:901)
         if use_cache and isinstance(past_key_values, RPUCache):
             past_key_values._prefix_len = past_key_values.position
+
+        # Save selected logical KV tensors after prefill.
+        import os as _os
+        _probe_dir = _os.environ.get("RPU_PI05_PROBE_DIR")
+        if use_cache and _probe_dir and isinstance(past_key_values, RPUCache):
+            try:
+                import torch as _torch
+                _os.makedirs(_probe_dir, exist_ok=True)
+                for _L in (0, 8, 17):
+                    _k = past_key_values.k_caches[_L].cpu().float()
+                    _v = past_key_values.v_caches[_L].cpu().float()
+                    _torch.save(_k, _os.path.join(_probe_dir, f"kv_post_prefill_L{_L}_k.pt"))
+                    _torch.save(_v, _os.path.join(_probe_dir, f"kv_post_prefill_L{_L}_v.pt"))
+            except Exception as _exc:
+                _LOG.warning("KV probe dump failed: %s", _exc)
 
         if _kv_only:
             return past_key_values

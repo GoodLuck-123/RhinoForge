@@ -132,7 +132,7 @@ std::tuple<at::Tensor, at::Tensor> rpu_gdn_recurrent_multihead_test(
     TORCH_CHECK(state_in.dim() == 3, "multihead: state must be [H,Dk,Dv]");
     TORCH_CHECK(q.scalar_type() == at::kHalf && state_in.scalar_type() == at::kHalf,
                 "multihead: inputs must be fp16");
-    TORCH_CHECK(q.device().type() == at::kPrivateUse1, "multihead: inputs must be on RPU");
+    TORCH_CHECK(q.device().type() == at::kPrivateUse1, "multihead: inputs must be on device");
     const int64_t H = state_in.size(0), Dk = state_in.size(1), Dv = state_in.size(2);
     TORCH_CHECK((Dk & (Dk - 1)) == 0, "multihead: Dk must be a power of two");
     TORCH_CHECK(q.size(0) == H && q.size(1) == Dk && k.size(1) == Dk && v.size(1) == Dv,

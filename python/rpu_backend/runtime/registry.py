@@ -75,7 +75,7 @@ def get_adapter(arch_string: str):
     with _REGISTRY_LOCK:
         if adapter is None:
             raise UnsupportedModelError(
-                f"No RPU adapter registered for HF architecture {arch_string!r}. "
+                f"No device adapter registered for HF architecture {arch_string!r}. "
                 f"Registered archs: {sorted(list_adapters())}. "
                 f"See docs/api_reference.md#Migration for supported models and porting guide."
             )

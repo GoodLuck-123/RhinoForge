@@ -16,6 +16,7 @@
 #include <ATen/ATen.h>
 #include <ATen/record_function.h>
 #include <c10/util/Half.h>
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -164,7 +165,8 @@ static void launch_rope_2d_spm_kernel(
     int64_t head_dim,
     int64_t head_dim_pad,
     int num_cores,
-    GraphKernelRegisterWriter* register_writer)
+    GraphKernelRegisterWriter* register_writer,
+    KernelId id = KernelId::ROPE_2D_SPM)
 {
     TORCH_CHECK(position_idx_ddr_ptr != nullptr,
                 "rpu_launch_rope_2d_spm_kernel: position_idx_ddr_ptr must be non-null");
@@ -200,8 +202,15 @@ static void launch_rope_2d_spm_kernel(
     const uint16_t grid_dim_y = ceil_div_u16(num_tokens, kNumTokenPerWarp);
     const uint16_t grid_dim_z = 1;
 
-    Kernel_t *kernel = GET_KERNEL(KernelId::ROPE_2D_SPM);
+    Kernel_t *kernel = GET_KERNEL(id);
     TORCH_CHECK(kernel != nullptr, "Failed to get rope_2d_spm kernel");
+    if (id == KernelId::WALL_BASE_VISION_QK_ROPE_2D_SPM) {
+        // The exact variant interprets x/y as independent in-place Q/K bases.
+        // grid.x=1 uses only image zero; clear unused secondary image bases.
+        kernel->reset_regs();
+        for (int reg = 16; reg < 24; ++reg)
+            kernel->set_regs(reg, static_cast<uint16_t>(0));
+    }
 
     // reg[2]/[3]: FreqCos SPM addr (RAW per-core byte offset — no >>8)
     kernel->set_regs(2, (uint16_t)(cos_spm_addr & 0xFFFF));
@@ -300,7 +309,7 @@ void rpu_launch_rope_2d_spm_kernel(
                     position_idx.is_contiguous() && position_idx.dim() == 2 &&
                     position_idx.size(1) == 2,
                 "rpu_launch_rope_2d_spm_kernel owned: position_idx must be "
-                "a contiguous int16 RPU Tensor [rows,2]");
+                "a contiguous int16 device Tensor [rows,2]");
     TORCH_CHECK(pos_offset >= 0 && num_tokens > 0 &&
                     pos_offset <= position_idx.size(0) &&
                     num_tokens <= position_idx.size(0) - pos_offset,
@@ -325,6 +334,67 @@ void rpu_launch_rope_2d_spm_kernel(
         head_dim, head_dim_pad, num_cores, &register_writer);
 }
 
+// Exact Wall base Vision variant: the original packet with in-place Q/K
+// semantics, fixed 128x20 SPM tables, and one tensor-owned DDR position input.
+void rpu_launch_wall_base_vision_qk_rope_2d_spm_kernel(
+    uint32_t q, uint32_t k, uint32_t cos_spm, uint32_t sin_spm,
+    const at::Tensor& position_idx, int64_t pos_offset,
+    int64_t rows, int num_cores)
+{
+    TORCH_CHECK((rows == 324 || rows == 672) && num_cores == 8 && pos_offset == 0,
+                "Wall Vision paired RoPE requires M324/M672, TP8 and offset zero");
+    TORCH_CHECK(position_idx.defined() &&
+                    position_idx.device().type() == c10::DeviceType::PrivateUse1 &&
+                    position_idx.scalar_type() == at::kShort &&
+                    position_idx.layout() == c10::Layout::Strided &&
+                    position_idx.is_contiguous() && position_idx.dim() == 2 &&
+                    position_idx.size(1) == 2 && position_idx.size(0) >= ((rows + 7) / 8) * 8,
+                "Wall Vision paired RoPE requires owned contiguous int16 device positions [>=align8(M),2]");
+    // Position DDR reads use 16-int16 vectors: M324 needs the final four
+    // backing rows even though Q/K load/store predicates stop at row323.
+    const uint64_t position_addr = RpuGetDevAddr(position_idx.data_ptr<int16_t>());
+    TORCH_CHECK(position_addr != 0 && (position_addr & 255u) == 0 &&
+                    (position_addr >> 8) <= UINT32_MAX,
+                "Wall Vision paired RoPE position address exceeds shift8 ABI");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(), "Wall Vision paired RoPE requires initialized SPM");
+    const uint64_t base = SPM_ALLOC.addr(0, 0);
+    const uint64_t matrix_bytes = rows * 2 * 80 * sizeof(c10::Half);
+    const std::array<std::pair<uint64_t, uint64_t>, 4> slabs{{
+        {q, matrix_bytes}, {k, matrix_bytes},
+        {cos_spm, 128 * 20 * sizeof(c10::Half)},
+        {sin_spm, 128 * 20 * sizeof(c10::Half)}}};
+    for (size_t i = 0; i < slabs.size(); ++i) {
+        const auto [address, bytes] = slabs[i];
+        // D/4=20 uses two 16-half vector reads. strblp masks the VLM
+        // destination, not the SPM read, so the final read needs 24 more
+        // addressable bytes. Logical writes remain within each slab.
+        const uint64_t read_bytes = bytes + 24;
+        TORCH_CHECK(address != 0 && address >= base && address % 256 == 0 &&
+                        read_bytes <= SpmAllocator::SPM_USABLE &&
+                        address - base <= SpmAllocator::SPM_USABLE - read_bytes,
+                    "Wall Vision paired RoPE requires full aligned absolute SPM slabs");
+        for (int core = 0; core < num_cores; ++core)
+            TORCH_CHECK(static_cast<uint64_t>(SPM_ALLOC.addr(core, 0)) +
+                            address - base + read_bytes - 1 <= UINT32_MAX,
+                        "Wall Vision paired RoPE SPM range exceeds register ABI");
+        for (size_t j = 0; j < i; ++j)
+            TORCH_CHECK(address + bytes <= slabs[j].first ||
+                            slabs[j].first + slabs[j].second <= address,
+                        "Wall Vision paired RoPE Q/K/cos/sin slabs must not overlap");
+    }
+    constexpr auto id = KernelId::WALL_BASE_VISION_QK_ROPE_2D_SPM;
+    TORCH_CHECK(KernelCache::instance().has_loaded(id),
+                "Wall Vision paired RoPE optional payload is unavailable");
+    auto writer = RpuKernelGraph::active().stage_kernel_ddr_registers(id,
+        std::vector<GraphDdrRegisterOperandSpec>{
+            GraphDdrRegisterOperandSpec{GraphDdrRegisterAbi{
+                GraphDdrRegisterRole::SemanticInput, GraphDdrRegisterAccess::Read,
+                GraphDdrRegisterEncoding::DevAddrShift8LoHi, 0, 1}, position_idx}});
+    launch_rope_2d_spm_kernel(q, k, cos_spm, sin_spm,
+        position_idx.data_ptr<int16_t>(), pos_offset, rows,
+        2, 80, 80, num_cores, &writer, id);
+}
+
 // =============================================================================
 // rpu_rope_2d_test_ddr — torch op wrapper for isolated rope_2d_ddr testing.
 //
@@ -333,9 +403,9 @@ void rpu_launch_rope_2d_spm_kernel(
 // a fresh DDR tensor. Intended ONLY for unit-test harness (compare kernel
 // output against HF apply_rotary_pos_emb_vision reference).
 //
-// Input shape: [num_tokens, num_heads, head_dim] fp16 RPU DDR.
-// cos / sin:   [max_hw, head_dim/4] fp16 RPU DDR, 256B-aligned.
-// position_idx: [num_tokens, 2] int16 RPU DDR, 256B-aligned (row, col pair).
+// Input shape: [num_tokens, num_heads, head_dim] fp16 device DDR.
+// cos / sin:   [max_hw, head_dim/4] fp16 device DDR, 256B-aligned.
+// position_idx: [num_tokens, 2] int16 device DDR, 256B-aligned (row, col pair).
 // =============================================================================
 
 at::Tensor rpu_rope_2d_test_ddr(
@@ -363,7 +433,7 @@ at::Tensor rpu_rope_2d_test_ddr(
                 && cos.device().type() == at::kPrivateUse1
                 && sin.device().type() == at::kPrivateUse1
                 && position_idx.device().type() == at::kPrivateUse1,
-                "rope_2d_test_ddr: all inputs must be on RPU device");
+                "rope_2d_test_ddr: all inputs must be on device");
 
     const int64_t num_tokens = input.size(0);
     const int64_t num_heads = input.size(1);
@@ -449,7 +519,7 @@ at::Tensor rpu_rope_2d_test_spm(
                 && cos.device().type() == at::kPrivateUse1
                 && sin.device().type() == at::kPrivateUse1
                 && position_idx.device().type() == at::kPrivateUse1,
-                "rope_2d_test_spm: all inputs must be on RPU device");
+                "rope_2d_test_spm: all inputs must be on device");
 
     const int64_t num_tokens = input.size(0);
     const int64_t num_heads = input.size(1);

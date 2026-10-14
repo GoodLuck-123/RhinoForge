@@ -99,6 +99,8 @@ def _clear_hyvla_cold_environment(monkeypatch):
     keys = set(hyvla_runtime._HY_VLA_ENV_DEFAULTS)
     keys.update({
         "RPU_HY_VLA_ACTION_MLP_MC",
+        "RPU_HY_VLA_EXPERT_GATEUP_RESIDENT",
+        "RPU_HY_VLA_EXPERT_GATEUP_RESIDENT_LAYERS",
         "RPU_HY_VLA_CACHING_ALLOC",
         "RPU_HY_VLA_MOT_NORM_NOMERGE",
         "RPU_HY_VLA_PREFIX_TEMPLATE",
@@ -584,5 +586,5 @@ def test_policy_failure_after_materialization_marker_remains_terminal(
     assert not policy._rpu_build_lock.locked()
     from rpu_backend.api.errors import RPUBackendError
 
-    with pytest.raises(RPUBackendError, match="先前在权重/RPU 物化开始后失败"):
+    with pytest.raises(RPUBackendError, match="先前在权重/device 物化开始后失败"):
         policy.to("rpu")

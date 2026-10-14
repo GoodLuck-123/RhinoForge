@@ -1,0 +1,26 @@
+[example]
+profile_id = "wall-oss-0.5-w4a16-pgrp.w4a16-pgrp.vla"
+registry_alias = "wall-oss-0.5-w4a16-pgrp"
+target = "wall_oss"
+dtype = "w4a16-pgrp"
+
+[example.opt_in]
+
+[input]
+images = ["/path/to/face.png", "/path/to/left_wrist.png", "/path/to/right_wrist.png"]
+instruction = "Move the object to the target."
+proprioception = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+state_mask = [1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+prefix_length_range = [545, 640]
+camera_names = ["face_view", "left_wrist_view", "right_wrist_view"]
+noise_seed = 0
+fp16_registry_alias = "wall-oss-0.5"
+
+[run]
+warmup = 2
+runs = 3
+hwperf = false
+profile = false
+seed = 0
+
+[rpu_execution]

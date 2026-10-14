@@ -83,7 +83,7 @@ _LOG.propagate = False
 
 
 def set_debug_level(level: int) -> None:
-    """Set RPU debug verbosity (0=SILENT .. 5=TRACE; default 3=INFO).
+    """Set device debug verbosity (0=SILENT .. 5=TRACE; default 3=INFO).
 
     Syncs the C++ `g_rpu_debug_level` atomic, the Python logger level, and
     the module-local mirror (used as truth source when the C++ backend is

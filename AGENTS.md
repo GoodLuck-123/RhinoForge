@@ -33,7 +33,7 @@ and [runtime configuration](docs/runtime_config.md) for supported controls.
 - Use the smallest meaningful validation set for the requested change. Run
   affected host tests once; do not expand to the full suite when targeted checks
   already cover the changed path.
-- For an RPU-specific fix, default to one representative hardware smoke test per
+- For a device-specific fix, default to one representative hardware smoke test per
   affected execution path. Use 3–10 replay iterations, or 2 warmups plus 5–10
   measured iterations for performance, unless the user requests another protocol.
 - Stop when the requested behavior and its direct regression checks pass. Reuse
@@ -46,27 +46,17 @@ and [runtime configuration](docs/runtime_config.md) for supported controls.
   path is confirmed, record ordinary accumulated numerical differences instead of
   escalating them into additional gates.
 
-**Numerical evaluation policy:** follow the
-three-layer policy in [model validation](docs/validation_policy.md#numerical-evaluation).
-Inherited fixed MSE/max-abs/row-error and cosine cutoffs are diagnostics, not
-model acceptance gates, even when an older profile says to preserve them.
-Do not replace them with a new arbitrary or renamed composite threshold.
-Keep shape/dtype/finite, correct routes, KV/cache/Graph, artifact identity and
-explicit deterministic replay contracts. Compare matching reference semantics
-and preserve independently specified task-quality requirements. Runtime PASS
-and numerical observations do not automatically certify task quality or support.
+Follow the [acceptance contracts](docs/validation_policy.md#numerical-evaluation): preserve runtime, artifact and deterministic-replay checks; match reference semantics when diagnosing differences. Historical universal floating-point cutoffs are not model acceptance gates. Keep independently specified task requirements.
 
 ## Required engineering contracts
 
-- Treat support as an exact checkpoint, precision, input-envelope, execution,
-  launch-library, and operator-asset profile. Source presence, an architecture
-  match, or a registry alias is not a support claim.
+- Bind support to the checkpoint, precision, input envelope, execution, Launch and operator assets.
 - Reject unsupported profiles before full weight loading or irreversible
   transformation.
 - Transform a model's weight layout exactly once. Reload a clean model after a
   partial transformation or failed installation.
 - Respect process ownership: the main fused CausalLM path permits one live
-  RPU-resident model or policy per process.
+  device-resident model or policy per process.
 - Keep `FusedModelBase::declare_buffers` deterministic and free of launch side
   effects. Declare state that must survive Graph replay as persistent.
 - For a repeated Graph signature, prove one BUILD followed by stable REPLAY:
@@ -89,10 +79,6 @@ and numerical observations do not automatically certify task quality or support.
 - Make the smallest change that satisfies a verified profile; reuse public
   helpers before adding abstractions or dependencies.
 - Keep profile guards, cache ownership, teardown, and error paths explicit.
-- Run board-free checks before board validation. A port is not complete until
-  the exact profile satisfies the current numerical policy, warmup,
-  Graph-lifecycle, input-envelope, and end-to-end requirements in
-  [model porting](docs/model_porting.md).
-  An ordinary existing-model fix does not start a full port or certification run.
+- Run board-free checks first. New ports must satisfy the profile, warmup, Graph, input and end-to-end requirements in [model porting](docs/model_porting.md); existing-model fixes follow the validation scope above.
 - Update public documentation and [the knowledge workflow](knowledge/WORKFLOWS.md)
   when a public contract changes.

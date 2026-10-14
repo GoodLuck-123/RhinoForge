@@ -149,9 +149,13 @@ def test_finalized_upload_preserves_payload_and_source_policy(
                 moves.append(module)
             return original_to(module, *args, **kwargs)
 
-        raw_projection_pointers = {
-            module.weight.data_ptr() for module in inner.modules()
-            if isinstance(module, (torch.nn.Linear, torch.nn.Conv1d))}
+        # Keep the original storage alive while checking upload provenance.
+        # Freeing source weights must not let allocator address reuse make an
+        # independently transformed tensor look like an original projection.
+        raw_projections = [
+            module.weight.detach() for module in inner.modules()
+            if isinstance(module, (torch.nn.Linear, torch.nn.Conv1d))]
+        raw_projection_pointers = {tensor.data_ptr() for tensor in raw_projections}
         original_tensor_to = torch.Tensor.to
 
         def finalized_to(tensor, *args, **kwargs):

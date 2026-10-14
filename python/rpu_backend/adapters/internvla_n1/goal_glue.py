@@ -1,3 +1,6 @@
+# Adapted from InternNav commit 7a5c62400ac45b313d9b709c740b64191556a242.
+# Copyright (c) 2025 Intern Robotics; see LICENSES/InternNav-MIT.txt.
+# RhinoForge uses explicit attention projections and strict checkpoint loading.
 """InternVLA-N1 CPU-fp32 goal glue: vlm_tokens[1,4,3584] → goal_embed[1,1,384].
 
 Bridges System-2 (vlm_tokens) to System-1 (NavDP memory). Two small modules:
@@ -7,7 +10,7 @@ Bridges System-2 (vlm_tokens) to System-1 (NavDP memory). Two small modules:
 
 Reconstructed as plain nn.Modules (no InternNav import); weights load strictly from the
 extracted `navdp_head.safetensors` (`vlm_embed_mlp.*`, `goal_compressor.*`). The unvalidated
-stock-aten RPU path is deliberately rejected.
+stock-aten device path is deliberately rejected.
 """
 from __future__ import annotations
 from pathlib import Path
@@ -38,7 +41,7 @@ class TokenCompressor(nn.Module):
         self.embed_dim, self.num_heads = embed_dim, num_heads
 
     def forward(self, x, padding_mask=None):
-        # Manual MHA (avoids nn.MultiheadAttention's internal views, which alias on the RPU
+        # Manual MHA (avoids nn.MultiheadAttention's internal views, which alias on the device
         # custom device — "View returned a tensor same as base"). Numerically identical: same
         # in_proj_weight/bias + out_proj, F.scaled_dot_product_attention. padding_mask unused
         # (goal_compressor is always called with the full 4 vlm tokens, no padding).

@@ -30,6 +30,60 @@ from .cache_plan import cache_plan
 from .geometry import layer_geometry, max_head_dim, max_num_kv_heads
 
 
+def _reset_generation_prefix(cache, model, token_count: int) -> bool:
+    """Clear every physical KV lane a bounded generation can read."""
+    if (type(cache) is not Gemma4KVCache or cache.batch_size != 1
+            or type(cache.max_seq_len) is not int
+            or not 0 < token_count <= cache.max_seq_len
+            or cache.geom != getattr(model, "_rpu_gemma4_geom", None)):
+        return False
+    try:
+        if cache.attn_tp != min(NUM_CORES, max_num_kv_heads(cache.geom)):
+            return False
+        plan = cache_plan(cache.geom, cache.max_seq_len, cache.attn_tp)
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+        return False
+    if (cache.num_layers != plan["num_layers"]
+            or cache._owner_layers != plan["owners"]
+            or cache.kv_source_layer_for_layer != plan["source_map"]
+            or len(cache.k_caches) != plan["num_layers"]
+            or len(cache.v_caches) != plan["num_layers"]):
+        return False
+
+    owners, ranges = [], []
+    for layer in plan["layers"]:
+        for tensors, shape in ((cache.k_caches, layer["k_shape"]),
+                               (cache.v_caches, layer["v_shape"])):
+            tensor = tensors[layer["idx"]]
+            if tensor is not tensors[layer["source"]]:
+                return False
+            if not layer["owns"]:
+                continue
+            if (not isinstance(tensor, torch.Tensor)
+                    or tensor.device.type != "rpu" or tensor.dtype != torch.float16
+                    or tuple(tensor.shape) != shape or not tensor.is_contiguous()
+                    or tensor.storage_offset() != 0 or tensor.requires_grad
+                    or (tensor.is_inference() and not torch.is_inference_mode_enabled())):
+                return False
+            storage = tensor.untyped_storage()
+            if (tensor.nbytes != storage.nbytes() or tensor.data_ptr() % 256
+                    or tensor.nbytes % 256):
+                return False
+            owners.append(tensor)
+            ranges.append((tensor.data_ptr(), tensor.data_ptr() + tensor.nbytes))
+    ranges.sort()
+    if not owners or any(left[1] > right[0] for left, right in zip(ranges, ranges[1:])):
+        return False
+
+    # Sequence blocks are outermost after B=1. Include all lanes and the last
+    # 16-row SDPA read block, without relying on prefill overwrites or masking.
+    blocks = (token_count + 15) // 16
+    views = [tensor[:, :blocks].view(1, 1, -1) for tensor in owners]
+    torch.ops.rpu.zero_contiguous_tensor_blocks_sized(views, 0)
+    RPUCache.reset_to_position(cache, 0)
+    return True
+
+
 class Gemma4KVCache(RPUCache):
     """Per-layer mixed-width KV cache with a forced cross-layer source-map."""
 

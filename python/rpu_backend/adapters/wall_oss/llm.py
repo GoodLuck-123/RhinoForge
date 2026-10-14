@@ -1,9 +1,9 @@
-"""Wall-OSS-0.5 expert-0 (Qwen2.5 text decoder) → RPU (P1).
+"""Wall-OSS-0.5 expert-0 (Qwen2.5 text decoder) → device (P1).
 
 A text-only token sequence routes every token to expert-0, so the Wall-OSS MoT
 decoder reduces to a standard Qwen2.5-VL text decoder (see the CPU golden
 `tests/model/wall_oss/ref_qwen25_text.py`). This adapter drives that decoder on
-RPU through the extended `causal_decoder_*` op family:
+device through the extended `causal_decoder_*` op family:
 
   * Qwen2.5 == Qwen3 decoder **minus QK-norm, plus QKV bias** → we pass empty
     q/k/v_norm lists (`has_qk_norm_=false`) and populated q/k/v_bias lists
@@ -35,6 +35,7 @@ from safetensors import safe_open
 
 import rpu_backend
 from rpu_backend.runtime import rpu_env_bool
+from rpu_backend.adapters.wall_oss._sorting import sorting_config_from_env
 from rpu_backend.runtime.execution_planner import (
     GRAPH_COMPOSITE_CHILD,
     GRAPH_MODES,
@@ -46,13 +47,16 @@ from rpu_backend.runtime.weights import (
     tp_row_swizzle_mc_weight,
 )
 from rpu_backend.adapters.wall_oss.checkpoint_validation import (
+    validate_rtc_w4_checkpoint_pair,
     validate_w8_nvfp4_checkpoint_pair,
 )
 from rpu_backend.quant.int4_pgrp_pack import (
     swizzle_int4_pgrp_scale,
     swizzle_pack_int4_pgrp,
 )
-from rpu_backend.quant.nvfp4_pack import quantize_nvfp4, swizzle_pack_nvfp4
+from rpu_backend.quant.nvfp4_pack import (
+    quantize_nvfp4, swizzle_pack_nvfp4, swizzle_nvfp4_scales,
+)
 
 # attn_tp for the action/text expert (num_kv_heads=2). Q/K/V/O swizzle + KV cache
 # + the C++ attention phase all run at this tensor-parallel factor; MLP stays 8.
@@ -62,10 +66,20 @@ _PREFILL_CHUNK_SIZE_CAP_SAFE = 256
 _PREFILL_CHUNK_SIZE_CAP_TP8_PAD16 = 384
 _PREFILL_CHUNK_POLICY_VERSION = 4
 _FMB_GRAPH_COMPOSITE_CHILD = GRAPH_MODES.index(GRAPH_COMPOSITE_CHILD) + 1
+_RMSNORM_CAP_BASE = 1
+_RMSNORM_CAP_FIXED32 = 1 | 4
 
 
 def _kvinsert_pad16_enabled() -> bool:
     return rpu_env_bool("RPU_WALL_OSS_KVINSERT_PAD16", default=True)
+
+
+def _prefill_mixed_precision_enabled() -> bool:
+    return rpu_env_bool("RPU_WALL_OSS_PREFILL_MIXED_PRECISION")
+
+
+def _prefill_staged_mlp_enabled() -> bool:
+    return rpu_env_bool("RPU_WALL_OSS_PREFILL_STAGED_MLP")
 
 
 def _eff_attn_tp(nkv_real: int) -> int:
@@ -99,7 +113,7 @@ def _eff_attn_tp(nkv_real: int) -> int:
 def _prefill_chunk_size_cap(attn_tp: int) -> int:
     """Return the build-time auto-planner ceiling for text prefill.
 
-    The 384-token layout is admitted by the SPM envelope only for TP8, and
+    The 384-token layout is within the measured SPM envelope only for TP8, and
     padding keeps the equal-two long-prefix plan legal. Keep the established
     256-token ceiling for TP2 or an explicitly unpadded prefix.
     """
@@ -143,7 +157,7 @@ def _prefill_execution_plan(
     equal_two: bool,
     geom: dict,
 ) -> tuple[int, int]:
-    """Return ``(execution_len, planned_chunk_size)`` before embedding assembly.
+    """Return ``(execution_len, planned_chunk_size)`` before embedding composition.
 
     A prefix that fits the proven single-chunk cap keeps the existing 16-token
     KV-insert alignment. Longer Wall TP8 prefixes use the smallest 32-aligned
@@ -182,7 +196,7 @@ def _prefill_graph_signature(
     hidden_size: int,
     planned_chunk_size: int,
     num_layers: int,
-
+    mixed_precision: bool = False,
     *,
     plan_key_words: tuple[int, ...],
 ):
@@ -193,6 +207,7 @@ def _prefill_graph_signature(
         dyn_dims=[
             num_layers,
             _PREFILL_CHUNK_POLICY_VERSION,
+            int(mixed_precision),
             *plan_key_words,
         ],
         dtypes=[torch.float16],
@@ -326,7 +341,7 @@ class _SafeTensorStore:
 
 
 def _build_rope_tables(head_dim: int, rope_theta: float, max_seq_len: int):
-    """Kernel-format 1D RoPE cos/sin `[max_seq_len, head_dim/2]` (fp16, RPU).
+    """Kernel-format 1D RoPE cos/sin `[max_seq_len, head_dim/2]` (fp16, device).
 
     Identical formula to transformers' `Qwen2_5_VLRotaryEmbedding` (default rope,
     attention_scaling=1.0). The per-axis (T/H/W) mRoPE selection is applied by
@@ -362,7 +377,7 @@ def _to_rpu_int8(t: torch.Tensor) -> torch.Tensor:
 def _pack_int4_rpu(
     w_int4: torch.Tensor, partition: int, num_cores: int
 ) -> torch.Tensor:
-    # int4 values [N,K] (int8 container) -> packed uint8 [N, K/2] on RPU. The packer
+    # int4 values [N,K] (int8 container) -> packed uint8 [N, K/2] on device. The packer
     # returns a flat [N*K/2] buffer; the fused set_weights + wINT4 kernel both require
     # the 2D [N, K/2] shape (mirrors adapters/pi05/w4pack.py). All W4 weights use
     # the pgrp swizzle consumed by the generated auto-tile family.
@@ -380,15 +395,16 @@ def _pack_nvfp4_rpu(
     n, k = weight.shape
     codes, block_scale, tensor_scale = quantize_nvfp4(weight)
     packed = swizzle_pack_nvfp4(codes, partition, num_cores).reshape(n, k // 2)
+    packed_scale = swizzle_nvfp4_scales(block_scale, partition, num_cores)
     return (
         packed.to(dtype=torch.uint8, device="rpu").contiguous(),
-        block_scale.to(dtype=torch.uint8, device="rpu").contiguous(),
+        packed_scale.to(dtype=torch.uint8, device="rpu").contiguous(),
         tensor_scale.cpu(),
     )
 
 
 def _nvfp4_tensor_scale_array(values: list[torch.Tensor]) -> torch.Tensor:
-    # Canonical Rhino NVFP4 ACC16 reads one FP32 value by layer_id from a
+    # Tiled Rhino NVFP4 ACC32 reads one FP32 value by layer_id from a
     # projection-family array through one aligned 32-byte vector load. Pad the
     # source to a whole eight-fp32 block so the persistent preload initializes
     # every byte fetched by the kernel (and remains legal for 1..7-layer probes).
@@ -414,12 +430,11 @@ def _int8_to_int4_perchannel(w_int8: torch.Tensor, scale_1d: torch.Tensor):
 
 
 def _expert0_down_int4() -> bool:
-    """Pack expert-0 down_proj as per-channel int4 (INTER padded to a %512 multiple, half
-    weight DMA) vs keep it int8 (full DMA). RPU_WALL_OSS_EXPERT0_DOWN_INT4, default ON.
-    per-channel w4a16 ckpt: down is already int4 VALUES → lossless pack toggle.
-    pgrp ckpt: down is stored per-channel INT8 (±127; other proj are group-wise int4) →
-    _int8_to_int4_perchannel re-quantizes INT8 to INT4, which is lossy.
-    The opt-out retains the original INT8 projection."""
+    """Select packed INT4 for expert-0 Down; enabled by default.
+
+    Per-channel W4 weights are packed losslessly. Legacy group-wise checkpoints
+    may store this projection as INT8; that path requantizes it to INT4. Set
+    ``RPU_WALL_OSS_EXPERT0_DOWN_INT4=0`` to keep that legacy projection as INT8."""
     return rpu_env_bool("RPU_WALL_OSS_EXPERT0_DOWN_INT4", default=True)
 
 
@@ -459,22 +474,43 @@ def _destroy_causal_decoder_handle(h):
     torch.ops.rpu.causal_decoder_destroy(h)
 
 
-# Decoder admission bounds both automatic and explicit chunk requests using
-# _prefill_chunk_size_cap(). KV length is also bounded by cache capacity and
-# rectangular-mask SPM use: comp_cs * ceil16(kv) * 32 bytes.
+# MR-A: certified chunk envelope for the Wall-OSS decoders
+# (docs/runtime_config.md).
+#
+# The chunk half is NOT a new number: it is the cap this adapter already computes
+# in _prefill_chunk_size_cap(), whose own docstring calls 384 "within the measured
+# SPM envelope only for TP8". The envelope makes that already-measured value
+# enforceable on the EXPLICIT-OVERRIDE route too, which the cap never covered
+# (compute_chunks_impl:489 does not read the cap).
+#
+# The length half is the RPUCache capacity these handles are built against. This
+# is the 2D-rect-mask path, so kv length is genuinely SPM-load-bearing here —
+# declare_buffers adds sdpa_mask = comp_cs * ceil16(kv) * 32
+# (rpu_qwen3_model.h:1266) — and the cache bound is the limit the adapter already
+# enforces. Green evidence: the four wall_oss cells at .gitlab-ci.yml:2058-2059
+# (toml3img = 3 images, P=217).
 _CHUNK_ENVELOPE_MAX_KV = 8192
 
 
 def _configure_causal_decoder_handle(
     *, set_weights, weight_args, chunk_size_cap, equal_two_prefill,
-
-    chunk_size_override=0
+    wall_prefill_routes=(False, False, _RMSNORM_CAP_BASE, False),
+    chunk_size_override=0, sorting=None, linear_acc32=False,
 ):
     """Create/configure a decoder handle, destroying it on any failed gate."""
     from rpu_backend.api._execution import _require_execution_process_safe
     _require_execution_process_safe()
     handle = torch.ops.rpu.causal_decoder_create()
     try:
+        if linear_acc32:
+            torch.ops.rpu.causal_decoder_set_linear_acc32(handle, True)
+        if sorting is not None:
+            torch.ops.rpu.causal_decoder_set_wall_sorting_routes(
+                handle, *sorting.decoder_args()
+            )
+        torch.ops.rpu.causal_decoder_set_wall_prefill_routes(
+            handle, *wall_prefill_routes
+        )
         set_weights(handle, *weight_args)
         torch.ops.rpu.causal_decoder_set_chunk_size_cap(
             handle, chunk_size_cap
@@ -499,17 +535,18 @@ def _configure_causal_decoder_handle(
 
 
 class WallOssLLM:
-    """Expert-0 Qwen2.5 text decoder on RPU (P1 prefill).
+    """Expert-0 Qwen2.5 text decoder on device (P1 prefill).
 
     Construct via :func:`build_wall_oss_llm`. Call :meth:`forward` with CPU
     `input_ids` `[1, seq]`; returns the final-normed `last_hidden` `[1, seq, H]`
-    on the RPU device.
+    on the device device.
     """
 
     def __init__(self, *, handle, cache, graph_cache, embed_w, hidden_size,
                  num_layers, head_dim, rope_theta, mrope_section,
                  prefill_chunk_size_cap, prefill_pad16, prefill_equal_two,
-                 attn_geometry, partial_mrope=None, execution_config=None):
+                 attn_geometry, partial_mrope=None, execution_config=None,
+                 prefill_mixed_precision=False):
         self._gc_retirement_enabled = False
         partial_mrope = (
             _partial_mrope_enabled()
@@ -537,12 +574,9 @@ class WallOssLLM:
         self._rpu_execution = (
             {} if execution_config is None else execution_config
         )
-        # Memoized prefill chunked cos/sin (partial_mrope), keyed on seq. cos/sin
-        # are a pure function of position_ids, which for a fixed prompt structure is
-        # f(seq) only, so recurring layouts reuse their prepared RPU tables.
-        # RPU_WALL_OSS_HOST_CACHE=0 disables this cache.
+        self._prefill_mixed_precision = bool(prefill_mixed_precision)
         self._prefill_rope_cache = {}
-        # Stable per-seq RPU position tensors. CausalDecoderModel memoizes the
+        # Stable per-seq device position tensors. CausalDecoderModel memoizes the
         # source pointer used to refresh its keepalive; retaining the source
         # prevents allocator address reuse from making changed contents look
         # like a pointer cache hit (notably synthetic prewarm -> first real
@@ -627,12 +661,34 @@ class WallOssLLM:
             return pair
 
         stage = self._rpu_execution.get("prefill", {})
+        if self._prefill_mixed_precision and real_len == 672:
+            requested = stage.get("chunk_size", "auto")
+            if requested not in ("auto", 336):
+                raise ValueError(
+                    "Wall-OSS mixed P672 prefill requires chunk_size='auto' "
+                    f"or 336, got {requested!r}"
+                )
+            if 672 > physical_limit:
+                raise ValueError(
+                    "Wall-OSS mixed P672 prefill plus reserved action rows "
+                    "exceeds the shared KV cache: "
+                    f"reserve_rows={reserve_rows}, "
+                    f"max_seq_len={self.cache.max_seq_len}"
+                )
+            return plan(
+                0,
+                alignment=1,
+                padding_rows=672 - real_len,
+                # The mixed native envelope already requires C336. Preserve
+                # whether it was automatic or explicitly pinned by the caller.
+                exact_chunk_size=336 if requested == 336 else None,
+            )
         if (
             stage.get("chunk_size", "auto") == "auto"
             and "padding_rows" not in stage
             and "padding_budget" not in stage
         ):
-            # Preserve the default execution length
+            # Preserve the measured Wall default execution length byte-for-byte
             # when no public padding policy was requested.  The policy helper's
             # chunk is only a ceiling/equal-two target: the full native planner
             # can choose a smaller value once it applies the model's real SPM
@@ -670,23 +726,28 @@ class WallOssLLM:
         )
 
     def _bake_prefill_cos_sin(self, position_ids: torch.Tensor):
-        """Host-bake Qwen2.5-VL chunked cos/sin [seq, hd/2] → RPU fp16."""
+        """Host-bake Qwen2.5-VL chunked cos/sin [seq, hd/2] → device fp16."""
         cos_cpu, sin_cpu = build_chunked_mrope_cos_sin(
             position_ids.to(torch.int64), head_dim=self._head_dim,
             rope_theta=self._rope_theta, mrope_section=self._mrope_section)
-        return cos_cpu.to("rpu").contiguous(), sin_cpu.to("rpu").contiguous()
+        # These private immutable owners need version counters even when the
+        # caller runs inference_mode. Native keepalive reuse requires both
+        # tensor identity and a usable version; inference tensors force copies.
+        with torch.inference_mode(False):
+            return cos_cpu.to("rpu").contiguous(), sin_cpu.to("rpu").contiguous()
 
     def _prefill_position_ids_rpu(
         self, position_ids: torch.Tensor, seq: int
     ) -> torch.Tensor:
-        """Return a stable RPU int32 position tensor, validated by full content."""
+        """Return a stable device int32 position tensor, validated by full content."""
         cached = self._prefill_pos_cache.get(seq) if self._host_cache else None
         if cached is not None and torch.equal(cached[0], position_ids):
             return cached[1]
         # Allocate while ``cached`` (or _last_prefill_pos_ref when caching is
-        # disabled) still owns the previous tensor, so the RPU allocator cannot
+        # disabled) still owns the previous tensor, so the device allocator cannot
         # recycle its address and fool the C++ source-pointer upload memo.
-        pos = position_ids.to(dtype=torch.int32, device="rpu").contiguous()
+        with torch.inference_mode(False):
+            pos = position_ids.to(dtype=torch.int32, device="rpu").contiguous()
         if self._host_cache:
             self._prefill_pos_cache[seq] = (position_ids.clone(), pos)
         else:
@@ -694,7 +755,7 @@ class WallOssLLM:
         return pos
 
     def _prefill_cos_sin(self, position_ids: torch.Tensor, seq: int):
-        """Memoized Qwen2.5-VL chunked cos/sin tables in RPU fp16.
+        """Memoized Qwen2.5-VL chunked cos/sin tables in device fp16.
 
         The tables are a pure function of position_ids: cache by sequence length,
         then validate with ``torch.equal`` so a same-length frame with genuinely
@@ -733,8 +794,27 @@ class WallOssLLM:
             raise ValueError(
                 f"logical_len must be in [1, {seq}], got {logical_len}"
             )
+        # Plan the full already-padded input for the RTC buckets and the
+        # default base H32/P640 envelope. Otherwise logical 545/570/640 creates
+        # separate native identities for the same physical base graph. Keep
+        # logical_len for masks/receipts, and leave explicit padding/chunk
+        # requests to the ordinary planner so padding is never applied twice.
+        prefill_request = self._rpu_execution.get("prefill", {})
+        base_p640_bucket = (
+            not self._prefill_mixed_precision
+            and op_id == "wall_oss_llm_embeds"
+            and seq == 640 and 545 <= logical_len <= 640
+            and reserve_rows == 32
+            and self._prefill_pad16 and self._prefill_equal_two
+            and prefill_request.get("chunk_size", "auto") == "auto"
+            and "padding_rows" not in prefill_request
+            and "padding_budget" not in prefill_request
+        )
         plan_len = (
-            logical_len
+            seq
+            if (self._prefill_mixed_precision and seq in (640, 672))
+            or base_p640_bucket
+            else logical_len
         )
         plan_box = {}
         execution_len, planned_chunk_size = self.prefill_execution_plan(
@@ -754,6 +834,16 @@ class WallOssLLM:
             or (seq == 672 and execution_len == 672
                 and planned_chunk_size == 336)
         )
+        if self._prefill_mixed_precision and (
+            op_id != "wall_oss_llm_embeds"
+            or not supported_mixed_profile
+        ):
+            raise ValueError(
+                "Wall-OSS prefill mixed precision is validated only for the RTC "
+                "embedded P640/C320 or P672/C336 profile; got "
+                f"op_id={op_id!r}, seq={seq}, execution_len={execution_len}, "
+                f"planned_chunk_size={planned_chunk_size}"
+            )
         if execution_len != seq:
             raise ValueError(
                 "Wall-OSS prefill must be padded exactly once before the native "
@@ -764,7 +854,7 @@ class WallOssLLM:
         pos = self._prefill_position_ids_rpu(position_ids, seq)
         if tuple(pos.shape) != (seq, 3):
             raise RuntimeError(
-                f"RPU position_ids must be [seq, 3], got {tuple(pos.shape)}"
+                f"device position_ids must be [seq, 3], got {tuple(pos.shape)}"
             )
 
         # Host-bake Qwen2.5-VL's contiguous T/H/W frequency chunks [seq, hd/2].
@@ -773,11 +863,6 @@ class WallOssLLM:
         # Memoized on seq (see _prefill_cos_sin) — frame-invariant for a fixed prefix length.
         cos_il, sin_il = self._prefill_cos_sin(position_ids, seq)
 
-        # Fresh prefill from position 0. Use reset_to_position (no zero-fill) instead
-        # of reset(): the LTM insert kernel overwrites K/V at [0, seq) before SDPA
-        # reads it (same overwrite-before-read invariant reset_to_position documents
-        # and the denoise loop already relies on), so prefill does not need
-        # to zero the cache storage first.
         self.cache.reset_to_position(0)
         sig = _prefill_graph_signature(
             op_id,
@@ -785,6 +870,7 @@ class WallOssLLM:
             self.hidden_size,
             planned_chunk_size,
             self.num_layers,
+            self._prefill_mixed_precision,
             plan_key_words=a6_plan.graph_key_words(),
         )
         with self._graph_cache.capture(sig):
@@ -802,15 +888,9 @@ class WallOssLLM:
                 0,
                 planned_stage_descriptor,
             )
-        resolved_chunk_size = int(
-            torch.ops.rpu.causal_decoder_get_resolved_chunk_size(self._handle)
-        )
-        if resolved_chunk_size != planned_chunk_size:
-            raise RuntimeError(
-                "Wall-OSS prefill dry/forward chunk mismatch: "
-                f"planned={planned_chunk_size}, resolved={resolved_chunk_size}, "
-                f"logical_len={logical_len}, execution_len={seq}"
-            )
+        # The exact descriptor is the native forward's sole chunk authority;
+        # FMB rejects live capacity/schedule disagreement before execution.
+        resolved_chunk_size = int(a6_plan.selected.stage_tuple.compute_chunk)
         vars(self)["_rpu_last_execution_plan"] = {
             "component": getattr(
                 self, "_fmb_execution_component_id", "text_backbone"),
@@ -854,7 +934,7 @@ class WallOssLLM:
         execution_len, _ = self.prefill_execution_plan(
             seq, reserve_rows=reserve_rows
         )
-        # Embed on CPU (fp32, matching the golden), then move to RPU fp16.
+        # Embed on CPU (fp32, matching the golden), then move to device fp16.
         inputs_embeds = F.embedding(input_ids.cpu(), self._embed_w)  # [1, seq, H] fp32
         # Text-only → mRoPE 3 axes equal (T=H=W=index) → standard 1D RoPE.
         pos = torch.arange(seq, dtype=torch.int32)[:, None].expand(seq, 3).contiguous()
@@ -926,8 +1006,10 @@ def build_wall_oss_llm(
     nvfp4a16: bool = False,
     w8_down_ckpt_dir: str | None = None,
     execution_config=None,
+    graph_runtime_policy=None,
+    rmsnorm_fixed32: bool = False,
 ) -> WallOssLLM:
-    """Load expert-`expert` weights and install the RPU text decoder.
+    """Load expert-`expert` weights and install the device text decoder.
 
     Args:
         ckpt_dir: Wall-OSS-0.5 checkpoint directory (model.safetensors + config.json).
@@ -941,13 +1023,28 @@ def build_wall_oss_llm(
         max_seq_len: RoPE table + KV cache capacity.
         w8a16: load int8 weights + fp16 per-row scales from the W8A16 checkpoint
             and call `causal_decoder_set_weights_w8a16`.
-        fp16_ckpt_dir: paired source checkpoint for CPU glue weights.
+        fp16_ckpt_dir: paired source checkpoint for the layer-2 FP16 down projection
+            when RTC prefill mixed precision and W8A16/W4A16 are enabled.
         w8_down_ckpt_dir: W8A16 source for expert-0 ``down_proj`` only. Valid
             exclusively with ``expert=0, nvfp4a16=True`` so NVFP4 covers the
             same projection set as the retained WINT4A16 pgrp composition.
     """
+    if graph_runtime_policy is not None:
+        from rpu_backend.graph import GraphRuntimePolicy
+        if not isinstance(graph_runtime_policy, GraphRuntimePolicy):
+            raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
     from rpu_backend.api._execution import _require_execution_process_safe
     _require_execution_process_safe()
+    from rpu_backend.api._execution import normalize_rpu_execution
+    prefill_execution = normalize_rpu_execution(
+        {"prefill": ({} if execution_config is None else
+                     execution_config.get("prefill", {}))},
+        entry_point="build_wall_oss_llm",
+        supported={"prefill": ("chunk_size", "padding_rows", "padding_budget", "linear_acc32")},
+    ).get("prefill", {})
+    linear_acc32 = prefill_execution.get("linear_acc32", False)
+    if linear_acc32 and _prefill_mixed_precision_enabled():
+        raise ValueError("Wall-OSS mixed RTC prefill does not support linear_acc32=True")
     precision_modes = {
         "w8a16": w8a16,
         "w4a16": w4a16,
@@ -958,6 +1055,11 @@ def build_wall_oss_llm(
         for name, value in precision_modes.items()
         if not isinstance(value, bool)
     }
+    if not isinstance(rmsnorm_fixed32, bool):
+        raise ValueError(
+            "Wall-OSS text rmsnorm_fixed32 must be bool, got "
+            f"{rmsnorm_fixed32!r}"
+        )
     if invalid_modes:
         raise ValueError(
             f"Wall-OSS precision flags must be bool, got {invalid_modes}"
@@ -968,6 +1070,7 @@ def build_wall_oss_llm(
             "pick one of w8a16 / w4a16 / nvfp4a16, got "
             f"{selected_modes}"
         )
+    sorting = sorting_config_from_env()
     if w8_down_ckpt_dir is not None and (not nvfp4a16 or expert != 0):
         raise ValueError(
             "w8_down_ckpt_dir is valid only for expert=0 with nvfp4a16=True")
@@ -1003,10 +1106,26 @@ def build_wall_oss_llm(
     # their GraphCache entries cannot be hot-switched by later env changes.
     PREFILL_PAD16 = _kvinsert_pad16_enabled()
     PREFILL_CHUNK_SIZE_CAP = _prefill_chunk_size_cap(ATTN_TP)
-    execution_config = {} if execution_config is None else execution_config
-    requested_chunk = execution_config.get("prefill", {}).get(
-        "chunk_size", "auto"
+    PREFILL_MIXED_PRECISION = _prefill_mixed_precision_enabled()
+    PREFILL_STAGED_MLP = _prefill_staged_mlp_enabled()
+    PREFILL_OWNER_DIRECT_KV = rpu_env_bool(
+        "RPU_WALL_OSS_PREFILL_OWNER_DIRECT_KV", default=False
     )
+    if PREFILL_STAGED_MLP and not PREFILL_MIXED_PRECISION:
+        raise ValueError(
+            "RPU_WALL_OSS_PREFILL_STAGED_MLP=1 requires "
+            "RPU_WALL_OSS_PREFILL_MIXED_PRECISION=1"
+        )
+    fp16_transfer = not selected_modes and bool(sorting.fp16_mask & 2)
+    if rmsnorm_fixed32 and not (
+        (w8a16 or fp16_transfer) and PREFILL_MIXED_PRECISION
+    ):
+        raise ValueError(
+            "Wall-OSS text FIXED32 RMSNorm requires the exact mixed RTC "
+            "W8A16 or opted-in FP16 profile"
+        )
+    execution_config = {} if execution_config is None else execution_config
+    requested_chunk = prefill_execution.get("chunk_size", "auto")
     CHUNK_SIZE_OVERRIDE = (
         0 if requested_chunk == "auto" else int(requested_chunk)
     )
@@ -1019,7 +1138,13 @@ def build_wall_oss_llm(
     PREFILL_EQUAL_TWO = (
         ATTN_TP == _MLP_CORES
         and PREFILL_PAD16
-        and CHUNK_SIZE_OVERRIDE == 0
+        and (
+            CHUNK_SIZE_OVERRIDE == 0
+            or (
+                PREFILL_MIXED_PRECISION
+                and CHUNK_SIZE_OVERRIDE in (320, 336)
+            )
+        )
     )
     REP = ATTN_TP // NKV            # KV-head replication factor (1 or 4)
     NKV_EFF = NKV * REP             # effective KV heads the C++ decoder sees (== ATTN_TP)
@@ -1029,9 +1154,36 @@ def build_wall_oss_llm(
     else:
         layer_indices = list(layer_indices)
     num_layers = len(layer_indices)
+    if PREFILL_MIXED_PRECISION:
+        exact_profile = (
+            expert == 0
+            and not nvfp4a16
+            and (not w4a16 or not down_int4)
+            and layer_indices == list(range(36))
+            and H == 2048 and NQ == 16 and NKV == 2 and HD == 128
+            and INTER_PAD == 11008 and MROPE == [16, 24, 24]
+            and ATTN_TP == 8 and NKV_EFF == 8
+            and PREFILL_PAD16 and PREFILL_EQUAL_TWO
+            and PREFILL_CHUNK_SIZE_CAP == 384
+            and max_seq_len >= 640
+        )
+        if not exact_profile:
+            raise ValueError(
+                "RPU_WALL_OSS_PREFILL_MIXED_PRECISION=1 supports only the "
+                "full 36-layer FP16/W8A16/W4A16 RTC expert-0 profile with logical "
+                "H2048/I11008/NQ16/NKV2/HD128, TP8, pad16, and max_seq_len>=640"
+            )
 
+    mixed_quantized = PREFILL_MIXED_PRECISION and (w8a16 or w4a16)
+    if mixed_quantized:
+        fp16_ckpt_dir = _resolve_ckpt(fp16_ckpt_dir, False)
+        if w4a16:
+            validate_rtc_w4_checkpoint_pair(ckpt_dir, fp16_ckpt_dir)
+        else:
+            validate_w8_nvfp4_checkpoint_pair(ckpt_dir, fp16_ckpt_dir)
 
     st = _SafeTensorStore(ckpt_dir)
+    fp16_st = _SafeTensorStore(fp16_ckpt_dir) if mixed_quantized else None
     down_w8_st = (
         _SafeTensorStore(w8_down_ckpt_dir)
         if w8_down_ckpt_dir is not None
@@ -1124,7 +1276,9 @@ def build_wall_oss_llm(
             down_w8_st.get_tensor(down_key).contiguous()
             if down_w8_st is not None
             else (
-                gr(down_key)
+                fp16_st.get_tensor(down_key).contiguous()
+                if mixed_quantized and L == 2
+                else gr(down_key)
             )
         )                                                              # [H, INTER]
         if down_w8_st is not None:
@@ -1146,7 +1300,9 @@ def build_wall_oss_llm(
             gate_list.append(_to_rpu_int8(tp_col_swizzle_mc_weight(gate_w, _MLP_CORES, dwidth=1)))
             up_list.append(_to_rpu_int8(tp_col_swizzle_mc_weight(up_w, _MLP_CORES, dwidth=1)))
             down_list.append(
-                _to_rpu_int8(
+                _to_rpu_half(tp_row_swizzle_mc_weight(down_w.half(), _MLP_CORES))
+                if mixed_quantized and L == 2
+                else _to_rpu_int8(
                     tp_row_swizzle_mc_weight(down_w, _MLP_CORES, dwidth=1)
                 )
             )
@@ -1172,7 +1328,13 @@ def build_wall_oss_llm(
                 up_s = F.pad(up_s, _spad, value=1.0)
             gate_list.append(_pack_int4_rpu(gate_w, 1, _MLP_CORES))
             up_list.append(_pack_int4_rpu(up_w, 1, _MLP_CORES))
-            if down_int4:
+            if mixed_quantized and L == 2:
+                down_list.append(
+                    _to_rpu_half(
+                        tp_row_swizzle_mc_weight(down_w.half(), _MLP_CORES)
+                    )
+                )
+            elif down_int4:
                 # down is logically per-channel (1D scale) in BOTH ckpts. The pgrp ckpt stores
                 # expert-0 down as per-channel INT8 (±127) -> re-quant to int4 on the fly
                 # (LOSSY int8->int4) when values exceed the int4 range; the runtime
@@ -1186,7 +1348,7 @@ def build_wall_oss_llm(
                 gate_s, in_features=H, partition=1, num_cores=_MLP_CORES))
             up_s_list.append(_scale_to_rpu(
                 up_s, in_features=H, partition=1, num_cores=_MLP_CORES))
-            if down_int4:
+            if down_int4 and not (mixed_quantized and L == 2):
                 down_s_list.append(_scale_to_rpu(
                     down_s, in_features=down_w.shape[1], partition=0,
                     num_cores=_MLP_CORES))
@@ -1228,7 +1390,9 @@ def build_wall_oss_llm(
         num_layers=num_layers, batch_size=1, max_seq_len=max_seq_len,
         num_kv_heads=NKV_EFF, head_dim=HD, attn_tp=ATTN_TP,
     )
-    graph_cache = rpu_backend.graph.GraphCache()
+    graph_cache = rpu_backend.graph.GraphCache(
+        **({"runtime_policy": graph_runtime_policy}
+           if graph_runtime_policy is not None else {}))
 
     set_weights = (
         torch.ops.rpu.causal_decoder_set_weights_nvfp4
@@ -1274,7 +1438,15 @@ def build_wall_oss_llm(
         weight_args=weight_args,
         chunk_size_cap=PREFILL_CHUNK_SIZE_CAP,
         equal_two_prefill=PREFILL_EQUAL_TWO,
-        chunk_size_override=CHUNK_SIZE_OVERRIDE,
+        wall_prefill_routes=(
+            PREFILL_MIXED_PRECISION,
+            PREFILL_STAGED_MLP,
+            (_RMSNORM_CAP_FIXED32
+             if rmsnorm_fixed32 else _RMSNORM_CAP_BASE),
+            PREFILL_OWNER_DIRECT_KV,
+        ),
+        chunk_size_override=CHUNK_SIZE_OVERRIDE, sorting=sorting,
+        linear_acc32=linear_acc32,
     )
     model = None
     try:
@@ -1296,6 +1468,7 @@ def build_wall_oss_llm(
                                attn_mask_type=1),   # 1 = LTM (causal prefill)
             partial_mrope=partial_mrope,
             execution_config=execution_config,
+            prefill_mixed_precision=PREFILL_MIXED_PRECISION,
         )
         return model
     except BaseException as error:

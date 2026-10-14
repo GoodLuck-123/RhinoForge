@@ -26,6 +26,7 @@ MODE_INT8 = 1
 MODE_FP16 = 2
 MODE_FP8_E2M5 = 4
 MODE_FP8_E4M3 = 5
+MODE_UINT4 = 6
 TP = 8
 SHARED_SCALAR_LOCAL_N = 16
 
@@ -65,6 +66,17 @@ def _source_scale(experts, name: str) -> torch.Tensor:
 
 
 def _prepare_routed(experts, num_cores: int):
+    source = getattr(experts, "_qwen3_5_moe_int4_source", None)
+    if source is not None:
+        from .quant_scope import runtime_capabilities
+        from .int4_checkpoint import RoutedInt4LayerSource
+
+        if (not isinstance(source, RoutedInt4LayerSource)
+                or getattr(experts, "rpu_weight_mode", None) != MODE_UINT4
+                or getattr(experts, "rpu_quant_profile", None) != source.profile_id
+                or runtime_capabilities(source.profile_id).routed_weight_mode != MODE_UINT4):
+            raise ValueError("INT4 experts require matching typed source and profile markers")
+        return source.prepare(num_cores=num_cores)
     if type(num_cores) is not int or num_cores not in (4, 6, 8):
         raise ValueError(
             f"Qwen3.5-35B-A3B routed experts require TP4, TP6 or TP8, got {num_cores}"
@@ -210,7 +222,7 @@ def prepare_moe_layer_weights(
             return tensor
         return tensor.contiguous().to(device)
 
-    return PackedMoeLayerWeights(
+    prepared = PackedMoeLayerWeights(
         router=upload(router),
         routed_gate=upload(routed_gate),
         routed_up=upload(routed_up),
@@ -224,6 +236,9 @@ def prepare_moe_layer_weights(
         shared_scalar_gate=upload(shared_scalar),
         routed_weight_mode=mode,
     )
+    if mode == MODE_UINT4:
+        mlp.experts._qwen3_5_moe_int4_source.release()
+    return prepared
 
 
 def build_route_tables(
@@ -243,7 +258,7 @@ def build_route_tables(
 
 
 __all__ = [
-    "MODE_FP16", "MODE_FP8_E4M3", "PackedMoeLayerWeights",
+    "MODE_FP16", "MODE_FP8_E4M3", "MODE_UINT4", "PackedMoeLayerWeights",
     "build_route_tables", "dequantize_fp8_e4m3_per_output",
     "pack_grouped_weight", "prepare_moe_layer_weights",
     "quantize_fp8_e4m3_per_output",

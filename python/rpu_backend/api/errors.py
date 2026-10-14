@@ -43,7 +43,7 @@ class RPUUnsupportedDtypeError(RPUBackendError):
 
 
 class RPUSingleHandleError(RPUBackendError):
-    """Second concurrent RPU model or policy instance attempted.
+    """Second concurrent device model or policy instance attempted.
 
     NM1 reviews iter-3: relocated from `transformers/errors.py`. Re-exported
     from `transformers.errors` for user-code back-compat.

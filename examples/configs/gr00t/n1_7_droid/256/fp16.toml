@@ -1,0 +1,33 @@
+# Three-camera GR00T-N1.7; precision/input select the supported profile.
+# See ../README.md. Change text_tokens and observation together for T64/T128.
+[example]
+profile_id = "gr00t-n1d7-3b.fp16.vla"
+registry_alias = "gr00t-n1d7-3b"
+target = "gr00t"
+dtype = "fp16"
+
+[input]
+observation = "/path/to/gr00t_3cam_256_t32_observation.pt"
+qwen3vl_registry_alias = "qwen3-vl-2b"
+cameras = 3
+image_size = 256
+text_tokens = 32                       # Pure instruction tokens: 32, 64 or 128.
+action_horizon = 40
+num_steps = 4
+embodiment_id = 20
+seed = 0
+# max_prefix_len is inferred from the actual observation (16-aligned, <=512).
+
+[run]
+warmup = 2
+runs = 6
+hwperf = false
+profile = false
+seed = 0
+output_dir = "./gr00t_results/3cam/256/fp16"
+
+# Keep the model's per-component AUTO planning and actual SPM/DDR admission.
+[rpu_execution]
+
+[cpu]
+threads = 8

@@ -116,13 +116,14 @@ plan.
 | Check | Failure pattern | Required correction |
 |---|---|---|
 | Top-level capture | Every call stays outside retained Graph execution | Wrap the production native forward in the adapter-owned `GraphCache.capture(signature)` unless the reviewed model contract defines a bounded one-shot |
+| Tensor views | A view created across inference-mode contexts loses its base state or raises a version-counter error | Use native PyTorch view construction to preserve base inference state, aliasing, storage offsets, bounds and version counters |
 | Complete signature | Same shape but different mask, grid, or lookup data reuses stale results | Add the semantic value to the signature, keep it at a proven stable address, or update it through mutable DMA |
 | DMA address ownership | BUILD passes, REPLAY reads or writes an earlier tensor | Use fixed DMA only for stable model-owned storage; use mutable DMA for caller inputs and fresh outputs |
 | Multi-core broadcast | An immediate multi-core operation updates only one core | Call `set_broadcast_mode(true)`; batch and Graph paths already apply it centrally |
 | Model invalidation | New weights or layout settings reuse an old plan | End every layout-, weight-, or Graph-affecting setter with `invalidate_model_state()` |
-| CPU fallback | End-to-end execution completes but a required model component did not run on RPU | List the fallback explicitly and keep the profile out of Supported status until the intended execution contract is validated |
+| CPU fallback | End-to-end execution completes but a required model component did not run on device | List the fallback explicitly and keep the profile out of Supported status until the intended execution contract is validated |
 | Profile inheritance | One size or short input passes and nearby profiles are accepted | Guard exact configuration tuples and maximum envelopes before weight loading |
-| Process ownership | A second live fused model or transformed model move causes state conflicts | Use one live RPU-resident fused model or policy per process and reload a clean CPU instance for another placement |
+| Process ownership | A second live fused model or transformed model move causes state conflicts | Use one live device-resident fused model or policy per process and reload a clean CPU instance for another placement |
 
 ## Fast triage order
 

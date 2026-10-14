@@ -1,7 +1,7 @@
 // graph_runtime_internal.h — private helpers shared by graph runtime .cpp files.
 //
 // These helpers are not part of the public op-facing graph API. They are kept
-// out of graph_runtime.h to avoid exposing patch application internals to RPU
+// out of graph_runtime.h to avoid exposing patch application internals to device
 // operator implementations.
 #pragma once
 

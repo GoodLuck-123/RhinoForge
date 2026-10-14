@@ -1,8 +1,8 @@
-"""Qwen3.5-MoE mixed-FP8 checkpoint scope.
+"""Qwen3.5-MoE checkpoint profiles and their execution contracts.
 
 Shared by the offline converter and the adapter-local loader. Keeping the
 scope beside the adapter mirrors dense Qwen3.5 and prevents conversion,
-loading, and RPU installation from silently selecting different projections.
+loading, and device installation from silently selecting different projections.
 
 This module is deliberately stdlib-only so the offline converter can import it
 without importing torch or the compiled backend.
@@ -10,6 +10,7 @@ without importing torch or the compiled backend.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 TEXT_PREFIX = "model.language_model.layers."
 FULL_ATTENTION = "full_attention"
@@ -39,6 +40,44 @@ FP8_FORMAT = "fp8_e4m3_per_output"
 FP8_SCOPE = "routed_experts_and_text_mixers"
 FP8_PROFILE = "fp8_main_fp8_gdn"
 EXACT_PROFILE_ID = "qwen3_5_moe_35b_a3b_tp8_mixed_e4m3"
+RTN_PROFILE_ID = "qwen3_5_moe_35b_a3b_tp8_routed_rtn_w4a16_g128"
+RTN_METHOD = "qwen3_5_moe_routed_rtn_uint4"
+GPTQ_PROFILE_ID = "qwen3_5_moe_35b_a3b_tp8_routed_gptq_w4a16_g128"
+GPTQ_METHOD = "qwen3_5_moe_routed_gptq_uint4"
+
+
+@dataclass(frozen=True)
+class RuntimeCapabilities:
+    routed_weight_mode: int
+    mixer_precision: str
+    allowed_cores: tuple[int, ...]
+    text_only: bool
+
+
+# Routed quantization does not change the ordinary FP16 Vision tower.  Both
+# INT4 sources use the existing exact TP8 Vision/text bridge and owner policy.
+_ROUTED_INT4_RUNTIME = RuntimeCapabilities(6, "float16", (8,), False)
+_MIXED_FP8_RUNTIME = RuntimeCapabilities(5, "fp8_e4m3", (4, 6, 8), False)
+
+
+def runtime_capabilities(profile_id: str) -> RuntimeCapabilities:
+    """Resolve only admitted profile identities, never a tensor dtype/mode hint."""
+    if profile_id in (RTN_PROFILE_ID, GPTQ_PROFILE_ID):
+        return _ROUTED_INT4_RUNTIME
+    if profile_id == EXACT_PROFILE_ID:
+        return _MIXED_FP8_RUNTIME
+    raise ValueError(f"Unknown Qwen3.5-MoE profile: {profile_id!r}")
+
+
+RTN_RECIPE = {
+    "algorithm": "RTN", "bits": 4, "group_size": 128, "sym": True,
+    "desc_act": False, "calibration": False, "error_feedback": False,
+    "scale_formula": "2*max(abs(group))/15; all-zero group: 2/15",
+    "rounding": "nearest_ties_to_even", "quantization_arithmetic": "float32",
+    "zero": 8, "q_range": [0, 15], "scale_storage": "float16",
+    "format": "gptq_v1", "qzeros_encoding": "zero_minus_one",
+    "scale_underflow": "IEEE float16 cast may produce zero; preserve and count, no floor",
+}
 FP16_PRESERVE = (
     "linear_attn.in_proj_b",
     "linear_attn.in_proj_a",
@@ -101,8 +140,12 @@ def _value(owner, name, default=None):
     return getattr(owner, name, default)
 
 
+def _declares(owner, name):
+    return name in owner if isinstance(owner, Mapping) else hasattr(owner, name)
+
+
 def validate_exact_profile(config, *, require_quant: bool = True) -> dict:
-    """Validate the only public sparse-MoE profile before allocation.
+    """Validate exact geometry and one supported checkpoint profile before allocation.
 
     Core topology is deliberately validated by the adapter because it belongs
     to ``rpu_execution`` rather than the checkpoint.  Everything encoded by
@@ -159,14 +202,86 @@ def validate_exact_profile(config, *, require_quant: bool = True) -> dict:
             f"mismatched fields: {sorted(mismatches)}"
         )
     quant = _value(config, "quant_config")
+    if _declares(config, "rtn_metadata"):
+        if _declares(config, "quant_config"):
+            raise ValueError("Qwen3.5-MoE RTN cannot also declare mixed-FP8 quant_config")
+        return {"profile": RTN_PROFILE_ID,
+                "quant_config": validate_rtn_config(config)}
+    if _declares(config, "quantization_config"):
+        if _declares(config, "quant_config"):
+            raise ValueError("Qwen3.5-MoE cannot combine mixed-FP8 and GPTQ declarations")
+        return {"profile": GPTQ_PROFILE_ID,
+                "quant_config": validate_gptq_config(config)}
     if require_quant and quant is None:
         raise ValueError(
-            "Qwen3.5-35B-A3B requires the controlled mixed-E4M3 checkpoint; "
+            "Qwen3.5-35B-A3B requires a supported mixed-E4M3, RTN or official GPTQ checkpoint; "
             "BF16/FP16 and official block-FP8 checkpoints are not admitted"
         )
     if quant is not None:
         quant = validate_quant_config(quant, layer_types)
     return {"profile": EXACT_PROFILE_ID, "quant_config": quant}
+
+
+def validate_rtn_config(config) -> dict:
+    """Recognize the audited routed-only RTN artifact, not arbitrary GPTQ."""
+    metadata = _value(config, "rtn_metadata")
+    expected_metadata = {
+        "algorithm": "RTN", "manifest": "derivation_manifest.json",
+        "calibration": False,
+    }
+    if (not isinstance(metadata, Mapping) or dict(metadata) != expected_metadata
+            or metadata.get("calibration") is not False):
+        raise ValueError("Qwen3.5-MoE RTN requires the exact derivation metadata")
+    quant = _value(config, "quantization_config")
+    required = {"bits": 4, "group_size": 128, "sym": True,
+                "desc_act": False, "quant_method": "gptq"}
+    if not isinstance(quant, Mapping) or any(
+        quant.get(key) != value or type(quant.get(key)) is not type(value)
+        for key, value in required.items()
+    ):
+        raise ValueError("Qwen3.5-MoE RTN requires symmetric G128 GPTQ-v1 storage")
+    if quant.get("checkpoint_format") not in (None, "gptq", "gptq_v1"):
+        raise ValueError("Qwen3.5-MoE RTN requires GPTQ-v1 checkpoint_format")
+    return {
+        "method": RTN_METHOD, "profile": RTN_PROFILE_ID, "weight_mode": 6,
+        "group_size": 128, "scope": "routed_experts", "scale_dtype": "float16",
+        "format": "gptq_v1", "qzeros_encoding": "zero_minus_one",
+    }
+
+
+def validate_gptq_config(config) -> dict:
+    """Admit the official routed-only symmetric layout, not generic GPTQ.
+
+    The checked Qwen release omits checkpoint_format. Its symmetric MoE
+    reference uses implicit zero8; every stored zero/g_idx is still checked
+    when read. A file with explicit format metadata needs its own assessment.
+    """
+    if _declares(config, "rtn_metadata") or _declares(config, "quant_config"):
+        raise ValueError("Official GPTQ cannot also declare RTN or mixed-FP8 metadata")
+    quant = _value(config, "quantization_config")
+    required = {"bits": 4, "group_size": 128, "sym": True,
+                "desc_act": False, "quant_method": "gptq",
+                "static_groups": False, "true_sequential": True,
+                "damp_percent": 0.01}
+    if not isinstance(quant, Mapping) or any(
+        quant.get(key) != value or type(quant.get(key)) is not type(value)
+        for key, value in required.items()
+    ):
+        raise ValueError("Qwen3.5-MoE official GPTQ requires the released symmetric G128 declaration")
+    dynamic = {"lm_head": {}, "model.language_model.embed_tokens": {},
+               "-:.*attn.*": {}, "-:.*shared_expert.*": {},
+               "-:.*mtp.*": {}, "-:.*visual.*": {}}
+    if quant.get("dynamic") != dynamic or quant.get("modules_to_not_convert") != []:
+        raise ValueError("Qwen3.5-MoE official GPTQ requires its routed-only dynamic scope")
+    unknown = set(quant) - set(required) - {"dynamic", "modules_to_not_convert"}
+    if unknown:
+        raise ValueError(f"Unsupported official GPTQ fields/checkpoint_format: {sorted(unknown)}")
+    return {
+        "method": GPTQ_METHOD, "profile": GPTQ_PROFILE_ID, "weight_mode": 6,
+        "group_size": 128, "scope": "routed_experts", "scale_dtype": "float16",
+        "format": "qwen3_5_moe_official_symmetric_gptq",
+        "qzeros_encoding": "direct_zero", "effective_zero": 8,
+    }
 
 
 def validate_layer_types(layer_types) -> tuple[str, ...]:
@@ -288,6 +403,8 @@ def validate_quant_config(quant_config, layer_types) -> dict:
 
 __all__ = [
     "EXACT_PROFILE_ID",
+    "RTN_PROFILE_ID", "RTN_METHOD", "RTN_RECIPE", "validate_rtn_config",
+    "GPTQ_PROFILE_ID", "GPTQ_METHOD", "validate_gptq_config", "runtime_capabilities",
     "FP8_FORMAT",
     "FP8_METHOD",
     "FP8_PROFILE",

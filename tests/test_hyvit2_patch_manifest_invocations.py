@@ -1,4 +1,4 @@
-"""Host-only regression for HYViT2's three-image patch manifest identities."""
+"""Host-only HYViT2 patch admission, manifest and device retirement regressions."""
 from __future__ import annotations
 
 import os
@@ -316,3 +316,174 @@ int main() {
         check=True, capture_output=True, text=True, timeout=30,
     )
     subprocess.run([str(binary)], check=True, capture_output=True, text=True, timeout=5)
+
+
+def test_complete_patch_encoder_retires_every_stream_before_arena_reuse(tmp_path):
+    """Execute the native boundary and allocator; SDK timing needs a board run."""
+    compiler = shutil.which("g++")
+    if compiler is None:
+        pytest.skip("g++ is required for the host-native retirement test")
+    source = SOURCE.read_text(encoding="utf-8")
+    eligible = _balanced_block(source, "    bool patch_encoder_device_fence_eligible(")
+    retirement = _balanced_block(source, "    void retire_patch_temporaries(")
+    reset = _balanced_block(
+        (ROOT / "src/core/rpu_spm_allocator.cpp").read_text(),
+        "void SpmAllocator::reset_temporary()",
+    )
+    program = r'''
+#include <array>
+#include <cassert>
+#include <cstdint>
+#include <functional>
+#include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
+#define TORCH_CHECK(ok, ...) do { if (!(ok)) throw std::runtime_error(#ok); } while (false)
+#define NUM_CORES 8
+enum class FmbPhysicalManifestState {UNSPECIFIED, COMPLETE};
+enum class FmbGraphLifecycle {UNSPECIFIED, COMPOSITE_CHILD};
+enum class FmbLinearAccumulationPolicy {ACC16, ACC32};
+struct Manifest {
+    FmbPhysicalManifestState state = FmbPhysicalManifestState::COMPLETE;
+    FmbGraphLifecycle graph_lifecycle = FmbGraphLifecycle::COMPOSITE_CHILD;
+    FmbLinearAccumulationPolicy linear_accumulation = FmbLinearAccumulationPolicy::ACC16;
+    int64_t logical_length=392,physical_length=392,execution_padding_rows=0,kv_logical_length=392;
+};
+struct Context {
+    bool complete=true;
+    mutable int reads=0;
+    Manifest manifest;
+    bool has_complete_physical_manifest() const {++reads;return complete;}
+    const Manifest&physical_manifest()const{++reads;return manifest;}
+};
+struct GraphSignature {};
+struct RpuKernelGraph {
+    enum class State {RECORDING,REPLAYING,PASSTHROUGH,BUILT};
+    State current=State::RECORDING;
+    std::vector<std::pair<int,int>> events;
+    int branches=0;
+    static RpuKernelGraph&active();
+    State state()const{return current;}
+    void record_barrier(uint8_t self,uint8_t target){events.push_back({self,target});}
+    void record_branch(uint64_t key,GraphSignature,const std::string&label){
+        assert(key==0x5349474c49505f52ull&&label=="hyvit2_patch_embed_spm_reset");
+        ++branches;events.push_back({-1,-1});
+    }
+} graph;
+RpuKernelGraph&RpuKernelGraph::active(){return graph;}
+struct SpmAllocator {
+    bool pipeline_arena_locked_=false;
+    int64_t pipeline_arena_epoch_=23,t_end_=456789,generation_=5;
+    int64_t persistent_generation_=17,p_start_=6000000,sp_floor_=6000000;
+    void reset_temporary();
+} allocator;
+#define SPM_ALLOC allocator
+__RESET__
+struct Harness {
+    Context context;
+    bool has_patch_emb_=true;
+    int64_t patch_embed_cores_=8,pe_cin_orig_=3,pe_cin_padded_=16,pe_cout_=1152;
+    int64_t pe_kh_=16,pe_kw_=16,pe_strideh_=16,pe_stridew_=16,orig_head_dim_=72;
+    int64_t layers=27,h=1152,inter=4352,q=16,kv=16,hd=80;
+    std::vector<int>layer_weights_=std::vector<int>(27);
+    const Context&ctx()const{return context;}
+    int64_t num_layers()const{return layers;}
+    int64_t hidden_size()const{return h;}
+    int64_t intermediate_size()const{return inter;}
+    int64_t num_q_heads()const{return q;}
+    int64_t num_kv_heads()const{return kv;}
+    int64_t head_dim()const{return hd;}
+__ELIGIBLE__
+__RETIREMENT__
+};
+void init(RpuKernelGraph::State state=RpuKernelGraph::State::RECORDING){
+    graph=RpuKernelGraph{};graph.current=state;allocator=SpmAllocator{};
+}
+void check_reset(){
+    assert(allocator.t_end_==0&&allocator.generation_==6);
+    assert(allocator.persistent_generation_==17&&allocator.p_start_==6000000&&allocator.sp_floor_==6000000);
+}
+void check_fence(){
+    assert(graph.branches==0&&graph.events.size()==8);
+    std::array<bool,8> outstanding;outstanding.fill(true);
+    for(int i=0;i<8;++i){
+        assert((graph.events[i]==std::make_pair(0,2*i)));
+        // SYNC offset=0 retires all preceding STARTs on its target stream.
+        outstanding[graph.events[i].second/2]=false;
+    }
+    for(bool pending:outstanding)assert(!pending);
+    check_reset();
+}
+void check_branch(){
+    assert(graph.branches==1&&graph.events.size()==1);
+    assert((graph.events[0]==std::make_pair(-1,-1)));check_reset();
+}
+int main(){
+    for(auto state:{RpuKernelGraph::State::RECORDING,RpuKernelGraph::State::REPLAYING}){
+        for(int count:{2,3}){
+            init(state);Harness h;
+            h.context.manifest.logical_length=h.context.manifest.physical_length=
+                h.context.manifest.kv_logical_length=count*196;
+            h.retire_patch_temporaries(true,count,224,224,196);check_fence();
+        }
+        // A valid descriptor alone cannot admit a standalone patch call.
+        init(state);Harness h;
+        h.retire_patch_temporaries(false,2,224,224,196);check_branch();
+        assert(h.context.reads==0);
+        for(auto args:std::vector<std::array<int64_t,4>>{
+                {1,224,224,196},{4,224,224,196},{2,225,224,196},
+                {2,224,225,196},{2,224,224,195}}){
+            init(state);Harness h;
+            h.retire_patch_temporaries(true,args[0],args[1],args[2],args[3]);check_branch();
+        }
+        const std::vector<std::function<void(Harness&)>> faults{
+            [](auto&h){h.context.complete=false;},
+            [](auto&h){h.has_patch_emb_=false;},
+            [](auto&h){h.patch_embed_cores_=1;},
+            [](auto&h){h.pe_cin_orig_=4;},[](auto&h){h.pe_cin_padded_=32;},
+            [](auto&h){h.pe_cout_=1280;},[](auto&h){h.pe_kh_=8;},
+            [](auto&h){h.pe_kw_=8;},[](auto&h){h.pe_strideh_=8;},
+            [](auto&h){h.pe_stridew_=8;},[](auto&h){h.layers=26;},
+            [](auto&h){h.layer_weights_.pop_back();},[](auto&h){h.h=1280;},
+            [](auto&h){h.inter=4304;},[](auto&h){h.q=8;},[](auto&h){h.kv=8;},
+            [](auto&h){h.hd=72;},[](auto&h){h.orig_head_dim_=80;},
+            [](auto&h){h.context.manifest.state=FmbPhysicalManifestState::UNSPECIFIED;},
+            [](auto&h){h.context.manifest.graph_lifecycle=FmbGraphLifecycle::UNSPECIFIED;},
+            [](auto&h){h.context.manifest.linear_accumulation=FmbLinearAccumulationPolicy::ACC32;},
+            [](auto&h){h.context.manifest.logical_length=588;},
+            [](auto&h){h.context.manifest.physical_length=400;},
+            [](auto&h){h.context.manifest.execution_padding_rows=8;},
+            [](auto&h){h.context.manifest.kv_logical_length=400;},
+        };
+        for(const auto&fault:faults){
+            init(state);Harness h;fault(h);
+            h.retire_patch_temporaries(true,2,224,224,196);check_branch();
+        }
+        // The new fence cannot grant authority to reset a locked physical arena.
+        for(bool prologue:{false,true}){
+            init(state);allocator.pipeline_arena_locked_=true;Harness h;bool rejected=false;
+            try{h.retire_patch_temporaries(prologue,2,224,224,196);}
+            catch(const std::runtime_error&){rejected=true;}
+            assert(rejected&&allocator.t_end_==456789&&allocator.generation_==5);
+        }
+    }
+    for(auto state:{RpuKernelGraph::State::PASSTHROUGH,RpuKernelGraph::State::BUILT}){
+        init(state);Harness h;h.retire_patch_temporaries(true,2,224,224,196);
+        assert(graph.events.empty()&&h.context.reads==0);check_reset();
+    }
+}
+'''.replace("__ELIGIBLE__", eligible).replace("__RETIREMENT__", retirement).replace("__RESET__", reset)
+    # The loop closes all image output DMAs before the arena retirement call.
+    packed = _balanced_block(source, "    at::Tensor run_packed_patch_embed_core(")
+    assert packed.index("fused_patch_embedding(") < packed.index("retire_patch_temporaries(")
+    assert retirement.index("graph.record_barrier(") < retirement.index("SPM_ALLOC.reset_temporary()")
+    cpp, binary = tmp_path / "hyvit2-retirement.cpp", tmp_path / "hyvit2-retirement"
+    cpp.write_text(program, encoding="utf-8")
+    compiled = subprocess.run(
+        [compiler, "-std=c++17", "-Wall", "-Wextra", str(cpp), "-o", str(binary)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr

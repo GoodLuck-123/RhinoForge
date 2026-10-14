@@ -1,34 +1,11 @@
-"""HALO action expert 权重装载：safetensors (ema, bf16) → 预 swizzle fp16 RPU。
+"""Load HALO text/action branches from an EMA safetensors checkpoint.
 
-权重命名（HALO ema.safetensors，实测 2026-06-10）：
-  * 每层 text 路：``language_model.model.layers.{i}.self_attn.{q,k,v,o}_proj.weight``
-    （q/k/v 另有 ``.bias``，o 无 bias）、``self_attn.{q,k}_norm.weight`` [128]、
-    ``input_layernorm.weight`` / ``post_attention_layernorm.weight`` [1536]、
-    ``mlp.{gate,up,down}_proj.weight``；
-  * act 孪生：模块名加 ``_moe_act``（``q_proj_moe_act`` / ``q_norm_moe_act`` /
-    ``input_layernorm_moe_act`` / ``mlp_moe_act.gate_proj`` …），bias 同样有；
-  * 模型级：``language_model.model.norm.weight`` 与 ``norm_moe_act.weight``、
-    ``language_model.model.embed_tokens.weight`` [151933,1536]、
-    ``input_linear_layer`` 14→1536、``output_linear_layer`` 1536→14、
-    ``action_time_embedder.mlp.{0,2}``。
-
-swizzle 流程（RC-1）：先 ``.half()``（bf16→fp16），再做布局变换 —
-col-partition = q/k/v/gate/up（``tp_col_swizzle_mc_weight``），
-row-partition = o/down（``tp_row_swizzle_mc_weight``）；attention 用
-``attn_tp=2``（num_kv_heads=2），MLP 用 8 核。norm/bias 不 swizzle，
-原样 ``.half().to('rpu')``。
-
-RoPE 表：theta=1e6，行=常数 position（HALO act 模式 packed_position_ids 全行
-同值）。注意与规格的偏离：规格写 "[prefix+cs,128] HF 展开"，但 fused 模型经
-``rpu_launch_rope_spm_kernel`` 读 DDR 表的契约是 kernel 格式 [max_seq,
-head_dim/2]（rpu_rope.cpp:375 + rpu_qwenpi05_model.cpp Round-4 注释："full-dim
-caller misindexes"）。本模块先按 HF 展开式构造 [rows,128]，再切前 64 列下发；
-HF 展开前 64 列恰为 kernel 格式。
-
-所有权：build 函数返回的张量由调用方（HaloStepRunner）持有；C++
-``set_weights_halo``/``set_moe_weights`` 只保存引用计数副本，张量须存活到
-handle 销毁。
-"""
+Text parameters use the base names; action parameters use ``_moe_act``.
+Cast weights to FP16 before layout conversion. Q/K/V/Gate/Up use column
+partitioning; O/Down use row partitioning. Attention uses two cores and MLP
+eight. Norms and biases keep their logical layout. RoPE tables use half-width
+``[rows, head_dim/2]`` cos/sin values. The runner retains returned tensors for
+the native handle's lifetime."""
 from __future__ import annotations
 
 import dataclasses
@@ -80,8 +57,8 @@ class HaloConfig:
     #  =[0,1377]，packed_text_ids=[start_of_image,end_of_image]=[151652,151653]）。
     num_image_query_tokens: int = 1378        # = num_image_tokens + 2（含首尾 text 边界）
     image_text_rows: Tuple[int, ...] = (0, 1377)  # start_of_image=0 / end_of_image=1377
-    start_of_image_id: int = 151652           # packed_text_ids[0]（golden 实测）
-    end_of_image_id: int = 151653             # packed_text_ids[1]（golden 实测）
+    start_of_image_id: int = 151652
+    end_of_image_id: int = 151653
 
     @property
     def total_len(self) -> int:
@@ -118,7 +95,7 @@ def validate_halo_core_layout(cfg: HaloConfig) -> None:
 
 @dataclasses.dataclass(frozen=True)
 class HaloBranchWeights:
-    """一条分支（text 或 act 孪生）的 28 层权重列表，全部预 swizzle fp16 RPU。
+    """一条分支（text 或 act 孪生）的 28 层权重列表，全部预 swizzle fp16 device。
 
     形状契约（i = 层号；swizzle 不改形状只改布局）：
       q_w [1536,1536]  k_w/v_w [256,1536]  o_w [1536,1536]
@@ -147,7 +124,7 @@ class HaloBranchWeights:
 
 @dataclasses.dataclass(frozen=True)
 class HaloHostWeights:
-    """boundary host 数学用的 CPU 权重（M1：投影不进 RPU 图）。
+    """boundary host 数学用的 CPU 权重（M1：投影不进 device 图）。
 
     in/out proj 与 time-embedder 很小，转 fp32；embed_tokens [151933,1536]
     保持 bf16（fp32 约 0.9 GB，逐 id F.embedding 后再 .float()）。
@@ -260,7 +237,7 @@ def load_halo_branches(
     """装载 (text, act, host) 三组权重。
 
     I/O 契约：ckpt_path 指向 HALO ema.safetensors（bf16）；返回的 text/act
-    分支已在 RPU DDR（fp16 预 swizzle），host 权重留 CPU。
+    分支已在 device DDR（fp16 预 swizzle），host 权重留 CPU。
 
     ``load_lm_head``：默认 ``False`` → ``host.lm_head_w = None``，**不读** ``language_model.
     lm_head.weight``。该共享 loader 被 4 个消费者复用（runtime 动作专家 / text_cache /
@@ -297,17 +274,12 @@ def load_halo_branches(
 def build_rope_tables(
     cfg: HaloConfig, rope_position: int, rows: "int | None" = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """常数 position 的 RoPE 表 [rows, head_dim/2] fp16 RPU（kernel 格式）。
+    """Return constant-position FP16 cos/sin tables shaped ``[rows, head_dim/2]``.
 
-    ``rows`` 缺省 = ``cfg.total_len``（action 路径 prefix+18）；image_flow 传
-    prefix+num_image_tokens（行数须 ≥ C++ step_forward 的 prefix_len+seq 校验）。
-
-    HALO act 模式 packed_position_ids 全 18 行同值（step0 实测 = 11），所以表的
-    每一行都是该 position 的 cos/sin；fused 模型在 cos_sin_start=prefix_len
-    取行，prefix K 来自 CUDA NaiveCache（已 rope），表只服务 query/新 K。
-    先按 HF 展开构造 [rows, head_dim]（cat(c,c)），再切 [:, :head_dim/2] —
-    kernel 格式 = HF 展开前半（见模块 docstring 的偏离说明）。
-    """
+    ``rows`` defaults to ``cfg.total_len`` and must cover prefix plus query rows.
+    All query tokens share the supplied semantic position. Prefix keys already
+    carry their own rotary positions; these tables apply only to the new query
+    and key rows."""
     if rope_position < 0:
         raise ValueError(f"rope_position must be >= 0, got {rope_position}")
     half = cfg.head_dim // 2
@@ -324,7 +296,7 @@ def build_rope_tables(
 
 
 def build_text_row_mask(cfg: HaloConfig) -> torch.Tensor:
-    """text 行掩码 [chunk_size] fp16 RPU：text 行=1，action 行=0（C++ host 侧展开）。"""
+    """text 行掩码 [chunk_size] fp16 device：text 行=1，action 行=0（C++ host 侧展开）。"""
     mask = torch.zeros(cfg.chunk_size, dtype=torch.float16)
     for row in cfg.text_rows:
         if not 0 <= row < cfg.chunk_size:
@@ -367,7 +339,7 @@ def sinusoidal_pos_embedding(position_ids: torch.Tensor, cfg: HaloConfig) -> tor
 
 @dataclasses.dataclass(frozen=True)
 class HaloGenHostWeights:
-    """image_flow boundary host 权重（CPU fp32；投影不进 RPU 图）。
+    """image_flow boundary host 权重（CPU fp32；投影不进 device 图）。
 
     vae2llm (64→1536) / llm2vae (1536→64) / time_embedder.mlp (256→1536→1536, SiLU) /
     latent_pos_embed.pos_embed [1024,1536]（2D sincos 预算常量, forward = pos_embed[ids]）。
@@ -399,7 +371,7 @@ def load_halo_gen_branch(
     1376 vae 行走 **gen = ``*_moe_gen`` 孪生**（``model.norm_moe_gen.weight``）。两孪生
     同结构同 swizzle（``_load_branch`` 仅换 suffix）。gen host = vae2llm/llm2vae/
     time_embedder/latent_pos_embed + embed_tokens（2 text 行查表用）。
-    I/O：ckpt = HALO ema.safetensors（bf16）；两孪生在 RPU DDR fp16，host 留 CPU。
+    I/O：ckpt = HALO ema.safetensors（bf16）；两孪生在 device DDR fp16，host 留 CPU。
     """
     validate_halo_core_layout(cfg)
     store = _HaloTensorStore(ckpt_path)
@@ -425,7 +397,7 @@ def load_halo_gen_branch(
 
 
 def build_image_text_row_mask(cfg: HaloConfig) -> torch.Tensor:
-    """image_flow 行掩码 [num_image_query_tokens] fp16 RPU：text(und)行=1，vae(gen)行=0。
+    """image_flow 行掩码 [num_image_query_tokens] fp16 device：text(und)行=1，vae(gen)行=0。
 
     text 行 = ``cfg.image_text_rows``（start/end_of_image, 默认 {0,1377}）；其余 1376
     行 = vae（gen 孪生）。C++ ``set_gen_weights`` host 侧按 3 个 merge 宽度展开为
@@ -463,7 +435,7 @@ def assemble_image_x_emb(
     x_t: torch.Tensor, timestep: torch.Tensor, vae_position_ids: torch.Tensor,
     host: HaloGenHostWeights, cfg: HaloConfig
 ) -> torch.Tensor:
-    """host 合成 image_flow 双流 x_emb（bagel.py:1232-1242）→ [1,1378,1536] fp16 RPU。
+    """host 合成 image_flow 双流 x_emb（bagel.py:1232-1242）→ [1,1378,1536] fp16 device。
 
     query 1378 行 = 2 text(start/end_of_image) + 1376 vae（packed_sequence 散射）:
       * text 行 {0,1377}: ``embed_tokens(start/end_of_image_id)``（bagel.py:1232-1234）。

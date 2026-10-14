@@ -13,7 +13,7 @@ Line-for-line mirror of the official
     align-flag parsing                            (:775-870)
 
 ⚠️ IMPORT CONTRACT: pure torch, NO module-level `import rpu_backend`, no relative imports —
-   so the CPU test suite can exec this file standalone on an RPU-less host. Same rule as
+   so the CPU test suite can exec this file standalone on an device-less host. Same rule as
    convert.py; `test_prefix_module_is_cpu_safe` stands guard.
 
 Prefix token layout produced for the AUTHORITATIVE YAML (kuavo_v2_depth):
@@ -81,8 +81,8 @@ class AlignConfig:
     use_future_video_cls: bool = False                # align_params.video.use_cls_loss
     future_video_share_future_depth_query: bool = True   # align_params.video.share_future_depth_query
     use_shared_future_task_proj: bool = True          # align_params.video.use_shared_future_task_proj
-    block_future_depth_to_action: bool = False         # align_params.depth.block_future_depth_to_action
-    block_suffix_to_future_video: bool = False         # align_params.video.block_suffix_to_future_video
+    block_future_depth_to_action: bool = True         # align_params.depth.block_future_depth_to_action
+    block_suffix_to_future_video: bool = True         # align_params.video.block_suffix_to_future_video
     qwen3vl_use_vision_boundaries: bool = True        # config.qwen3vl_use_vision_boundaries (default True, :541)
     vlm_causal: bool = True                           # vlm_causal (YAML:261)
 

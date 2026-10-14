@@ -1,4 +1,4 @@
-"""Public Wall-OSS-0.5 policy facade for downstream RPU inference.
+"""Public Wall-OSS-0.5 policy facade for downstream device inference.
 
 The canonical user import is:
 
@@ -46,6 +46,10 @@ _SUPPORTED_CAMERA_NAMES = frozenset(
         "global_view",
     }
 )
+_RTC_CAMERA_NAMES = ("face_view", "left_wrist_view", "right_wrist_view")
+_RTC_ACTIVE_SLOTS = tuple(range(20))
+_RTC_STATE_DIM = 26
+_RTC_NUMERIC_BLOCKED_ENV = "RPU_WALL_OSS_RTC_ALLOW_NUMERIC_BLOCKED"
 
 
 def _strict_bool(name: str, value: bool) -> bool:
@@ -241,7 +245,7 @@ def _close_wall_oss_vla(vla: Any) -> None:
 
 
 class WallOssPolicy:
-    """Public Wall-OSS-0.5 (Qwen2.5-VL VLA) RPU entry point.
+    """Public Wall-OSS-0.5 (Qwen2.5-VL VLA) device entry point.
 
     Prompt layout (FLOW system/observation template), camera roster and dataset
     normalizer are fixed at construction. Camera pixels, proprioception and the
@@ -291,6 +295,8 @@ class WallOssPolicy:
         active_slots: Sequence[int] | None = None,
         runtime_env: Mapping[str, str] | None = None,
         rpu_execution=None,
+        graph_runtime_policy=None,
+        rtc: bool = False,
     ) -> "WallOssPolicy":
         """Create a policy bound to a Wall-OSS-0.5 checkpoint directory.
 
@@ -308,22 +314,37 @@ class WallOssPolicy:
         projections selected by WINT4A16 use NVFP4. This is an experimental
         final-action mode and does not claim FP16-equivalent prefix parity.
 
+        ``rtc=True`` selects the strict ``wrc_sf_v728`` profile.  With
+        ``w8a16=True``, eligible Vision/decoder projections use W8A16 while
+        the two overflow boundaries retain ACC32-to-BF16 output.
+        RTC prefixes passed to :meth:`infer` are physical model-space actions,
+        not the customer's absolute EE14 wire representation.
         """
 
+        if graph_runtime_policy is not None:
+            from rpu_backend.graph import GraphRuntimePolicy
+            if not isinstance(graph_runtime_policy, GraphRuntimePolicy):
+                raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
         from rpu_backend.api._execution import normalize_rpu_execution
         execution_config = normalize_rpu_execution(
             rpu_execution,
             entry_point="WallOssPolicy.from_checkpoint",
             supported={
-                "prefill": ("chunk_size", "padding_rows", "padding_budget"),
-                "vision": ("chunk_size",),
-                "action": ("chunk_size",),
+                "prefill": ("chunk_size", "padding_rows", "padding_budget", "linear_acc32"),
+                "vision": ("chunk_size", "linear_acc32"),
+                "action": ("chunk_size", "linear_acc32"),
             },
         )
         delta_action = _strict_bool("delta_action", delta_action)
         w8a16 = _strict_bool("w8a16", w8a16)
         w4a16 = _strict_bool("w4a16", w4a16)
         nvfp4a16 = _strict_bool("nvfp4a16", nvfp4a16)
+        rtc = _strict_bool("rtc", rtc)
+        if rtc and any(
+            execution_config.get(stage, {}).get("linear_acc32", False)
+            for stage in ("prefill", "vision", "action")
+        ):
+            raise ValueError("Wall-OSS RTC does not support linear_acc32=True")
         precision_modes = {
             "w8a16": w8a16,
             "w4a16": w4a16,
@@ -378,22 +399,74 @@ class WallOssPolicy:
                 f"action_horizon={inst._action_horizon}"
             )
         active_slot_list = _active_slot_list(active_slots)
+        if rtc:
+            rtc_mismatches = []
+            if inst._dataset_key != "ex_normal":
+                rtc_mismatches.append("dataset_key='ex_normal'")
+            if not delta_action:
+                rtc_mismatches.append("delta_action=True")
+            if inst._state_bins != 512:
+                rtc_mismatches.append("state_bins=512")
+            if inst._action_horizon != 20:
+                rtc_mismatches.append("action_horizon=20")
+            if inst._num_steps != 6:
+                rtc_mismatches.append("num_steps=6")
+            if inst._action_hz != 32.0:
+                rtc_mismatches.append("action_hz=32")
+            if inst._max_seq_len < 672:
+                rtc_mismatches.append("max_seq_len>=672")
+            if tuple(inst._camera_names) != _RTC_CAMERA_NAMES:
+                rtc_mismatches.append(
+                    f"camera_names={list(_RTC_CAMERA_NAMES)!r}")
+            if (
+                active_slot_list is not None
+                and set(active_slot_list) != set(_RTC_ACTIVE_SLOTS)
+            ):
+                rtc_mismatches.append("active_slots=range(20)")
+            if any(mode != "w8a16" for mode in selected):
+                rtc_mismatches.append("FP16 or overflow-safe hybrid W8A16 precision")
+            if rtc_mismatches:
+                raise ValueError(
+                    "WallOssPolicy rtc=True selects the wrc_sf_v728 contract; "
+                    "required " + ", ".join(rtc_mismatches))
         inst._w8a16 = w8a16
         inst._w4a16 = w4a16
         inst._nvfp4a16 = nvfp4a16
+        inst._rtc = rtc
+        inst._rtc_max_delay = 10 if rtc else 0
         inst._precision = (
-            "w8a16" if w8a16 else (
+            "w8a16-hybrid" if rtc and w8a16 else (
+                "w8a16" if w8a16 else (
                     "w4a16" if w4a16 else (
                         "nvfp4a16" if nvfp4a16 else "fp16"
                     )
                 )
+            )
         )
         inst._fp16_ckpt_dir = os.fspath(fp16_ckpt_dir) if fp16_ckpt_dir is not None else inst._ckpt_dir
         inst._active_slots = (
-            active_slot_list
+            list(_RTC_ACTIVE_SLOTS) if rtc else active_slot_list
         )
         inst._runtime_env = _runtime_environment(runtime_env)
         inst._rpu_execution = execution_config
+        inst._graph_runtime_policy = graph_runtime_policy
+        if rtc:
+            # v728 uses the standard automatic residual ring and keeps its
+            # checked mixed-precision boundaries.
+            # W8 leaves the Vision selector caller-configurable; the builder
+            # supplies exact MIMC only when no explicit value was given.
+            inst._runtime_env.update({
+                "RPU_WALL_OSS_ACTION_FP32_TAIL": "0",
+                "RPU_WALL_OSS_FUSED_DENOISE": "1",
+                "RPU_WALL_OSS_DENOISE_UNROLL": "1",
+                "RPU_WALL_OSS_ATTN_TP8": "1",
+                "RPU_WALL_OSS_VISION_FUSED_MERGER": "1",
+                "RPU_WALL_OSS_VISION_LAYER_GROUP": "0",
+                "RPU_WALL_OSS_VISION_MIXED_PRECISION": "1",
+                "RPU_WALL_OSS_PREFILL_MIXED_PRECISION": "1",
+            })
+            if not w8a16:
+                inst._runtime_env["RPU_WALL_OSS_VISION_WEIGHT_OUTER"] = "0"
         inst._rpu_ready = False
         inst._rpu_build_started = False
         inst._rpu_build_lock = threading.Lock()
@@ -477,10 +550,26 @@ class WallOssPolicy:
             if self._rpu_build_started:
                 raise RPUBackendError(
                     "WallOssPolicy.to('rpu') previously failed after claiming "
-                    "the process-wide RPU slot. Delete this policy, run "
+                    "the process-wide device slot. Delete this policy, run "
                     "gc.collect(), and construct a fresh instance; retrying may "
                     "reuse partially initialized or swizzled state."
                 )
+
+            if self._rtc:
+                rtc_opt_in = self._runtime_env.get(
+                    _RTC_NUMERIC_BLOCKED_ENV,
+                    os.environ.get(_RTC_NUMERIC_BLOCKED_ENV),
+                )
+                if rtc_opt_in != "1":
+                    raise NotImplementedError(
+                        "Wall-OSS wrc_sf_v728 RTC is fail-closed by default. "
+                        "Blocking CI grants controlled temporary support only "
+                        "to exact FP16 P640/C320 staged0 and W8A16 P640/C320 "
+                        "staged0+A16-stretch; W4 and other profiles remain "
+                        "evaluation-only. Set exactly "
+                        f"{_RTC_NUMERIC_BLOCKED_ENV}=1 to enter a controlled "
+                        "path; none is formally or robot certified."
+                    )
 
 
             from rpu_backend.api.causal_lm import _claim_live_instance
@@ -507,6 +596,9 @@ class WallOssPolicy:
                     nvfp4_wint4_scope=self._nvfp4a16,
                     fp16_ckpt_dir=self._fp16_ckpt_dir,
                     rpu_execution=self._rpu_execution,
+                    rtc=self._rtc,
+                    **({"graph_runtime_policy": self._graph_runtime_policy}
+                       if getattr(self, "_graph_runtime_policy", None) is not None else {}),
                 )
                 pending_vla._live_owner = self
                 self._rpu_execution = pending_vla._rpu_execution
@@ -569,6 +661,31 @@ class WallOssPolicy:
             raise ValueError(f"{name} shape {tuple(t.shape)} != expected {expected}")
         return t.contiguous()
 
+    @staticmethod
+    def _as_rtc_prefix(value, *, delay: int, horizon: int,
+                       action_dim: int) -> torch.Tensor | None:
+        if delay == 0:
+            if value is not None:
+                raise ValueError(
+                    "rtc_prefix_actions requires inference_delay > 0")
+            return None
+        if value is None:
+            raise ValueError(
+                "rtc_prefix_actions is required when inference_delay > 0")
+        t = _cpu_finite_tensor(value, name="rtc_prefix_actions")
+        if t.ndim == 2:
+            t = t.unsqueeze(0)
+        if t.ndim != 3 or t.shape[0] != 1 or t.shape[2] != action_dim:
+            raise ValueError(
+                "rtc_prefix_actions must be [L, action_dim] or "
+                f"[1, L, action_dim] with action_dim={action_dim}, got "
+                f"{tuple(t.shape)}")
+        length = int(t.shape[1])
+        if not delay <= length <= horizon:
+            raise ValueError(
+                "rtc_prefix_actions length must satisfy "
+                f"inference_delay <= L <= {horizon}, got delay={delay}, L={length}")
+        return t.contiguous()
 
     def _observation_inputs(
         self,
@@ -592,7 +709,14 @@ class WallOssPolicy:
         prop = _cpu_finite_tensor(
             proprioception, name="proprioception"
         ).reshape(1, 1, -1)
+        if self._rtc and prop.numel() != _RTC_STATE_DIM:
+            raise ValueError(
+                f"WallOssPolicy rtc=True requires {_RTC_STATE_DIM} proprioception "
+                f"entries, got {prop.numel()}"
+            )
         default_mask = torch.ones_like(prop)
+        if self._rtc:
+            default_mask[..., len(_RTC_ACTIVE_SLOTS):] = 0
         mask = (
             default_mask
             if state_mask is None
@@ -602,6 +726,11 @@ class WallOssPolicy:
             raise ValueError(
                 f"WallOssPolicy state_mask has {mask.numel()} entries but "
                 f"proprioception has {prop.numel()}"
+            )
+        if self._rtc and not torch.equal(mask, default_mask):
+            raise ValueError(
+                "WallOssPolicy rtc=True requires state_mask=[1]*20+[0]*6 "
+                "for the trained desktop agent_pos_mask"
             )
         return image_list, instruction, prop, mask
 
@@ -631,6 +760,14 @@ class WallOssPolicy:
                 binary=True,
             )
         )
+        if self._rtc and not torch.equal(
+            mask,
+            self._default_dof_mask(horizon=horizon, action_dim=action_dim),
+        ):
+            raise ValueError(
+                "WallOssPolicy rtc=True requires dof_mask=[1]*20+[0]*6 "
+                "on every action row"
+            )
         return mask
 
     @property
@@ -712,6 +849,11 @@ class WallOssPolicy:
             if num_steps is None
             else _integer_at_least("num_steps", num_steps, 1)
         )
+        if self._rtc and steps != self._num_steps:
+            raise ValueError(
+                f"WallOssPolicy rtc=True requires num_steps={self._num_steps}, "
+                f"got {steps}"
+            )
         prefix_range = _prefix_range(prefix_length_range)
 
         t0 = time.perf_counter()
@@ -742,6 +884,9 @@ class WallOssPolicy:
         dof_mask=None,
         num_steps: int | None = None,
         noise_seed: int = 0,
+        rtc_prefix_actions=None,
+        inference_delay: int = 0,
+        use_rtc: bool = False,
     ) -> WallOssActionOutput:
         """Run one Wall-OSS action-chunk inference and return CPU physical actions.
 
@@ -749,7 +894,9 @@ class WallOssPolicy:
         raw robot state ``[D]`` (normalized to the FLOW state string internally).
         ``state_mask``: active proprioception dims (default all active). ``noise`` /
         ``dof_mask``: ``[1, H, action_dim]`` (defaults: seeded Gaussian / active-slot
-        mask). Returns de-normalized actions with shape ``[H, action_dim]``.
+        mask). For an RTC policy, ``use_rtc=True, inference_delay=0`` selects
+        the independent D0 graph; a positive delay also selects RTC for backward
+        compatibility. Returns de-normalized actions with shape ``[H, action_dim]``.
         """
 
         if not _wall_oss_policy_runtime_complete(self):
@@ -769,6 +916,21 @@ class WallOssPolicy:
         action_dim = self.action_dim
         horizon = self._action_horizon
         seed = _integer_value("noise_seed", noise_seed)
+        delay = _integer_at_least(
+            "inference_delay", inference_delay, 0)
+        use_rtc = _strict_bool("use_rtc", use_rtc)
+        rtc_request = bool(use_rtc or delay)
+        if rtc_request:
+            if not self._rtc:
+                raise ValueError("RTC inference requires WallOssPolicy rtc=True")
+        if delay:
+            if delay > min(horizon, self._rtc_max_delay):
+                raise ValueError(
+                    f"inference_delay must be <= {min(horizon, self._rtc_max_delay)}, "
+                    f"got {delay}")
+        rtc_prefix_t = self._as_rtc_prefix(
+            rtc_prefix_actions, delay=delay, horizon=horizon,
+            action_dim=action_dim)
 
         noise_t = (
             self._make_default_noise(
@@ -787,6 +949,11 @@ class WallOssPolicy:
             if num_steps is None
             else _integer_at_least("num_steps", num_steps, 1)
         )
+        if self._rtc and steps != self._num_steps:
+            raise ValueError(
+                f"WallOssPolicy rtc=True requires num_steps={self._num_steps}, "
+                f"got {steps}"
+            )
         if self._graph_profile is not None:
             prepared_steps = int(self._graph_profile["num_steps"])
             if steps != prepared_steps:
@@ -799,9 +966,22 @@ class WallOssPolicy:
                 raise RuntimeError(
                     "dof_mask execution mode differs from the prepared graph; "
                     "online graph BUILD is disabled")
+            if rtc_request and not bool(
+                self._graph_profile.get("rtc_enabled", False)
+            ):
+                raise RuntimeError(
+                    "RTC was not included in the prepared graph profile; "
+                    "online graph BUILD is disabled")
 
         t0 = time.perf_counter()
         predict_kwargs = {"num_steps": steps}
+        if rtc_request:
+            predict_kwargs["use_rtc"] = True
+        if delay:
+            predict_kwargs.update(
+                rtc_prefix_actions=rtc_prefix_t,
+                inference_delay=delay,
+            )
         out = self._vla.predict(
             image_list, instruction, prop, state_mask_t, noise_t, dof_t,
             **predict_kwargs)
@@ -848,8 +1028,8 @@ class WallOssPolicy:
                 "action_chunk_size_resolved": (
                     (int(horizon) + 15) // 16
                 ) * 16,
-
-
+                "use_rtc": rtc_request,
+                "inference_delay": delay,
                 "noise_seed": seed,
                 "prepare_ms": dict(self._prepare_ms),
                 "graphs_ready": self.graphs_ready,

@@ -35,10 +35,9 @@ from rpu_backend.runtime.chunk_envelope import ChunkEnvelope, make_lookup
 # ── MR-A: certified chunk envelope — TEMPLATE ──
 # Every CausalDecoderModel handle must declare one before its first prefill, or
 # the C++ planner refuses (deny-by-default; an over-picked chunk busts SPM and
-# WEDGES the board). Replace the row below with YOUR geometry and YOUR measured
-# numbers, and add the matching row to docs/roadmap/chunk_certified_envelope.md.
-# chunk=0 means "auto is certified up to max_kv_len" — only claim a length you
-# have actually run.
+# fails device allocation). Replace the row below with the supported geometry
+# and chunk bound; document its runtime profile in docs/runtime_config.md.
+# chunk=0 selects automatic planning up to the configured max_kv_len.
 _CHUNK_ENVELOPE = {
     ("llama", 2, 128): ChunkEnvelope(128),
 }
@@ -220,7 +219,7 @@ class MinimalCausalLMAdapter:
             ):
                 raise RPUBackendError(
                     f"model.to({target!r}) rejected: weights have been swizzled "
-                    "for RPU and cannot be moved back safely. Reload the model "
+                    "for device and cannot be moved back safely. Reload the model "
                     "if you need a CPU copy."
                 )
 

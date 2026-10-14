@@ -8,7 +8,7 @@ timm / cv2 / xformers (MemEffAttention falls back to standard attention when xfo
 
 The DINOv2 source (`dinov2.py` + `dinov2_layers/`, pure torch, bundled by InternNav) must be
 importable — pass its parent dir via `dinov2_src` (added to sys.path). Weights load from the
-extracted `navdp_head.safetensors` under `rgbd_encoder.*`. This is the on-board CPU path; the RPU
+extracted `navdp_head.safetensors` under `rgbd_encoder.*`. This is the on-board CPU path; the device
 port (dinov3 reuse + fp16 hybrid) is a separate, deferred effort.
 """
 from __future__ import annotations
@@ -152,7 +152,7 @@ def build_rgbd_encoder(safetensors_path: str | Path, dinov2_src: str,
                        device: str = "cpu") -> RGBDEncoder:
     """Strictly load ``rgbd_encoder.*`` onto the board CPU in fp32."""
     if device != "cpu":
-        raise ValueError("use build_rgbd_encoder_rpu for the controlled RPU path")
+        raise ValueError("use build_rgbd_encoder_rpu for the controlled device path")
     from safetensors.torch import load_file
     sd = load_file(str(safetensors_path))
     enc = RGBDEncoder(dinov2_src, input_dtype=torch.float32).eval()

@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_host_only_import_is_silent() -> None:
+def test_host_only_import_reports_missing_native_backend() -> None:
     site_packages = [path for path in sys.path if "site-packages" in path]
     script = (
         "import sys; "
@@ -35,11 +35,11 @@ def test_host_only_import_is_silent() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout == ""
-    assert result.stderr == ""
+    assert "[RhinoForge]" in result.stdout
+    assert "native backend not loaded" in result.stdout
 
 
-def test_nofile_preflight_is_silent_and_best_effort(monkeypatch, capsys) -> None:
+def test_nofile_preflight_reports_best_effort_changes(monkeypatch, capsys) -> None:
     from rpu_backend import _bootstrap_env
 
     calls = []
@@ -58,7 +58,8 @@ def test_nofile_preflight_is_silent_and_best_effort(monkeypatch, capsys) -> None
         (_bootstrap_env.resource.RLIMIT_NOFILE, (4096, 4096))
     ]
     captured = capsys.readouterr()
-    assert captured.out == captured.err == ""
+    assert captured.out == ""
+    assert "RLIMIT_NOFILE soft raised 1024 -> 4096" in captured.err
 
     def deny_limit_change(*_args):
         raise OSError("denied")
@@ -68,7 +69,8 @@ def test_nofile_preflight_is_silent_and_best_effort(monkeypatch, capsys) -> None
         "setrlimit",
         deny_limit_change,
     )
-    _bootstrap_env.ensure_nofile_limit()
+    with pytest.warns(UserWarning, match="could not raise RLIMIT_NOFILE"):
+        _bootstrap_env.ensure_nofile_limit()
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
 
@@ -97,7 +99,7 @@ def test_public_api_and_host_graph_lifecycle() -> None:
         cache.freeze()
 
 
-def test_pi05_remap_cache_detects_source_replacement_with_older_mtime(
+def test_pi05_remap_cache_tracks_source_modification_time(
     monkeypatch, tmp_path,
 ) -> None:
     from rpu_backend.adapters.pi05 import loader
@@ -123,6 +125,8 @@ def test_pi05_remap_cache_detects_source_replacement_with_older_mtime(
     source.write_bytes(b"pour")
     stats[source] = SimpleNamespace(st_mtime_ns=9, st_ctime_ns=30)
     assert source.read_bytes() == b"pour"
+    assert not loader._cache_is_stale([source], cache)
+    stats[source] = SimpleNamespace(st_mtime_ns=21, st_ctime_ns=30)
     assert loader._cache_is_stale([source], cache)
 
 
@@ -207,14 +211,11 @@ def test_registry_keeps_public_example_paths_local() -> None:
         "qwen3-0.6b-instruct",
         "qwen3-4b-instruct",
     }
-    excluded = {
-        "dinov3-vit-s",
-        "dinov3-vit-l",
-        "gemma2",
-        "paligemma2",
-        "paligemma2-3b-pt-224",
-        "paligemma2-3b-mix-224",
-    }
+    # Asset lookup also serves diagnostic/source-only profiles. Admission
+    # remains the loader's responsibility.
+    required.update({"dinov3-vit-s", "dinov3-vit-l", "paligemma2-3b-pt-224",
+                     "paligemma2-3b-mix-224", "qwen3_5-2b-w4-mlp-w8-attn-gdn-g32"})
+    excluded = {"gemma2", "paligemma2"}
     assert required <= model_registry.MODELS.keys()
     assert excluded.isdisjoint(model_registry.MODELS)
     for relative in model_registry.MODELS.values():
@@ -247,22 +248,62 @@ def test_shutdown_invalidates_registered_graphs_before_allocator_teardown() -> N
     )
 
 
-def test_native_loader_only_selects_packaged_extension(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_native_loader_explicit_path_precedes_installed_extension(tmp_path: Path) -> None:
     from rpu_backend._native_loader import find_shared_object
 
     package_dir = tmp_path / "python" / "rpu_backend"
     package_dir.mkdir(parents=True)
-    external = tmp_path / "build" / "rpu_backend.so"
+    external = tmp_path / "custom" / "rpu_backend.so"
     external.parent.mkdir()
     external.write_bytes(b"external")
-    monkeypatch.setenv("RPU_BACKEND_SO", str(external))
-
-    assert find_shared_object(package_dir=str(package_dir)) is None
     packaged = package_dir / "rpu_backend.so"
     packaged.write_bytes(b"packaged")
-    assert find_shared_object(package_dir=str(package_dir)) == str(packaged)
+    assert find_shared_object(package_dir=str(package_dir), environ={}) == str(packaged)
+    assert find_shared_object(package_dir=str(package_dir),
+                              environ={"RPU_BACKEND_SO": str(external)}) == str(external)
+    with pytest.raises(FileNotFoundError, match="RPU_BACKEND_SO"):
+        find_shared_object(package_dir=str(package_dir),
+                           environ={"RPU_BACKEND_SO": str(tmp_path / "missing.so")})
+
+
+def test_native_loader_source_build_scope_and_priority(tmp_path: Path) -> None:
+    from rpu_backend._native_loader import find_shared_object
+
+    package_dir = tmp_path / "python" / "rpu_backend"
+    package_dir.mkdir(parents=True)
+    standard = tmp_path / "build" / "nested" / "rpu_backend.so"
+    current = tmp_path / "build_current" / "nested" / "rpu_backend.so"
+    unrelated = tmp_path / "build_other" / "rpu_backend.so"
+    for path in (standard, current, unrelated):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"extension")
+    kwargs = dict(package_dir=str(package_dir), executable="/envs/current/bin/python", environ={})
+    assert find_shared_object(**kwargs) == str(current)
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='rhinoforge'\n")
+    assert find_shared_object(**kwargs) == str(current)
+    current.unlink()
+    assert find_shared_object(**kwargs) == str(standard)
+    standard.unlink()
+    assert find_shared_object(**kwargs) is None
+
+
+def test_graph_structured_diagnostics_delegate_without_backend_requirement():
+    from types import SimpleNamespace
+    from rpu_backend.graph import Graph
+
+    graph = Graph.__new__(Graph)
+    graph._impl = None
+    assert graph.debug_nodes() == []
+    assert graph.debug_segments() == []
+    assert graph.debug_segments_jsonl() == ""
+    nodes = [{"kind": "kernel", "node_id": 0}]
+    segments = [{"segment_id": 0}]
+    graph._impl = SimpleNamespace(debug_nodes=lambda: nodes,
+                                 debug_segments=lambda: segments,
+                                 debug_segments_jsonl=lambda: '{"segment_id":0}\n')
+    assert graph.debug_nodes() == nodes
+    assert graph.debug_segments() == segments
+    assert graph.debug_segments_jsonl() == '{"segment_id":0}\n'
 
 
 @pytest.mark.parametrize(

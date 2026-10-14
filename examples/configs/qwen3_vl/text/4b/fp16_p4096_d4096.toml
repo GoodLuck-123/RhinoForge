@@ -1,5 +1,4 @@
-# Public configuration; provide your own checkpoint and input assets.
-
+# Requested fixed-length input; this file is not new hardware certification.
 [example]
 profile_id = "qwen3-vl-4b.fp16.text"
 registry_alias = "qwen3-vl-4b"

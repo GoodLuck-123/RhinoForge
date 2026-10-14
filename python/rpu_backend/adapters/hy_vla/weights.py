@@ -1,4 +1,4 @@
-"""Hy-Embodied-0.5-VLA 权重装载：safetensors → swizzled FP16 RPU 张量。
+"""Hy-Embodied-0.5-VLA 权重装载：safetensors → swizzled FP16 device 张量。
 
 checkpoint 源张量逐个读取和释放；三个子系统的权重必须在任何 forward
 之前全部就位，避免后续安装扰动已构建的 Graph。
@@ -16,8 +16,14 @@ import torch
 import torch.nn.functional as F
 from safetensors import safe_open
 
+from rpu_backend.adapters.hy_vla.resident_o import pack_expert_o_w8_layers
+from rpu_backend.adapters.hy_vla.nvfp4 import (
+    HyVlaExpertNvfp4Metadata, pack_expert_gateup_nvfp4_installed,
+    quantize_expert_nvfp4_cpu,
+)
 from rpu_backend.quant._common import quantize_linear_per_channel
 from rpu_backend.quant.int4_pgrp_pack import pack_int4_per_channel_as_pgrp
+from rpu_backend.quant.hyvla_nvfp4_resident_scales import pack_hyvla_nvfp4_resident_scales
 from rpu_backend.runtime.weights import (tp_col_swizzle_mc_weight,
                                          tp_row_swizzle_mc_weight,
                                          transform_linear_weight)
@@ -50,7 +56,7 @@ class HyVlaConfig:
     vit_layers: int = 27
     vit_heads: int = 16
     vit_hidden: int = 1152
-    vit_head_dim: int = 72            # → padded 80（RPU 要求 16 对齐）
+    vit_head_dim: int = 72            # → padded 80（device 要求 16 对齐）
     vit_inter: int = 4304             # → padded 4352（8 核 × 128 对齐）
     vit_seq: int = 196                # 14×14 patch
     num_cameras: int = 3              # 固定工作负载；ViT packed 路径的 KV cache 按它定长
@@ -93,7 +99,7 @@ class HyVlaConfig:
 
     @property
     def kv_heads_rpu(self) -> int:
-        """RPU 使用的物理 KV head 数。
+        """device 使用的物理 KV head 数。
 
         RPU_HY_VLA_ATTN_TP8 将每个逻辑 KV head 复制到两个物理槽，使 attention
         使用 8 核。核 c 的 q head 为 2c、2c+1，对应逻辑 KV head floor(c/2)；
@@ -223,7 +229,7 @@ def _expected_materialized_keys(
 
 
 def _validate_checkpoint_keys(keys, cfg: HyVlaConfig) -> tuple[str, ...]:
-    """Reject a different checkpoint inventory before the first RPU upload."""
+    """Reject a different checkpoint inventory before the first device upload."""
     actual = tuple(keys)
     expected = _expected_checkpoint_keys(cfg)
     actual_set = set(actual)
@@ -267,7 +273,7 @@ def _validate_checkpoint_schema(handle, cfg: HyVlaConfig) -> tuple[str, ...]:
 def preflight_hy_vla_checkpoint(
         ckpt_path: "str | Path",
         cfg: HyVlaConfig = HyVlaConfig()) -> None:
-    """Pure-host exact-profile validation with no tensor or RPU materialization."""
+    """Pure-host exact-profile validation with no tensor or device materialization."""
     with safe_open(Path(ckpt_path), framework="pt", device="cpu") as handle:
         _validate_checkpoint_schema(handle, cfg)
 
@@ -431,6 +437,11 @@ class _HyVlaWeightColdPlan:
     vlm_text_bits: int
     vlm_vision_bits: int
     expert_bits: int
+    gateup_resident: bool = False
+    gateup_resident_layers: int = 6
+    o_resident_layers: int = 0
+    expert_nvfp4: bool = False
+    resident_fp8_scale_layers: int = 0
 
     @classmethod
     def from_environment(
@@ -441,6 +452,56 @@ class _HyVlaWeightColdPlan:
         w4_tokens = _quant_tokens("RPU_HY_VLA_W4A16", source)
         w8_tokens = _quant_tokens("RPU_HY_VLA_W8A16", source)
         vit_bits = _qbits_from_tokens("vit", "", w4_tokens, w8_tokens)
+        key = "RPU_HY_VLA_EXPERT_GATEUP_RESIDENT"
+        resident_value = _environment_value(source, key).lower()
+        if resident_value not in ("", "0", "off", "false", "1", "on", "true"):
+            raise ValueError(f"{key} requires a strict boolean, got {resident_value!r}")
+        gateup_resident = resident_value in ("1", "on", "true")
+        expert_bits = _qbits_from_tokens("expert", "", w4_tokens, w8_tokens)
+        nv_key = "RPU_HY_VLA_EXPERT_NVFP4"
+        nv_value = _environment_value(source, nv_key).lower()
+        if nv_value not in ("", "0", "off", "false", "1", "on", "true"):
+            raise ValueError(f"{nv_key} requires a strict boolean, got {nv_value!r}")
+        expert_nvfp4 = nv_value in ("1", "on", "true")
+        vlm_text_bits = _qbits_from_tokens("vlm", "text", w4_tokens, w8_tokens)
+        vlm_vision_bits = _qbits_from_tokens("vlm", "vision", w4_tokens, w8_tokens)
+        if expert_nvfp4 and ("expert" in w4_tokens or "expert" in w8_tokens):
+            raise ValueError(f"{nv_key} conflicts with W4A16/W8A16 expert selection; use W8A16=vit,vlm")
+        if expert_nvfp4 and (vit_bits, vlm_text_bits, vlm_vision_bits) != (8, 8, 8):
+            raise ValueError(f"{nv_key} requires W8A16 Vision and both VLM branches")
+        layers_key = "RPU_HY_VLA_EXPERT_GATEUP_RESIDENT_LAYERS"
+        layers_value = _environment_value(source, layers_key) or "6"
+        if layers_value not in ("6", "12", "24"):
+            raise ValueError(f"{layers_key} requires 6, 12 or 24, got {layers_value!r}")
+        resident_layers = int(layers_value)
+        if expert_nvfp4 and gateup_resident and resident_layers not in (12, 24):
+            raise ValueError(f"{nv_key} residency requires explicit {layers_key}=12 or 24")
+        if resident_layers == 24 and (not gateup_resident or not expert_nvfp4):
+            raise ValueError(f"{layers_key}=24 requires enabled NVFP4 expert residency")
+        if resident_layers == 12 and (not gateup_resident or not (expert_bits == 8 or expert_nvfp4)):
+            raise ValueError(f"{layers_key}=12 requires enabled W8A16/NVFP4 expert residency")
+        o_key = "RPU_HY_VLA_EXPERT_O_RESIDENT_LAYERS"
+        o_value = _environment_value(source, o_key) or "0"
+        if o_value not in ("0", "12"):
+            raise ValueError(f"{o_key} requires 0 or 12, got {o_value!r}")
+        o_layers = int(o_value)
+        if o_layers and (not gateup_resident or expert_bits != 8 or resident_layers != 6):
+            raise ValueError(f"{o_key}=12 requires enabled W8A16 expert and exactly six resident GateUp layers")
+        attn_tp8 = _environment_value(source, "RPU_HY_VLA_ATTN_TP8").lower() in (
+            "1", "true", "on")
+        action_mlp_cores = 1 if _environment_value(
+            source, "RPU_HY_VLA_ACTION_MLP_MC").lower() in ("0", "off", "false") else 8
+        if expert_nvfp4 and (not attn_tp8 or action_mlp_cores != 8 or o_layers):
+            raise ValueError(f"{nv_key} requires attention TP8, action MLP TP8 and no W8 O residency")
+        scale_key = "RPU_HY_VLA_EXPERT_RESIDENT_FP8_SCALE_LAYERS"
+        scale_value = _environment_value(source, scale_key) or "0"
+        if scale_value not in ("0", "4", "8"):
+            raise ValueError(f"{scale_key} requires 0, 4 or 8, got {scale_value!r}")
+        scale_layers = int(scale_value)
+        if scale_layers and (not expert_nvfp4 or not gateup_resident or resident_layers != 24 or o_layers):
+            raise ValueError(f"{scale_key}={scale_layers} requires NVFP4 expert, enabled GU24 residency and no O residency")
+        if gateup_resident and (expert_bits not in (8, 16) or not attn_tp8 or action_mlp_cores != 8):
+            raise ValueError(f"{key} requires FP16/W8A16 expert, attention TP8 and action MLP TP8")
         if vit_bits == 4:
             raise ValueError(
                 "RPU_HY_VLA_W4A16 cannot select vit: the certified ViT "
@@ -453,30 +514,22 @@ class _HyVlaWeightColdPlan:
                     source, "RPU_HY_VLA_PATCH_EMBED_MC"
                 ).lower() in ("0", "false") else 8
             ),
-            action_mlp_cores=(
-                1 if _environment_value(
-                    source, "RPU_HY_VLA_ACTION_MLP_MC"
-                ).lower() in ("0", "off", "false") else 8
-            ),
-            attn_tp8=(
-                _environment_value(source, "RPU_HY_VLA_ATTN_TP8").lower()
-                in ("1", "true", "on")
-            ),
+            action_mlp_cores=action_mlp_cores,
+            attn_tp8=attn_tp8,
             vit_bits=vit_bits,
-            vlm_text_bits=_qbits_from_tokens(
-                "vlm", "text", w4_tokens, w8_tokens
-            ),
-            vlm_vision_bits=_qbits_from_tokens(
-                "vlm", "vision", w4_tokens, w8_tokens
-            ),
-            expert_bits=_qbits_from_tokens(
-                "expert", "", w4_tokens, w8_tokens
-            ),
+            vlm_text_bits=vlm_text_bits,
+            vlm_vision_bits=vlm_vision_bits,
+            expert_bits=expert_bits,
+            gateup_resident=gateup_resident,
+            gateup_resident_layers=resident_layers,
+            o_resident_layers=o_layers,
+            expert_nvfp4=expert_nvfp4,
+            resident_fp8_scale_layers=scale_layers,
         )
 
 
 def _q8(w: torch.Tensor, partition: int, nc: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """fp16 `[N,K]` → (int8 已 swizzle 的 RPU 权重, fp16 `[N]` RPU scale)。
+    """fp16 `[N,K]` → (int8 已 swizzle 的 device 权重, fp16 `[N]` device scale)。
 
     per-output-channel 对称 int8（`quant/_common.py`），kernel 侧由
     `rpu_linear.cpp` 按 `weight.scalar_type()==at::kChar` 自动派发到 generated
@@ -518,7 +571,7 @@ def _q4(w: torch.Tensor, partition: int, nc: int) -> Tuple[torch.Tensor, torch.T
 
 
 def _quant(w: torch.Tensor, partition: int, nc: int, bits: int):
-    """按位宽派发。返回 (RPU 权重, RPU scale)；bits==16 时 scale 为 None。"""
+    """按位宽派发。返回 (device 权重, device scale)；bits==16 时 scale 为 None。"""
     if bits == 4:
         return _q4(w, partition, nc)
     if bits == 8:
@@ -526,11 +579,18 @@ def _quant(w: torch.Tensor, partition: int, nc: int, bits: int):
     return (_col if partition else _row)(w, nc), None
 
 
+def _rpu_nvfp4(tensor: torch.Tensor) -> torch.Tensor:
+    """Upload FP4/FP8 bytes or FP32 tables without a Half conversion."""
+    if tensor.dtype not in (torch.uint8, torch.float32):
+        raise ValueError("HyVLA NVFP4 upload requires uint8 codes or FP32 tables")
+    return tensor.to("rpu").contiguous()
+
+
 @dataclasses.dataclass
 class HyVlaWeights:
-    """三座子系统的 RPU 权重 + 留在 host 的 boundary 权重。
+    """三座子系统的 device 权重 + 留在 host 的 boundary 权重。
 
-    所有 RPU 张量在本对象构造完毕时就已全部驻留 DDR —— 见模块 docstring 的顺序约束。
+    所有 device 张量在本对象构造完毕时就已全部驻留 DDR —— 见模块 docstring 的顺序约束。
     """
     cfg: HyVlaConfig
     patch_embed_cores: int                    # cold physical layout authority
@@ -542,7 +602,7 @@ class HyVlaWeights:
     vit_proj1_b: torch.Tensor
     vit_patch_gemm_w: torch.Tensor              # patch_embed 折成 im2col GEMM
     vit_pos_fused: torch.Tensor                 # pos_embed + conv.bias 预融合
-    merger_rest: Dict[str, torch.Tensor]        # DwPooler→GELU→proj2（P1b，全 RPU）
+    merger_rest: Dict[str, torch.Tensor]        # DwPooler→GELU→proj2（P1b，全 device）
     vlm_text: Dict[str, List[torch.Tensor]]     # VLM text 塔
     vlm_vision: Dict[str, List[torch.Tensor]]   # VLM `_v` 塔
     vlm_final_norm: torch.Tensor
@@ -550,6 +610,8 @@ class HyVlaWeights:
     expert_final_norm: torch.Tensor
     tok_emb: torch.Tensor                       # host fp32：tied embed_tokens
     host: Dict[str, torch.Tensor]               # host fp32：boundary 投影
+    expert_o_resident_layers: int = 0            # cold physical resident bundle authority
+    expert_nvfp4: HyVlaExpertNvfp4Metadata | None = None
 
 
 def _build_vit(
@@ -579,7 +641,7 @@ def _build_vit(
     bits = cold.vit_bits
     for li in range(cfg.vit_layers):
         b = f"blocks.{li}."
-        # Keep the existing RPU upload order (q/k/v/o/fc1/fc2, then biases and
+        # Keep the existing device upload order (q/k/v/o/fc1/fc2, then biases and
         # norms), while retaining at most the current source tensor.  qkv is a
         # single checkpoint tensor, so share that one materialization across
         # its three projections.
@@ -681,6 +743,29 @@ def _build_mot_branch(
     return d
 
 
+_GATEUP_WEIGHT_ELEMENTS = 256 * 1024
+
+
+def _pack_expert_gateup_weight(weight: torch.Tensor) -> torch.Tensor:
+    """Raw CPU weight -> core-major FP16 16x16 tiles for the SPM payload."""
+    if weight.device.type != "cpu" or tuple(weight.shape) != (2048, 1024):
+        raise ValueError("HyVLA resident Gate/Up requires raw CPU [2048,1024] weights")
+    if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError("HyVLA resident Gate/Up requires floating-point source weights")
+    # Match _col's half-before-swizzle rounding, but place the controller/core
+    # dimension first. SPM has no DDR controller interleave between 512B tiles.
+    return (weight.half().contiguous().reshape(8, 16, 16, 64, 16)
+            .permute(0, 1, 3, 2, 4).contiguous().reshape(8, _GATEUP_WEIGHT_ELEMENTS))
+
+
+def _pack_expert_gateup_w8_installed(weight: torch.Tensor) -> torch.Tensor:
+    """Installed INT8 DDR layout -> core-major 16x32 tiles, without requantizing."""
+    if weight.dtype != torch.int8 or tuple(weight.shape) != (2048, 1024):
+        raise ValueError("HyVLA resident W8 requires installed INT8 [2048,1024]")
+    return (weight.cpu().contiguous().reshape(16, 32, 8, 512)
+            .permute(2, 0, 1, 3).contiguous().reshape(8, _GATEUP_WEIGHT_ELEMENTS))
+
+
 def _build_expert(
     e: Mapping[str, torch.Tensor],
     v: Mapping[str, torch.Tensor],
@@ -697,6 +782,30 @@ def _build_expert(
                          "q_ws k_ws v_ws o_ws gate_ws up_ws down_ws").split()}
     tp, mc = (8 if cold.attn_tp8 else min(8, cfg.num_kv_heads)), 8
     bits = cold.expert_bits
+    nvfp4 = cold.expert_nvfp4
+    scale_layers = cold.resident_fp8_scale_layers
+    if type(scale_layers) is not int or scale_layers not in (0, 4, 8) or (scale_layers and (
+            not nvfp4 or not cold.gateup_resident or cold.gateup_resident_layers != 24 or cold.o_resident_layers)):
+        raise ValueError("HyVLA resident FP8 scales require zero, four or eight layers with NVFP4 GU24 and O0")
+    if nvfp4 and (cfg.layers, cfg.expert_hidden, cfg.expert_inter, cfg.suffix_len,
+            cfg.num_q_heads, cfg.num_kv_heads, cfg.head_dim, cfg.num_steps) != (
+            32, 1024, 2048, 51, 16, 4, 128, 10):
+        raise ValueError("HyVLA NVFP4 requires the exact L32/H1024/I2048/S51/ten-step model")
+    tensor_scales = {key: [] for key in ("q", "k", "v", "o", "gate", "up", "down")} if nvfp4 else {}
+    resident_scales = {key: [] for key in ("gate_w", "up_w")} if scale_layers else None
+    resident = None
+    d["gateup_resident"] = []
+    if cold.gateup_resident:
+        allowed_layers = (12, 24) if nvfp4 else (6, 12) if bits == 8 else (6,)
+        if cold.gateup_resident_layers not in allowed_layers:
+            raise ValueError("HyVLA Gate/Up residency supports FP16 six, W8 six/twelve, or NVFP4 twelve/twenty-four layers")
+        if (cfg.layers, cfg.expert_hidden, cfg.expert_inter, cfg.suffix_len,
+                cfg.num_q_heads, cfg.num_kv_heads, cfg.head_dim, cfg.num_steps) != (
+                32, 1024, 2048, 51, 16, 4, 128, 10):
+            raise ValueError("HyVLA Gate/Up residency requires the exact L32/H1024/I2048/S51/ten-step model")
+        resident = torch.empty(
+            (8, cold.gateup_resident_layers, 2, _GATEUP_WEIGHT_ELEMENTS // 2 if nvfp4 else _GATEUP_WEIGHT_ELEMENTS),
+            dtype=torch.uint8 if nvfp4 else torch.int8 if bits == 8 else torch.float16)
     for li in range(cfg.layers):
         b, sa = f"layers.{li}.", f"layers.{li}.self_attn."
         for key, source, p, nc, dup_kv in (
@@ -708,9 +817,27 @@ def _build_expert(
                 ("up_w",   f"{b}mlp_v.up_proj.weight",   1, mc, False),
                 ("down_w", f"{b}mlp_v.down_proj.weight", 0, mc, False)):
             raw = e[source]
+            if bits == 16 and not nvfp4 and resident is not None and li < cold.gateup_resident_layers and key in ("gate_w", "up_w"):
+                resident[:, li, 0 if key == "gate_w" else 1].copy_(
+                    _pack_expert_gateup_weight(raw))
             if dup_kv:
                 raw = _dup_kv(raw, cfg.head_dim, attn_tp8=cold.attn_tp8)
-            q, sc = _quant(raw, p, nc, bits)
+            if nvfp4:
+                packed, block_scale, tensor_scale = quantize_expert_nvfp4_cpu(raw, p, nc)
+                if resident is not None and li < cold.gateup_resident_layers and key in ("gate_w", "up_w"):
+                    resident[:, li, 0 if key == "gate_w" else 1].copy_(
+                        pack_expert_gateup_nvfp4_installed(packed))
+                if resident_scales is not None and li < scale_layers and key in resident_scales:
+                    # Reuse the exact installed bytes; never requantize scales.
+                    resident_scales[key].append(block_scale)
+                q, sc = _rpu_nvfp4(packed), _rpu_nvfp4(block_scale)
+                tensor_scales[key[:-2]].append(tensor_scale)
+                del packed, block_scale, tensor_scale
+            else:
+                q, sc = _quant(raw, p, nc, bits)
+            if bits == 8 and resident is not None and li < cold.gateup_resident_layers and key in ("gate_w", "up_w"):
+                resident[:, li, 0 if key == "gate_w" else 1].copy_(
+                    _pack_expert_gateup_w8_installed(q))
             d[key].append(q)
             if sc is not None:
                 d[key[:-1] + "ws"].append(sc)
@@ -719,6 +846,23 @@ def _build_expert(
         d["k_norm"].append(_rpu16(v[f"{sa}key_layernorm.weight"]))     # ← VLM 的
         d["input_norm"].append(_rpu16(e[f"{b}input_layernorm_v.weight"]))
         d["post_norm"].append(_rpu16(e[f"{b}post_attention_layernorm_v.weight"]))
+    if resident is not None:
+        # Opaque 16-bit DMA carrier: bitcast INT8 pairs, never float conversion.
+        carrier = resident.reshape(8, -1).view(torch.float16)
+        if resident_scales is not None:
+            scale_carrier = pack_hyvla_nvfp4_resident_scales(
+                resident_scales["gate_w"], resident_scales["up_w"])
+            carrier = torch.cat((carrier, scale_carrier), dim=1)
+        if cold.o_resident_layers:
+            if bits != 8 or cold.gateup_resident_layers != 6 or cold.o_resident_layers != 12:
+                raise ValueError("HyVLA mixed residency requires six W8 GateUp and twelve O layers")
+            carrier = torch.cat((carrier, pack_expert_o_w8_layers(d["o_w"][:12])), dim=1)
+        d["gateup_resident"] = [_rpu16(carrier)]
+    for key, scales in tensor_scales.items():
+        table = torch.stack(scales).float().contiguous()
+        if tuple(table.shape) != (32,) or not torch.isfinite(table).all() or not (table > 0).all():
+            raise ValueError(f"HyVLA NVFP4 {key} tensor scales require positive finite FP32 [32]")
+        d[key + "_ts"] = [_rpu_nvfp4(table)]
     return d
 
 
@@ -763,7 +907,7 @@ def load_hy_vla_weights(
     *,
     _cold_plan: _HyVlaWeightColdPlan | None = None,
 ) -> HyVlaWeights:
-    """在首次 forward 前装载全部 RPU 权重（见模块 docstring 的顺序约束）。
+    """在首次 forward 前装载全部 device 权重（见模块 docstring 的顺序约束）。
 
     checkpoint 名称先完整校验，随后源张量按需逐个转成 fp32、变换并释放；不会把
     checkpoint 的全部 fp32 副本同时留在 host。
@@ -818,7 +962,7 @@ def load_hy_vla_weights(
         pos_fused = _rpu16(pos_embedding
                            + vit_w["patch_embed.proj.bias"].view(1, 1, -1))
 
-        # RPU aten::linear 上的 merger 余部要求 col-swizzled 权重。
+        # device aten::linear 上的 merger 余部要求 col-swizzled 权重。
         merger_rest = {}
         for key in merger_w:
             if key.startswith("proj1"):
@@ -851,7 +995,7 @@ def load_hy_vla_weights(
         expert_final_norm = _rpu16(expert_w["norm.weight"])
 
         # These are the only persistent CPU fp32 weights.  Materialize them
-        # after all RPU uploads so they do not inflate the upload peak.
+        # after all device uploads so they do not inflate the upload peak.
         tok_emb = root_w[_LM_HEAD]
         host = {name: host_w[name] for name in _HOST_TENSORS}
         _validate_materialized_keys(
@@ -875,6 +1019,10 @@ def load_hy_vla_weights(
             vlm_vision=vlm_vision,
             vlm_final_norm=vlm_final_norm,
             expert=expert,
+            expert_o_resident_layers=cold.o_resident_layers,
+            expert_nvfp4=(HyVlaExpertNvfp4Metadata(
+                resident_layers=cold.gateup_resident_layers if cold.gateup_resident else 0)
+                if cold.expert_nvfp4 else None),
             expert_final_norm=expert_final_norm,
             tok_emb=tok_emb,
             host=host,
@@ -883,7 +1031,7 @@ def load_hy_vla_weights(
 
 def build_rope_tables(positions: torch.Tensor, cfg: HyVlaConfig,
                       vendor_bf16: bool = True):
-    """构造 [rows, head_dim/2] FP16 RPU RoPE 表。
+    """构造 [rows, head_dim/2] FP16 device RoPE 表。
 
     第 i 行对应 positions[i]，不是行号 i。suffix 的 position 从 prefix
     有效长度起算，与 KV 中从 S 开始的绝对下标不同。
@@ -921,7 +1069,7 @@ def _time_bias_list(cfg: HyVlaConfig, host: Dict[str, torch.Tensor]) -> List[tor
 
 def build_unroll_weights(cfg: HyVlaConfig, host: Dict[str, torch.Tensor],
                          action_mlp_cores: int):
-    """图内 10 步 unroll 需要的 6 个 RPU 张量。
+    """图内 10 步 unroll 需要的 6 个 device 张量。
 
     ⚠️ swizzle 不是统一的：`mo` 默认 **8 核 row 切分**（见 frozen cold plan），
     其余 5 个仍是单核 col-swizzle。

@@ -1,27 +1,15 @@
-"""Config-driven action de-normalization for LingBot-VLA-V2 on the RPU.
+# Adapted from LingBot-VLA-V2 commit 951475ae1b1d87553e7dc47c97b53a3d695c0d13
+# under Apache-2.0; see LICENSE and THIRD_PARTY_NOTICES.md.
+# RhinoForge adds explicit action-group metadata and checkpoint-stat validation.
+"""Config-driven action de-normalization for LingBot-VLA-V2.
 
-WHY THIS EXISTS
-    The LingBot-VLA-V2 model emits actions in a *normalized* space. The official
-    server (`lingbot_vla_v2_policy.py::select_action` / `_infer_batch`) ALWAYS maps
-    them back to physical units via `FeatureTransform.unapply()` before handing them
-    to the robot. The RPU delivery historically skipped this step and returned the
-    normalized grid verbatim -- so a robot fed `.actions` directly moved to the wrong
-    joint angles (worst observed: 1.84 rad ~= 106 deg on a shoulder joint).
+Map normalized actions to physical units using the configured statistics,
+joint ordering, dimensions and normalization type. The transform follows
+Normalizer.unnormalize and FeatureTransform.unapply: reverse padding and
+concatenation, unnormalize each feature, then add state for delta actions.
 
-    This module restores the missing step. It is a faithful, standalone re-implementation
-    of the operative parts of `lingbotvla.data.vla_data.transform.Normalizer.unnormalize`
-    and `FeatureTransform.unapply` (the `reverse_pad_and_concat` split + `unnormalize`
-    + optional delta `action += state`).
-
-NON-NEGOTIABLES (per the P0 brief)
-    * NOTHING about a specific robot's stats is hardcoded. The norm JSON path, the joint
-      order/dims and each joint's norm_type are all supplied by config.
-    * Numerically bit-identical to the official `unnormalize` (verified against the
-      shipped reference action, see tests).
-
-The stat formulas below are copied verbatim (same +1e-6 epsilons, same clamp bounds)
-from `transform.py::Normalizer.{normalize,unnormalize}` so results compose with the
-GPU/official pipeline.
+Formulas preserve the vendor epsilon and clamp bounds. Robot-specific statistics
+come from the supplied normalization JSON.
 """
 from __future__ import annotations
 

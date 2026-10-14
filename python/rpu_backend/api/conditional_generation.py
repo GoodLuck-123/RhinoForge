@@ -3,10 +3,11 @@
 R-Phase 4. Mirrors `RPUModelForCausalLM.from_pretrained` (api/causal_lm.py)
 but routes to multimodal HF classes via `AutoModelForImageTextToText`. Shares
 the same single-handle gate (`_LIVE_REF` in causal_lm.py) so a CausalLM and a
-ConditionalGeneration model cannot be live on RPU simultaneously.
+ConditionalGeneration model cannot be live on device simultaneously.
 
-Supported: `Qwen3VLForConditionalGeneration` and
-`Qwen3_5ForConditionalGeneration`, routed through their registered adapters.
+Supported: `Qwen3VLForConditionalGeneration`, `Qwen3_5ForConditionalGeneration`,
+and exact `Qwen3_5MoeForConditionalGeneration` 35B-A3B TP8 profiles
+(mixed-E4M3, routed RTN G128, or official GPTQ G128).
 """
 from __future__ import annotations
 
@@ -42,7 +43,8 @@ class RPUModelForConditionalGeneration:
       - Like `RPUModelForCausalLM`, this is NOT a subclass of any HF class.
       - `from_pretrained(..., device='rpu')` is the one-step shortcut (D-01).
       - Video inputs have a controlled implementation path but are outside the
-        certified Qwen3-VL 8B envelope. Batch > 1 and 30B-A3B MoE are rejected.
+        certified Qwen3-VL 8B envelope. Batch > 1 is rejected. The only MoE
+        admission is the exact Qwen3.5-35B-A3B TP8 checkpoint profiles.
     """
 
     _RESERVED_HF_KWARGS = frozenset({
@@ -94,7 +96,7 @@ class RPUModelForConditionalGeneration:
             )
         if dtype is not torch.float16:
             raise RPUUnsupportedDtypeError(
-                f"RPU kernels require torch.float16, got {dtype}. "
+                f"device kernels require torch.float16, got {dtype}. "
                 "Load the CPU reference separately for fp32 comparison."
             )
 
@@ -111,8 +113,6 @@ class RPUModelForConditionalGeneration:
             entry_point="RPUModelForConditionalGeneration.from_pretrained",
         )
 
-        if hf_kwargs.get("trust_remote_code", False) is not False:
-            raise ValueError("RhinoForge requires trust_remote_code=False")
         _CONFIG_KWARGS = {
             "cache_dir", "revision", "subfolder", "local_files_only",
             "trust_remote_code", "token", "force_download", "proxies",

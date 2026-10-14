@@ -278,7 +278,7 @@ public:
         TORCH_CHECK(num_layers() > 0,
                     "QwenPI05Model::forward called before set_weights");
         TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1,
-                    "QwenPI05Model::forward: hidden_states must be on RPU device");
+                    "QwenPI05Model::forward: hidden_states must be on device");
         TORCH_CHECK(hidden_states.is_contiguous(),
                     "QwenPI05Model::forward: hidden_states must be contiguous "
                     "(downstream kernels use raw data_ptr())");
@@ -295,7 +295,7 @@ public:
                     hidden_size(), "], got dim=", (cond.defined() ? cond.dim() : -1),
                     " size=", (cond.defined() ? cond.size(0) : -1));
         TORCH_CHECK(cond.device().type() == at::kPrivateUse1,
-                    "QwenPI05Model::forward: cond must be on RPU device");
+                    "QwenPI05Model::forward: cond must be on device");
         TORCH_CHECK(cond.scalar_type() == at::kHalf,
                     "QwenPI05Model::forward: cond must be fp16");
         TORCH_CHECK(cond.is_contiguous(),
@@ -307,7 +307,7 @@ public:
                     "QwenPI05Model::forward: cos/sin must be defined");
         TORCH_CHECK(cos.device().type() == at::kPrivateUse1 &&
                     sin.device().type() == at::kPrivateUse1,
-                    "QwenPI05Model::forward: cos/sin must be on RPU device");
+                    "QwenPI05Model::forward: cos/sin must be on device");
         TORCH_CHECK(cos.scalar_type() == at::kHalf &&
                     sin.scalar_type() == at::kHalf,
                     "QwenPI05Model::forward: cos/sin must be fp16");
@@ -1274,7 +1274,7 @@ private:
 
     // Per-forward tensor refs (kept alive for graph execution/replay via
     // class-member assignment; run_all_layers is synchronous so refcount
-    // covers the full dispatch window). `cond_src_base_` is the live RPU
+    // covers the full dispatch window). `cond_src_base_` is the live device
     // dev addr of cond_ref_'s data_ptr — feeds the mutable-DMA cond scatter
     // so REPLAY end() picks up the per-forward base from this storage.
     at::Tensor cond_ref_;

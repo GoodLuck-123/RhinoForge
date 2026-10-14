@@ -12,6 +12,8 @@ import sys
 
 OFFICIAL_SOURCE_SHA = "a3edf0c1addf4bf849192642bff3ad15559db3f4"
 OFFICIAL_CHECKPOINT_SHA256 = "93be25953542bf59e1b036bcb3be6c161b9a20dc070aaceae768ddb1c6d2b145"
+V3_SOURCE_SHA = "e60650377dca38a78bcd4a2e2d58f9e6a631a275"
+V3_CHECKPOINT_SHA256 = "2303f9e44cc5847a9990a617cf56c30dfb0ca05f38b6f08b152bf95e67e2f70f"
 
 
 def _reject_unsafe_diagnostics():
@@ -27,7 +29,10 @@ def _reject_unsafe_diagnostics():
         raise ValueError("official RhinoVLA forbids diagnostic prefix visibility truncation")
 
 
-def _validate_official_assets(model_root, checkpoint):
+def _validate_official_assets(
+    model_root, checkpoint, *, source_sha=OFFICIAL_SOURCE_SHA,
+    checkpoint_sha256=OFFICIAL_CHECKPOINT_SHA256,
+):
     revision = subprocess.check_output(
         ["git", "-C", str(model_root), "rev-parse", "HEAD"], text=True,
     ).strip()
@@ -35,16 +40,16 @@ def _validate_official_assets(model_root, checkpoint):
         ["git", "--no-optional-locks", "-C", str(model_root), "status", "--porcelain", "--untracked-files=all"],
         text=True,
     ).strip()
-    if revision != OFFICIAL_SOURCE_SHA or dirty:
+    if revision != source_sha or dirty:
         raise ValueError("RhinoVLA official factory requires the clean reviewed source revision")
     with checkpoint.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if digest != OFFICIAL_CHECKPOINT_SHA256:
+    if digest != checkpoint_sha256:
         raise ValueError("RhinoVLA official factory checkpoint SHA-256 mismatch")
 
 
 def _load_official_model(model_root, checkpoint):
-    """Strict CPU FP32 source model; this function never imports native RPU."""
+    """Strict CPU FP32 source model; this function never imports the native backend."""
     import torch
     from omegaconf import OmegaConf
 
@@ -64,7 +69,8 @@ def _load_official_model(model_root, checkpoint):
         cfg = OmegaConf.load(model_root / "configs/training/demo_full_finetune.yaml")
         cfg.framework.qwenvl.base_vlm = str(model_root / "rhinovla/assets/qwen3_vl_processor")
         cfg.framework.qwenvl.attn_implementation = "sdpa"
-        cfg.framework.action_expert.training_time_rtc.max_delay = 0
+        if "training_time_rtc" in cfg.framework.action_expert:
+            cfg.framework.action_expert.training_time_rtc.max_delay = 0
         model = framework.build_framework(cfg).float().eval().requires_grad_(False)
         state = torch.load(checkpoint, map_location="cpu", mmap=True, weights_only=True)
         remapped, stats = trainer.TrainerUtils._adapt_checkpoint_state_dict(model.state_dict(), state)
@@ -120,6 +126,19 @@ def official_runtime_factory(config, *, rpu_execution=None):
     trust_model_code=True. Input preprocessing remains the official processor's
     responsibility. RTC is not accepted; no second executor/config parser exists.
     """
+    return _runtime_factory(config, rpu_execution=rpu_execution)
+
+
+def v3_runtime_factory(config, *, rpu_execution=None):
+    """Load the pinned v3 96D, horizon-30, depth-18 non-RTC profile.
+
+    Use the v3 checkpoint remapping, descending flow and prefix RoPE continuation;
+    training-only OAT/LoRA tensors are ignored. Configuration and prepared CPU
+    inputs follow ``official_runtime_factory``. The v1 asset contract is separate."""
+    return _runtime_factory(config, rpu_execution=rpu_execution, v3=True)
+
+
+def _runtime_factory(config, *, rpu_execution=None, v3=False):
     if not isinstance(config, Mapping):
         raise TypeError("RhinoVLA official factory config must be a mapping")
     allowed = {"model_root", "checkpoint", "qin", "steps", "trust_model_code",
@@ -158,7 +177,13 @@ def official_runtime_factory(config, *, rpu_execution=None):
         raise ValueError("RhinoVLA official qin requires batch=1 and nonempty input_ids")
     if qin["attention_mask"].shape != ids.shape:
         raise ValueError("RhinoVLA input_ids/attention_mask shapes disagree")
-    _validate_official_assets(root, checkpoint)
+    if v3:
+        _validate_official_assets(
+            root, checkpoint, source_sha=V3_SOURCE_SHA,
+            checkpoint_sha256=V3_CHECKPOINT_SHA256,
+        )
+    else:
+        _validate_official_assets(root, checkpoint)
     model_config = json.loads((root / "rhinovla/assets/qwen3_vl_processor/config.json").read_text())
     _validate_qin_profile(qin, model_config)
     model = _load_official_model(root, checkpoint)
@@ -181,4 +206,4 @@ def official_runtime_factory(config, *, rpu_execution=None):
     )
 
 
-__all__ = ["official_runtime_factory"]
+__all__ = ["official_runtime_factory", "v3_runtime_factory"]

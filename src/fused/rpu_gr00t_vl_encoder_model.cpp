@@ -1,4 +1,4 @@
-// rpu_gr00t_vl_encoder_model.cpp — GR00T-N1.7 "全程 RPU" Component A
+// rpu_gr00t_vl_encoder_model.cpp — GR00T-N1.7 "全程 device" Component A
 //                                   (v3 FusedModelBase subsystem)
 //
 // Fuses the host-fp32 `vlln + vl_self_attention` glue (runtime.py::_vl_embeds) on-device:
@@ -33,7 +33,9 @@
 #include <c10/util/Half.h>
 #include <c10/util/ScopeExit.h>
 #include <cstdint>
+#include <cstdlib>
 #include <cmath>
+#include <string>
 #include <vector>
 #include <algorithm>
 #include <tuple>
@@ -46,7 +48,7 @@ using namespace ::rhino_lkn;
 
 // W8A16 per-projection scale validation. Same four checks as the already-strong
 // sites (rpu_siglip_model.cpp:227, rpu_pi05_denoise_step_model.cpp:68): list
-// length, int8 weight dtype, 1D contiguous fp16 RPU scale, and
+// length, int8 weight dtype, 1D contiguous fp16 device scale, and
 // scale.numel() == output channels. Checking only the list length is not enough —
 // a wrong-length or wrong-dtype scale reaches the generated W8A16 family as garbage
 // per-channel multipliers, i.e. a silent numeric corruption rather than a crash.
@@ -75,7 +77,7 @@ static void check_gr00t_vl_w8a16_scale_list(int64_t n_layers,
                         && s.device().type() == at::kPrivateUse1
                         && s.is_contiguous(),
                         ctx, ": ", name, "_scale[", i,
-                        "] must be 1D contiguous fp16 RPU tensor");
+                        "] must be 1D contiguous fp16 device tensor");
             TORCH_CHECK(s.numel() == w.size(0),
                         ctx, ": ", name, "_scale[", i, "].numel()=", s.numel(),
                         " != output dim=", w.size(0));
@@ -90,6 +92,13 @@ static void check_gr00t_vl_w8a16_scale_list(int64_t n_layers,
 namespace v3 {
 
 namespace {
+
+bool gr00t_vl_kv_spm_only_opt_in() {
+    const char* value = std::getenv("RPU_GR00T_VL_KV_SPM_ONLY");
+    if (value == nullptr || *value == '\0' || std::string(value) == "0") return false;
+    TORCH_CHECK(std::string(value) == "1", "RPU_GR00T_VL_KV_SPM_ONLY must be 0 or 1");
+    return true;
+}
 
 // Stable descriptor identities. GR00T_VL_ENCODER_FIXED_KERNEL_BASIS: the
 // remaining launches are the model's fixed LayerNorm/GELU/residual math,
@@ -109,9 +118,10 @@ constexpr int64_t GR00T_VL_FF_ALL_REDUCE_SITE = 4133575514160129194LL;
 
 constexpr uint32_t GR00T_VL_KV_CAPABILITIES =
     KV_INSERT_CAP_V2 | KV_INSERT_CAP_V16;
-// Raw attention reads the just-produced SPM K/V, while this route remains a
-// durable DDR mirror for the fallback and downstream cache ABI.
+// Raw attention reads the just-produced SPM K/V. Keep the public DDR mirror
+// unless the cold, exact ordinary-encoder opt-in explicitly omits its writes.
 constexpr int64_t GR00T_VL_KV_FLAG_DDR_MIRROR = 1;
+constexpr int64_t GR00T_VL_KV_FLAG_RAW_SPM_ONLY = 2;
 constexpr int64_t GR00T_VL_ATTN_CAPABILITY_FALLBACK_DDR_REQUIRED = 1LL << 0;
 
 }  // namespace
@@ -134,7 +144,8 @@ public:
         at::Tensor to_q_ws, to_k_ws, to_v_ws, to_out_ws, ff0_ws, ff2_ws;
     };
 
-    Gr00tVlEncoderModel() = default;
+    Gr00tVlEncoderModel()
+        : kv_spm_only_opt_in_(gr00t_vl_kv_spm_only_opt_in()) {}
 
     void set_weights(
         at::TensorList norm1_w_list, at::TensorList norm1_b_list,
@@ -169,7 +180,7 @@ public:
                             && l[i].device().type() == at::kPrivateUse1
                             && l[i].is_contiguous(),
                             "gr00t_vl_encoder_set_weights: ", n, "[", i,
-                            "] must be ", rank, "D contiguous RPU tensor");
+                            "] must be ", rank, "D contiguous device tensor");
             }
         };
         check_list(norm1_w_list, "norm1_w", 1); check_list(norm1_b_list, "norm1_b", 1);
@@ -183,7 +194,7 @@ public:
         auto check_vec = [&](const at::Tensor& t, const char* n) {
             TORCH_CHECK(t.defined() && t.dim() == 1 && t.size(0) == hidden_size
                         && t.device().type() == at::kPrivateUse1 && t.is_contiguous(),
-                        "gr00t_vl_encoder_set_weights: ", n, " must be 1-D [hidden] contiguous RPU tensor");
+                        "gr00t_vl_encoder_set_weights: ", n, " must be 1-D [hidden] contiguous device tensor");
         };
         check_vec(vlln_w, "vlln_w"); check_vec(vlln_b, "vlln_b"); check_vec(inv_w_rms, "inv_w_rms");
 
@@ -238,7 +249,7 @@ public:
                     "gr00t_vl_encoder_forward: Z2 lease is active; use the Z2 forward op");
         TORCH_CHECK(raw.defined() && raw.dim() == 3 && raw.size(-1) == hidden_size()
                     && raw.device().type() == at::kPrivateUse1 && raw.is_contiguous(),
-                    "gr00t_vl_encoder_forward: raw must be [B,S,hidden] contiguous RPU tensor");
+                    "gr00t_vl_encoder_forward: raw must be [B,S,hidden] contiguous device tensor");
 
         // MR-C / T20 — this comment used to read "Force single chunk", which
         // set_chunk_size_override(0) does NOT do: 0 means AUTO, i.e. let the
@@ -276,6 +287,12 @@ public:
                     "gr00t_vl_encoder Z2: seq_len must be positive");
         TORCH_CHECK(!z2_bound_,
                     "gr00t_vl_encoder Z2: cannot prepare while a lease is active");
+        // Preparation asks for declarations before z2_prepared_seq_len_ is
+        // published. Keep its original disjoint scratch even on failure.
+        const bool was_preparing = z2_layout_preparing_;
+        z2_layout_preparing_ = true;
+        auto restore_preparing = c10::make_scope_exit(
+            [&] { z2_layout_preparing_ = was_preparing; });
         LayoutContext layout;
         layout.chunk_size = seq_len;
         layout.max_kv_seq_len = seq_len;
@@ -382,7 +399,7 @@ public:
                         raw.scalar_type() == at::kHalf &&
                         raw.device().type() == at::kPrivateUse1 &&
                         raw.is_contiguous(),
-                    "gr00t_vl_encoder_forward_z2: raw must match prepared [1,S,H] fp16 RPU layout");
+                    "gr00t_vl_encoder_forward_z2: raw must match prepared [1,S,H] fp16 device layout");
         set_chunk_size_override(0);
         (void)run_all_layers(
             raw, k_caches, v_caches, /*mask=*/std::nullopt,
@@ -512,7 +529,8 @@ protected:
         manifest.routes.push_back({
             GR00T_VL_KV_INSERT_SITE, FmbRouteFamily::KV_INSERT,
             static_cast<int64_t>(kv_plan.route()),
-            GR00T_VL_KV_FLAG_DDR_MIRROR,
+            raw_spm && kv_spm_only_profile(plan, layout, position)
+                ? GR00T_VL_KV_FLAG_RAW_SPM_ONLY : GR00T_VL_KV_FLAG_DDR_MIRROR,
             {kv_arguments.begin(), kv_arguments.end()}, invocation});
         manifest.routes.push_back({
             raw_spm ? GR00T_VL_RAW_SPM_ATTENTION_SITE
@@ -595,7 +613,7 @@ protected:
         }
         const ChunkInfo& chunk = plan.compute.chunks.front();
         const int64_t seq = chunk.len;
-        if (seq <= 0 || seq > 256 || chunk.offset != 0 ||
+        if (seq <= 0 || chunk.offset != 0 ||
             chunk.kv_seq_len != seq ||
             plan.input.chunks.front().offset != 0 ||
             plan.input.chunks.front().len != seq ||
@@ -611,6 +629,56 @@ protected:
             sdpa_by_mha_spm_is_valid(
                 /*batch=*/1, seq, seq, num_q_heads(), num_kv_heads(),
                 head_dim(), NUM_CORES, /*MASK_NONE=*/0);
+    }
+
+    bool kv_spm_only_profile(
+        const FmbThreeStageChunkPlan& plan,
+        const LayoutContext& layout, int64_t position) const {
+        return kv_spm_only_opt_in_ && attn_tp() == NUM_CORES &&
+            plan.compute.chunks.size() == 1 &&
+            subclass_spm_kv_by_mha_eligible(plan, layout, position);
+    }
+
+    AttentionExecutionPolicy attention_policy_for_chunk(int64_t invocation) {
+        if (!ctx().has_complete_physical_manifest()) return ctx().attention_policy;
+        int64_t selected_site = 0;
+        for (const auto& route : ctx().physical_manifest().routes) {
+            if (route.family != FmbRouteFamily::ATTENTION ||
+                route.invocation != invocation ||
+                (route.site_id != GR00T_VL_RAW_SPM_ATTENTION_SITE &&
+                 route.site_id != GR00T_VL_ATTENTION_SITE)) continue;
+            TORCH_CHECK(selected_site == 0, "GR00T VL ambiguous attention route");
+            selected_site = route.site_id;
+        }
+        TORCH_CHECK(selected_site != 0, "GR00T VL missing attention route");
+        const auto expected = selected_site == GR00T_VL_RAW_SPM_ATTENTION_SITE
+            ? AttentionExecutionPolicy::SPM_KV_BY_MHA
+            : AttentionExecutionPolicy::DDR_KV;
+        TORCH_CHECK(ctx().physical_attention_policy_for_site(selected_site, invocation) == expected,
+                    "GR00T VL attention site/selector drift");
+        return expected;
+    }
+
+    int64_t kv_insert_flags(
+        const ChunkInfo& chunk, AttentionExecutionPolicy attention_policy) {
+        if (!ctx().has_complete_physical_manifest() ||
+            attention_policy != AttentionExecutionPolicy::SPM_KV_BY_MHA ||
+            chunk.len != ctx().seq_len) return GR00T_VL_KV_FLAG_DDR_MIRROR;
+        LayoutContext layout;
+        layout.attention_policy = attention_policy;
+        layout.batch_size = ctx().batch_size;
+        layout.is_causal = ctx().is_causal;
+        layout.use_attn_mask = ctx().attention_mask.has_value();
+        return kv_spm_only_profile(ctx().stage_plan, layout, ctx().position)
+            ? GR00T_VL_KV_FLAG_RAW_SPM_ONLY : GR00T_VL_KV_FLAG_DDR_MIRROR;
+    }
+
+    int64_t subclass_layout_hash() const override {
+        // Keep the default identity unchanged; opt-in descriptors cannot be
+        // reused by a handle that still promises the public DDR mirrors.
+        return kv_spm_only_opt_in_
+            ? detail::layout_mix(GR00T_VL_KV_INSERT_SITE, GR00T_VL_KV_FLAG_RAW_SPM_ONLY)
+            : 0;
     }
 
     std::vector<BufferDecl> declare_buffers(const LayoutContext& ctx) override {
@@ -651,6 +719,22 @@ protected:
             {"sdpa_tmp",    tmp,    0, 0, StorageClass::Temp, 0, nullptr, ALL},
             {"ff_mid",      mlp,    0, 0, StorageClass::Temp, 0, nullptr, ALL},
         };
+
+        // Norm output is dead after Q/K/V and after FF0. The two oproj
+        // writes occur later, after SDPA and FF2 respectively, and each ring
+        // consumes oproj before the next norm writes. Reuse their equal-size
+        // slot only for the ordinary long-prefix layout; all three ring
+        // operands and every attention operand remain mutually disjoint.
+        if (cs > 256 && !z2_layout_preparing_ && !z2_bound_ &&
+            z2_prepared_seq_len_ == 0 && ctx.batch_size == 1 &&
+            !ctx.is_causal && !ctx.use_attn_mask && num_layers() == 4 &&
+            h == 2048 && FF == 8192 && nq == 32 && num_kv_heads() == 32 &&
+            hd == 64 && attn_tp() == NUM_CORES) {
+            for (auto& decl : v) {
+                if (std::string(decl.name) == "oproj")
+                    decl.alias_of = "norm_hidden";
+            }
+        }
 
         // ---- global Persistent: vlln gamma/beta + inv_w_rms (broadcast [hidden]) ----
         auto bcast_const = [&](const char* name, at::Tensor Gr00tVlEncoderModel::* field) {
@@ -767,6 +851,9 @@ protected:
             seq_len, nq * hd, h, 1, NUM_CORES, layer_addr(layer_idx, 0, "v_bias"), lw.to_v_ws);
 
         // ---- KV-insert@0 + bidirectional SDPA (MASK_NONE, scale 1/√64) ----
+        // Resolve the consumed ATTENTION site, not the union layout policy,
+        // before any KV writer can touch the caller-provided DDR caches.
+        const auto attention_policy = attention_policy_for_chunk(chunk.idx);
         auto& k_cache = (*ctx().k_caches)[layer_idx];
         auto& v_cache = (*ctx().v_caches)[layer_idx];
         const auto& kv_route = ctx().find_physical_route(
@@ -779,20 +866,26 @@ protected:
                         kv_plan.logical_rows() == seq_len &&
                         kv_plan.physical_rows() == seq_len,
                     "GR00T VL KV descriptor geometry drift");
+        const int64_t kv_flags = kv_insert_flags(chunk, attention_policy);
         ctx().consume_physical_route(
             FmbRouteFamily::KV_INSERT, GR00T_VL_KV_INSERT_SITE,
             static_cast<int64_t>(kv_plan.route()),
-            GR00T_VL_KV_FLAG_DDR_MIRROR,
+            kv_flags,
             kv_route.arguments, chunk.idx);
-        rpu_launch_insert_kvcache_spm_unified_with_plan(
-            k_cache, v_cache,
-            addr_offset("k").value, addr_offset("v").value,
-            nq, hd, NUM_CORES,
-            /*k_cache_batch_offset_elems=*/0,
-            /*v_cache_batch_offset_elems=*/0,
-            /*spm_rows=*/0, kv_plan);
+        if (kv_flags == GR00T_VL_KV_FLAG_DDR_MIRROR) {
+            rpu_launch_insert_kvcache_spm_unified_with_plan(
+                k_cache, v_cache,
+                addr_offset("k").value, addr_offset("v").value,
+                nq, hd, NUM_CORES,
+                /*k_cache_batch_offset_elems=*/0,
+                /*v_cache_batch_offset_elems=*/0,
+                /*spm_rows=*/0, kv_plan);
+        }
+        // The mirror writers only read SPM. Omitting them preserves all K/V
+        // bytes, including the existing 82-to-96 allocation tail; do not add
+        // padding, memset, or a different V-transpose/SDPA sequence here.
         const double attn_scale = 1.0 / std::sqrt(static_cast<double>(hd));
-        if (ctx().attention_policy ==
+        if (attention_policy ==
             AttentionExecutionPolicy::SPM_KV_BY_MHA) {
             ctx().consume_physical_route(
                 FmbRouteFamily::ATTENTION,
@@ -906,6 +999,10 @@ private:
         if (layer_weights_.empty()) return {};
         std::vector<int64_t> identity{1};
         append_kvinsert_cost_scalar_identity(identity, eps_);
+        if (kv_spm_only_opt_in_) {
+            identity.push_back(GR00T_VL_KV_INSERT_SITE);
+            identity.push_back(GR00T_VL_KV_FLAG_RAW_SPM_ONLY);
+        }
         identity.push_back(static_cast<int64_t>(layer_weights_.size()));
         for (const auto& weights : layer_weights_) {
             for (const auto* tensor : {
@@ -925,11 +1022,13 @@ private:
         return identity;
     }
 
+    const bool kv_spm_only_opt_in_;
     std::vector<LayerWeights> layer_weights_;
     at::Tensor vlln_w_, vlln_b_, inv_w_rms_;
     double eps_ = 1e-5;
     SdpaKernelType sdpa_kernel_ = SdpaKernelType::FLASH_ATTN_SPM;
     bool z2_bound_ = false;
+    bool z2_layout_preparing_ = false;
     int64_t z2_prepared_seq_len_ = 0;
     uint32_t z2_port_addr_ = 0;
     uint64_t z2_epoch_ = 0;
@@ -1150,4 +1249,9 @@ void rpu_gr00t_vl_encoder_forward_z2(
     Gr00tVlEncoderRegistry::get(handle, "rpu_gr00t_vl_encoder_z2")->forward_z2(
         raw, k_caches, v_caches,
         static_cast<uint64_t>(epoch), static_cast<uint64_t>(plan_hash));
+}
+
+void rpu_gr00t_vl_encoder_prepare_persistent_spm(int64_t handle, int64_t execution_len) {
+    Gr00tVlEncoderRegistry::get(handle, "rpu_gr00t_vl_encoder_prepare_persistent_spm")
+        ->prepare_persistent_spm(execution_len, 0, false);
 }

@@ -63,7 +63,7 @@ inline int exact_lookup(const PLEntry* table, std::size_t count,
   return pl_key(e.M, e.n, e.k) == wanted ? e.tile : 0;
 }
 
-// EXACT_TILE_TABLE (285 entries), generated from the shared public operator table.
+// EXACT_TILE_TABLE (295 entries), generated from the shared public operator table.
 static constexpr PLEntry PL_EXACT_W8A16[] = {
     {1,32,2048,48}, {1,32,4096,112}, {1,64,2048,32}, {1,64,2560,32}, {1,64,3584,32}, {1,128,1024,32},
     {1,128,2048,32}, {1,128,2304,48}, {1,128,2560,48}, {1,128,4096,32}, {1,128,5120,32}, {1,256,1024,32},
@@ -102,9 +102,12 @@ static constexpr PLEntry PL_EXACT_W8A16[] = {
     {288,512,4096,112}, {288,544,1152,64}, {288,576,4608,128}, {288,640,5120,112}, {288,1024,128,96}, {288,1024,256,96},
     {288,1024,512,96}, {288,1152,192,80}, {288,1152,576,64}, {288,1280,192,96}, {288,1280,448,112}, {288,1536,4096,112},
     {288,2048,512,112}, {288,2048,640,80}, {288,4096,512,128}, {288,4096,576,96}, {288,5120,2176,112},
+    {336,128,2048,64}, {336,256,2048,96}, {336,1376,2048,96}, {336,2048,256,96}, {336,2048,1376,80},
     {512,128,1024,64},
     {512,128,4096,64}, {512,256,1024,96}, {512,512,4096,112}, {512,1024,256,128}, {512,1536,4096,128}, {512,4096,512,128},
     {512,5120,2176,48},
+    {576,160,1280,96}, {576,448,1280,96}, {576,1280,160,112}, {576,1280,448,96},
+    {640,1376,2048,112},
     {720,128,1024,80}, {720,128,1536,128}, {720,144,1152,48}, {720,144,1536,80}, {720,160,1280,80},
     {720,384,1024,80}, {720,432,1152,64}, {720,432,1280,80}, {720,480,1280,80}, {720,512,1024,80}, {720,544,1152,64},
     {720,1024,128,80}, {720,1024,512,80}, {720,1152,192,80}, {720,1152,576,80}, {720,1280,192,80}, {720,1280,448,80},
@@ -116,7 +119,7 @@ static constexpr PLEntry PL_EXACT_W8A16[] = {
     {1152,480,1280,80}, {1152,512,1024,80}, {1152,544,1152,80}, {1152,1024,128,80}, {1152,1024,512,80}, {1152,1152,192,80},
     {1152,1152,576,80}, {1152,1280,192,80}, {1152,1280,448,80},
 };
-static_assert(table_size(PL_EXACT_W8A16) == 285, "EXACT_TILE_TABLE count drifted");
+static_assert(table_size(PL_EXACT_W8A16) == 295, "EXACT_TILE_TABLE count drifted");
 
 // EXACT_TILE_TABLE_W16 (285 entries).
 static constexpr PLEntry PL_EXACT_W16[] = {
@@ -730,6 +733,15 @@ inline std::string autotile_kernel_name_int4_acc32(int m_tile, int n_tile) {
          "n" + std::to_string(n_tile) + "k128";
 }
 
+inline std::string autotile_kernel_name_uint4(int m_tile, int n_tile) {
+  return "parallel_linear_w4a16_pgrp_m" + std::to_string(m_tile) +
+         "n" + std::to_string(n_tile) + "k128";
+}
+inline std::string autotile_kernel_name_uint4_acc32(int m_tile, int n_tile) {
+  return "parallel_linear_w4a16_pgrp_acc32_m" + std::to_string(m_tile) +
+         "n" + std::to_string(n_tile) + "k128";
+}
+
 inline std::string autotile_kernel_name_nvfp4_acc16(int m_tile, int n_tile) {
   return "parallel_linear_wnvfp4a16_acc16_m" + std::to_string(m_tile) +
          "n" + std::to_string(n_tile) + "k128";
@@ -741,17 +753,20 @@ inline std::string autotile_kernel_name_nvfp4_acc32(int m_tile, int n_tile) {
 }
 
 // Order: existing 21 acc16 IDs first, then the 21 acc32 IDs. Within every
-// family n_tile is 128,112,96,80,64,48,32. KernelCache enum order must match.
+// family n_tile is 128,112,96,80,64,48,32. Shared UINT4 families follow;
+// old KernelIds and signed expansion names retain their original order.
 inline std::vector<std::string> autotile_kernel_names() {
   static constexpr int ntiles[] = {128, 112, 96, 80, 64, 48, 32};
   std::vector<std::string> names;
-  names.reserve(42);
+  names.reserve(56);
   for (int n : ntiles) names.push_back(autotile_kernel_name(false, mtile_w8a16(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name(true, mtile_w16(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name_int4(mtile_int4(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name_acc32(false, mtile_w8a16_acc32(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name_acc32(true, mtile_fp16_acc32(n), n));
   for (int n : ntiles) names.push_back(autotile_kernel_name_int4_acc32(mtile_int4_acc32(n), n));
+  for (int n : ntiles) names.push_back(autotile_kernel_name_uint4(mtile_int4(n), n));
+  for (int n : ntiles) names.push_back(autotile_kernel_name_uint4_acc32(mtile_int4_acc32(n), n));
   return names;
 }
 
@@ -800,6 +815,30 @@ inline void set_parallel_linear_regs(Kernel& kernel,
   set_u32_reg_pair(kernel, 20, a.scale_dev_addr >> 8);
   kernel.set_regs(22, a.partition);
   kernel.set_regs(23, a.dtype_mode);
+}
+
+// Shared W4 register payload.
+struct ParallelLinearW4GroupRegisterArgs {
+  ParallelLinearRegisterArgs linear;
+  uint16_t group_size;
+  uint16_t local_groups;
+  uint32_t scale_group_block_byte_step;
+  uint64_t negative_zero_dev_addr = 0;
+  bool is_uint4 = false;
+};
+
+template <typename Kernel>
+inline void set_parallel_linear_w4_group_regs(
+    Kernel& kernel, const ParallelLinearW4GroupRegisterArgs& a) {
+  set_parallel_linear_regs(kernel, a.linear);
+  kernel.set_regs(8, a.linear.partition);
+  kernel.set_regs(9, static_cast<uint16_t>(a.linear.local_m));
+  set_u32_reg_pair(kernel, 22, a.is_uint4 ? a.negative_zero_dev_addr >> 8 : 0);
+  set_u32_reg_pair(kernel, 24, a.scale_group_block_byte_step);
+  kernel.set_regs(26, static_cast<uint16_t>(2));  // FP16 activation/output.
+  kernel.set_regs(27, static_cast<uint16_t>(a.is_uint4 ? 8 : 9));
+  kernel.set_regs(28, a.group_size);
+  kernel.set_regs(29, a.local_groups);
 }
 
 struct ParallelLinearInt4GroupRegisterArgs {

@@ -8,6 +8,7 @@
 #include "rhino_launch_queue.h"
 #include <c10/util/Half.h>
 #include <vector>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -114,7 +115,7 @@ void rpu_launch_llama_insert_vcache(
     TORCH_CHECK(v_input.is_contiguous(),
                 "v_input must be contiguous");
     TORCH_CHECK(v_input.device().type() == c10::DeviceType::PrivateUse1,
-                "v_input must be on RPU device");
+                "v_input must be on device");
 
     int64_t batch = v_input.size(0);
     int64_t seq_len = v_input.size(1);
@@ -291,7 +292,7 @@ void rpu_launch_llama_insert_kcache(
     TORCH_CHECK(k_input.is_contiguous(),
                 "k_input must be contiguous");
     TORCH_CHECK(k_input.device().type() == c10::DeviceType::PrivateUse1,
-                "k_input must be on RPU device");
+                "k_input must be on device");
 
     int64_t batch = k_input.size(0);
     int64_t seq_len = k_input.size(1);
@@ -861,12 +862,14 @@ namespace {
 void launch_owned_paired_kv_insert(
     at::Tensor& k_cache, at::Tensor& v_cache, int64_t position,
     uint32_t k_off, uint32_t v_off, int64_t seq_len,
-    int64_t num_kv_heads, int64_t head_dim, int num_cores, bool decode) {
+    int64_t num_kv_heads, int64_t head_dim, int num_cores, bool decode,
+    bool lingbot_m224 = false) {
     TORCH_CHECK(num_kv_heads == 8 && head_dim == 128 && num_cores == 8 &&
-                    seq_len == (decode ? 1 : 192) && position >= 0 &&
+                    !(lingbot_m224 && decode) &&
+                    seq_len == (decode ? 1 : (lingbot_m224 ? 224 : 192)) && position >= 0 &&
                     (decode || position % 16 == 0),
-                "paired KV insert requires Qwen3-VL TP8/HD128 "
-                "decode1 or 16-aligned prefill192");
+                "paired KV insert requires admitted TP8/HD128 decode1, "
+                "Qwen3-VL aligned prefill192 or LingBot2 aligned prefill224");
     const auto cache_shape = [](const at::Tensor& cache) {
         return cache.defined() &&
             cache.device().type() == c10::DeviceType::PrivateUse1 &&
@@ -878,7 +881,7 @@ void launch_owned_paired_kv_insert(
     TORCH_CHECK(cache_shape(k_cache) && cache_shape(v_cache) &&
                     k_cache.device() == v_cache.device() &&
                     k_cache.size(1) == v_cache.size(1),
-                "paired KV insert requires matching owned B1 FP16 RPU "
+                "paired KV insert requires matching owned B1 FP16 device "
                 "7D KV8/HD128 swizzled caches");
     TORCH_CHECK(static_cast<uint64_t>(position) <= UINT32_MAX - seq_len &&
                     (position + seq_len + 15) / 16 <= k_cache.size(1),
@@ -896,6 +899,51 @@ void launch_owned_paired_kv_insert(
     const KernelId kernel_id = decode
         ? KernelId::QWEN3VL_INSERT_KV_CACHE_DECODE
         : KernelId::QWEN3VL_INSERT_KV_CACHE_V16;
+    uint32_t k_spm_addr = 0;
+    uint32_t v_spm_addr = 0;
+    if (lingbot_m224) {
+        constexpr uint64_t kInputBytes = 224 * 128 * sizeof(c10::Half);
+        TORCH_CHECK(k_cache.storage_offset() == 0 && v_cache.storage_offset() == 0 &&
+                        k_cache.storage().nbytes() == k_cache.nbytes() &&
+                        v_cache.storage().nbytes() == v_cache.nbytes(),
+                    "LingBot2 M224 paired KV requires two full cache owners");
+        TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                    "LingBot2 M224 paired KV requires initialized SPM");
+        const uint64_t spm_base = SPM_ALLOC.addr(0, 0);
+        const auto absolute_spm = [spm_base](uint32_t offset) {
+            TORCH_CHECK((offset & 255u) == 0 &&
+                            offset <= SpmAllocator::SPM_USABLE - kInputBytes,
+                        "LingBot2 M224 KV input offset violates its full57344B extent");
+            const uint64_t address = SPM_ALLOC.addr(0, offset);
+            TORCH_CHECK(address == spm_base + offset && (address & 255u) == 0 &&
+                            address <= UINT32_MAX - (kInputBytes - 1),
+                        "LingBot2 M224 KV input failed its offset-to-absolute conversion");
+            return static_cast<uint32_t>(address);
+        };
+        k_spm_addr = absolute_spm(k_off);
+        v_spm_addr = absolute_spm(v_off);
+        TORCH_CHECK(uint64_t{k_spm_addr} + kInputBytes <= v_spm_addr ||
+                        uint64_t{v_spm_addr} + kInputBytes <= k_spm_addr,
+                    "LingBot2 M224 KV input SPM intervals overlap");
+        const uint64_t k_addr = RpuGetDevAddr(k_cache.data_ptr<c10::Half>());
+        const uint64_t v_addr = RpuGetDevAddr(v_cache.data_ptr<c10::Half>());
+        const auto ddr_ok = [](uint64_t address, size_t bytes) {
+            constexpr uint64_t limit = uint64_t{1} << 40;
+            return address != 0 && (address & 255u) == 0 &&
+                address < limit && bytes <= limit - address;
+        };
+        TORCH_CHECK(ddr_ok(k_addr, k_cache.nbytes()) && ddr_ok(v_addr, v_cache.nbytes()),
+                    "LingBot2 M224 full KV owners violate the shift8 DDR address ABI");
+        const bool ddr_disjoint = k_addr <= v_addr
+            ? v_addr - k_addr >= k_cache.nbytes()
+            : k_addr - v_addr >= v_cache.nbytes();
+        TORCH_CHECK(ddr_disjoint,
+                    "LingBot2 M224 requires non-overlapping full DDR KV owners");
+    }
+    TORCH_CHECK(KernelCache::instance().get(kernel_id) != nullptr,
+                "selected paired KV insert kernel unavailable");
+    auto* queue = GET_QUEUE(num_cores);
+    TORCH_CHECK(queue != nullptr, "selected paired KV insert queue unavailable");
     auto register_writer = RpuKernelGraph::active().stage_kernel_ddr_registers(
         kernel_id,
         std::vector<GraphDdrRegisterOperandSpec>{
@@ -911,12 +959,17 @@ void launch_owned_paired_kv_insert(
                     GraphDdrRegisterAccess::Write,
                     GraphDdrRegisterEncoding::DevAddrShift8LoHi, 12, 13},
                 v_cache}});
+    Kernel_t* kernel = GET_KERNEL(kernel_id);
+    if (lingbot_m224) {
+        RpuKernelGraph::active().keep_alive(k_cache);
+        RpuKernelGraph::active().keep_alive(v_cache);
+    }
     rpu_ddr_flush(k_cache.data_ptr<c10::Half>());
     rpu_ddr_flush(v_cache.data_ptr<c10::Half>());
-    const uint32_t k_spm_addr = SPM_ALLOC.addr(0, k_off);
-    const uint32_t v_spm_addr = SPM_ALLOC.addr(0, v_off);
-    Kernel_t* kernel = GET_KERNEL(kernel_id);
-    TORCH_CHECK(kernel != nullptr, "selected paired KV insert kernel unavailable");
+    if (!lingbot_m224) {
+        k_spm_addr = SPM_ALLOC.addr(0, k_off);
+        v_spm_addr = SPM_ALLOC.addr(0, v_off);
+    }
     kernel->reset_regs();
     const uint32_t position_val = static_cast<uint32_t>(position);
     kernel->set_regs(0, static_cast<uint16_t>(position_val & 0xFFFF));
@@ -928,8 +981,14 @@ void launch_owned_paired_kv_insert(
     kernel->set_regs(10, static_cast<uint16_t>(v_spm_addr & 0xFFFF));
     kernel->set_regs(11, static_cast<uint16_t>(v_spm_addr >> 16));
     kernel->set_regs(21, static_cast<uint16_t>(num_cores));
+    if (lingbot_m224) {
+        // The unchanged paired V16 payload locks and releases core counter0.
+        // Every recorded launch includes its zero-valued full u32 pair so
+        // snapshot replay starts each core with the same fresh counter state.
+        TORCH_CHECK(kernel->set_regs(128, uint32_t{0}) == kKernelRegOk,
+                    "LingBot2 M224 paired KV rejected atomic counter0 reset");
+    }
     register_writer.write(*kernel);
-    auto* queue = GET_QUEUE(num_cores);
     queue->set_broadcast_mode(true);
     queue->enqueu_kernel(*kernel,
         {static_cast<uint16_t>(decode ? 1 : seq_len / 16), 1, 1},
@@ -948,12 +1007,296 @@ void rpu_launch_insert_kv_cache_spm_unified_v16(
         seq_len, num_kv_heads, head_dim, num_cores, false);
 }
 
+void rpu_launch_wall_base_paired_kv_spm_kernel(
+    at::Tensor& k_cache, at::Tensor& v_cache,
+    uint32_t k_off, uint32_t v_off, int64_t spm_rows,
+    const KvInsertSegmentPlan& plan) {
+    rpu_validate_kvinsert_segment_plan(plan, 8, 8, 128);
+    TORCH_CHECK(plan.route() == KvInsertRoute::ALIGNED_V16 &&
+                    plan.logical_rows() == 32 && plan.physical_rows() == 32 &&
+                    plan.segment_count() == 1 && spm_rows == 32,
+                "Wall paired KV requires one actual H32 ALIGNED_V16 plan");
+    const auto& segment = plan.segment(0);
+    const int64_t position = segment.position;
+    TORCH_CHECK((position == 336 || position == 384) && segment.rows == 32 &&
+                    segment.token_offset == 0 && segment.kernel == KvInsertKernel::V16,
+                "Wall paired KV requires P336/P384 and the full 32-row input");
+    const auto cache_shape = [](const at::Tensor& cache) {
+        return cache.defined() &&
+            cache.device().type() == c10::DeviceType::PrivateUse1 &&
+            cache.scalar_type() == at::kHalf && cache.is_contiguous() &&
+            cache.dim() == 7 && cache.size(0) == 1 && cache.size(1) > 0 &&
+            cache.size(2) == 1 && cache.size(3) == 8 && cache.size(4) == 8 &&
+            cache.size(5) == 16 && cache.size(6) == 16;
+    };
+    TORCH_CHECK(cache_shape(k_cache) && cache_shape(v_cache) &&
+                    k_cache.device() == v_cache.device() &&
+                    k_cache.size(1) == v_cache.size(1) &&
+                    k_cache.size(1) >= (position + 32) / 16,
+                "Wall paired KV requires matching owned FP16 7D KV8/D128 caches");
+    const auto kb = reinterpret_cast<uintptr_t>(k_cache.data_ptr());
+    const auto vb = reinterpret_cast<uintptr_t>(v_cache.data_ptr());
+    TORCH_CHECK(kb <= vb ? vb - kb >= k_cache.nbytes()
+                         : kb - vb >= v_cache.nbytes(),
+                "Wall paired KV requires disjoint K/V cache byte ranges");
+    constexpr uint32_t kBytes = 32 * 128 * sizeof(c10::Half);
+    TORCH_CHECK(SPM_ALLOC.is_initialized() && k_off % 32 == 0 && v_off % 32 == 0 &&
+                    k_off <= SpmAllocator::SPM_USABLE - kBytes &&
+                    v_off <= SpmAllocator::SPM_USABLE - kBytes &&
+                    (k_off <= v_off ? v_off - k_off >= kBytes
+                                     : k_off - v_off >= kBytes),
+                "Wall paired KV requires independent complete 8192-byte SPM inputs");
+    for (int core = 0; core < 8; ++core) {
+        const uint64_t base = SPM_ALLOC.addr(core, 0);
+        TORCH_CHECK(base + k_off + kBytes - 1 <= UINT32_MAX &&
+                        base + v_off + kBytes - 1 <= UINT32_MAX,
+                    "Wall paired KV absolute SPM input exceeds uint32");
+    }
+    // All geometry/owner/range admission precedes typed address staging.
+    const auto id = KernelId::QWEN3VL_INSERT_KV_CACHE_V16;
+    auto writer = RpuKernelGraph::active().stage_kernel_ddr_registers(
+        id, std::vector<GraphDdrRegisterOperandSpec>{
+            {GraphDdrRegisterAbi{GraphDdrRegisterRole::KeyCache,
+                GraphDdrRegisterAccess::Write,
+                GraphDdrRegisterEncoding::DevAddrShift8LoHi, 8, 9}, k_cache},
+            {GraphDdrRegisterAbi{GraphDdrRegisterRole::ValueCache,
+                GraphDdrRegisterAccess::Write,
+                GraphDdrRegisterEncoding::DevAddrShift8LoHi, 12, 13}, v_cache}});
+    rpu_ddr_flush(k_cache.data_ptr<c10::Half>());
+    rpu_ddr_flush(v_cache.data_ptr<c10::Half>());
+    auto* kernel = GET_KERNEL(id);
+    TORCH_CHECK(kernel != nullptr, "Wall paired KV payload unavailable");
+    kernel->reset_regs();
+    const auto set16 = [kernel](uint32_t reg, uint16_t value) {
+        TORCH_CHECK(kernel->set_regs(reg, value) == 0,
+                    "Wall paired KV register write rejected at ", reg);
+    };
+    const uint32_t ka = SPM_ALLOC.addr(0, k_off);
+    const uint32_t va = SPM_ALLOC.addr(0, v_off);
+    set16(0, static_cast<uint16_t>(position));
+    set16(1, 0);
+    set16(2, 1);
+    set16(3, 128);
+    set16(6, static_cast<uint16_t>(ka));
+    set16(7, static_cast<uint16_t>(ka >> 16));
+    set16(10, static_cast<uint16_t>(va));
+    set16(11, static_cast<uint16_t>(va >> 16));
+    set16(21, 8);
+    writer.write(*kernel);
+    auto* queue = GET_QUEUE(8);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {2, 1, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
+    rpu_ddr_flush(k_cache.data_ptr<c10::Half>());
+    rpu_ddr_flush(v_cache.data_ptr<c10::Half>());
+}
+
+void rpu_launch_hyvla_expert_paired_kv_spm_kernel(
+    at::Tensor& k_cache, at::Tensor& v_cache,
+    uint32_t k_off, uint32_t v_off, int64_t spm_rows,
+    const KvInsertSegmentPlan& plan) {
+    rpu_validate_kvinsert_segment_plan(plan, 8, 8, 128);
+    TORCH_CHECK(plan.route() == KvInsertRoute::PAD16_V16 &&
+                    plan.logical_rows() == 51 && plan.physical_rows() == 64 &&
+                    plan.segment_count() == 1 && spm_rows == 64,
+                "HyVLA paired KV requires one actual S51/S64 PAD16_V16 plan");
+    const auto& segment = plan.segment(0);
+    const int64_t position = segment.position;
+    TORCH_CHECK((position >= 128 && position <= 240 && position % 16 == 0) &&
+                    segment.rows == 64 &&
+                    segment.token_offset == 0 && segment.kernel == KvInsertKernel::V16,
+                "HyVLA paired KV requires P128..240 aligned16 and the full 64-row input");
+    const auto cache_shape = [](const at::Tensor& cache) {
+        return cache.defined() &&
+            cache.device().type() == c10::DeviceType::PrivateUse1 &&
+            cache.scalar_type() == at::kHalf && cache.is_contiguous() &&
+            cache.dim() == 7 && cache.size(0) == 1 && cache.size(1) > 0 &&
+            cache.size(2) == 1 && cache.size(3) == 8 && cache.size(4) == 8 &&
+            cache.size(5) == 16 && cache.size(6) == 16;
+    };
+    TORCH_CHECK(cache_shape(k_cache) && cache_shape(v_cache) &&
+                    k_cache.device() == v_cache.device() &&
+                    k_cache.size(1) == v_cache.size(1) &&
+                    k_cache.size(1) >= (position + 64 + 15) / 16,
+                "HyVLA paired KV requires matching owned FP16 7D KV8/D128 caches");
+    const auto kb = reinterpret_cast<uintptr_t>(k_cache.data_ptr());
+    const auto vb = reinterpret_cast<uintptr_t>(v_cache.data_ptr());
+    TORCH_CHECK(kb <= vb ? vb - kb >= k_cache.nbytes()
+                         : kb - vb >= v_cache.nbytes(),
+                "HyVLA paired KV requires disjoint K/V cache byte ranges");
+    constexpr uint32_t kBytes = 64 * 128 * sizeof(c10::Half);
+    TORCH_CHECK(SPM_ALLOC.is_initialized() && k_off % 32 == 0 && v_off % 32 == 0 &&
+                    k_off <= SpmAllocator::SPM_USABLE - kBytes &&
+                    v_off <= SpmAllocator::SPM_USABLE - kBytes &&
+                    (k_off <= v_off ? v_off - k_off >= kBytes
+                                     : k_off - v_off >= kBytes),
+                "HyVLA paired KV requires independent complete 16384-byte SPM inputs");
+    for (int core = 0; core < 8; ++core) {
+        const uint64_t base = SPM_ALLOC.addr(core, 0);
+        TORCH_CHECK(base + k_off + kBytes - 1 <= UINT32_MAX &&
+                        base + v_off + kBytes - 1 <= UINT32_MAX,
+                    "HyVLA paired KV absolute SPM input exceeds uint32");
+    }
+    // All geometry/owner/range admission precedes typed address staging.
+    const auto id = KernelId::QWEN3VL_INSERT_KV_CACHE_V16;
+    auto writer = RpuKernelGraph::active().stage_kernel_ddr_registers(
+        id, std::vector<GraphDdrRegisterOperandSpec>{
+            {GraphDdrRegisterAbi{GraphDdrRegisterRole::KeyCache,
+                GraphDdrRegisterAccess::Write,
+                GraphDdrRegisterEncoding::DevAddrShift8LoHi, 8, 9}, k_cache},
+            {GraphDdrRegisterAbi{GraphDdrRegisterRole::ValueCache,
+                GraphDdrRegisterAccess::Write,
+                GraphDdrRegisterEncoding::DevAddrShift8LoHi, 12, 13}, v_cache}});
+    rpu_ddr_flush(k_cache.data_ptr<c10::Half>());
+    rpu_ddr_flush(v_cache.data_ptr<c10::Half>());
+    auto* kernel = GET_KERNEL(id);
+    TORCH_CHECK(kernel != nullptr, "HyVLA paired KV payload unavailable");
+    kernel->reset_regs();
+    const auto set16 = [kernel](uint32_t reg, uint16_t value) {
+        TORCH_CHECK(kernel->set_regs(reg, value) == 0,
+                    "HyVLA paired KV register write rejected at ", reg);
+    };
+    const uint32_t ka = SPM_ALLOC.addr(0, k_off);
+    const uint32_t va = SPM_ALLOC.addr(0, v_off);
+    set16(0, static_cast<uint16_t>(position));
+    set16(1, 0);
+    set16(2, 1);
+    set16(3, 128);
+    set16(6, static_cast<uint16_t>(ka));
+    set16(7, static_cast<uint16_t>(ka >> 16));
+    set16(10, static_cast<uint16_t>(va));
+    set16(11, static_cast<uint16_t>(va >> 16));
+    set16(21, 8);
+    writer.write(*kernel);
+    auto* queue = GET_QUEUE(8);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {4, 1, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
+    rpu_ddr_flush(k_cache.data_ptr<c10::Half>());
+    rpu_ddr_flush(v_cache.data_ptr<c10::Half>());
+}
+
 void rpu_launch_insert_kv_cache_spm_unified_decode(
     at::Tensor& k_cache, at::Tensor& v_cache, int64_t position,
     uint32_t k_off, uint32_t v_off, int64_t seq_len,
     int64_t num_kv_heads, int64_t head_dim, int num_cores) {
     launch_owned_paired_kv_insert(k_cache, v_cache, position, k_off, v_off,
         seq_len, num_kv_heads, head_dim, num_cores, true);
+}
+
+void rpu_launch_lingbot2_insert_kv_m224_spm_with_plan(
+    at::Tensor& k_cache, at::Tensor& v_cache,
+    uint32_t k_off, uint32_t v_off, int64_t spm_rows,
+    const KvInsertSegmentPlan& plan) {
+    TORCH_CHECK(RpuKernelGraph::has_active(),
+                "LingBot2 M224 paired KV requires an active Graph context");
+    rpu_validate_kvinsert_segment_plan(plan, 8, 8, 128);
+    TORCH_CHECK(spm_rows >= 224 && plan.logical_rows() == 224 &&
+                    plan.physical_rows() == 224 &&
+                    plan.route() == KvInsertRoute::ALIGNED_V16 &&
+                    plan.segment_count() == 1 &&
+                    plan.segment(0).kernel == KvInsertKernel::V16 &&
+                    plan.segment(0).rows == 224 && plan.segment(0).token_offset == 0,
+                "LingBot2 M224 paired KV requires the exact single224-row V16 plan");
+    launch_owned_paired_kv_insert(k_cache, v_cache, plan.segment(0).position,
+        k_off, v_off, 224, 8, 128, 8, false, true);
+}
+
+void rpu_launch_lingbot2_insert_kv_t51_spm_kernel(
+    at::Tensor& k_cache, at::Tensor& v_cache, int64_t position,
+    uint32_t k_off, uint32_t v_off, int64_t spm_rows) {
+    constexpr int64_t kRows = 51;
+    constexpr uint64_t kInputBytes = kRows * 128 * sizeof(c10::Half);
+    constexpr KernelId kKernelId = KernelId::LINGBOT2_INSERT_KV_T51;
+    TORCH_CHECK(RpuKernelGraph::has_active(),
+                "LingBot2 T51 KV insert requires an active Graph context");
+    TORCH_CHECK(spm_rows >= kRows && position >= 0 && position % 16 == 0 &&
+                    static_cast<uint64_t>(position) <= UINT32_MAX - kRows,
+                "LingBot2 T51 KV insert requires51 available rows and an aligned u32 position");
+    const auto cache_ok = [](const at::Tensor& cache) {
+        return cache.defined() &&
+            cache.device().type() == c10::DeviceType::PrivateUse1 &&
+            cache.scalar_type() == at::kHalf && cache.is_contiguous() &&
+            cache.storage_offset() == 0 && cache.dim() == 7 &&
+            cache.size(0) == 1 && cache.size(1) > 0 && cache.size(2) == 1 &&
+            cache.size(3) == 8 && cache.size(4) == 8 &&
+            cache.size(5) == 16 && cache.size(6) == 16 &&
+            cache.storage().nbytes() == cache.nbytes();
+    };
+    TORCH_CHECK(cache_ok(k_cache) && cache_ok(v_cache) &&
+                    k_cache.device() == v_cache.device() &&
+                    k_cache.size(1) == v_cache.size(1) &&
+                    (position + kRows + 15) / 16 <= k_cache.size(1),
+                "LingBot2 T51 KV insert requires matching full FP16 device "
+                "[1,S16,1,8,8,16,16] owners covering the logical append");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "LingBot2 T51 KV insert requires initialized SPM");
+    const uint64_t spm_base = SPM_ALLOC.addr(0, 0);
+    const auto absolute_spm = [spm_base](uint32_t offset) {
+        TORCH_CHECK((offset & 255u) == 0 &&
+                        offset <= SpmAllocator::SPM_USABLE - kInputBytes,
+                    "LingBot2 T51 KV input offset is misaligned or outside its full13056B extent");
+        const uint64_t address = SPM_ALLOC.addr(0, offset);
+        TORCH_CHECK(address == spm_base + offset && (address & 255u) == 0 &&
+                        address <= UINT32_MAX - (kInputBytes - 1),
+                    "LingBot2 T51 KV input failed its single offset-to-absolute conversion");
+        return static_cast<uint32_t>(address);
+    };
+    const uint32_t k_spm = absolute_spm(k_off);
+    const uint32_t v_spm = absolute_spm(v_off);
+    TORCH_CHECK(uint64_t{k_spm} + kInputBytes <= v_spm ||
+                    uint64_t{v_spm} + kInputBytes <= k_spm,
+                "LingBot2 T51 KV input SPM intervals overlap");
+    const uint64_t k_addr = RpuGetDevAddr(k_cache.data_ptr<c10::Half>());
+    const uint64_t v_addr = RpuGetDevAddr(v_cache.data_ptr<c10::Half>());
+    const auto ddr_ok = [](uint64_t address, size_t bytes) {
+        return address != 0 && (address & 255u) == 0 &&
+            (address >> 8) <= UINT32_MAX && bytes <= (uint64_t{1} << 40) - address;
+    };
+    TORCH_CHECK(ddr_ok(k_addr, k_cache.nbytes()) && ddr_ok(v_addr, v_cache.nbytes()),
+                "LingBot2 T51 KV full DDR owners violate the shift8 address ABI");
+    const bool disjoint = k_addr <= v_addr
+        ? v_addr - k_addr >= k_cache.nbytes()
+        : k_addr - v_addr >= v_cache.nbytes();
+    TORCH_CHECK(disjoint, "LingBot2 T51 KV requires non-overlapping full K/V owners");
+    TORCH_CHECK(KernelCache::instance().get(kKernelId) != nullptr,
+                "LingBot2 T51 KV optional expansion symbol is absent");
+    auto* queue = GET_QUEUE(8);
+    TORCH_CHECK(queue != nullptr, "LingBot2 T51 KV eight-core queue is absent");
+
+    auto& graph = RpuKernelGraph::active();
+    auto writer = graph.stage_kernel_ddr_registers(kKernelId,
+        std::vector<GraphDdrRegisterOperandSpec>{
+            {GraphDdrRegisterAbi{GraphDdrRegisterRole::KeyCache,
+                GraphDdrRegisterAccess::Write,
+                GraphDdrRegisterEncoding::DevAddrShift8LoHi, 8, 9}, k_cache},
+            {GraphDdrRegisterAbi{GraphDdrRegisterRole::ValueCache,
+                GraphDdrRegisterAccess::Write,
+                GraphDdrRegisterEncoding::DevAddrShift8LoHi, 12, 13}, v_cache}});
+    Kernel_t* kernel = GET_KERNEL(kKernelId);
+    graph.keep_alive(k_cache);
+    graph.keep_alive(v_cache);
+    rpu_ddr_flush(k_cache.data_ptr<c10::Half>());
+    rpu_ddr_flush(v_cache.data_ptr<c10::Half>());
+    kernel->reset_regs();
+    const auto set_reg = [kernel](uint32_t index, uint16_t value) {
+        TORCH_CHECK(kernel->set_regs(index, value) == kKernelRegOk,
+                    "LingBot2 T51 KV rejected parameter ", index);
+    };
+    const auto set_pair = [&set_reg](uint32_t index, uint32_t value) {
+        set_reg(index, static_cast<uint16_t>(value));
+        set_reg(index + 1, static_cast<uint16_t>(value >> 16));
+    };
+    set_pair(0, static_cast<uint32_t>(position));
+    set_reg(2, 1);
+    set_reg(3, 128);
+    set_reg(4, kRows);
+    set_pair(6, k_spm);
+    set_pair(10, v_spm);
+    set_reg(21, 8);
+    writer.write(*kernel);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {4, 1, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
+    rpu_ddr_flush(k_cache.data_ptr<c10::Half>());
+    rpu_ddr_flush(v_cache.data_ptr<c10::Half>());
 }
 
 // =============================================================================
@@ -972,7 +1315,7 @@ static void validate_kv_arena_input(
     TORCH_CHECK(kv_input.scalar_type() == at::kHalf, "arena insert: input must be FP16");
     TORCH_CHECK(kv_input.is_contiguous(), "arena insert: input must be contiguous");
     TORCH_CHECK(kv_input.device().type() == at::kPrivateUse1,
-                "arena insert: input must be on the RPU device");
+                "arena insert: input must be on the device");
     // The address math below indexes core-local slices and ignores the batch dim,
     // and the 8-core head split requires nkv to divide (or be divided by) num_cores
     // — mirror the checks in rpu_launch_llama_insert_{k,v}cache so a bad shape fails
@@ -1132,10 +1475,11 @@ void rpu_launch_pi05_kv1_direct_cache_m50d256p64_kernel(
             plan.segment(0).kernel == KvInsertKernel::V16 &&
             (plan.segment(0).position == 544 || plan.segment(0).position == 800 ||
              plan.segment(0).position == 832 || plan.segment(0).position == 576 ||
-             plan.segment(0).position == 864 || plan.segment(0).position == 896 || plan.segment(0).position == 608 || plan.segment(0).position == 640) &&
+             plan.segment(0).position == 864 || plan.segment(0).position == 896 || plan.segment(0).position == 608 || plan.segment(0).position == 640 ||
+             plan.segment(0).position == 672 || plan.segment(0).position == 928) &&
             plan.segment(0).token_offset == 0 &&
             plan.segment(0).rows == kPhysicalRows,
-        "Pi0.5 KV1 direct-cache requires the exact P544/P576/P608/P640/P800/P832/P864/P896/M50/PAD64 plan");
+        "Pi0.5 KV1 direct-cache requires the exact P544/P576/P608/P640/P672/P800/P832/P864/P896/P928/M50/PAD64 plan");
     TORCH_CHECK(
         logical_rope_position >= 0 && logical_rope_position <= UINT32_MAX,
         "Pi0.5 KV1 direct-cache logical RoPE position exceeds u32");
@@ -1317,9 +1661,9 @@ void rpu_launch_pi05_prefill_kv1_direct_cache_m400d256p400_kernel(
     const KvInsertSegmentPlan& plan) {
     TORCH_CHECK(plan.logical_rows() == 272 || plan.logical_rows() == 288 ||
                 plan.logical_rows() == 304 || plan.logical_rows() == 320 ||
-                plan.logical_rows() == 400 ||
-                plan.logical_rows() == 416 || plan.logical_rows() == 432 || plan.logical_rows() == 448,
-                "Pi0.5 prefill KV1 direct-cache requires C272/C288/C304/C320/C400/C416/C432/C448");
+                plan.logical_rows() == 336 || plan.logical_rows() == 400 ||
+                plan.logical_rows() == 416 || plan.logical_rows() == 432 || plan.logical_rows() == 448 || plan.logical_rows() == 464,
+                "Pi0.5 prefill KV1 direct-cache requires C272/C288/C304/C320/C336/C400/C416/C432/C448/C464");
     const uint32_t kActiveRows = static_cast<uint32_t>(plan.logical_rows());
     const uint32_t kPhysicalRows = kActiveRows;
     constexpr uint32_t kHeadDim = 256;
@@ -1334,6 +1678,10 @@ void rpu_launch_pi05_prefill_kv1_direct_cache_m400d256p400_kernel(
         size_t{1} * 128 * 1 * 16 * 8 * 16 * 16 * sizeof(c10::Half);
     const KernelId kKernelId = kActiveRows == 432
         ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M432D256P432
+        : kActiveRows == 464
+        ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M464D256P464
+        : kActiveRows == 336
+        ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M336D256P336
         : kActiveRows == 448
         ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M448D256P448
         : kActiveRows == 416
@@ -1361,7 +1709,7 @@ void rpu_launch_pi05_prefill_kv1_direct_cache_m400d256p400_kernel(
              plan.segment(0).position == kActiveRows) &&
             plan.segment(0).token_offset == 0 &&
             plan.segment(0).rows == kPhysicalRows,
-        "Pi0.5 prefill KV1 direct-cache requires an exact P544/C272, P576/C288, P608/C304, P640/C320, P800/C400, P832/C416, P864/C432 or P896/C448 "
+        "Pi0.5 prefill KV1 direct-cache requires an exact P544/C272, P576/C288, P608/C304, P640/C320, P672/C336, P800/C400, P832/C416, P864/C432, P896/C448 or P928/C464 "
         "ALIGNED_V16 plan at physical start 0 or chunk rows");
     TORCH_CHECK(
         logical_rope_position == plan.segment(0).position,
@@ -1541,4 +1889,508 @@ void rpu_launch_pi05_prefill_kv1_direct_cache_m400d256p400_kernel(
     queue->set_broadcast_mode(true);
     queue->enqueu_kernel(
         *kernel, {blocks, 1, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
+}
+
+// Exact G05 W8 Action continuation. All kernels launch cores0..7: the LKN
+// packet encodes a contiguous start/count, so {0,4} is not a sparse core mask.
+namespace {
+constexpr uint32_t kG05OwnerRows = 32;
+constexpr uint32_t kG05OwnerDim = 256;
+constexpr uint32_t kG05OwnerBytes = kG05OwnerRows * kG05OwnerDim * 2;
+
+void g05_require_owner_cache_payloads() {
+    for (auto id : {KernelId::G05_K_OWNER_RMS_NORM_M32D256,
+                    KernelId::G05_K_OWNER_PARTIAL_MROPE_M32D256R64,
+                    KernelId::G05_OWNER_INSERT_KCACHE_MULTIWARP,
+                    KernelId::G05_OWNER_INSERT_KCACHE_MULTIWARP_V16,
+                    KernelId::G05_OWNER_INSERT_VCACHE_MULTIWARP,
+                    KernelId::G05_OWNER_INSERT_VCACHE_MULTIWARP_V16}) {
+        TORCH_CHECK(KernelCache::instance().has_loaded(id),
+                    "G05 owner continuation requires all six optional payloads");
+    }
+}
+
+bool g05_owner_intervals_disjoint(uint64_t a, size_t an, uint64_t b, size_t bn) {
+    return a + an <= b || b + bn <= a;
+}
+
+void g05_validate_owner_spm_absolute(uint32_t address, size_t bytes) {
+    TORCH_CHECK(SPM_ALLOC.is_initialized(), "G05 owner requires initialized SPM");
+    const uint64_t base = SPM_ALLOC.addr(0, 0);
+    TORCH_CHECK(bytes <= SpmAllocator::SPM_USABLE && address >= base &&
+                    (address & 255u) == 0 &&
+                    uint64_t{address} - base <= SpmAllocator::SPM_USABLE - bytes,
+                "G05 owner SPM interval/alignment is invalid");
+}
+
+uint64_t g05_validate_owner_ddr(const at::Tensor& owner) {
+    const uint64_t address = RpuGetDevAddr(owner.data_ptr());
+    constexpr uint64_t limit = UINT64_C(1) << 40;
+    TORCH_CHECK(address != 0 && (address & 255u) == 0 && address < limit &&
+                    owner.nbytes() <= limit - address,
+                "G05 owner DDR interval/alignment is invalid");
+    return address;
+}
+
+void g05_set_owner_pair(Kernel_t& kernel, uint32_t index, uint32_t value) {
+    kernel.set_regs(index, static_cast<uint16_t>(value));
+    kernel.set_regs(index + 1, static_cast<uint16_t>(value >> 16));
+}
+}  // namespace
+
+void rpu_launch_g05_k_owner_norm_rope_spm_kernel(
+    uint32_t key_spm_addr, uint32_t norm_spm_addr,
+    const at::Tensor& cos, const at::Tensor& sin, int64_t rope_position) {
+    TORCH_CHECK(RpuKernelGraph::has_active(), "G05 owner norm/RoPE requires Graph");
+    g05_validate_owner_spm_absolute(key_spm_addr, kG05OwnerBytes);
+    g05_validate_owner_spm_absolute(norm_spm_addr, kG05OwnerDim * 2);
+    TORCH_CHECK(g05_owner_intervals_disjoint(
+                    key_spm_addr, kG05OwnerBytes, norm_spm_addr, kG05OwnerDim * 2),
+                "G05 owner K and norm SPM intervals overlap");
+    const auto table_ok = [rope_position](const at::Tensor& table) {
+        return table.defined() &&
+            table.device().type() == c10::DeviceType::PrivateUse1 &&
+            table.scalar_type() == at::kHalf && table.is_contiguous() &&
+            table.storage_offset() == 0 && table.dim() == 2 && table.size(1) == 32 &&
+            rope_position >= 0 && rope_position <= UINT32_MAX &&
+            rope_position <= table.size(0) &&
+            kG05OwnerRows <= table.size(0) - rope_position;
+    };
+    TORCH_CHECK(table_ok(cos) && table_ok(sin) && cos.sizes() == sin.sizes() &&
+                    cos.device() == sin.device(),
+                "G05 owner RoPE needs FP16 [rows,32] owners covering all32 rows");
+    const uint64_t cos_addr = g05_validate_owner_ddr(cos);
+    const uint64_t sin_addr = g05_validate_owner_ddr(sin);
+    TORCH_CHECK(g05_owner_intervals_disjoint(cos_addr, cos.nbytes(), sin_addr, sin.nbytes()),
+                "G05 owner cos/sin DDR intervals overlap");
+    g05_require_owner_cache_payloads();
+    auto* queue = GET_QUEUE(8);
+    TORCH_CHECK(queue != nullptr, "G05 owner eight-core queue is absent");
+    queue->set_broadcast_mode(true);
+
+    // The guard is followed by the complete BASE RMSNorm payload. It has no
+    // DDR operands and uses the same intrinsic no-DDR census as BASE RMSNorm.
+    auto* kernel = GET_KERNEL(KernelId::G05_K_OWNER_RMS_NORM_M32D256);
+    TORCH_CHECK(kernel != nullptr, "G05 owner BASE norm payload disappeared");
+    kernel->reset_regs();
+    kernel->set_regs(0, uint16_t{256});
+    kernel->set_regs(1, uint16_t{0x1c00});  // FP16(1/256), unchanged BASE ABI.
+    kernel->set_regs(2, uint16_t{512});
+    kernel->set_regs(3, uint16_t{0});
+    g05_set_owner_pair(*kernel, 4, key_spm_addr);
+    g05_set_owner_pair(*kernel, 6, key_spm_addr);
+    g05_set_owner_pair(*kernel, 8, norm_spm_addr);
+    kernel->set_regs(10, uint16_t{0x0011});  // FP16(1e-6), original epsilon.
+    queue->enqueu_kernel(*kernel, {32, 1, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
+
+    constexpr auto id = KernelId::G05_K_OWNER_PARTIAL_MROPE_M32D256R64;
+    auto writer = RpuKernelGraph::active().stage_kernel_ddr_registers(
+        id, std::vector<GraphDdrRegisterOperandSpec>{
+            {GraphDdrRegisterAbi{GraphDdrRegisterRole::SemanticInput,
+                GraphDdrRegisterAccess::Read,
+                GraphDdrRegisterEncoding::DevAddrShift8LoHi, 0, 1}, cos},
+            {GraphDdrRegisterAbi{GraphDdrRegisterRole::SemanticInput,
+                GraphDdrRegisterAccess::Read,
+                GraphDdrRegisterEncoding::DevAddrShift8LoHi, 2, 3}, sin}});
+    rpu_ddr_flush(cos.data_ptr<c10::Half>());
+    rpu_ddr_flush(sin.data_ptr<c10::Half>());
+    kernel = GET_KERNEL(id);
+    TORCH_CHECK(kernel != nullptr, "G05 owner partial RoPE payload disappeared");
+    kernel->reset_regs();
+    g05_set_owner_pair(*kernel, 4, key_spm_addr);
+    g05_set_owner_pair(*kernel, 6, key_spm_addr);
+    g05_set_owner_pair(*kernel, 8, static_cast<uint32_t>(rope_position));
+    kernel->set_regs(10, uint16_t{256});
+    kernel->set_regs(11, uint16_t{1});
+    kernel->set_regs(12, uint16_t{32});
+    kernel->set_regs(13, uint16_t{64});
+    kernel->set_regs(14, uint16_t{1});
+    writer.write(*kernel);
+    queue->enqueu_kernel(*kernel, {1, 1, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
+}
+
+// Exact G05 Action continuation. Each warp retires four independent BASE
+// RMSNorm rows before applying the original partial-MRoPE to those same rows.
+void rpu_launch_g05_qk_norm_rope_group4_spm_kernel(
+    uint32_t query_spm_addr, uint32_t key_spm_addr,
+    uint32_t query_norm_spm_addr, uint32_t key_norm_spm_addr,
+    const at::Tensor& query_cos, const at::Tensor& query_sin, int64_t query_position,
+    const at::Tensor& key_cos, const at::Tensor& key_sin, int64_t key_position) {
+    TORCH_CHECK(RpuKernelGraph::has_active(), "G05 group4 requires Graph");
+    const std::array<std::pair<uint32_t,size_t>,4> spans{{
+        {query_spm_addr,kG05OwnerBytes},{key_spm_addr,kG05OwnerBytes},
+        {query_norm_spm_addr,kG05OwnerDim*2},{key_norm_spm_addr,kG05OwnerDim*2}}};
+    for (size_t i=0;i<spans.size();++i) {
+        g05_validate_owner_spm_absolute(spans[i].first,spans[i].second);
+        for (size_t j=0;j<i;++j)
+            TORCH_CHECK(g05_owner_intervals_disjoint(spans[i].first,spans[i].second,
+                            spans[j].first,spans[j].second),
+                        "G05 group4 Q/K and gamma SPM intervals overlap");
+    }
+    const std::array<const at::Tensor*,2> cos{{&query_cos,&key_cos}},sin{{&query_sin,&key_sin}};
+    const std::array<int64_t,2> positions{{query_position,key_position}};
+    for (size_t family=0;family<2;++family) {
+        const auto table_ok=[&](const at::Tensor& t) {
+            const int64_t position=positions[family];
+            return t.defined() && t.device().type()==c10::DeviceType::PrivateUse1 &&
+                t.scalar_type()==at::kHalf && t.is_contiguous() && t.storage_offset()==0 &&
+                t.dim()==2 && t.size(1)==32 && position>=0 && position<=UINT32_MAX &&
+                position<=t.size(0) && 32<=t.size(0)-position;
+        };
+        const auto& c=*cos[family];const auto& s=*sin[family];
+        TORCH_CHECK(table_ok(c) && table_ok(s) && c.sizes()==s.sizes() && c.device()==s.device(),
+                    "G05 group4 requires owned FP16 [rows,32] tables covering each independent M32 position");
+        const auto ca=g05_validate_owner_ddr(c),sa=g05_validate_owner_ddr(s);
+        TORCH_CHECK(g05_owner_intervals_disjoint(ca,c.nbytes(),sa,s.nbytes()),
+                    "G05 group4 cosine/sine DDR owners overlap");
+    }
+    constexpr std::array<KernelId,2> ids{{KernelId::G05_Q_NORM_PARTIAL_ROPE_M32D256R64_GROUP4,
+        KernelId::G05_K_OWNER_NORM_PARTIAL_ROPE_M32D256R64_GROUP4}};
+    for (auto id:ids) TORCH_CHECK(KernelCache::instance().has_loaded(id),
+        "G05 group4 optional payload absent; cold owner must retain original route");
+    auto* queue=GET_QUEUE(8);TORCH_CHECK(queue,"G05 group4 queue absent");
+    queue->set_broadcast_mode(true);
+    for (size_t family=0;family<2;++family) {
+        rpu_ddr_flush(cos[family]->data_ptr<c10::Half>());rpu_ddr_flush(sin[family]->data_ptr<c10::Half>());
+    }
+    for (size_t family=0;family<2;++family) {
+        const auto id=ids[family];
+        auto writer=RpuKernelGraph::active().stage_kernel_ddr_registers(id,
+            std::vector<GraphDdrRegisterOperandSpec>{
+                {{GraphDdrRegisterRole::SemanticInput,GraphDdrRegisterAccess::Read,
+                  GraphDdrRegisterEncoding::DevAddrShift8LoHi,16,17},*cos[family]},
+                {{GraphDdrRegisterRole::SemanticInput,GraphDdrRegisterAccess::Read,
+                  GraphDdrRegisterEncoding::DevAddrShift8LoHi,18,19},*sin[family]}});
+        auto* kernel=GET_KERNEL(id);TORCH_CHECK(kernel,"G05 group4 payload disappeared");
+        kernel->reset_regs();
+        kernel->set_regs(0,uint16_t{256});kernel->set_regs(1,uint16_t{0x1c00});
+        kernel->set_regs(2,uint16_t{512});kernel->set_regs(3,uint16_t{0});
+        g05_set_owner_pair(*kernel,4,spans[family].first);
+        g05_set_owner_pair(*kernel,6,spans[family].first);
+        g05_set_owner_pair(*kernel,8,spans[family+2].first);
+        kernel->set_regs(10,uint16_t{0x0011}); // Original FP16 epsilon1e-6.
+        g05_set_owner_pair(*kernel,20,static_cast<uint32_t>(positions[family]));
+        kernel->set_regs(22,uint16_t{1});kernel->set_regs(23,uint16_t{4});
+        kernel->set_regs(24,uint16_t{64});kernel->set_regs(25,uint16_t{1});
+        writer.write(*kernel);
+        queue->enqueu_kernel(*kernel,{8,1,1},{0,1,2,3,4,5,6,7});
+    }
+}
+
+void rpu_launch_g05_owner_insert_kvcache_spm_with_plan(
+    at::Tensor& key_cache, at::Tensor& value_cache,
+    uint32_t key_spm_offset, uint32_t value_spm_offset,
+    const KvInsertSegmentPlan& plan) {
+    TORCH_CHECK(RpuKernelGraph::has_active(), "G05 owner cache requires Graph");
+    rpu_validate_kvinsert_segment_plan(plan, 8, 8, 256);
+    const auto part_is = [&](size_t index, KvInsertKernel kernel,
+                             int64_t position, int64_t offset, int64_t rows) {
+        const auto& part = plan.segment(index);
+        return part.kernel == kernel && part.position == position &&
+            part.token_offset == offset && part.rows == rows;
+    };
+    const bool p0 = plan.route() == KvInsertRoute::ALIGNED_V16 &&
+        plan.segment_count() == 1 && part_is(0, KvInsertKernel::V16, 0, 0, 32);
+    const bool p245 = plan.route() == KvInsertRoute::HYBRID3 &&
+        plan.segment_count() == 3 && part_is(0, KvInsertKernel::V2, 245, 0, 11) &&
+        part_is(1, KvInsertKernel::V16, 256, 11, 16) &&
+        part_is(2, KvInsertKernel::V2, 272, 27, 5);
+    const int64_t prefix = plan.segment(0).position;
+    const bool p1 = prefix >= 161 && prefix <= 449 && prefix % 16 == 1 &&
+        plan.route() == KvInsertRoute::HYBRID3 && plan.segment_count() == 3 &&
+        part_is(0,KvInsertKernel::V2,prefix,0,15) &&
+        part_is(1,KvInsertKernel::V16,prefix+15,15,16) &&
+        part_is(2,KvInsertKernel::V2,prefix+31,31,1);
+    const bool p181 = plan.route() == KvInsertRoute::HYBRID3 &&
+        plan.segment_count() == 3 && part_is(0,KvInsertKernel::V2,181,0,11) &&
+        part_is(1,KvInsertKernel::V16,192,11,16) &&
+        part_is(2,KvInsertKernel::V2,208,27,5);
+    TORCH_CHECK(plan.logical_rows() == 32 && plan.physical_rows() == 32 &&
+                    (p0 || p245 || p1 || p181),
+                "G05 owner cache requires exact unpadded bounded P0/P181/P245/P%16=1 M32 segment plan");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(), "G05 owner cache requires initialized SPM");
+    for (auto offset : {key_spm_offset, value_spm_offset}) {
+        TORCH_CHECK((offset & 255u) == 0 &&
+                        offset <= SpmAllocator::SPM_USABLE - kG05OwnerBytes,
+                    "G05 owner cache source offset exceeds full32-row SPM extent");
+        const uint64_t absolute = SPM_ALLOC.addr(0, offset);
+        TORCH_CHECK(absolute == uint64_t{SPM_ALLOC.addr(0, 0)} + offset && absolute <= UINT32_MAX,
+                    "G05 owner cache typed offset conversion overflow");
+    }
+    TORCH_CHECK(g05_owner_intervals_disjoint(
+                    key_spm_offset, kG05OwnerBytes, value_spm_offset, kG05OwnerBytes),
+                "G05 owner K/V SPM intervals overlap");
+    const int64_t end_row = plan.segment(0).position + 32;
+    const auto cache_ok = [end_row](const at::Tensor& cache) {
+        // Capacity is an actual owner bound, not part of the fixed inner ABI.
+        // Hardware performance evidence is S136; writers are capacity-independent.
+        return cache.defined() &&
+            cache.device().type() == c10::DeviceType::PrivateUse1 &&
+            cache.scalar_type() == at::kHalf && cache.is_contiguous() &&
+            cache.storage_offset() == 0 && cache.dim() == 7 &&
+            cache.size(0) == 1 && cache.size(1) >= (end_row + 15) / 16 &&
+            cache.size(2) == 1 && cache.size(3) == 16 && cache.size(4) == 8 &&
+            cache.size(5) == 16 && cache.size(6) == 16 &&
+            cache.nbytes() == static_cast<size_t>(cache.size(1)) * 65536;
+    };
+    TORCH_CHECK(cache_ok(key_cache) && cache_ok(value_cache) &&
+                    key_cache.sizes() == value_cache.sizes() &&
+                    key_cache.device() == value_cache.device(),
+                "G05 owner cache needs full FP16 [1,S,1,16,8,16,16] owners covering the plan");
+    const uint64_t key_addr = g05_validate_owner_ddr(key_cache);
+    const uint64_t value_addr = g05_validate_owner_ddr(value_cache);
+    TORCH_CHECK(g05_owner_intervals_disjoint(
+                    key_addr, key_cache.nbytes(), value_addr, value_cache.nbytes()),
+                "G05 owner cache DDR intervals overlap");
+    g05_require_owner_cache_payloads();
+    auto* queue = GET_QUEUE(8);
+    TORCH_CHECK(queue != nullptr, "G05 owner cache eight-core queue is absent");
+    queue->set_broadcast_mode(true);
+    // Original order: all K segments, then all V segments. Every node binds its
+    // actual cache owner. Source GP6/7 remains an offset for unified owner loads.
+    for (int kind = 0; kind < 2; ++kind) {
+        const auto& cache = kind == 0 ? key_cache : value_cache;
+        for (size_t i = 0; i < plan.segment_count(); ++i) {
+            const auto& part = plan.segment(i);
+            const bool v16 = part.kernel == KvInsertKernel::V16;
+            const auto id = kind == 0
+                ? (v16 ? KernelId::G05_OWNER_INSERT_KCACHE_MULTIWARP_V16
+                       : KernelId::G05_OWNER_INSERT_KCACHE_MULTIWARP)
+                : (v16 ? KernelId::G05_OWNER_INSERT_VCACHE_MULTIWARP_V16
+                       : KernelId::G05_OWNER_INSERT_VCACHE_MULTIWARP);
+            auto writer = RpuKernelGraph::active().stage_kernel_ddr_registers(
+                id, std::vector<GraphDdrRegisterOperandSpec>{
+                    {GraphDdrRegisterAbi{
+                        kind == 0 ? GraphDdrRegisterRole::KeyCache : GraphDdrRegisterRole::ValueCache,
+                        GraphDdrRegisterAccess::Write,
+                        GraphDdrRegisterEncoding::DevAddrShift8LoHi, 8, 9}, cache}});
+            rpu_ddr_flush(cache.data_ptr<c10::Half>());
+            auto* kernel = GET_KERNEL(id);
+            TORCH_CHECK(kernel != nullptr, "G05 owner cache writer payload disappeared");
+            kernel->reset_regs();
+            g05_set_owner_pair(*kernel, 0, static_cast<uint32_t>(part.position));
+            kernel->set_regs(2, uint16_t{1});
+            kernel->set_regs(3, uint16_t{256});
+            kernel->set_regs(4, static_cast<uint16_t>(part.rows));
+            const uint32_t offset = (kind == 0 ? key_spm_offset : value_spm_offset) +
+                static_cast<uint32_t>(part.token_offset * 512);
+            g05_set_owner_pair(*kernel, 6, offset);
+            kernel->set_regs(21, uint16_t{8});
+            writer.write(*kernel);
+            queue->enqueu_kernel(*kernel,
+                {static_cast<uint16_t>(v16 ? part.rows / 16 : part.rows), 1, 1},
+                {0, 1, 2, 3, 4, 5, 6, 7});
+        }
+    }
+}
+
+// One exact standard KV22 plan, all eight physical cache stripes. The private
+// measured composition preserves every original writer's transpose/locks/fences.
+void rpu_launch_g05_owner_insert_kvcache_joint_spm_with_plan(
+    at::Tensor& key_cache, at::Tensor& value_cache,
+    uint32_t key_spm_offset, uint32_t value_spm_offset,
+    const KvInsertSegmentPlan& plan) {
+    TORCH_CHECK(RpuKernelGraph::has_active(), "G05 joint owner cache requires Graph");
+    rpu_validate_kvinsert_segment_plan(plan, 8, 8, 256);
+    const auto part_is = [&](size_t index, KvInsertKernel kernel,
+                             int64_t position, int64_t offset, int64_t rows) {
+        const auto& part = plan.segment(index);
+        return part.kernel == kernel && part.position == position &&
+            part.token_offset == offset && part.rows == rows;
+    };
+    const bool p0 = plan.route() == KvInsertRoute::ALIGNED_V16 &&
+        plan.segment_count() == 1 && part_is(0, KvInsertKernel::V16, 0, 0, 32);
+    const bool p245 = plan.route() == KvInsertRoute::HYBRID3 &&
+        plan.segment_count() == 3 && part_is(0, KvInsertKernel::V2, 245, 0, 11) &&
+        part_is(1, KvInsertKernel::V16, 256, 11, 16) &&
+        part_is(2, KvInsertKernel::V2, 272, 27, 5);
+    TORCH_CHECK(plan.logical_rows() == 32 && plan.physical_rows() == 32 && (p0 || p245),
+                "G05 joint owner cache requires exact unpadded P0/P245 M32 segment plan");
+    TORCH_CHECK(SPM_ALLOC.is_initialized(), "G05 joint owner cache requires initialized SPM");
+    for (auto offset : {key_spm_offset, value_spm_offset}) {
+        TORCH_CHECK((offset & 255u) == 0 &&
+                        offset <= SpmAllocator::SPM_USABLE - kG05OwnerBytes,
+                    "G05 joint owner cache source offset exceeds full32-row SPM extent");
+        const uint64_t absolute = SPM_ALLOC.addr(0, offset);
+        TORCH_CHECK(absolute == uint64_t{SPM_ALLOC.addr(0, 0)} + offset && absolute <= UINT32_MAX,
+                    "G05 joint owner cache typed offset conversion overflow");
+    }
+    TORCH_CHECK(g05_owner_intervals_disjoint(
+                    key_spm_offset, kG05OwnerBytes, value_spm_offset, kG05OwnerBytes),
+                "G05 owner K/V SPM intervals overlap");
+    const int64_t end_row = plan.segment(0).position + 32;
+    const auto cache_ok = [end_row](const at::Tensor& cache) {
+        // Capacity is an actual owner bound, not part of the fixed inner ABI.
+        // Hardware performance evidence is S136; writers are capacity-independent.
+        return cache.defined() &&
+            cache.device().type() == c10::DeviceType::PrivateUse1 &&
+            cache.scalar_type() == at::kHalf && cache.is_contiguous() &&
+            cache.storage_offset() == 0 && cache.dim() == 7 &&
+            cache.size(0) == 1 && cache.size(1) >= (end_row + 15) / 16 &&
+            cache.size(2) == 1 && cache.size(3) == 16 && cache.size(4) == 8 &&
+            cache.size(5) == 16 && cache.size(6) == 16 &&
+            cache.nbytes() == static_cast<size_t>(cache.size(1)) * 65536;
+    };
+    TORCH_CHECK(cache_ok(key_cache) && cache_ok(value_cache) &&
+                    key_cache.sizes() == value_cache.sizes() &&
+                    key_cache.device() == value_cache.device(),
+                "G05 joint owner cache needs full FP16 [1,S,1,16,8,16,16] owners covering the plan");
+    const uint64_t key_addr = g05_validate_owner_ddr(key_cache);
+    const uint64_t value_addr = g05_validate_owner_ddr(value_cache);
+    TORCH_CHECK(g05_owner_intervals_disjoint(
+                    key_addr, key_cache.nbytes(), value_addr, value_cache.nbytes()),
+                "G05 joint owner cache DDR intervals overlap");
+
+    const auto id = p0 ? KernelId::G05_OWNER_INSERT_KV_CACHE_M32D256_P0
+                       : KernelId::G05_OWNER_INSERT_KV_CACHE_M32D256_P245;
+    TORCH_CHECK(KernelCache::instance().has_loaded(id),
+                "G05 joint owner cache payload absent; cold owner must retain separate writers");
+    auto* queue = GET_QUEUE(8);
+    TORCH_CHECK(queue != nullptr, "G05 joint owner cache eight-core queue is absent");
+    queue->set_broadcast_mode(true);
+    auto writer = RpuKernelGraph::active().stage_kernel_ddr_registers(
+        id, std::vector<GraphDdrRegisterOperandSpec>{
+            {{GraphDdrRegisterRole::KeyCache, GraphDdrRegisterAccess::Write,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 8, 9}, key_cache},
+            {{GraphDdrRegisterRole::ValueCache, GraphDdrRegisterAccess::Write,
+              GraphDdrRegisterEncoding::DevAddrShift8LoHi, 12, 13}, value_cache}});
+    rpu_ddr_flush(key_cache.data_ptr<c10::Half>());
+    rpu_ddr_flush(value_cache.data_ptr<c10::Half>());
+    auto* kernel = GET_KERNEL(id);
+    TORCH_CHECK(kernel != nullptr, "G05 joint owner cache payload disappeared");
+    kernel->reset_regs();
+    g05_set_owner_pair(*kernel, 0, static_cast<uint32_t>(plan.segment(0).position));
+    kernel->set_regs(2, uint16_t{1});
+    kernel->set_regs(3, uint16_t{256});
+    kernel->set_regs(4, uint16_t{32});
+    g05_set_owner_pair(*kernel, 6, key_spm_offset);
+    g05_set_owner_pair(*kernel, 10, value_spm_offset);
+    kernel->set_regs(21, uint16_t{8});
+    writer.write(*kernel);
+    queue->enqueu_kernel(*kernel,
+        {static_cast<uint16_t>(p0 ? 2 : 17), 2, 1}, {0, 1, 2, 3, 4, 5, 6, 7});
+}
+
+
+void rpu_launch_wall_prefill_owner_direct_kv_spm_kernel(
+    at::Tensor& k_cache,
+    at::Tensor& v_cache,
+    uint32_t k_spm_addr,
+    uint32_t v_spm_addr,
+    const at::Tensor& cos,
+    const at::Tensor& sin) {
+    constexpr int64_t kRows = 640;
+    constexpr int64_t kRotaryHalf = 64;
+    constexpr uint64_t kCompactBytes =
+        kRows * kRotaryHalf * sizeof(c10::Half);
+
+    auto check_cache = [](const at::Tensor& cache, const char* name) {
+        TORCH_CHECK(
+            cache.defined() &&
+                cache.device().type() == c10::DeviceType::PrivateUse1 &&
+                cache.scalar_type() == at::kHalf && cache.is_contiguous() &&
+                cache.dim() == 7 && cache.size(0) == 1 &&
+                cache.size(1) >= 40 && cache.size(2) == 1 &&
+                cache.size(3) == 8 && cache.size(4) == 8 &&
+                cache.size(5) == 16 && cache.size(6) == 16,
+            "Wall P640 owner-direct ", name,
+            " cache must be contiguous device fp16 "
+            "[1,>=40,1,8,8,16,16], got ", cache.sizes());
+    };
+    check_cache(k_cache, "K");
+    check_cache(v_cache, "V");
+    TORCH_CHECK(
+        cos.defined() && sin.defined() &&
+            cos.device().type() == c10::DeviceType::PrivateUse1 &&
+            sin.device().type() == c10::DeviceType::PrivateUse1 &&
+            cos.scalar_type() == at::kHalf && sin.scalar_type() == at::kHalf &&
+            cos.is_contiguous() && sin.is_contiguous() &&
+            cos.dim() == 2 && sin.dim() == 2 && cos.sizes() == sin.sizes() &&
+            cos.size(0) >= kRows && cos.size(1) == kRotaryHalf,
+        "Wall P640 owner-direct cos/sin must be matching contiguous device fp16 "
+        "tables [>=640,64]");
+
+    const uint32_t spm_base0 = SPM_ALLOC.addr(0, 0);
+    auto checked_offset = [&](uint32_t address, const char* name) {
+        TORCH_CHECK(
+            address >= spm_base0 && address % 256 == 0 &&
+                static_cast<uint64_t>(address - spm_base0) <=
+                    SpmAllocator::SPM_USABLE - kCompactBytes,
+            "Wall P640 owner-direct ", name,
+            " must be a 256-byte-aligned local SPM range");
+        return address - spm_base0;
+    };
+    const uint32_t k_offset = checked_offset(k_spm_addr, "K input");
+    const uint32_t v_offset = checked_offset(v_spm_addr, "V input");
+    TORCH_CHECK(
+        static_cast<uint64_t>(k_offset) + kCompactBytes <= v_offset ||
+            static_cast<uint64_t>(v_offset) + kCompactBytes <= k_offset,
+        "Wall P640 owner-direct K/V SPM input ranges must not overlap");
+
+    auto register_writer =
+        RpuKernelGraph::active().stage_kernel_ddr_registers(
+            KernelId::WALL_PREFILL_OWNER_DIRECT_KV_M640,
+            std::vector<GraphDdrRegisterOperandSpec>{
+                GraphDdrRegisterOperandSpec{
+                    GraphDdrRegisterAbi{
+                        GraphDdrRegisterRole::KeyCache,
+                        GraphDdrRegisterAccess::Write,
+                        GraphDdrRegisterEncoding::DevAddrShift8LoHi, 4, 5},
+                    k_cache},
+                GraphDdrRegisterOperandSpec{
+                    GraphDdrRegisterAbi{
+                        GraphDdrRegisterRole::ValueCache,
+                        GraphDdrRegisterAccess::Write,
+                        GraphDdrRegisterEncoding::DevAddrShift8LoHi, 6, 7},
+                    v_cache},
+                GraphDdrRegisterOperandSpec{
+                    GraphDdrRegisterAbi{
+                        GraphDdrRegisterRole::SemanticInput,
+                        GraphDdrRegisterAccess::Read,
+                        GraphDdrRegisterEncoding::DevAddrShift8LoHi, 8, 9},
+                    cos},
+                GraphDdrRegisterOperandSpec{
+                    GraphDdrRegisterAbi{
+                        GraphDdrRegisterRole::SemanticInput,
+                        GraphDdrRegisterAccess::Read,
+                        GraphDdrRegisterEncoding::DevAddrShift8LoHi, 10, 11},
+                    sin}});
+
+    const at::Tensor* ddr_operands[] = {&k_cache, &v_cache, &cos, &sin};
+    for (const at::Tensor* tensor : ddr_operands) {
+        rpu_ddr_flush(tensor->data_ptr());
+        TORCH_CHECK(
+            RpuGetDevAddr(tensor->data_ptr()) % 256 == 0,
+            "Wall P640 owner-direct DDR operand is not 256-byte aligned");
+    }
+    const uint64_t k_cache_addr = RpuGetDevAddr(k_cache.data_ptr());
+    const uint64_t v_cache_addr = RpuGetDevAddr(v_cache.data_ptr());
+    const uint64_t k_cache_bytes =
+        static_cast<uint64_t>(k_cache.numel()) * sizeof(c10::Half);
+    const uint64_t v_cache_bytes =
+        static_cast<uint64_t>(v_cache.numel()) * sizeof(c10::Half);
+    TORCH_CHECK(
+        k_cache_addr + k_cache_bytes <= v_cache_addr ||
+            v_cache_addr + v_cache_bytes <= k_cache_addr,
+        "Wall P640 owner-direct K/V DDR cache ranges must not overlap");
+
+    Kernel_t* kernel =
+        GET_KERNEL(KernelId::WALL_PREFILL_OWNER_DIRECT_KV_M640);
+    TORCH_CHECK(kernel != nullptr,
+                "owner_direct_kv_m640 missing from expansion ref");
+    kernel->reset_regs();
+    kernel->set_regs(0, static_cast<uint16_t>(k_offset));
+    kernel->set_regs(1, static_cast<uint16_t>(k_offset >> 16));
+    kernel->set_regs(2, static_cast<uint16_t>(v_offset));
+    kernel->set_regs(3, static_cast<uint16_t>(v_offset >> 16));
+    kernel->set_regs(12, static_cast<uint16_t>(0));
+    register_writer.write(*kernel);
+
+    auto* queue = GET_QUEUE(NUM_CORES);
+    queue->set_broadcast_mode(true);
+    const std::vector<uint8_t> cores{0, 1, 2, 3, 4, 5, 6, 7};
+    queue->enqueu_kernel(*kernel, {40, 1, 1}, cores);
+
+    rpu_ddr_flush(k_cache.data_ptr<c10::Half>());
+    rpu_ddr_flush(v_cache.data_ptr<c10::Half>());
 }

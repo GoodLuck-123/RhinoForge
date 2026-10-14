@@ -38,6 +38,7 @@
 #include <string>
 
 #include "rpu_runtime_state.h"  // shared debug and cross-layer runtime state
+#include "rpu_wall_sorting_config.h"
 
 namespace v3 {
 
@@ -90,6 +91,33 @@ inline constexpr int64_t CAUSAL_DECODER_KV_FIRST_V_SITE =
 inline constexpr int64_t CAUSAL_DECODER_KV_FIRST_KV_SITE =
     3361545584592853925LL;
 
+inline constexpr int64_t CAUSAL_DECODER_P640_KV_HALF_SITE =
+    8535688935003675170LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_ATTN_HALF_SITE =
+    8570387146214916426LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_PREPARE_SITE =
+    5027877468547488755LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_O_SITE =
+    8850892697263436791LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_ATTN_REDUCE_SITE =
+    3668975285723910264LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_DOWN_SITE =
+    4394682572892278519LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_DOWN_ACC32_SITE =
+    399704067794410603LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_MIXED_REDUCE_SITE =
+    1839992827015145200LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_KV_PACKED_SITE =
+    5281967311249135583LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_ATTN_PACKED_TAIL_SITE =
+    832748208446470435LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_ATTN_PACKED_HEAD_SITE =
+    8753687736755763019LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_LOCAL_REDUCE_SITE =
+    9053924509254040070LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_REDUCE_SITE =
+    2464442243428739560LL;
+
 inline constexpr int64_t CAUSAL_DECODER_KV_FIRST_ATTN_SITE =
     4507982168063975685LL;
 inline constexpr int64_t CAUSAL_DECODER_KV_FIRST_PREPARE_SITE =
@@ -106,15 +134,53 @@ inline constexpr int64_t CAUSAL_DECODER_KV_FIRST_LM_HEAD_DMA_SITE =
     4026804102159716270LL;
 
 inline constexpr int64_t CAUSAL_DECODER_Q_SITE = 403971716841024546LL;
+inline constexpr int64_t LINGBOT2_PREFILL_POLICY_SITE = 5504178466171665685LL;
+inline constexpr int64_t LINGBOT2_PREFILL_QKV_MULTIBASE_SITE = 8454925678955766182LL;
+inline constexpr int64_t LINGBOT2_PREFILL_GATEUP_SHARED_A_SITE = 241484981695485993LL;
+inline constexpr int64_t LINGBOT2_PREFILL_KV_PAIR_SITE = 495520770794372102LL;
+inline constexpr int64_t LINGBOT2_PREFILL_QK_NORM_ROPE_SITE = 2577166026789914925LL;
+inline constexpr int64_t LINGBOT2_PREFILL_TAIL_K_SITE = 2305263238757064451LL;
+inline constexpr int64_t LINGBOT2_PREFILL_TAIL_V_SITE = 1422116084753939717LL;
+inline constexpr int64_t LINGBOT2_PREFILL_TAIL_KV_INSERT_SITE = 6319100201650874808LL;
+inline constexpr int64_t LINGBOT2_PREFILL_NOGAMMA_SITE = 688997276550014182LL;
+inline constexpr int64_t LINGBOT2_PREFILL_KV_TAIL_SITE = 3151337916589114704LL;
 inline constexpr int64_t CAUSAL_DECODER_K_SITE = 4795854722057375216LL;
 inline constexpr int64_t CAUSAL_DECODER_V_SITE = 6513089886571723927LL;
 inline constexpr int64_t CAUSAL_DECODER_RAW_SPM_ATTN_SITE =
     1958683583016123762LL;
+inline constexpr int64_t CAUSAL_DECODER_P672_ATTN_FIRST_SITE =
+    1474603354697563017LL;
+inline constexpr int64_t CAUSAL_DECODER_P672_ATTN_SECOND_SITE =
+    6180408805450126941LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_ROPE_SITE =
+    2842289842137902953LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_PARALLEL_SITE =
+    489263202852899179LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_NVFP4_KV_PARALLEL_SITE =
+    4030776912844874198LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SHARED_SILU_SITE =
+    7052916936419045721LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SILU_SITE =
+    3122792047702542432LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SITE =
+    6854732981276560913LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_QK_ROPE_SITE =
+    5470596349203671821LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_NVFP4_O_RING_NORM_SITE =
+    4642846510208079363LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_NVFP4_DOWN_RING_NORM_SITE =
+    2325056782993142764LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_RING_O_SITE =
+    572706433384339236LL;
 inline constexpr int64_t CAUSAL_DECODER_PREPARE_SITE =
     6944851813645512725LL;
 inline constexpr int64_t CAUSAL_DECODER_O_SITE = 8202287092212169288LL;
+inline constexpr int64_t CAUSAL_DECODER_MIXED_REDUCE_SITE =
+    7634148837397944168LL;
 inline constexpr int64_t CAUSAL_DECODER_REDUCE_SITE =
     6623643466707134842LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_RING_DOWN_SITE =
+    289560853106106124LL;
 inline constexpr int64_t CAUSAL_DECODER_DEEPSTACK_SITE =
     532029389006794381LL;
 inline constexpr int64_t CAUSAL_DECODER_LM_HEAD_SITE =
@@ -127,6 +193,14 @@ inline constexpr int64_t QWEN3VL_4B_DECODE_QK_NORM_MROPE_KV_INSERT_SITE =
     3722835822343098908LL;
 inline constexpr int64_t QWEN3VL_4B_DECODE_O_RING_NORM_SITE =
     3714126432099747378LL;
+// Exact Wall base FP16/W8 shared-input Gate/Up; independent COMPLETE sites.
+inline constexpr int64_t WALL_BASE_FP16_PREFILL_SHARED_GATEUP_SITE = 6874960863280133317LL;
+inline constexpr int64_t WALL_BASE_PREFILL_O_OWNER_NORM_SITE = 492240204828070401LL;
+inline constexpr int64_t WALL_BASE_PREFILL_SHARED_NOUP_SITE = 1629868327520520421LL;
+inline constexpr int64_t WALL_BASE_PREFILL_SHARED_SILU_SITE = 5552835997272390135LL;
+inline constexpr int64_t WALL_BASE_PREFILL_SHARED_GATEUP_SITE = 7094924445686102804LL;
+inline constexpr int64_t WALL_BASE_PREFILL_SHARED_DOWN_SITE = 475404116434773658LL;
+inline constexpr int64_t WALL_BASE_PREFILL_SHARED_REDUCE_SITE = 3858448252409706459LL;
 inline constexpr int64_t QWEN3VL_4B_PREFILL_GATEUP_SITE =
     5140288894752052630LL;
 inline constexpr int64_t QWEN3VL_4B_PREFILL_DOWN_SITE =
@@ -196,6 +270,12 @@ inline constexpr int64_t CAUSAL_DECODER_DEEPSTACK_TOPOLOGY_SITE =
     7158328860829261528LL;
 inline constexpr int64_t CAUSAL_DECODER_LM_HEAD_TOPOLOGY_SITE =
     3145128204432384004LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_SORTING_TOPOLOGY_SITE =
+    6741819502103388665LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_BASE_PAIRED_KV_SITE =
+    1134963394920026477LL;
+inline constexpr int64_t CAUSAL_DECODER_WALL_OWNER_DIRECT_KV_SITE =
+    2112699326193781810LL;
 // Controlled 4B W8 ordinary prefill uses the shared chunk-major traversal.
 inline constexpr int64_t CAUSAL_DECODER_4B_W8_PREFILL_SCHEDULE_SITE =
     4913775020614323787LL;
@@ -205,6 +285,7 @@ inline constexpr int64_t CAUSAL_DECODER_VL_PREFILL_SCHEDULE_SITE =
     1348148692389361716LL;
 inline constexpr int64_t CAUSAL_DECODER_4B_W8_PACKED_QKV_SITE =
     1079292426267549655LL;
+
 
 // Exact controlled delivery sites, represented in every COMPLETE descriptor.
 inline constexpr int64_t QWEN3VL_DELIVERY_TOPOLOGY_SITE = 7689168168149885712LL;
@@ -221,16 +302,29 @@ inline constexpr int64_t QWEN3VL_DELIVERY_MLP_REDUCE_SITE = 957155555766991356LL
 inline constexpr int64_t QWEN3VL_DELIVERY_KV_PAIR_SITE = 24242269098580500LL;
 inline constexpr int64_t QWEN3VL_DELIVERY_LM_HIDDEN_DMA_SITE = 1179089008795781732LL;
 
-// Ordinary direct-SPM normalization routes are downstream choices of
+// Ordinary direct-SPM decoder and Wall-OSS normalization routes are downstream choices of
 // the already-owned compute chunks, not independent planner search axes.
 // Keep these sites out of the generated owner inventory.
 inline constexpr int64_t RHINOVLA_TEXT_HIGH_RMSNORM_SITE = 6934604613252246886LL;
 inline constexpr int64_t RHINOVLA_TEXT_HIGH_ACTIVATION_SITE = 5910322037581299718LL;
 inline constexpr int64_t CAUSAL_DECODER_ORDINARY_RMSNORM_SITE =
     1776983747673121799LL;
+inline constexpr int64_t kCausalDecoderRmsNormRowsSite =
+    3400770019884872545LL;
+inline constexpr int64_t CAUSAL_DECODER_P640_MIXED_RMSNORM_SITE =
+    7375204264222821057LL;
+inline constexpr int64_t CAUSAL_DECODER_INPUT_MIXED_RMSNORM_SITE =
+    4901268649889462085LL;
+inline constexpr int64_t CAUSAL_DECODER_POST_MIXED_RMSNORM_SITE =
+    903642198633604752LL;
+inline constexpr int64_t CAUSAL_DECODER_FINAL_MIXED_RMSNORM_SITE =
+    3193242894861030760LL;
 
 enum class CausalDecoderAllReduceRoute : int64_t {
     PREPARE_RING_INPUT = 3,
+    FP16_PARTIAL_BF16_RESIDUAL = 4,
+    BF16_PARTIAL_FP16_RESIDUAL = 5,
+    RING_LOCAL_RESIDUAL = 6,
 };
 
 enum class CausalDecoderRopeRoute : int64_t {
@@ -252,7 +346,12 @@ enum class CausalDecoderGraphScheduleRoute : int64_t {
 enum class CausalDecoderLinearRoute : int64_t {
     AUTO_TILE = static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
     GEMV = static_cast<int64_t>(FmbLinearRouteSelector::GEMV),
+    WALL_RING_POSTNORM = 3,
+    ACC32_OUT_BF16 = 4,
     ROW_WEIGHT_REUSE = static_cast<int64_t>(FmbLinearRouteSelector::ROW_WEIGHT_REUSE),
+    WALL_QKV_MULTIBASE = 8,
+    WALL_BASE_NVFP4_O_RING_NORM = 9,
+    WALL_BASE_NVFP4_DOWN_RING_NORM = 10,
 };
 
 enum class CausalDecoderPlanningMode : int64_t {
@@ -286,7 +385,7 @@ inline std::vector<int64_t> causal_deepstack_topology_arguments(
 //   Qwen3 系列 vocab 一致 = 151936 (0.6B/1.7B/4B/8B/14B/32B)
 //   per-core: 151936/8 = 18992 halves ≈ 38 KB
 //   上限设 200000 (per-core 25000 halves = 50 KB), 给未来更大 vocab 模型留余量
-// Eight-core head reserve: 50 KB/core; reduced-core TP4 reserves 100 KB/core.
+// 八核默认50 KB/core；4/6核模板的冷态 head TP4 固定预留100 KB/core。
 inline constexpr int64_t QWEN3_FUSED_LM_HEAD_MAX_VOCAB = 200000;
 
 inline int resolve_causal_decoder_lm_head_tp(int core_count, int64_t vocab_size) {
@@ -300,16 +399,6 @@ inline int resolve_causal_decoder_lm_head_tp(int core_count, int64_t vocab_size)
     return core_count == 8 ? 8 : 4;
 }
 
-// AdaRMS fused scale/shift broadcast is a cold planner capability.
-// Each role has a contiguous [num_layers, hidden] DDR slab. reverse_layer_alloc
-// makes the corresponding persistent SPM slots ascend in the same layer order,
-// so a whole-role broadcast can replace individual per-layer transfers.
-// The transformation changes data movement, not arithmetic.
-//
-// M-RoPE position IDs use a stable [seq_len,3] INT32 DDR buffer indexed by
-// ctx().position + chunk.offset. Allocate capacity for the cache envelope and
-// refresh the relevant rows each forward. Only models with mrope_section need
-// this buffer; plain Qwen3/Llama paths do not allocate it.
 inline constexpr int64_t QWEN3_MROPE_MAX_KEEPALIVE_SEQ = 8192;
 
 // =============================================================================
@@ -334,6 +423,10 @@ public:
                     "decode auxiliary owners require cold binding outside Graph capture");
         TORCH_CHECK(num_layers() > 0,
                     "decode auxiliary owners require installed model weights");
+        // A retained Tensor can expose unversioned CPU aliases. This instance
+        // must never infer publication from its table bytes after owner export,
+        // including when a later set_weights reuses the same storage.
+        ka_cpu_pos_owner_exported_ = true;
         DecodeAuxiliaryTensorOwners owners{
             installed_model_state_generation(),
             qwen3vl_4b_qkv_scale_bank_, position_ids_keepalive_, {}};
@@ -351,6 +444,68 @@ public:
         TORCH_CHECK(num_layers() > 0,
                     "decoder topology requires installed model weights");
         return {num_cores(), attn_tp(), mlp_tp(), lm_head_tp(), NUM_CORES};
+    }
+
+    void set_wall_sorting_routes(
+        int64_t fp16_transfer_mask, bool fp16_mlp_m224, bool silu_mul,
+        bool action_activation_reuse, bool prefill_row_reuse,
+        bool prefill_mlp_retile, bool paired_postnorm_tile40) {
+        TORCH_CHECK(num_layers() == 0,
+                    "Wall sorting routes must be set before weights");
+        TORCH_CHECK(fp16_transfer_mask >= 0 && fp16_transfer_mask <= 7,
+                    "Wall FP16 transfer mask must be in 0..7");
+        TORCH_CHECK(!fp16_mlp_m224 || (fp16_transfer_mask & 2),
+                    "Wall FP16 M224 requires prefill transfer");
+        WallSortingConfig sorting;
+        sorting.fp16_transfer_mask = static_cast<uint32_t>(fp16_transfer_mask);
+        sorting.fp16_mlp_m224 = fp16_mlp_m224;
+        sorting.silu_mul = silu_mul;
+        sorting.action_activation_reuse = action_activation_reuse;
+        sorting.prefill_row_reuse = prefill_row_reuse;
+        sorting.prefill_mlp_retile = prefill_mlp_retile;
+        sorting.paired_postnorm_tile40 = paired_postnorm_tile40;
+        wall_sorting_ = sorting;
+    }
+
+    void set_wall_prefill_routes(
+        bool mixed_precision, bool staged_mlp,
+        int64_t rmsnorm_capability, bool owner_direct_kv = false) {
+        TORCH_CHECK(num_layers() == 0,
+                    "Wall-OSS prefill routes must be set before weights");
+        TORCH_CHECK(!staged_mlp || mixed_precision,
+                    "Wall-OSS staged MLP requires mixed precision");
+        TORCH_CHECK(!owner_direct_kv || staged_mlp,
+                    "Wall-OSS owner-direct K/V requires staged MLP");
+        TORCH_CHECK(
+            rmsnorm_capability >= 0 &&
+                rmsnorm_capability <=
+                    static_cast<int64_t>(RPU_RMSNORM_CAP_ALL) &&
+                rpu_rmsnorm_capability_valid(
+                    static_cast<uint32_t>(rmsnorm_capability)),
+            "Wall-OSS RMSNorm capability must be a valid typed mask; got ",
+            rmsnorm_capability);
+        TORCH_CHECK(
+            rmsnorm_capability == RPU_RMSNORM_CAP_BASE ||
+                rmsnorm_capability ==
+                    (RPU_RMSNORM_CAP_BASE | RPU_RMSNORM_CAP_V32),
+            "Wall-OSS RMSNorm capability must be BASE or exact FIXED32; got ",
+            rmsnorm_capability);
+        const auto rmsnorm_contract = rpu_snapshot_rmsnorm_spm_contract(
+            static_cast<uint32_t>(rmsnorm_capability));
+        TORCH_CHECK(
+            rmsnorm_capability == RPU_RMSNORM_CAP_BASE ||
+                rmsnorm_contract.capability ==
+                    static_cast<uint32_t>(rmsnorm_capability),
+            "Wall-OSS FIXED32 RMSNorm payload is unavailable in the loaded "
+            "op libraries");
+
+        // Commit only after every fallible route dependency has been
+        // snapshotted and checked. A rejected FIXED32 request must not enable
+        // mixed/staged execution on an otherwise unconfigured handle.
+        wall_prefill_mixed_requested_ = mixed_precision;
+        wall_prefill_staged_requested_ = staged_mlp;
+        wall_prefill_owner_direct_requested_ = owner_direct_kv;
+        wall_rmsnorm_capability_ = rmsnorm_contract.capability;
     }
 
     struct LayerWeights {
@@ -558,8 +713,8 @@ public:
                             intermediate_size() == 6144 && num_q_heads() == 16 &&
                             num_kv_heads() == 8 && head_dim() == 128 &&
                             has_qk_norm_ && has_mrope_ && use_silu_ && !adarms_ &&
-                            !qwen3vl_2b_w8_profile_ &&
-                            !decode_gate_up_fusion_,
+                            !decoder_mixed_precision_ && !qwen3vl_2b_w8_profile_ &&
+                            !decode_gate_up_fusion_ && !wall_sorting_route_enabled(),
                         "RhinoVLA high-precision text requires exact ordinary v3 W8 prefix");
             for (const auto& layer : layer_weights_) {
                 for (const auto* weight : {&layer.q_w, &layer.k_w, &layer.v_w,
@@ -594,6 +749,101 @@ public:
             get_last_resolved_chunk_size() == 0,
             "causal decoder linear accumulation mode must be set before the first forward");
         linear_acc32_ = enabled;
+        invalidate_model_state();
+    }
+
+    void enable_lingbot_resident_preloads() {
+        TORCH_CHECK(lingbot_prefill_kv_only_ && num_cores() == 8 &&
+                        num_layers() == 36 && hidden_size() == 2560 &&
+                        has_qk_norm_ && !has_qkv_bias_ && !adarms_ && !norm_slab_active() &&
+                        !qwen3vl_pooler_z1_dispatch_ && !qwen3vl_multiview_text_composite_dispatch_,
+                    "resident language preloads require the ordinary LingBot KV-only owner");
+        std::vector<std::string> names{"q_norm_w", "k_norm_w"};
+        if (!lingbot_folded_rmsnorm_) {
+            names.emplace_back("norm_w");
+            names.emplace_back("post_norm_w");
+        }
+        configure_resident_preloads(std::move(names));
+    }
+
+    void set_lingbot_prefill_mode(bool folded_rmsnorm, bool kv_only) {
+        constexpr const char* operation = "lingbot2_language_prefill_mode";
+        RpuExecutionCoordinator::require_graph_quiescent(operation);
+        RpuExecutionCoordinator::check_current_thread_execution_allowed(operation);
+        TORCH_CHECK(!RpuKernelGraph::has_active() && get_last_resolved_chunk_size() == 0 &&
+                        !lingbot_prefill_mode_bound_,
+                    "LingBot language mode must be bound once before forward");
+        TORCH_CHECK(typeid(*this) == typeid(CausalDecoderModel) &&
+                        num_cores() == 8 && num_layers() == 36 && hidden_size() == 2560 &&
+                        intermediate_size() == 9728 && num_q_heads() == 32 &&
+                        num_kv_heads() == 8 && head_dim() == 128 && has_mrope_ &&
+                        has_qk_norm_ && !has_qkv_bias_ && use_silu_ && !adarms_ &&
+                        !nvfp4_ && !decoder_mixed_precision_ && !rhinovla_high_precision_ &&
+                        !qwen3vl_2b_w8_profile_ && !wall_sorting_route_enabled() &&
+                        !fuse_lm_head_ && mrope_section_ == std::vector<int32_t>({24, 20, 20}) &&
+                        deepstack_lang_layers_ == std::vector<int64_t>({0, 1, 2}),
+                    "LingBot language mode requires the ordinary TP8 4B prefix owner");
+        const auto dtype = layer_weights_.front().q_w.scalar_type();
+        TORCH_CHECK(dtype == at::kHalf || dtype == at::kChar,
+                    "LingBot language mode supports FP16 or W8 projections");
+        for (const auto& layer : layer_weights_) {
+            for (const auto* weight : {&layer.q_w, &layer.k_w, &layer.v_w,
+                    &layer.o_w, &layer.gate_w, &layer.up_w, &layer.down_w})
+                TORCH_CHECK(weight->scalar_type() == dtype,
+                            "LingBot language mode requires uniform projection precision");
+        }
+        TORCH_CHECK(!folded_rmsnorm || kv_only,
+                    "LingBot folded RMSNorm is admitted only for KV-only prefill");
+        const auto norm_contract = folded_rmsnorm
+            ? rpu_snapshot_rmsnorm_nogamma_spm_contract() : RpuRmsNormSpmContract{};
+        const int64_t qkv_mode = select_lingbot_prefill_qkv_mode(folded_rmsnorm, kv_only);
+        lingbot_nogamma_contract_ = norm_contract;
+        lingbot_prefill_qkv_mode_ = qkv_mode;
+        lingbot_prefill_gateup_shared_a_ = select_lingbot_prefill_gateup_shared_a(folded_rmsnorm, kv_only);
+        lingbot_folded_rmsnorm_ = folded_rmsnorm;
+        lingbot_prefill_kv_only_ = kv_only;
+        lingbot_prefill_mode_bound_ = true;
+        invalidate_model_state();
+    }
+
+    void set_lingbot_prefill_kv_pair(bool enabled) {
+        constexpr const char* operation = "lingbot2_prefill_kv_pair";
+        RpuExecutionCoordinator::require_graph_quiescent(operation);
+        RpuExecutionCoordinator::check_current_thread_execution_allowed(operation);
+        TORCH_CHECK(typeid(*this) == typeid(CausalDecoderModel) &&
+                        lingbot_prefill_mode_bound_ && !lingbot_prefill_kv_pair_bound_ &&
+                        !RpuKernelGraph::has_active() && get_last_resolved_chunk_size() == 0,
+                    "LingBot paired KV must be bound once after language mode and before planning");
+        // Paired V16 is a required initialized kernel, outside the optional
+        // atomic capability table. Read its existing slot without loading it.
+        TORCH_CHECK(!enabled || (lingbot_folded_rmsnorm_ && lingbot_prefill_kv_only_ &&
+                        qwen3vl_4b_w8_profile_ && !linear_acc32_ &&
+                        KernelCache::instance().get(KernelId::QWEN3VL_INSERT_KV_CACHE_V16) != nullptr),
+                    "LingBot paired KV requires the folded W8 owner and paired V16 payload");
+        lingbot_prefill_kv_pair_ = enabled;
+        lingbot_prefill_kv_pair_bound_ = true;
+        invalidate_model_state();
+    }
+
+    void set_lingbot_prefill_qk_norm_rope(bool enabled) {
+        constexpr const char* operation = "lingbot2_prefill_qk_norm_rope";
+        RpuExecutionCoordinator::require_graph_quiescent(operation);
+        RpuExecutionCoordinator::check_current_thread_execution_allowed(operation);
+        TORCH_CHECK(typeid(*this) == typeid(CausalDecoderModel) &&
+                        lingbot_prefill_mode_bound_ && !lingbot_prefill_qk_norm_rope_bound_ &&
+                        !RpuKernelGraph::has_active() && get_last_resolved_chunk_size() == 0,
+                    "LingBot QK norm/RoPE must be bound once after language mode and before planning");
+        TORCH_CHECK(!enabled || (lingbot_folded_rmsnorm_ && lingbot_prefill_kv_only_ &&
+                        qwen3vl_4b_w8_profile_ && !linear_acc32_ && eps_ == 1e-6),
+                    "LingBot QK norm/RoPE requires the folded W8 KV-only owner and epsilon 1e-6");
+        // Preserve the actual learned-gamma V32 routes, including their FP16
+        // retirement. A missing optional payload/capability retains four calls.
+        const bool selected = enabled && ordinary_rmsnorm_route_enabled() &&
+            ordinary_rmsnorm_spm_contract_.resolve(224 * 4, 128) == RpuRmsNormSpmRoute::V32_GRID8 &&
+            ordinary_rmsnorm_spm_contract_.resolve(224, 128) == RpuRmsNormSpmRoute::V32_GRID8 &&
+            KernelCache::instance().get(KernelId::LINGBOT2_PREFILL_QK_NORM_ROPE_M224) != nullptr;
+        lingbot_prefill_qk_norm_rope_ = selected;
+        lingbot_prefill_qk_norm_rope_bound_ = true;
         invalidate_model_state();
     }
 
@@ -764,6 +1014,8 @@ public:
         at::Tensor up_nvfp4_tensor_scales = {},
         at::Tensor down_nvfp4_tensor_scales = {})
     {
+        TORCH_CHECK(!lingbot_prefill_mode_bound_,
+                    "LingBot language weights cannot change after the cold mode is bound");
         // ─────────────────────────────────────────────────────────────────────
         // Basic sanity
         // ─────────────────────────────────────────────────────────────────────
@@ -993,7 +1245,7 @@ public:
             }
             TORCH_CHECK(ts.defined() && ts.dim() == 1 && ts.size(0) >= N,
                         "causal_decoder_set_weights: ", name,
-                        " must be fp32 RPU [at_least_num_layers=", N, "], got ",
+                        " must be fp32 device [at_least_num_layers=", N, "], got ",
                         ts.defined() ? ts.sizes() : at::IntArrayRef{});
             TORCH_CHECK(ts.numel() % 8 == 0,
                         "causal_decoder_set_weights: ", name,
@@ -1005,7 +1257,7 @@ public:
             TORCH_CHECK(ts.device().type() == c10::DeviceType::PrivateUse1 &&
                             ts.is_contiguous(),
                         "causal_decoder_set_weights: ", name,
-                        " must be contiguous on RPU");
+                        " must be contiguous on device");
         };
         check_nvfp4_tensor_scales(q_nvfp4_tensor_scales, "q_nvfp4_tensor_scales");
         check_nvfp4_tensor_scales(k_nvfp4_tensor_scales, "k_nvfp4_tensor_scales");
@@ -1057,7 +1309,8 @@ public:
                 (vl_semantics || (mrope_section.empty() && deepstack_lang_layers.empty()));
             TORCH_CHECK((!has_scale || bounded_text_w8) && !has_nvfp4 &&
                             (vl_semantics || (mrope_section.empty() &&
-                                              deepstack_lang_layers.empty())) ,
+                                              deepstack_lang_layers.empty())) &&
+                            !wall_prefill_mixed_requested_ && !wall_prefill_staged_requested_,
                         "reduced-core decoder requires plain Qwen3 / Qwen3-VL FP16 or exact Qwen3-1.7B / Qwen3-VL-2B W8A16");
             TORCH_CHECK(cold_routes_configured_ && configured_vocab_size_ == 151936 &&
                             lm_head_tp() == 4,
@@ -1195,6 +1448,35 @@ public:
         }
         // Bind the optional payload once, before planning/capture. Its presence
         // changes the actual COMPLETE route; an old REF keeps the original MLP.
+        wall_base_prefill_shared_input_ = wall_sorting_.silu_mul &&
+            N == 36 && num_cores() == 8 && has_scale && !has_nvfp4 &&
+            hidden_size == 2048 && intermediate_size == 11008 &&
+            num_q_heads == 16 && num_kv_heads == 8 && head_dim == 128 &&
+            mrope_section == std::vector<int64_t>{16, 24, 24} &&
+            deepstack_lang_layers.empty() && use_silu &&
+            has_qkv_bias_ && !has_qk_norm_;
+        for (int64_t i = 0; wall_base_prefill_shared_input_ && i < N; ++i) {
+            wall_base_prefill_shared_input_ =
+                q_w_list[i].scalar_type() == at::kChar &&
+                k_w_list[i].scalar_type() == at::kChar &&
+                v_w_list[i].scalar_type() == at::kChar &&
+                o_w_list[i].scalar_type() == at::kChar &&
+                gate_list[i].scalar_type() == at::kChar &&
+                up_list[i].scalar_type() == at::kChar &&
+                down_list[i].scalar_type() == at::kChar;
+        }
+        wall_base_prefill_shared_input_ = wall_base_prefill_shared_input_ &&
+            KernelCache::instance().has_loaded(
+                KernelId::WALL_BASE_PREFILL_GATE_UP_SHARED_A_M384N48K128);
+        wall_base_prefill_shared_silu_ = wall_base_prefill_shared_input_ &&
+            KernelCache::instance().has_loaded(
+                KernelId::WALL_BASE_PREFILL_GATE_UP_SHARED_SILU_M384N48K128);
+        wall_base_prefill_no_up_store_ = wall_base_prefill_shared_silu_ &&
+            KernelCache::instance().has_loaded(
+                KernelId::WALL_BASE_PREFILL_GATE_UP_SHARED_SILU_NOUP_M384N48K128);
+        wall_base_prefill_long_qkv_ = wall_base_prefill_no_up_store_ &&
+            KernelCache::instance().has_loaded(
+                KernelId::WALL_QKV_W8A16_MULTIBASE_M448N64);
         qwen3vl_4b_decode_gateup_fused_ = qwen3vl_4b_w8_profile_ &&
             KernelCache::instance().has_loaded(KernelId::QWEN3VL_GATEUP_SWIGLU_GEMV);
         qwen3vl_4b_decode_qk_fused_ = qwen3vl_4b_qk_profile &&
@@ -1203,6 +1485,39 @@ public:
             KernelCache::instance().has_loaded(KernelId::QWEN3VL_QK_NORM_MROPE_KV_INSERT_D128);
         qwen3vl_4b_decode_o_ring_norm_fused_ = qwen3vl_4b_w8_profile_ &&
             KernelCache::instance().has_loaded(KernelId::QWEN3VL_O_RING_NORM_M1_H2560_W8);
+        // Reuse the FP16 dynamic-row QKV and ordinary SiLU/Mul packets for
+        // the base owner's two-chunk prefill. This does not admit FP16 to
+        // the W8 shared-input/no-Up payloads or change any SPM allocation.
+        wall_base_fp16_long_prefill_ = wall_sorting_.silu_mul &&
+            (wall_sorting_.fp16_transfer_mask & 2u) &&
+            N == 36 && num_cores() == 8 && !has_scale && !has_nvfp4 &&
+            hidden_size == 2048 && intermediate_size == 11008 &&
+            num_q_heads == 16 && num_kv_heads == 8 && head_dim == 128 &&
+            mrope_section == std::vector<int64_t>{16, 24, 24} &&
+            deepstack_lang_layers.empty() && use_silu &&
+            has_qkv_bias_ && !has_qk_norm_;
+        for (int64_t i = 0; wall_base_fp16_long_prefill_ && i < N; ++i) {
+            wall_base_fp16_long_prefill_ =
+                q_w_list[i].scalar_type() == at::kHalf &&
+                k_w_list[i].scalar_type() == at::kHalf &&
+                v_w_list[i].scalar_type() == at::kHalf &&
+                o_w_list[i].scalar_type() == at::kHalf &&
+                gate_list[i].scalar_type() == at::kHalf &&
+                up_list[i].scalar_type() == at::kHalf &&
+                down_list[i].scalar_type() == at::kHalf;
+        }
+        wall_base_fp16_long_prefill_ = wall_base_fp16_long_prefill_ &&
+            KernelCache::instance().has_loaded(KernelId::WALL_PREFILL_QKV_FP16_M448N64K128);
+        wall_base_fp16_shared_gateup_ = wall_base_fp16_long_prefill_ &&
+            KernelCache::instance().has_loaded(
+                KernelId::WALL_BASE_PREFILL_GATE_UP_SHARED_SILU_FP16_M320N80K128);
+        // The C224 ring/norm payload consumes FP16 activations independently
+        // of projection precision. Both owners retain their exact two-chunk proof.
+        wall_base_prefill_owner_norm_ =
+            (wall_base_prefill_long_qkv_ || wall_base_fp16_long_prefill_) && eps == 1e-6 &&
+            std::all_of(post_norm_list.begin(), post_norm_list.end(), [](const at::Tensor& t) {
+                return t.scalar_type() == at::kHalf;
+            }) && KernelCache::instance().has_loaded(KernelId::WALL_BASE_PREFILL_O_OWNER_RING_NORM_M224);
         // Cold opt-in by actual storage, not a model-name route override.
         // General native callers with independent Q/K/V keep separate GEMVs.
         qwen3vl_4b_packed_qkv_weights_ = qwen3vl_4b_w8_profile_;
@@ -1392,7 +1707,7 @@ public:
                     src.device().type() == at::kPrivateUse1 &&
                         src.scalar_type() == at::kHalf && src.is_contiguous() &&
                         src.numel() == expected_elements,
-                    "Qwen norm slab requires contiguous fp16 RPU ", name,
+                    "Qwen norm slab requires contiguous fp16 device ", name,
                     " at layer ", layer, "; got device=", src.device(),
                     " dtype=", src.scalar_type(),
                     " contiguous=", src.is_contiguous(),
@@ -1424,6 +1739,7 @@ public:
         //   cos/sin) and compute strobe masks + allocate position_ids keepalive.
         // ─────────────────────────────────────────────────────────────────────
         const bool has_mrope = (mrope_section.size() > 0);
+        ka_cpu_pos_published_rows_.fill(0);
         if (has_mrope) {
             // C1: mrope_section must be exactly 3 axes (T, H, W), all non-negative,
             // sum == head_dim/2 (rotary half-dim).
@@ -1452,7 +1768,7 @@ public:
             mrope_strobe_masks_ = rpu_compute_mrope_strobe_masks(
                 mrope_section_, static_cast<int32_t>(head_dim));
 
-            // Lazy-allocate keepalive on RPU device. Stable across forwards;
+            // Lazy-allocate keepalive on device. Stable across forwards;
             // forward() copies per-forward [seq_len, 3] position_ids into the
             // appropriate row range at index `ctx().position`.
             if (qwen3vl_4b_decode_qk_fused_ || qwen3vl_4b_decode_qk_kv_fused_) {
@@ -1526,6 +1842,109 @@ public:
         deepstack_dense_src_base_.fill(0);
         deepstack_dense_refs_.clear();
 
+        // The mixed ring requires all eight input shards, hence the C++ profile
+        // sees the adapter's two logical KV heads after TP8 replication as nkv=8.
+        // This exact mixed-weight contract applies only to expert-0; expert-1's
+        // separate W8A16 path and every other decoder remain unaffected.
+        const bool wall_expert0_arch =
+            N == 36 && hidden_size == 2048 && intermediate_size == 11008
+            && num_q_heads == 16 && head_dim == 128
+            && has_qkv_bias_ && !has_qk_norm_ && has_mrope_
+            && deepstack_lang_layers_.empty()
+            && mrope_section_.size() == 3
+            && mrope_section_[0] == 16 && mrope_section_[1] == 24
+            && mrope_section_[2] == 24;
+        const bool wall_mixed_requested =
+            wall_expert0_arch && wall_prefill_mixed_requested_;
+        const bool wall_staged_requested =
+            wall_expert0_arch && wall_prefill_staged_requested_;
+        const bool wall_owner_direct_requested =
+            wall_expert0_arch && wall_prefill_owner_direct_requested_;
+        TORCH_CHECK(
+            !wall_staged_requested || wall_mixed_requested,
+            "RPU_WALL_OSS_PREFILL_STAGED_MLP=1 requires "
+            "RPU_WALL_OSS_PREFILL_MIXED_PRECISION=1");
+        TORCH_CHECK(
+            !wall_owner_direct_requested || wall_staged_requested,
+            "RPU_WALL_OSS_PREFILL_OWNER_DIRECT_KV=1 requires "
+            "RPU_WALL_OSS_PREFILL_STAGED_MLP=1");
+        wall_prefill_staged_mlp_ = false;
+        wall_prefill_owner_direct_kv_ = false;
+        if (wall_mixed_requested) {
+            TORCH_CHECK(
+                num_kv_heads == 8,
+                "Wall-OSS prefill mixed precision requires TP8 KV replication; "
+                "C++ received num_kv_heads=", num_kv_heads);
+            const bool pure_fp16 = !has_scale && std::all_of(
+                layer_weights_.begin(), layer_weights_.end(),
+                [](const LayerWeights& lw) {
+                    return lw.q_w.scalar_type() == at::kHalf
+                        && lw.k_w.scalar_type() == at::kHalf
+                        && lw.v_w.scalar_type() == at::kHalf
+                        && lw.o_w.scalar_type() == at::kHalf
+                        && lw.gate_w.scalar_type() == at::kHalf
+                        && lw.up_w.scalar_type() == at::kHalf
+                        && lw.down_w.scalar_type() == at::kHalf;
+                });
+            const bool hybrid_w8a16 = has_scale && !has_nvfp4 && [&] {
+                for (size_t i = 0; i < layer_weights_.size(); ++i) {
+                    const auto& lw = layer_weights_[i];
+                    if (lw.q_w.scalar_type() != at::kChar
+                        || lw.k_w.scalar_type() != at::kChar
+                        || lw.v_w.scalar_type() != at::kChar
+                        || lw.o_w.scalar_type() != at::kChar
+                        || lw.gate_w.scalar_type() != at::kChar
+                        || lw.up_w.scalar_type() != at::kChar
+                        || lw.down_w.scalar_type()
+                            != (i == 2 ? at::kHalf : at::kChar)) {
+                        return false;
+                    }
+                }
+                return true;
+            }();
+            const bool hybrid_w4a16 = has_scale && !has_nvfp4 && [&] {
+                for (size_t i = 0; i < layer_weights_.size(); ++i) {
+                    const auto& lw = layer_weights_[i];
+                    if (lw.q_w.scalar_type() != at::kByte
+                        || lw.k_w.scalar_type() != at::kByte
+                        || lw.v_w.scalar_type() != at::kByte
+                        || lw.o_w.scalar_type() != at::kByte
+                        || lw.gate_w.scalar_type() != at::kByte
+                        || lw.up_w.scalar_type() != at::kByte
+                        || lw.down_w.scalar_type()
+                            != (i == 2 ? at::kHalf : at::kChar)) {
+                        return false;
+                    }
+                }
+                return true;
+            }();
+            TORCH_CHECK(
+                pure_fp16 || hybrid_w8a16 || hybrid_w4a16,
+                "Wall-OSS prefill mixed precision requires either all FP16 "
+                "weights, exact W8A16 weights, or exact W4A16 projection weights "
+                "with INT8 down_proj; only layer-2 down_proj may be FP16");
+            TORCH_CHECK(
+                wall_rmsnorm_capability_ == RPU_RMSNORM_CAP_BASE ||
+                    hybrid_w8a16 ||
+                    (pure_fp16 && (wall_sorting_.fp16_transfer_mask & 2u)),
+                "Wall-OSS FIXED32 RMSNorm requires exact RTC W8A16 or "
+                "transferred FP16 prefill weights");
+            decoder_mixed_precision_ = true;
+            TORCH_CHECK(
+                !wall_staged_requested || hybrid_w8a16 ||
+                    (pure_fp16 && (wall_sorting_.fp16_transfer_mask & 2u)),
+                "RPU_WALL_OSS_PREFILL_STAGED_MLP=1 is currently certified "
+                "only for exact Wall-OSS W8A16 or transferred FP16 weights");
+            wall_prefill_staged_mlp_ = wall_staged_requested;
+            wall_prefill_owner_direct_kv_ = wall_owner_direct_requested;
+        } else {
+            TORCH_CHECK(
+                wall_rmsnorm_capability_ == RPU_RMSNORM_CAP_BASE,
+                "non-Wall or non-mixed CausalDecoder owners require BASE "
+                "RMSNorm capability");
+            decoder_mixed_precision_ = false;
+        }
+
         // AdaRMS FiLM state (LingBot-VLA expert) is established per set_adarms_*() call,
         // which always runs AFTER set_weights. Clear it here (symmetric with the mrope /
         // deepstack resets above) so a handle re-used as a PLAIN decoder after AdaRMS use
@@ -1550,13 +1969,50 @@ public:
         adarms_is_live_base_ = adarms_ish_live_base_ = 0;
         adarms_ps_live_base_ = adarms_psh_live_base_ = 0;
 
+        // Task REF marker is a cold capability, never a hot environment lookup.
+        // The ordinary required paired payload and Qwen192 contract stay intact.
+        wall_base_paired_kv_ = wall_base_paired_kv_profile() &&
+            KernelCache::instance().get_kernel("wall_base_action_paired_kv_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_action_paired_kv_h32") != nullptr;
+        wall_base_nvfp4_qkv_bias_ = wall_base_nvfp4_qkv_bias_profile() &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_qkv_bias_barrier_n64") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_qkv_bias_barrier_n64") != nullptr &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_qkv_bias_barrier_n32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_qkv_bias_barrier_n32") != nullptr;
+        wall_base_nvfp4_qk_rope_ = wall_base_nvfp4_qkv_bias_ &&
+            KernelCache::instance().get_kernel("wall_base_partial_mrope_qk_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_partial_mrope_qk_h32") != nullptr;
+        wall_base_nvfp4_kv_parallel_ = wall_base_nvfp4_qk_rope_ &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_kv_parallel_bias_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_kv_parallel_bias_h32") != nullptr;
+        wall_base_nvfp4_qkv_parallel_ = wall_base_nvfp4_kv_parallel_ &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_qkv_parallel_bias_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_qkv_parallel_bias_h32") != nullptr;
+        wall_base_nvfp4_qkv_rope_ = wall_base_nvfp4_qkv_parallel_ &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_qkv_bias_rope_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_qkv_bias_rope_h32") != nullptr;
+        wall_base_nvfp4_o_ring_norm_ = wall_base_nvfp4_o_ring_norm_profile() &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_o_ring_norm_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_o_ring_norm_h32") != nullptr;
+        wall_base_nvfp4_down_ring_norm_ = wall_base_nvfp4_down_ring_norm_profile() &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_down_ring_norm_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_down_ring_norm_h32") != nullptr;
+        wall_base_nvfp4_gate_up_ = wall_base_nvfp4_gate_up_profile() &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_gate_up_parallel_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_gate_up_parallel_h32") != nullptr;
+        wall_base_nvfp4_gate_up_silu_ = wall_base_nvfp4_gate_up_ &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_gate_up_parallel_silu_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_gate_up_parallel_silu_h32") != nullptr;
+        wall_base_nvfp4_gate_up_shared_silu_ = wall_base_nvfp4_gate_up_silu_ &&
+            KernelCache::instance().get_kernel("wall_base_nvfp4_gate_up_shared_silu_h32") != nullptr &&
+            KernelCache::instance().get_program("wall_base_nvfp4_gate_up_shared_silu_h32") != nullptr;
         invalidate_model_state();  // D-503: last non-empty statement of set_weights
     }
 
     // AdaRMS FiLM step-update (LingBot-VLA expert). The Euler denoise loop calls
     // this before each forward with the step's folded scale/shift. The scale rides
     // on the input/post norm-weight slots (rmsnorm uses it as the weight); the shift
-    // is broadcast-added after each norm. All tensors [hidden] fp16 RPU. Must be
+    // is broadcast-added after each norm. All tensors [hidden] fp16 device. Must be
     // called AFTER set_weights (needs num_layers()/layer_weights_).
     void set_adarms_step(
         at::TensorList input_scales, at::TensorList input_shifts,
@@ -1584,7 +2040,7 @@ public:
                 TORCH_CHECK(t.defined() && t.dim()==1 && t.size(0)==h
                          && t.scalar_type()==at::kHalf
                          && t.device().type()==at::kPrivateUse1,
-                         "set_adarms_step: ", nm, "[", i, "] must be [", h, "] fp16 RPU");
+                         "set_adarms_step: ", nm, "[", i, "] must be [", h, "] fp16 device");
             };
             chk(input_scales[i],"input_scales"); chk(input_shifts[i],"input_shifts");
             chk(post_scales[i], "post_scales");  chk(post_shifts[i], "post_shifts");
@@ -1606,15 +2062,6 @@ public:
         invalidate_model_state(planning_domain_changed);
     }
 
-    // set_adarms_step_mutable — REPLAY-safe AdaRMS for the denoise loop (LingBot-VLA).
-    // The plain set_adarms_step above swaps the per-layer scale/shift tensors and
-    // invalidates model state, requiring a fresh graph build each Euler step.
-    // This variant instead holds the scale/shift in STABLE-ADDR keepalives whose CONTENTS
-    // are refreshed in place per step (no invalidate), and build_*_body emits a per-layer
-    // graph-body broadcast DMA that re-loads them into the norm_w/shift SPM slots on every
-    // REPLAY (emit_adarms_mut_refresh) — the same discipline as the partial_mrope cos/sin
-    // keepalive. So the graph is BUILT once and REPLAYED for steps 1..N (fast-replay-safe).
-    // Inputs are [num_layers, hidden] fp16 RPU (one contiguous tensor per role, not lists).
     void set_adarms_step_mutable(
         const at::Tensor& input_scale, const at::Tensor& input_shift,
         const at::Tensor& post_scale,  const at::Tensor& post_shift)
@@ -1628,7 +2075,7 @@ public:
         auto chk = [&](const at::Tensor& t, const char* nm){
             TORCH_CHECK(t.defined() && t.dim()==2 && t.size(0)==N && t.size(1)==h
                      && t.scalar_type()==at::kHalf && t.device().type()==at::kPrivateUse1,
-                     "set_adarms_step_mutable: ", nm, " must be [", N, ",", h, "] fp16 RPU");
+                     "set_adarms_step_mutable: ", nm, " must be [", N, ",", h, "] fp16 device");
         };
         chk(input_scale,"input_scale"); chk(input_shift,"input_shift");
         chk(post_scale,"post_scale");   chk(post_shift,"post_shift");
@@ -1666,7 +2113,7 @@ public:
 
     // set_adarms_unroll — bind the CALL-INVARIANT per-step AdaRMS fold for the in-graph
     // denoise unroll (LingBot-VLA lingbot_denoise op). The 4 buffers are
-    // [num_steps, num_layers, hidden] fp16 RPU (adapter's precomputed fold_all); the
+    // [num_steps, num_layers, hidden] fp16 device (adapter's precomputed fold_all); the
     // per-body refresh (emit_adarms_mut_refresh_*) reads slice (body_iter*N + L) each
     // iteration, so one BUILD unrolls all num_steps steps with per-step FiLM. The
     // preload_callbacks + build-time layer_weights_ views point at step 0 (body_iter 0).
@@ -1684,7 +2131,7 @@ public:
         auto chk = [&](const at::Tensor& t, const char* nm){
             TORCH_CHECK(t.defined() && t.dim()==3 && t.size(1)==N && t.size(2)==h
                      && t.scalar_type()==at::kHalf && t.device().type()==at::kPrivateUse1,
-                     "set_adarms_unroll: ", nm, " must be [num_steps,", N, ",", h, "] fp16 RPU");
+                     "set_adarms_unroll: ", nm, " must be [num_steps,", N, ",", h, "] fp16 device");
         };
         chk(input_scale,"input_scale"); chk(input_shift,"input_shift");
         chk(post_scale,"post_scale");   chk(post_shift,"post_shift");
@@ -1740,7 +2187,7 @@ public:
                      && t.size(1)==N && t.size(2)==h && t.is_contiguous()
                      && t.scalar_type()==at::kHalf && t.device().type()==at::kPrivateUse1,
                      "bind_adarms_schedule: ", nm,
-                     " must be contiguous [num_steps,", N, ",", h, "] fp16 RPU");
+                     " must be contiguous [num_steps,", N, ",", h, "] fp16 device");
         };
         chk(input_scale,"input_scale"); chk(input_shift,"input_shift");
         chk(post_scale,"post_scale");   chk(post_shift,"post_shift");
@@ -1749,7 +2196,7 @@ public:
                  && post_shift.size(0)==steps,
                     "bind_adarms_schedule: all 4 buffers must share num_steps");
 
-        // Direct tensor references keep the caller's RPU storage alive. Contents are immutable;
+        // Direct tensor references keep the caller's device storage alive. Contents are immutable;
         // flush each complete slab once here, instead of four copy_ + four flushes per step.
         adarms_is_  = input_scale;
         adarms_ish_ = input_shift;
@@ -1955,7 +2402,7 @@ public:
         const std::optional<at::Tensor>& position_ids = std::nullopt,
         const std::optional<std::vector<at::Tensor>>& deepstack_dense_visual_embeds = std::nullopt,
         // partial_mrope path: per-forward interleaved cos/sin [seq_len, head_dim/2]
-        // fp16 RPU. When supplied (M-RoPE active), the M-RoPE launchers swap to
+        // fp16 device. When supplied (M-RoPE active), the M-RoPE launchers swap to
         // partial_mrope. None (default) preserves the llama_mrope_interleave path.
         const std::optional<at::Tensor>& rope_cos_il = std::nullopt,
         const std::optional<at::Tensor>& rope_sin_il = std::nullopt,
@@ -1980,8 +2427,20 @@ public:
         // decoder forwards require one COMPLETE A6 descriptor for both prefill
         // and decode.
         int64_t planned_chunk_size = 0,
-        at::IntArrayRef planned_stage_descriptor = {})
+        at::IntArrayRef planned_stage_descriptor = {},
+        bool kv_only_entry = false)
     {
+        TORCH_CHECK(kv_only_entry == lingbot_prefill_kv_only_,
+                    "LingBot KV-only owner requires causal_decoder_prefill_kv_only; "
+                    "ordinary forward returns hidden states");
+        if (kv_only_entry) {
+            TORCH_CHECK(hidden_states.dim() == 3 &&
+                            lingbot_prefill_kv_only_shape(
+                                hidden_states.size(1), position, is_causal,
+                                attention_mask.has_value(), hidden_states.size(0)) &&
+                            batch_slot == 0 && !allow_batch_decode && cos_sin_offset == -1,
+                        "LingBot KV-only requires causal B1 aligned prefill at position zero");
+        }
         TORCH_CHECK(!qwen3vl_multiview_text_dry_prepared_,
                     "CausalDecoderModel ordinary forward is unavailable while "
                     "its multiview dry layout is prepared");
@@ -2029,13 +2488,14 @@ public:
             }
         }
 
+
         // ─────────────────────────────────────────────────────────────────────
         // Shape / layout contract — run_all_layers does full hidden_states and
         // k/v cache checks (device / dtype / contiguous / per-layer defined).
         // Keep only the subclass-specific early checks that framework doesn't do.
         // ─────────────────────────────────────────────────────────────────────
         TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1,
-                    "CausalDecoderModel::forward: hidden_states must be on RPU device, got ",
+                    "CausalDecoderModel::forward: hidden_states must be on device, got ",
                     hidden_states.device());
         TORCH_CHECK(position >= 0,
                     "CausalDecoderModel::forward: position must be non-negative, got ", position);
@@ -2043,7 +2503,7 @@ public:
                         (hidden_states.dim() == 3 && hidden_states.size(0) == 1 && is_causal &&
                          (reduced_qwen3vl_profile_ || !attention_mask.has_value()) &&
                          (reduced_qwen3vl_profile_ || !has_mrope_) &&
-                         !adarms_ && !nvfp4_),
+                         !adarms_ && !decoder_mixed_precision_ && !nvfp4_),
                     "reduced-core decoder requires B1 causal FP16 execution for its installed profile");
         const int64_t seq_len_in = hidden_states.size(1);
         detail::validate_fmb_planning_shape(
@@ -2065,7 +2525,7 @@ public:
                                 (c10::isIntegralType(mask.scalar_type(), /*includeBool=*/true) ||
                                  c10::isFloatingType(mask.scalar_type())),
                             "reduced-core Qwen3-VL causal token mask must be contiguous "
-                            "Boolean/integer/floating RPU [1, execution_len] on the hidden-state device");
+                            "Boolean/integer/floating device [1, execution_len] on the hidden-state device");
             }
             TORCH_CHECK(hidden_states.scalar_type() == at::kHalf &&
                             hidden_states.is_contiguous() &&
@@ -2080,7 +2540,7 @@ public:
                     TORCH_CHECK(cache.defined() && cache.device() == hidden_states.device() &&
                                     cache.scalar_type() == at::kHalf && cache.is_contiguous() &&
                                     cache.dim() == 7,
-                                "reduced-core Qwen3 requires contiguous FP16 RPU 7D KV caches");
+                                "reduced-core Qwen3 requires contiguous FP16 device 7D KV caches");
                     if (cache_blocks == 0) cache_blocks = cache.size(1);
                     TORCH_CHECK(cache_blocks > 0 &&
                                     cache.sizes().vec() == std::vector<int64_t>(
@@ -2188,14 +2648,14 @@ public:
         //
         // Contract:
         //   1. set_weights allocated position_ids_keepalive_ at
-        //      [MAX_KEEPALIVE_SEQ, 3] int32 RPU DDR (stable across forwards).
-        //   2. Caller passes per-forward position_ids [seq_len, 3] int32 RPU;
+        //      [MAX_KEEPALIVE_SEQ, 3] int32 device DDR (stable across forwards).
+        //   2. Caller passes per-forward position_ids [seq_len, 3] int32 device;
         //      we copy it into the keepalive at row `ctx().position` and flush.
         //   3. build_layer_subgraph dispatches rpu_launch_mrope_spm_kernel with
         //      pos_offset = ctx().position + chunk.offset (absolute index into
         //      the keepalive — NOT a per-forward offset).
         // ─────────────────────────────────────────────────────────────────────
-        // bound the 1D-RoPE table override.
+        // HALO WS-2 (codex MR!21 CLASS-C): bound the 1D-RoPE table override.
         // cos_sin_start = rope_position_base_ + chunk.offset is read by BOTH
         // build_layer_subgraph (L1481) and emit_kv_first_body (L1341); chunks
         // partition [0, seq_len), so the max table row touched is
@@ -2263,8 +2723,8 @@ public:
                         pos.scalar_type());
             TORCH_CHECK(pos.is_contiguous(),
                         "CausalDecoderModel::forward: position_ids must be contiguous");
-            TORCH_CHECK(pos.device().type() == at::kPrivateUse1,
-                        "CausalDecoderModel::forward: position_ids must be on RPU device, got ",
+            TORCH_CHECK(pos.device().is_cpu() || pos.device().type() == at::kPrivateUse1,
+                        "CausalDecoderModel::forward: position_ids must be on CPU or device device, got ",
                         pos.device());
             TORCH_CHECK(position + seq_len_in <= QWEN3_MROPE_MAX_KEEPALIVE_SEQ,
                         "CausalDecoderModel::forward: position+seq_len (",
@@ -2276,7 +2736,7 @@ public:
                         "(set_weights with non-empty mrope_section must precede forward).");
             // Cache non-overlapping keepalive segments, not merely the previous
             // call. A sequential service revisits decode positions after every
-            // request; retaining those tiny source tensors avoids three RPU
+            // request; retaining those tiny source tensors avoids three device
             // copy/flush operations per token on the next request. Each stamp
             // includes Tensor identity and content version, while overlapping
             // writes invalidate older stamps before they can become false hits.
@@ -2294,11 +2754,20 @@ public:
             const bool pos_content_changed =
                 pos_src_version < 0 ||
                 pos_src_version != ka_last_pos_src_version_;
-            if (qwen3vl_2b_w8_profile_
+            // CPU aliases can change without a version bump. Compare their
+            // actual bytes only against model-owned rows published by copy_.
+            if (pos.device().is_cpu() || (qwen3vl_2b_w8_profile_
                     ? !keepalive_segment_hit(ka_pos_sources_, ka_key, pos)
                     : (!ka_geom_same || pos.data_ptr() != ka_last_pos_src_ ||
-                       pos_content_changed)) {
-                position_ids_keepalive_.narrow(0, position, seq_len_in).copy_(pos);
+                       pos_content_changed))) {
+                if (!pos.device().is_cpu() ||
+                    !cpu_position_keepalive_hit(pos, position, seq_len_in)) {
+                    invalidate_cpu_position_keepalive(position, seq_len_in);
+                    position_ids_keepalive_.narrow(0, position, seq_len_in).copy_(pos);
+                    if (pos.device().is_cpu()) {
+                        mark_cpu_position_keepalive(pos, position, seq_len_in);
+                    }
+                }
                 ka_last_pos_src_ = pos.data_ptr();
                 ka_last_pos_src_version_ = pos_src_version;
                 if (qwen3vl_2b_w8_profile_) {
@@ -2329,7 +2798,7 @@ public:
                             && cil.device().type() == at::kPrivateUse1
                             && sil.device().type() == at::kPrivateUse1,
                             "CausalDecoderModel::forward: rope_cos_il/sin_il must be "
-                            "contiguous on RPU");
+                            "contiguous on device");
                 const size_t il_bytes =
                     static_cast<size_t>(seq_len_in) * half * sizeof(c10::Half);
                 const auto& cos_version_counter =
@@ -2447,7 +2916,7 @@ public:
                             i, "] must be contiguous");
                 TORCH_CHECK(d.device().type() == at::kPrivateUse1,
                             "CausalDecoderModel::forward: deepstack_dense_visual_embeds[",
-                            i, "] must be on RPU device, got ", d.device());
+                            i, "] must be on device, got ", d.device());
                 deepstack_dense_refs_.push_back(d);
                 deepstack_dense_src_base_[i] =
                     ::rhino_lkn::RpuGetDevAddr(d.data_ptr<c10::Half>());
@@ -2620,7 +3089,7 @@ public:
                     "packed uint8, got ",
                     lm_head_weight.scalar_type());
         TORCH_CHECK(lm_head_weight.device().type() == at::kPrivateUse1,
-                    "set_lm_head: lm_head_weight must be on RPU device, got ",
+                    "set_lm_head: lm_head_weight must be on device, got ",
                     lm_head_weight.device());
         TORCH_CHECK(exact_candidates == 0 || exact_candidates == 2,
                     "set_lm_head: exact_candidates must be 0 or 2, got ",
@@ -2639,7 +3108,7 @@ public:
                         "set_lm_head: lm_head_scale must be FP16 (half), got ",
                         lm_head_scale->scalar_type());
             TORCH_CHECK(lm_head_scale->device().type() == at::kPrivateUse1,
-                        "set_lm_head: lm_head_scale must be on RPU device, got ",
+                        "set_lm_head: lm_head_scale must be on device, got ",
                         lm_head_scale->device());
             if (lm_head_is_w8a16) {
                 TORCH_CHECK(lm_head_scale->dim() == 1 &&
@@ -2829,6 +3298,21 @@ protected:
     }
     virtual int64_t explicit_mask_body_iterations() const { return 1; }
 
+    bool lingbot_prefill_deepstack_reuses_down(const LayoutContext& layout) const {
+        // These full C320/C400 prefixes use the ordinary MLP. Its ring consumes Down
+        // before the ordered DeepStack DMA/add, so both owners may share the
+        // same complete [chunk_size,2560] FP16 root without changing any operator.
+        // Keep the proven short-prefix and other decoder layouts unchanged.
+        return lingbot_prefill_mode_bound_ && lingbot_folded_rmsnorm_ &&
+            lingbot_prefill_kv_only_ &&
+            planning_mode_ == CausalDecoderPlanningMode::ORDINARY &&
+            !decode_gate_up_fusion_ && !wall_prefill_staged_mlp_ &&
+            layout.is_causal && !layout.use_attn_mask && layout.batch_size == 1 &&
+            (layout.chunk_size == 320 || layout.chunk_size == 400) &&
+            layout.effective_kv_cs() == layout.chunk_size &&
+            layout.max_kv_seq_len == layout.chunk_size;
+    }
+
     // Derived owners must append all their scratch/body-hook declarations
     // before making any forward-wide residency decision.
     std::vector<BufferDecl> causal_baseline_buffer_declarations(
@@ -2839,7 +3323,7 @@ protected:
         // is declared whenever emit_kv_first_body runs, including the single-chunk
         // case where the framework leaves kv_insert_chunk_size==0 (KV-insert chunk
         // == compute chunk); otherwise emit would reference an undeclared q_kv.
-        // derive kv_first_layout from the LayoutContext
+        // MR!21 finding-5 fix: derive kv_first_layout from the LayoutContext
         // parameter (`ctx`), NOT from the runtime InferenceContext (this->ctx()).
         // declare_buffers MUST be a pure function of the hashed LayoutContext —
         // run_all_layers threads is_causal into layout_ctx and the hash folds in
@@ -2866,6 +3350,15 @@ protected:
         int64_t is_ = intermediate_size();
         int64_t nl  = num_layers();
 
+        // The staged Wall candidate keeps both C320 halves in one packed
+        // P640 hidden slab, while attention/down scratch stays C320 and
+        // gate/up runs at M640.  max_kv_seq_len distinguishes P640 from a
+        // P672 planner probe that happens to consider C320.
+        const bool wall_p640_staged_layout =
+            wall_prefill_staged_mlp_ && ctx.is_causal && !ctx.use_attn_mask
+            && ctx.batch_size == 1 && ctx.chunk_size == 320
+            && ctx.effective_kv_cs() == 320 && ctx.max_kv_seq_len == 640;
+
         // attn_tp() == min(NUM_CORES, nkv). For nkv >= NUM_CORES (Qwen3/Llama)
         // this is NUM_CORES (no-op); for nkv < NUM_CORES (Wall-OSS nkv=2) the
         // whole attention phase runs tensor-parallel across attn_tp() cores.
@@ -2882,9 +3375,13 @@ protected:
         int64_t q_bias_sz  = dma_safe(local_q * hd);   // (nq/tp)*hd per core
         int64_t kv_bias_sz = dma_safe(local_kv);       // nkv*hd/tp per core
 
-        int64_t res = A(bs * wide_cs * h * DWIDTH);
-        int64_t work_res = res;
-        const int64_t attn_rows = comp_cs;
+        int64_t res = A(bs * (wall_p640_staged_layout ? 640 : wide_cs)
+                        * h * DWIDTH);
+        int64_t work_res = wall_p640_staged_layout
+            ? A(bs * comp_cs * h * DWIDTH)
+            : res;
+        const int64_t attn_rows =
+            wall_p640_staged_layout ? 640 : comp_cs;
         int64_t q   = A(bs * attn_rows * local_q * hd * DWIDTH);
         int64_t output = A(bs * comp_cs * local_q * hd * DWIDTH);
         // KV_FIRST Q-split (mirrors Gemma q_kv/q_comp): Phase-1 Q lives in its own
@@ -2895,9 +3392,12 @@ protected:
         // footprint 7.98 MB vs non-KV_FIRST 6.35 MB). Non-KV_FIRST omits q_kv and
         // comp_scope==LayerWide → the SEQUENTIAL layout stays byte-identical.
         int64_t q_kv = A(bs * kv_cs * local_q * hd * DWIDTH);
-        int64_t kv  = A(bs * (kv_first_layout ? kv_cs : comp_cs)
+        int64_t kv  = A(bs * (wall_p640_staged_layout
+                                  ? 640
+                                  : (kv_first_layout ? kv_cs : comp_cs))
                         * local_kv * DWIDTH);
-        int64_t mlp = A(bs * comp_cs * (is_ / NUM_CORES) * DWIDTH);
+        int64_t mlp = A(bs * (wall_p640_staged_layout ? 640 : comp_cs)
+                        * (is_ / mlp_tp()) * DWIDTH);
         int64_t down_sz = A(bs * comp_cs * h * DWIDTH);
         int64_t nw  = A(h * DWIDTH);
         int64_t hnw = A(hd * DWIDTH);
@@ -2914,11 +3414,11 @@ protected:
         //     seq_len) (fused_model_base.cpp run_all_layers); for seq_len==1 decode that
         //     is 1 even though compute_chunks' auto-scan minimum is 16 — so this branch
         //     is LIVE for text_decode, NOT dead.)
-        // LTM imposes the extra tk%tm==0 constraint
+        // codex MR!21 review #4: LTM imposes the extra tk%tm==0 constraint
         // (rpu_helpers.h:139/166/257) that MASK_NONE does NOT → choose_tile_k picks
         // tile_k_LTM ≤ tile_k_NONE → sizing a path with mask=1 can UNDER-allocate vs
         // a real mask=0 launch (SDPA writes past sdpa_tmp, corrupting adjacent SPM).
-        // Mask scratch invariant: the original
+        // MR!21 finding (tmp-mask invariant, audit 2026-06-25): the original
         // `kv_first_layout ? 0 : 1` sized the causal DECODE path (comp_cs==1) at LTM
         // while the seq_len==1 dispatch runs MASK_NONE — an under-allocation latent
         // landmine for HALO text_decode (component C). Mirror the dispatch predicate
@@ -2960,13 +3460,20 @@ protected:
         decls.push_back({"residual1",  res,      1, 8, StorageClass::Temp, 0, nullptr});
         decls.push_back({"input_norm", work_res, 1, 8, StorageClass::Temp, 0, nullptr});
         decls.push_back({"residual2",  0,    0, 0, StorageClass::Temp, 0, "input_norm"});
+        if (wall_p640_staged_layout) {
+            // Half 0's compact residual uses this explicit shard; half 1
+            // reuses the front of input_norm after its QKV input is consumed.
+            decls.push_back({"residual_local",
+                             A(work_res / NUM_CORES), 1, 8,
+                             StorageClass::Temp, 0, nullptr});
+        }
 
         // Attention. KV_FIRST: q (Phase-2 reload) and output (SDPA out) are
         // Compute-scope so they alias with the MLP buffers; Phase-1 Q uses the
         // KvInsert-scope q_kv slot (declared only in KV_FIRST). Non-KV_FIRST:
         // comp_scope==LayerWide and q_kv is omitted → byte-identical layout.
         // NOTE: q_kv is keyed on kv_first_layout (= !ctx.is_causal && !ctx.use_attn_mask;
-        // Use the attention layout mode, not kv_insert_chunk_size>0 — see the kv_first_layout
+        // MR!21 finding-5, NOT the old kv_insert_chunk_size>0 — see the kv_first_layout
         // derivation at the top of this method), so it is declared for EVERY bidirectional
         // no-mask forward, INCLUDING the single-chunk case where kv_insert_chunk_size==0
         // (all HALO vit_cache seqs).
@@ -2980,14 +3487,14 @@ protected:
         const bool packed_4b_decode = qwen3vl_4b_packed_decode_qkv(
             ctx.chunk_size, ctx.is_causal, ctx.use_attn_mask, ctx.batch_size);
         const int kv_phase_end = packed_4b_decode ? q_phase_end
-            : 4;
-        const int output_phase_end = 5;
-        const int oproj_phase_start = 5;
+            : (wall_p640_staged_layout ? 2 : 4);
+        const int output_phase_end = wall_p640_staged_layout ? 4 : 5;
+        const int oproj_phase_start = wall_p640_staged_layout ? 4 : 5;
         // Raw V -> V^T and by-MHA happen while K/V are still live. Phase 4
         // prevents sdpa_tmp from aliasing its V input; the DDR path retains its
         // established phase-5 layout byte-for-byte.
         const int sdpa_tmp_phase =
-            spm_kv_by_mha ? 4 : 5;
+            spm_kv_by_mha ? 4 : (wall_p640_staged_layout ? 3 : 5);
         decls.push_back({"q",          q,    2, q_phase_end,
                          StorageClass::Temp, 0, nullptr, comp_scope});
         if (kv_first_layout) {
@@ -3005,18 +3512,27 @@ protected:
                          StorageClass::Temp, 0, nullptr, comp_scope});
 
         // P4: explicit 2D mask slot (phase 3..5 — conservative window covering the
-        // SDPA consumer so it cannot alias with sdpa_tmp). Conditional
+        // SDPA consumer so it can't alias with sdpa_tmp; codex-verified). Conditional
         // so no-mask forwards keep the original layout.
         if (ctx.use_attn_mask) {
             decls.push_back({"sdpa_mask", mask_sz, 3, 5, StorageClass::Temp, 0, nullptr, comp_scope});
         }
 
         // MLP (phase 7-8, aliased with attention). The sealed multiview Text
-        // composite aliases full `up` [7,7] with `down` [8,8].
+        // composite aliases full `up` [7,7] with `down` [8,8]. Exact staged
+        // Wall has no full `up`; its fused gate/up/SwiGLU kernel borrows the
+        // smaller `down` slot as bounded tile scratch from phase 7.
         const bool exact_multiview_text_layout =
             qwen3vl_multiview_text_dry_prepared_ ||
             qwen3vl_multiview_text_composite_prepared_;
-        const int down_phase_start = exact_multiview_text_layout ? 8 : 7;
+        // Ordinary full C400 MLP finishes Up and the in-place Gate*Up before
+        // Down's first write. Its larger Down root may reuse that dead storage;
+        // the subsequent ring retires it before DeepStack overwrites the alias.
+        // C320 and shorter LingBot layouts retain their established phase 7.
+        const bool lingbot_c400_full_layout =
+            lingbot_prefill_deepstack_reuses_down(ctx) && ctx.chunk_size == 400;
+        const int down_phase_start =
+            (exact_multiview_text_layout || lingbot_c400_full_layout) ? 8 : 7;
         if (decode_gate_up_fusion_) {
             decls.push_back({"gate_up", 2 * mlp, 7, 8,
                              StorageClass::Temp, 0, nullptr, comp_scope});
@@ -3027,7 +3543,7 @@ protected:
         } else {
             decls.push_back({"gate",   mlp,      7, 8,
                              StorageClass::Temp, 0, nullptr, comp_scope});
-            {
+            if (!wall_p640_staged_layout) {
                 decls.push_back({"up",     mlp,      7, 7,
                                  StorageClass::Temp, 0, nullptr, comp_scope});
             }
@@ -3044,7 +3560,7 @@ protected:
         //   own input. See SPM-aliasing notes.
         //   Batch decode: the fused GEMM runs M = bs, so this holds bs rows of
         //   the col-partitioned vocab slice.
-        {
+        if (!wall_p640_staged_layout) {
             decls.push_back({"lm_head_out",
                              A(bs * (QWEN3_FUSED_LM_HEAD_MAX_VOCAB / lm_head_tp()) * DWIDTH),
                              8, 9, StorageClass::Temp, 0, nullptr});
@@ -3065,9 +3581,15 @@ protected:
             qwen3vl_pooler_z1_retained_deepstack_count_ == 0 &&
             !qwen3vl_multiview_text_dry_prepared_ &&
             !qwen3vl_multiview_text_composite_prepared_) {
-            decls.push_back({"deepstack_scratch",
-                             res,  // chunk_size × hidden × DWIDTH (same as residual1)
-                             8, 8, StorageClass::Temp, 0, nullptr});
+            if (lingbot_prefill_deepstack_reuses_down(ctx)) {
+                TORCH_INTERNAL_ASSERT(down_sz == res);
+                decls.push_back({"deepstack_scratch", 0, 8, 8,
+                                 StorageClass::Temp, 0, "down"});
+            } else {
+                decls.push_back({"deepstack_scratch",
+                                 res,  // chunk_size × hidden × DWIDTH (same as residual1)
+                                 8, 8, StorageClass::Temp, 0, nullptr});
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -3100,7 +3622,7 @@ protected:
                         norm_slab_w_, 0, norm_slab_w_.numel(), core0_addr);
                 };
             decls.push_back(slab);
-        } else {
+        } else if (!lingbot_folded_rmsnorm_) {
             BufferDecl input_norm;
             input_norm.name      = "norm_w";
             input_norm.size      = nw;
@@ -3469,7 +3991,7 @@ protected:
         // ★ final_norm fuse: single Persistent slot. The same final_norm_w_
         //   tensor is read at the last layer's RMSNorm. Persistent (not
         //   PersistentPerLayer) because it's one weight, not 28.
-        if (!norm_slab_active()) {
+        if (!norm_slab_active() && !lingbot_prefill_kv_only_) {
             BufferDecl final_norm;
             final_norm.name     = "final_norm_w";
             final_norm.size     = nw;
@@ -3517,11 +4039,28 @@ protected:
             decls.push_back(final_norm);
         }
 
+        if (wall_p640_staged_layout) {
+            constexpr int64_t kValidatedTempPeakBytes = 7'168'000;
+            constexpr int64_t kFullVlaPersistentBytes = 591'360;
+            constexpr int64_t kAlignedSpmBudgetBytes = 8'303'616;
+            const int64_t temp_peak =
+                detail::estimate_temporary_total(decls);
+            TORCH_CHECK(
+                temp_peak <= kValidatedTempPeakBytes &&
+                    temp_peak + kFullVlaPersistentBytes <=
+                        kAlignedSpmBudgetBytes,
+                "Wall P640 staged layout exceeds its validated full-VLA SPM "
+                "envelope: temp_peak=", temp_peak,
+                " persistent=", kFullVlaPersistentBytes,
+                " budget=", kAlignedSpmBudgetBytes);
+        }
+
         return decls;
     }
 
-    // DeepStack can move Temp offsets without changing the generic params
-    // hash. The other uncovered gates here
+    // The two inputs to declare_buffers above that are invisible to the generic
+    // params hash and can move Temp offsets are DeepStack and the cold Wall
+    // staged-P640 selector. The other uncovered gates here
     // (adarms_, has_qk_norm_, has_qkv_bias_, nvfp4_ and the nvfp4 scale numels)
     // all guard Persistent/PersistentPerLayer decls, which the persistent-shape
     // check in ensure_allocated already turns into a hard abort — folding those
@@ -3531,6 +4070,76 @@ protected:
     int64_t subclass_layout_hash() const override {
         int64_t h = detail::layout_mix(
             0, deepstack_lang_layers_.empty() ? 0 : 1);
+        h = detail::layout_mix(h, wall_prefill_staged_mlp_ ? 1 : 0);
+        if (wall_base_paired_kv_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_PAIRED_KV_SITE);
+        }
+        if (wall_base_nvfp4_qkv_bias_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_QKV_BIAS_TOPOLOGY_SITE);
+            h = detail::layout_mix(h, 1);  // four-block bias-barrier ABI
+        }
+        if (wall_base_nvfp4_kv_parallel_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_NVFP4_KV_PARALLEL_SITE);
+            h = detail::layout_mix(h, 1);
+        }
+        if (wall_base_nvfp4_qkv_parallel_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_PARALLEL_SITE);
+            h = detail::layout_mix(h, 1);
+        }
+        if (wall_base_nvfp4_qkv_rope_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_ROPE_SITE);
+            h = detail::layout_mix(h, 1);
+        }
+        if (wall_base_nvfp4_gate_up_shared_silu_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SHARED_SILU_SITE);
+            h = detail::layout_mix(h, 1);
+        }
+        if (wall_base_nvfp4_gate_up_silu_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SILU_SITE);
+            h = detail::layout_mix(h, 1);
+        }
+        if (wall_base_nvfp4_gate_up_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SITE);
+            h = detail::layout_mix(h, 1);
+        }
+        if (wall_base_nvfp4_qk_rope_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_QK_ROPE_SITE);
+            h = detail::layout_mix(h, 1);
+        }
+        if (wall_base_nvfp4_o_ring_norm_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_NVFP4_O_RING_NORM_SITE);
+            h = detail::layout_mix(h, 1);  // full-FP16 ring / BASE norm ABI
+        }
+        if (wall_base_nvfp4_down_ring_norm_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_NVFP4_DOWN_RING_NORM_SITE);
+            h = detail::layout_mix(h, 1);  // full raw carry / next input norm, layers0..34
+        }
+        if (lingbot_prefill_mode_bound_) {
+            h = detail::layout_mix(h, LINGBOT2_PREFILL_POLICY_SITE);
+            h = detail::layout_mix(h, lingbot_folded_rmsnorm_);
+            h = detail::layout_mix(h, lingbot_prefill_kv_only_);
+            h = detail::layout_mix(h, lingbot_nogamma_contract_.capability);
+            if (lingbot_prefill_gateup_shared_a_) {
+                h = detail::layout_mix(h, LINGBOT2_PREFILL_GATEUP_SHARED_A_SITE);
+                for (const auto value : lingbot_prefill_gateup_arguments())
+                    h = detail::layout_mix(h, value);
+            }
+            if (lingbot_prefill_qkv_mode_) {
+                h = detail::layout_mix(h, LINGBOT2_PREFILL_QKV_MULTIBASE_SITE);
+                for (const auto value : lingbot_prefill_qkv_arguments())
+                    h = detail::layout_mix(h, value);
+            }
+            if (lingbot_prefill_kv_pair_) {
+                h = detail::layout_mix(h, LINGBOT2_PREFILL_KV_PAIR_SITE);
+                for (const auto value : lingbot_prefill_kv_pair_arguments())
+                    h = detail::layout_mix(h, value);
+            }
+            if (lingbot_prefill_qk_norm_rope_) {
+                h = detail::layout_mix(h, LINGBOT2_PREFILL_QK_NORM_ROPE_SITE);
+                for (const auto value : lingbot_prefill_qk_norm_rope_arguments())
+                    h = detail::layout_mix(h, value);
+            }
+        }
         if (tts_codec_mode_) h = detail::layout_mix(h, 0x545453);
         if (rhinovla_high_precision_) {
             h = detail::layout_mix(h, RHINOVLA_TEXT_HIGH_RMSNORM_SITE);
@@ -3544,6 +4153,29 @@ protected:
         if (qwen3vl_4b_packed_qkv_weights_) {
             h = detail::layout_mix(h, CAUSAL_DECODER_4B_W8_PACKED_QKV_SITE);
         }
+        if (wall_base_prefill_shared_input_) {
+            h = detail::layout_mix(h, WALL_BASE_PREFILL_SHARED_GATEUP_SITE);
+            if (wall_base_prefill_shared_silu_)
+                h = detail::layout_mix(h, WALL_BASE_PREFILL_SHARED_SILU_SITE);
+            if (wall_base_prefill_no_up_store_)
+                h = detail::layout_mix(h, WALL_BASE_PREFILL_SHARED_NOUP_SITE);
+        }
+        if (wall_base_prefill_long_qkv_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_Q_SITE);
+            h = detail::layout_mix(h,
+                static_cast<int64_t>(CausalDecoderLinearRoute::WALL_QKV_MULTIBASE));
+        }
+        if (wall_base_fp16_long_prefill_) {
+            h = detail::layout_mix(h, CAUSAL_DECODER_Q_SITE);
+            h = detail::layout_mix(h, 16);
+            h = detail::layout_mix(h, FMB_SHARED_MLP_SILU_MUL_SITE);
+        }
+        if (wall_base_fp16_shared_gateup_) {
+            h = detail::layout_mix(h, WALL_BASE_FP16_PREFILL_SHARED_GATEUP_SITE);
+            h = detail::layout_mix(h, 1);
+        }
+        if (wall_base_prefill_owner_norm_)
+            h = detail::layout_mix(h, WALL_BASE_PREFILL_O_OWNER_NORM_SITE);
         if (qwen3vl_4b_decode_qk_fused_) {
             h = detail::layout_mix(h, QWEN3VL_4B_DECODE_QK_NORM_MROPE_SITE);
         }
@@ -3566,7 +4198,7 @@ protected:
         const FmbThreeStageChunkPlan& plan,
         const LayoutContext& layout,
         int64_t position) const override {
-        if (num_cores() != 8 || !qwen3_spm_kv_by_mha_enabled_ ||
+        if (lingbot_prefill_kv_only_ || num_cores() != 8 || !qwen3_spm_kv_by_mha_enabled_ ||
             typeid(*this) != typeid(CausalDecoderModel) ||
             layout.attention_policy !=
                 AttentionExecutionPolicy::SPM_KV_BY_MHA ||
@@ -3597,7 +4229,8 @@ protected:
              (hidden_size() == 2048 && intermediate_size() == 6144));
         if (!exact_dense_profile || layer_weights_.size() != 28 ||
             !use_silu_ || !has_qk_norm_ || has_qkv_bias_ ||
-            nvfp4_ || has_mrope_ || partial_mrope_active_ ||
+            nvfp4_ || decoder_mixed_precision_ || wall_prefill_staged_mlp_ ||
+            has_mrope_ || partial_mrope_active_ ||
             !deepstack_lang_layers_.empty() || adarms_ || adarms_mutable_ ||
             adarms_unroll_ || adarms_schedule_select_ ||
             rope_position_base_ >= 0 || batch_decode_active_ ||
@@ -3658,6 +4291,7 @@ protected:
                 {norm_slab_w_.numel()});
         } else {
             for (int64_t layer = 0; layer < num_layers(); ++layer) {
+                if (!lingbot_folded_rmsnorm_) {
                 append(
                     tensor_preload
                         ? CAUSAL_DECODER_INPUT_NORM_POOLER_PRELOAD_SITE
@@ -3670,6 +4304,7 @@ protected:
                         : CAUSAL_DECODER_POST_NORM_DIRECT_PRELOAD_SITE,
                     broadcast_selector,
                     {layer, hidden_size(), tensor_preload ? 1 : 0}, layer);
+                }
                 if (adarms_) {
                     append(
                         CAUSAL_DECODER_ADARMS_INPUT_SHIFT_PRELOAD_SITE,
@@ -3742,7 +4377,7 @@ protected:
             append_nvfp4_scale(6, down_nvfp4_tensor_scales_);
         }
 
-        if (!norm_slab_active()) {
+        if (!norm_slab_active() && !lingbot_prefill_kv_only_) {
             append(
                 tensor_preload
                     ? CAUSAL_DECODER_FINAL_NORM_POOLER_PRELOAD_SITE
@@ -3758,6 +4393,7 @@ protected:
         return qwen3vl_4b_w8_profile_ && physical_len > 1 &&
             position == 0 && is_causal && !use_attn_mask && batch_size == 1 &&
             num_chunks > 1 && !linear_acc32_ && !adarms_ &&
+            !decoder_mixed_precision_ &&
             planning_mode_ == CausalDecoderPlanningMode::ORDINARY &&
             !qwen3vl_pooler_z1_dispatch_ &&
             !qwen3vl_multiview_text_composite_dispatch_;
@@ -3768,8 +4404,10 @@ protected:
         bool use_attn_mask, int64_t batch_size, int64_t num_chunks) const {
         return qwen3vl_ordinary_resident_prefill_profile_ && physical_len > 1 &&
             position == 0 && is_causal && !use_attn_mask && batch_size == 1 &&
-            num_chunks > 1 && !adarms_ && planning_mode_ == CausalDecoderPlanningMode::ORDINARY &&
-            !decode_gate_up_fusion_ && !pre_layers_residual1_ready_ && !wall_z1_dispatch_ &&
+            num_chunks > 1 && !adarms_ && !decoder_mixed_precision_ &&
+            planning_mode_ == CausalDecoderPlanningMode::ORDINARY &&
+            !decode_gate_up_fusion_ && !wall_prefill_staged_mlp_ &&
+            !pre_layers_residual1_ready_ && !wall_z1_dispatch_ &&
             !qwen3vl_pooler_z1_dispatch_ &&
             !qwen3vl_multiview_text_composite_dispatch_;
     }
@@ -3787,7 +4425,7 @@ protected:
     bool qwen3vl_decode_gemv(int64_t physical_len) const {
         return (qwen3vl_4b_w8_profile_ || qwen3vl_fp16_decode_profile_) &&
             physical_len == 1 &&
-            !linear_acc32_ && !adarms_ &&
+            !linear_acc32_ && !decoder_mixed_precision_ && !adarms_ &&
             planning_mode_ == CausalDecoderPlanningMode::ORDINARY;
     }
 
@@ -3805,7 +4443,7 @@ protected:
         return (qwen3vl_4b_decode_qk_fused_ || qwen3vl_4b_decode_qk_kv_fused_) &&
             physical_len == 1 && rows == 1 && is_causal &&
             !use_attn_mask && batch_size == 1 &&
-            !adarms_ &&
+            !decoder_mixed_precision_ && !adarms_ &&
             planning_mode_ == CausalDecoderPlanningMode::ORDINARY &&
             !qwen3vl_pooler_z1_dispatch_ && !qwen3vl_multiview_text_composite_dispatch_ &&
             has_qk_norm_ && has_mrope_ && !partial_mrope &&
@@ -3845,7 +4483,7 @@ protected:
                     "4B fused Gate/Up requires FP16 per-channel scales [9728]");
         // The inherited GEMV scale loader reads 256 channels for its N96 tail.
         // Own initialized backing for that overfetch while keeping logical [N].
-        // RPU tensors use HostDDR, as in the cold QKV/GateUp packing above.
+        // device tensors use HostDDR, as in the cold QKV/GateUp packing above.
         auto backing = at::empty({9728 + 256}, scale.options());
         auto* dst = backing.data_ptr<c10::Half>();
         std::memcpy(dst, scale.data_ptr(), scale.nbytes());
@@ -3906,9 +4544,46 @@ protected:
         return qwen3vl_4b_w8_profile_ && physical_len > 1 &&
             rows >= 16 && rows <= 256 && rows % 16 == 0 &&
             position == 0 && is_causal && !use_attn_mask && batch_size == 1 &&
-            !linear_acc32_ && !adarms_ &&
+            !linear_acc32_ && !decoder_mixed_precision_ && !adarms_ &&
             planning_mode_ == CausalDecoderPlanningMode::ORDINARY &&
             !qwen3vl_pooler_z1_dispatch_ && !qwen3vl_multiview_text_composite_dispatch_;
+    }
+
+    bool lingbot_prefill_kv_only_shape(
+        int64_t physical_len, int64_t position, bool is_causal,
+        bool use_attn_mask, int64_t batch_size) const {
+        // The ordinary operators and actual native layout determine the upper
+        // bound. A model-specific 256-row ceiling excluded legal longer inputs.
+        // Keep the same launcher predicate, including its grid/sync constraints.
+        return physical_len > 1 && physical_len % 16 == 0 && position == 0 &&
+            is_causal && !use_attn_mask && batch_size == 1 &&
+            sdpa_is_valid_chunk_size(make_sdpa_config(1), physical_len, physical_len, position);
+    }
+
+    bool lingbot_prefill_kv_only_for_plan(
+        const FmbThreeStageChunkPlan& plan, const LayoutContext& layout,
+        int64_t physical_len, int64_t position) const {
+        if (!lingbot_prefill_kv_only_ ||
+            !lingbot_prefill_kv_only_shape(physical_len, position, layout.is_causal,
+                layout.use_attn_mask, layout.batch_size) ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL ||
+            planning_mode_ != CausalDecoderPlanningMode::ORDINARY) return false;
+        const auto full_stage = [physical_len](const ResolvedFmbStageChunks& stage) {
+            if (stage.plan.num_chunks != 1 || stage.plan.chunk_size < physical_len ||
+                stage.chunks.size() != 1) return false;
+            const auto& chunk = stage.chunks.front();
+            return chunk.idx == 0 && chunk.offset == 0 && chunk.len == physical_len &&
+                chunk.kv_seq_len == physical_len;
+        };
+        return full_stage(plan.input) && full_stage(plan.qkv) && full_stage(plan.compute);
+    }
+
+    std::vector<FmbPhysicalExecutionManifest> physical_manifest_domain_for_candidate(
+        const FmbThreeStageChunkPlan& plan, const LayoutContext& layout,
+        int64_t physical_len, int64_t logical_len, int64_t position) const override {
+        if (lingbot_prefill_kv_only_ &&
+            !lingbot_prefill_kv_only_for_plan(plan, layout, physical_len, position)) return {};
+        return {physical_manifest_for_candidate(plan, layout, physical_len, logical_len, position)};
     }
 
     FmbPhysicalExecutionManifest physical_manifest_for_candidate(
@@ -3928,8 +4603,11 @@ protected:
             ? cos_.size(0) : position + logical_len;
         manifest.kv_insert_physical_rows = physical_len;
         manifest.graph_lifecycle = planning_graph_lifecycle_;
-        // All ordinary Linear formats share the immutable accumulation choice.
-        manifest.linear_accumulation = (linear_acc32_
+        // NVFP4 follows the same immutable accumulation choice as the other
+        // ordinary Linear formats; only the explicit mixed profile differs.
+        manifest.linear_accumulation = decoder_mixed_precision_
+            ? FmbLinearAccumulationPolicy::MIXED_BY_SITE
+            : (linear_acc32_
                    ? FmbLinearAccumulationPolicy::ACC32
                    : FmbLinearAccumulationPolicy::ACC16);
 
@@ -3989,8 +4667,12 @@ protected:
                        (dynamic_position
                             ? KV_INSERT_ROUTE_FLAG_DYNAMIC_POSITION : 0),
                    {arguments.begin(), arguments.end()}, invocation);
+            return kv_plan;
         };
 
+        const bool p640_staged = wall_prefill_staged_mlp_ &&
+            decoder_mixed_precision_ && physical_len == 640 && position == 0 &&
+            layout.is_causal && !layout.use_attn_mask;
         const bool partial_mrope = planning_rope_mode_ == 1;
         const bool pooler_z1_mode = qwen3vl_pooler_z1_dispatch_ ||
             planning_mode_ ==
@@ -4013,6 +4695,75 @@ protected:
                             : CausalDecoderRopeRoute::MROPE;
 
         const int64_t rows = physical_len;
+        TORCH_CHECK(
+            !wall_action_fuse_silu_mul_ || rows != 32 ||
+                (!wall_action_kv_owner_fanout_ &&
+                 !wall_sorting_.action_activation_reuse),
+            "Wall Action M32 transfer does not admit K/V owner fanout "
+            "or resident activation reuse");
+        const bool wall_action_qkv_profile =
+            wall_action_fuse_silu_mul_ &&
+            wall_action_fused_rows_supported(rows, wall_sorting_) && hidden_size() == 1024 &&
+            num_q_heads() == 16 && num_kv_heads() == 8 && head_dim() == 128 &&
+            num_layers() == 36 && attn_tp() == NUM_CORES && has_qkv_bias_ &&
+            !linear_acc32_;
+        const bool wall_action_fp16_transfer =
+            wall_action_fp16_transfer_enabled();
+        const bool every_wall_action_qkv = wall_action_qkv_profile &&
+            std::all_of(layer_weights_.begin(), layer_weights_.end(),
+                [wall_action_fp16_transfer](const LayerWeights& lw) {
+                    return wall_action_qkv_weights_compatible(
+                        lw, wall_action_fp16_transfer);
+                });
+        const bool wall_action_fused_qkv_partial_mrope =
+            every_wall_action_qkv && has_mrope_ && partial_mrope &&
+            !has_qk_norm_;
+        const bool wall_action_linear_ring = every_wall_action_qkv &&
+            use_silu_ && intermediate_size() == 2048 &&
+            layout.batch_size == 1 && !layout.is_causal &&
+            layout.use_attn_mask &&
+            pre_layers_residual1_ready_ && !adarms_ &&
+            deepstack_lang_layers_.empty() &&
+            qwen3vl_pooler_z1_retained_deepstack_count_ == 0 &&
+            !qwen3vl_pooler_z1_dispatch_ &&
+            !qwen3vl_multiview_text_dry_prepared_ &&
+            !qwen3vl_multiview_text_composite_prepared_ &&
+            !qwen3vl_multiview_text_composite_dispatch_ &&
+            final_norm_w_.scalar_type() == at::kHalf &&
+            std::all_of(layer_weights_.begin(), layer_weights_.end(),
+                [wall_action_fp16_transfer](const LayerWeights& lw) {
+                    return wall_action_ring_weights_compatible(
+                        lw, wall_action_fp16_transfer);
+                });
+        const bool wall_base_nvfp4_o_ring_norm = wall_base_nvfp4_o_ring_norm_enabled(
+            plan, physical_len, logical_len, position, layout.is_causal,
+            layout.use_attn_mask, layout.batch_size, partial_mrope);
+        const bool wall_prefill_owner_norm = wall_base_prefill_owner_norm_enabled(
+            plan, physical_len, position, layout.is_causal, layout.use_attn_mask, layout.batch_size);
+        const bool every_wall_p640_staged0_qkv =
+            decoder_mixed_precision_ && !wall_prefill_staged_mlp_ &&
+            physical_len == 640 && position == 0 && layout.is_causal &&
+            !layout.use_attn_mask && hidden_size() == 2048 &&
+            num_q_heads() == 16 && num_kv_heads() == 8 &&
+            head_dim() == 128 && attn_tp() == NUM_CORES && has_qkv_bias_ &&
+            use_silu_ && !linear_acc32_ &&
+            std::all_of(layer_weights_.begin(), layer_weights_.end(),
+                [](const LayerWeights& lw) {
+                    return lw.q_w.scalar_type() == at::kChar &&
+                        lw.k_w.scalar_type() == at::kChar &&
+                        lw.v_w.scalar_type() == at::kChar &&
+                        lw.gate_w.scalar_type() == at::kChar &&
+                        lw.up_w.scalar_type() == at::kChar;
+                });
+        const bool wall_small_prefill_fused = wall_small_prefill_fusion(
+            plan, physical_len, position, layout.is_causal,
+            layout.use_attn_mask, layout.batch_size);
+        const bool wall_long_prefill_qkv = wall_base_long_prefill_qkv_fusion(
+            plan, physical_len, position, layout.is_causal,
+            layout.use_attn_mask, layout.batch_size);
+        const bool wall_fp16_long_prefill_fused = wall_base_fp16_long_prefill_fusion(
+            plan, physical_len, position, layout.is_causal,
+            layout.use_attn_mask, layout.batch_size);
 
         const int64_t topology_selector = static_cast<int64_t>(
             CausalDecoderGraphScheduleRoute::TOPOLOGY);
@@ -4029,7 +4780,9 @@ protected:
                {has_qk_norm_ ? 1 : 0});
         append(FmbRouteFamily::GRAPH_SCHEDULE,
                CAUSAL_DECODER_QKV_BIAS_TOPOLOGY_SITE, topology_selector, 0,
-               {has_qkv_bias_ ? 1 : 0});
+               qkv_bias_topology_arguments(wall_base_nvfp4_qkv_bias_enabled(
+                   plan, physical_len, logical_len, position, layout.is_causal,
+                   layout.use_attn_mask, layout.batch_size, partial_mrope), position));
         append(FmbRouteFamily::GRAPH_SCHEDULE,
                CAUSAL_DECODER_NVFP4_TOPOLOGY_SITE, topology_selector, 0,
                {nvfp4_ ? 1 : 0});
@@ -4039,7 +4792,23 @@ protected:
         append(FmbRouteFamily::GRAPH_SCHEDULE,
                CAUSAL_DECODER_LM_HEAD_TOPOLOGY_SITE, topology_selector, 0,
                {fuse_lm_head_ ? 1 : 0, vocab_size_});
+        if (lingbot_prefill_mode_bound_) {
+            append(FmbRouteFamily::GRAPH_SCHEDULE, LINGBOT2_PREFILL_POLICY_SITE,
+                   topology_selector, 0, lingbot_prefill_policy_arguments());
+            if (lingbot_prefill_kv_only_) {
+                TORCH_CHECK(lingbot_prefill_kv_only_for_plan(
+                                plan, layout, physical_len, position),
+                            "RPU_PLANNER_REJECT:CAPABILITY: LingBot KV-only requires one aligned prefill chunk");
+                append(FmbRouteFamily::GRAPH_SCHEDULE, LINGBOT2_PREFILL_KV_TAIL_SITE,
+                       1, 0, {35, physical_len, 2560, 8, 128, 8});
+            }
+        }
 
+        if (wall_sorting_route_enabled()) {
+            append(FmbRouteFamily::GRAPH_SCHEDULE,
+                   CAUSAL_DECODER_WALL_SORTING_TOPOLOGY_SITE,
+                   topology_selector, 0, wall_sorting_route_arguments());
+        }
         if (qwen3vl_4b_w8_resident_prefill(
                 physical_len, position, layout.is_causal, layout.use_attn_mask,
                 layout.batch_size, plan.compute.chunks.size())) {
@@ -4173,10 +4942,67 @@ protected:
                            1, rhinovla_high_precision_fusions_ ? 1 : 0,
                            {chunk.len, intermediate_size() / mlp_tp(), 1}, chunk.idx);
                 }
-                append_ordinary_rmsnorm(/*role=*/0);
+                if (!lingbot_folded_rmsnorm_) append_ordinary_rmsnorm(/*role=*/0);
                 if (has_qk_norm_ && !qwen3vl4b_fused_qk) {
                     append_ordinary_rmsnorm(/*role=*/1);
                     append_ordinary_rmsnorm(/*role=*/2);
+                }
+            }
+        }
+
+        if (lingbot_prefill_qk_norm_rope_for_plan(plan, physical_len, position,
+                layout.is_causal, layout.use_attn_mask, layout.batch_size,
+                layout.attention_policy, partial_mrope)) {
+            append(FmbRouteFamily::NORMALIZATION, LINGBOT2_PREFILL_QK_NORM_ROPE_SITE,
+                   1, 0, lingbot_prefill_qk_norm_rope_arguments());
+        }
+
+        if (lingbot_folded_rmsnorm_) {
+            for (const ChunkInfo& chunk : plan.compute.chunks) {
+                append(FmbRouteFamily::NORMALIZATION, LINGBOT2_PREFILL_NOGAMMA_SITE,
+                       static_cast<int64_t>(lingbot_nogamma_contract_.resolve(chunk.len, hidden_size())),
+                       0, lingbot_nogamma_contract_.manifest_arguments(chunk.len, hidden_size()),
+                       chunk.idx);
+            }
+        }
+
+        if (wall_rmsnorm_capability_ != RPU_RMSNORM_CAP_BASE) {
+            for (const ChunkInfo& chunk : plan.compute.chunks) {
+                append(
+                    FmbRouteFamily::NORMALIZATION,
+                    kCausalDecoderRmsNormRowsSite,
+                    static_cast<int64_t>(rpu_resolve_rmsnorm_spm_route(
+                        wall_rmsnorm_capability_, chunk.len, hidden_size())),
+                    /*flags=*/0,
+                    {chunk.len, hidden_size(),
+                     static_cast<int64_t>(wall_rmsnorm_capability_)},
+                    chunk.idx);
+            }
+        }
+        const bool mixed_rmsnorm = decoder_mixed_precision_ &&
+            physical_len > 1 && position == 0 && layout.is_causal &&
+            num_layers() > 3;
+        if (mixed_rmsnorm) {
+            const auto append_mixed_rmsnorm =
+                [&](int64_t site_id, const ChunkInfo& chunk) {
+                    append(
+                        FmbRouteFamily::NORMALIZATION, site_id,
+                        static_cast<int64_t>(
+                            rpu_resolve_mixed_rmsnorm_spm_route(
+                                chunk.len, hidden_size())),
+                        /*flags=*/0, {chunk.len, hidden_size()}, chunk.idx);
+                };
+            for (const ChunkInfo& chunk : plan.compute.chunks) {
+                if (p640_staged) {
+                    append_mixed_rmsnorm(
+                        CAUSAL_DECODER_P640_MIXED_RMSNORM_SITE, chunk);
+                } else {
+                    append_mixed_rmsnorm(
+                        CAUSAL_DECODER_INPUT_MIXED_RMSNORM_SITE, chunk);
+                    append_mixed_rmsnorm(
+                        CAUSAL_DECODER_POST_MIXED_RMSNORM_SITE, chunk);
+                    append_mixed_rmsnorm(
+                        CAUSAL_DECODER_FINAL_MIXED_RMSNORM_SITE, chunk);
                 }
             }
         }
@@ -4201,7 +5027,34 @@ protected:
                     mask_plan.original_peak_bytes, mask_plan.retained_peak_bytes});
         }
 
-        if (!qwen3vl_2b_w8_profile_ && !qwen3vl4b_fused_qk) {
+        if (wall_base_nvfp4_gate_up_enabled(plan, physical_len, logical_len,
+                position, layout.is_causal, layout.use_attn_mask,
+                layout.batch_size, partial_mrope)) {
+            if (wall_base_nvfp4_gate_up_shared_silu_) {
+                append(FmbRouteFamily::LINEAR, CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SHARED_SILU_SITE,
+                       15, 0, wall_base_nvfp4_gate_up_shared_silu_arguments(position),
+                       plan.compute.chunks.front().idx);
+            } else if (wall_base_nvfp4_gate_up_silu_) {
+                append(FmbRouteFamily::LINEAR, CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SILU_SITE,
+                       15, 0, wall_base_nvfp4_gate_up_silu_arguments(position),
+                       plan.compute.chunks.front().idx);
+            } else {
+                append(FmbRouteFamily::LINEAR, CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SITE,
+                       11, 0, wall_base_nvfp4_gate_up_arguments(position),
+                       plan.compute.chunks.front().idx);
+            }
+        }
+        const bool wall_base_nvfp4_qkv_rope = wall_base_nvfp4_qkv_rope_enabled(
+            plan, physical_len, logical_len, position, layout.is_causal,
+            layout.use_attn_mask, layout.batch_size, partial_mrope);
+        if (!wall_base_nvfp4_qkv_rope && wall_base_nvfp4_qk_rope_enabled(plan, physical_len, logical_len,
+                position, layout.is_causal, layout.use_attn_mask,
+                layout.batch_size, partial_mrope)) {
+            append(FmbRouteFamily::ROPE, CAUSAL_DECODER_WALL_BASE_QK_ROPE_SITE,
+                   1, 0, wall_base_nvfp4_qk_rope_arguments(position),
+                   plan.compute.chunks.front().idx);
+        } else if (!wall_base_nvfp4_qkv_rope && !wall_action_fused_qkv_partial_mrope && !qwen3vl_2b_w8_profile_ &&
+            !qwen3vl4b_fused_qk) {
             append(FmbRouteFamily::ROPE, rope_site,
                    static_cast<int64_t>(rope_route), 0,
                    {has_mrope_ ? 1 : 0,
@@ -4216,7 +5069,49 @@ protected:
                        CausalDecoderMutableDmaRoute::DDR_BROADCAST_TO_SPM));
         }
 
-        if (plan.chunk_mode == ChunkMode::KV_FIRST) {
+        if (p640_staged) {
+            append_kv(CAUSAL_DECODER_P640_KV_HALF_SITE, 0, 0, 320, 0, false);
+            append_kv(CAUSAL_DECODER_P640_KV_HALF_SITE, 1, 320, 320, 0, false);
+            if (wall_prefill_owner_direct_kv_) {
+                TORCH_CHECK(partial_mrope,
+                            "Wall P640 owner-direct K/V requires partial M-RoPE");
+                append(FmbRouteFamily::GRAPH_SCHEDULE,
+                       CAUSAL_DECODER_WALL_OWNER_DIRECT_KV_SITE, 1, 0,
+                       {640, 2048, 8, 128, 8, 0, 1});
+            } else {
+                append_kv(CAUSAL_DECODER_P640_KV_PACKED_SITE,
+                          0, 0, 640, 0, false);
+            }
+            append_attention(CAUSAL_DECODER_P640_ATTN_HALF_SITE,
+                             AttentionExecutionPolicy::DDR_KV, 0);
+            append_attention(CAUSAL_DECODER_P640_ATTN_HALF_SITE,
+                             AttentionExecutionPolicy::DDR_KV, 1);
+            append_attention(CAUSAL_DECODER_P640_ATTN_PACKED_TAIL_SITE,
+                             AttentionExecutionPolicy::DDR_KV, 0);
+            append_attention(CAUSAL_DECODER_P640_ATTN_PACKED_HEAD_SITE,
+                             AttentionExecutionPolicy::DDR_KV, 0);
+            append(FmbRouteFamily::ALL_REDUCE,
+                   CAUSAL_DECODER_P640_PREPARE_SITE,
+                   static_cast<int64_t>(
+                       CausalDecoderAllReduceRoute::PREPARE_RING_INPUT));
+            append_ring(CAUSAL_DECODER_P640_ATTN_REDUCE_SITE, 320, 0);
+            append_ring(CAUSAL_DECODER_P640_ATTN_REDUCE_SITE, 320, 1);
+            append(FmbRouteFamily::ALL_REDUCE,
+                   CAUSAL_DECODER_P640_MIXED_REDUCE_SITE,
+                   static_cast<int64_t>(CausalDecoderAllReduceRoute::
+                       BF16_PARTIAL_FP16_RESIDUAL));
+            append(FmbRouteFamily::ALL_REDUCE,
+                   CAUSAL_DECODER_P640_LOCAL_REDUCE_SITE,
+                   static_cast<int64_t>(
+                       CausalDecoderAllReduceRoute::RING_LOCAL_RESIDUAL));
+            append_ring(CAUSAL_DECODER_P640_REDUCE_SITE, 320, 1);
+            append_linear(CAUSAL_DECODER_P640_O_SITE,
+                          CausalDecoderLinearRoute::AUTO_TILE);
+            append_linear(CAUSAL_DECODER_P640_DOWN_SITE,
+                          CausalDecoderLinearRoute::AUTO_TILE);
+            append_linear(CAUSAL_DECODER_P640_DOWN_ACC32_SITE,
+                          CausalDecoderLinearRoute::ACC32_OUT_BF16);
+        } else if (plan.chunk_mode == ChunkMode::KV_FIRST) {
             append_linear(CAUSAL_DECODER_KV_FIRST_Q_SITE,
                           CausalDecoderLinearRoute::AUTO_TILE);
             append_linear(CAUSAL_DECODER_KV_FIRST_K_SITE,
@@ -4255,19 +5150,67 @@ protected:
                            CausalDecoderMutableDmaRoute::SPM_SCATTER_TO_DDR));
             }
         } else {
-            if (qwen3vl_4b_packed_decode_qkv(
+            if (lingbot_prefill_qkv_for_plan(plan, physical_len, position,
+                    layout.is_causal, layout.use_attn_mask, layout.batch_size,
+                    layout.attention_policy)) {
+                append(FmbRouteFamily::LINEAR, LINGBOT2_PREFILL_QKV_MULTIBASE_SITE,
+                       1, 0, lingbot_prefill_qkv_arguments());
+            } else if (qwen3vl_4b_packed_decode_qkv(
                     physical_len, layout.is_causal, layout.use_attn_mask,
                     layout.batch_size)) {
                 append(FmbRouteFamily::LINEAR, CAUSAL_DECODER_4B_W8_PACKED_QKV_SITE,
                        static_cast<int64_t>(CausalDecoderLinearRoute::GEMV), 0,
                        {1, 6144, 2560, 8, 512, 128, 128});
-            } else {
+            } else if (wall_small_prefill_fused) {
+                append(FmbRouteFamily::LINEAR, CAUSAL_DECODER_Q_SITE,
+                       static_cast<int64_t>(CausalDecoderLinearRoute::WALL_QKV_MULTIBASE),
+                       0, wall_small_prefill_qkv_arguments(physical_len),
+                       plan.compute.chunks.front().idx);
+            } else if (wall_long_prefill_qkv || wall_fp16_long_prefill_fused) {
+                for (const ChunkInfo& chunk : plan.compute.chunks) {
+                    append(FmbRouteFamily::LINEAR, CAUSAL_DECODER_Q_SITE,
+                           static_cast<int64_t>(CausalDecoderLinearRoute::WALL_QKV_MULTIBASE),
+                           0, wall_small_prefill_qkv_arguments(chunk.len), chunk.idx);
+                }
+            } else if (wall_base_nvfp4_qkv_rope_enabled(plan, physical_len, logical_len,
+                    position, layout.is_causal, layout.use_attn_mask,
+                    layout.batch_size, partial_mrope)) {
+                append(FmbRouteFamily::LINEAR, CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_ROPE_SITE,
+                       14, 0, wall_base_nvfp4_qkv_rope_arguments(position),
+                       plan.compute.chunks.front().idx);
+            } else if (wall_base_nvfp4_qkv_parallel_enabled(plan, physical_len, logical_len,
+                    position, layout.is_causal, layout.use_attn_mask,
+                    layout.batch_size, partial_mrope)) {
+                append(FmbRouteFamily::LINEAR, CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_PARALLEL_SITE,
+                       13, 0, wall_base_nvfp4_qkv_parallel_arguments(position),
+                       plan.compute.chunks.front().idx);
+            } else if (wall_base_nvfp4_kv_parallel_enabled(plan, physical_len, logical_len,
+                    position, layout.is_causal, layout.use_attn_mask,
+                    layout.batch_size, partial_mrope)) {
+                append_linear(CAUSAL_DECODER_Q_SITE, decoder_projection_route(physical_len));
+                append(FmbRouteFamily::LINEAR, CAUSAL_DECODER_WALL_BASE_NVFP4_KV_PARALLEL_SITE,
+                       12, 0, wall_base_nvfp4_kv_parallel_arguments(position),
+                       plan.compute.chunks.front().idx);
+            } else if (!every_wall_action_qkv && !every_wall_p640_staged0_qkv) {
                 append_linear(CAUSAL_DECODER_Q_SITE,
                               decoder_projection_route(physical_len));
                 append_linear(CAUSAL_DECODER_K_SITE,
                               decoder_projection_route(physical_len));
                 append_linear(CAUSAL_DECODER_V_SITE,
                               decoder_projection_route(physical_len));
+            }
+            if (lingbot_prefill_kv_pair_for_plan(plan, physical_len, position,
+                    layout.is_causal, layout.use_attn_mask, layout.batch_size,
+                    layout.attention_policy)) {
+                for (int64_t role : {0, 1})
+                    append(FmbRouteFamily::GRAPH_SCHEDULE, LINGBOT2_PREFILL_KV_PAIR_SITE,
+                           1, 0, lingbot_prefill_kv_pair_arguments(), role);
+            }
+            if (lingbot_prefill_kv_only_) {
+                append_linear(LINGBOT2_PREFILL_TAIL_K_SITE, decoder_projection_route(physical_len));
+                append_linear(LINGBOT2_PREFILL_TAIL_V_SITE, decoder_projection_route(physical_len));
+                append_kv(LINGBOT2_PREFILL_TAIL_KV_INSERT_SITE, 0, 0,
+                          physical_len, kv_insert_spm_rows_, false);
             }
             LayoutContext spm_layout = layout;
             spm_layout.attention_policy =
@@ -4276,21 +5219,53 @@ protected:
                 plan, spm_layout, position);
             for (const ChunkInfo& chunk : plan.compute.chunks) {
                 if (!qwen3vl_2b_w8_profile_ && !qwen3vl4b_fused_qk_kv) {
-                    append_kv(CAUSAL_DECODER_KV_INSERT_SITE, chunk.idx,
-                              physical_len == 1 ? 0 : position + chunk.offset,
-                              chunk.len, kv_insert_spm_rows_, physical_len == 1);
+                    const auto kv_plan = append_kv(
+                        CAUSAL_DECODER_KV_INSERT_SITE, chunk.idx,
+                        physical_len == 1 ? 0 : position + chunk.offset,
+                        chunk.len, kv_insert_spm_rows_, physical_len == 1);
+                    if (wall_base_paired_kv_enabled(
+                            plan, kv_plan, physical_len, logical_len, position,
+                            layout.is_causal, layout.use_attn_mask,
+                            layout.batch_size, partial_mrope)) {
+                        append(FmbRouteFamily::GRAPH_SCHEDULE,
+                               CAUSAL_DECODER_WALL_BASE_PAIRED_KV_SITE, 1, 0,
+                               wall_base_paired_kv_arguments(position), chunk.idx);
+                    }
                 }
                 if (raw_spm) {
                     append_attention(CAUSAL_DECODER_RAW_SPM_ATTN_SITE,
                                      AttentionExecutionPolicy::SPM_KV_BY_MHA,
+                                     chunk.idx);
+                } else if (decoder_mixed_precision_ && physical_len == 672 &&
+                           chunk.offset == 336) {
+                    append_attention(CAUSAL_DECODER_P672_ATTN_FIRST_SITE,
+                                     AttentionExecutionPolicy::DDR_KV,
+                                     chunk.idx);
+                    append_attention(CAUSAL_DECODER_P672_ATTN_SECOND_SITE,
+                                     AttentionExecutionPolicy::DDR_KV,
                                      chunk.idx);
                 } else {
                     append_attention(CAUSAL_DECODER_MASKED_ATTENTION_SITE,
                                      AttentionExecutionPolicy::DDR_KV,
                                      chunk.idx);
                 }
-                if (!qwen3vl4b_fused_o) {
-                    {
+                if (wall_prefill_owner_norm) {
+                    append(FmbRouteFamily::ALL_REDUCE, WALL_BASE_PREFILL_O_OWNER_NORM_SITE,
+                           1, 0, wall_base_prefill_owner_norm_arguments(chunk.idx), chunk.idx);
+                } else if (!wall_action_linear_ring && !qwen3vl4b_fused_o &&
+                    !wall_base_nvfp4_o_ring_norm) {
+                    if (decoder_mixed_precision_ && physical_len > 1) {
+                        append(FmbRouteFamily::ALL_REDUCE,
+                               CAUSAL_DECODER_MIXED_REDUCE_SITE,
+                               static_cast<int64_t>(
+                                   CausalDecoderAllReduceRoute::
+                                       FP16_PARTIAL_BF16_RESIDUAL),
+                               0, {}, chunk.idx);
+                        // Layers 0..2 still use the ordinary FP16 residual
+                        // ring before the model transitions to BF16 carry.
+                        append_ring(CAUSAL_DECODER_REDUCE_SITE,
+                                    chunk.len, chunk.idx);
+                    } else {
                         append_ring(CAUSAL_DECODER_REDUCE_SITE,
                                     chunk.len, chunk.idx);
                     }
@@ -4300,6 +5275,29 @@ protected:
                 append(FmbRouteFamily::LINEAR, QWEN3VL_4B_DECODE_O_RING_NORM_SITE,
                        1, 0, {1, 2560, 4096, 512, 8, 320, 1, 63488},
                        plan.compute.chunks.front().idx);
+            } else if (wall_base_nvfp4_o_ring_norm) {
+                append(FmbRouteFamily::LINEAR,
+                       CAUSAL_DECODER_WALL_BASE_NVFP4_O_RING_NORM_SITE,
+                       static_cast<int64_t>(CausalDecoderLinearRoute::WALL_BASE_NVFP4_O_RING_NORM),
+                       0, wall_base_nvfp4_o_ring_norm_arguments(position),
+                       plan.compute.chunks.front().idx);
+            } else if (wall_action_linear_ring) {
+                append_linear(CAUSAL_DECODER_WALL_RING_O_SITE,
+                              CausalDecoderLinearRoute::WALL_RING_POSTNORM);
+                append_linear(CAUSAL_DECODER_WALL_RING_DOWN_SITE,
+                              CausalDecoderLinearRoute::WALL_RING_POSTNORM);
+                // Layer 0 seeds the compact carry through the ordinary O
+                // projection/residual chain; fused O starts at layer 1.
+                append(FmbRouteFamily::ALL_REDUCE,
+                       CAUSAL_DECODER_PREPARE_SITE,
+                       static_cast<int64_t>(
+                           CausalDecoderAllReduceRoute::PREPARE_RING_INPUT));
+                append_linear(CAUSAL_DECODER_O_SITE,
+                              CausalDecoderLinearRoute::AUTO_TILE);
+                for (const ChunkInfo& chunk : plan.compute.chunks) {
+                    append_ring(CAUSAL_DECODER_REDUCE_SITE,
+                                chunk.len, chunk.idx);
+                }
             } else {
                 append(FmbRouteFamily::ALL_REDUCE,
                        CAUSAL_DECODER_PREPARE_SITE,
@@ -4339,13 +5337,48 @@ protected:
             }
         }
 
+        if (wall_base_nvfp4_down_ring_norm_enabled(
+                plan, physical_len, logical_len, position, layout.is_causal,
+                layout.use_attn_mask, layout.batch_size, partial_mrope)) {
+            append(FmbRouteFamily::LINEAR,
+                   CAUSAL_DECODER_WALL_BASE_NVFP4_DOWN_RING_NORM_SITE,
+                   static_cast<int64_t>(CausalDecoderLinearRoute::WALL_BASE_NVFP4_DOWN_RING_NORM),
+                   0, wall_base_nvfp4_down_ring_norm_arguments(position),
+                   plan.compute.chunks.front().idx);
+        }
+
         bool needs_shared_mlp = false;
         for (const ChunkInfo& chunk : plan.compute.chunks) {
-            if (plan.chunk_mode == ChunkMode::SEQUENTIAL &&
+            if (wall_base_fp16_shared_gateup_enabled(
+                    plan, physical_len, position, layout.is_causal,
+                    layout.use_attn_mask, layout.batch_size)) {
+                append(FmbRouteFamily::LINEAR, WALL_BASE_FP16_PREFILL_SHARED_GATEUP_SITE,
+                       1, 0, wall_base_fp16_shared_gateup_arguments(chunk.len), chunk.idx);
+                append(FmbRouteFamily::LINEAR, WALL_BASE_PREFILL_SHARED_DOWN_SITE,
+                       static_cast<int64_t>(CausalDecoderLinearRoute::AUTO_TILE),
+                       0, {chunk.len, 2048, 11008, 0, 8}, chunk.idx);
+                append_ring(WALL_BASE_PREFILL_SHARED_REDUCE_SITE, chunk.len, chunk.idx);
+            } else if (wall_base_prefill_shared_input_enabled(
+                    plan, physical_len, position, layout.is_causal,
+                    layout.use_attn_mask, layout.batch_size)) {
+                append(FmbRouteFamily::LINEAR, wall_base_prefill_shared_gateup_site(),
+                       1, 0, wall_base_prefill_shared_input_arguments(chunk.len), chunk.idx);
+                append(FmbRouteFamily::LINEAR, WALL_BASE_PREFILL_SHARED_DOWN_SITE,
+                       static_cast<int64_t>(CausalDecoderLinearRoute::AUTO_TILE),
+                       0, {chunk.len, 2048, 11008, 0, 8}, chunk.idx);
+                append_ring(WALL_BASE_PREFILL_SHARED_REDUCE_SITE, chunk.len, chunk.idx);
+            } else if (plan.chunk_mode == ChunkMode::SEQUENTIAL &&
                 qwen3vl_4b_prefill_swiglu(physical_len, chunk.len, position,
                     layout.is_causal, layout.use_attn_mask, layout.batch_size)) {
+                if (lingbot_prefill_gateup_for_plan(plan, physical_len, position,
+                        layout.is_causal, layout.use_attn_mask, layout.batch_size,
+                        layout.attention_policy)) {
+                    append(FmbRouteFamily::LINEAR, LINGBOT2_PREFILL_GATEUP_SHARED_A_SITE,
+                           1, 0, lingbot_prefill_gateup_arguments(), chunk.idx);
+                } else {
                 append(FmbRouteFamily::LINEAR, QWEN3VL_4B_PREFILL_GATEUP_SITE,
                        1, 0, {chunk.len, 9728, 2560, 8, 320, 112}, chunk.idx);
+                }
                 append(FmbRouteFamily::LINEAR, QWEN3VL_4B_PREFILL_DOWN_SITE,
                        static_cast<int64_t>(CausalDecoderLinearRoute::AUTO_TILE),
                        0, {chunk.len, 2560, 9728, 0, 8}, chunk.idx);
@@ -4382,19 +5415,34 @@ protected:
                    !wall_z1_dispatch_ && !pre_layers_residual1_ready_) {
             shared_routes |= FMB_SHARED_LAYER_INPUT_DMA;
         }
-        if (needs_shared_mlp && !decode_gate_up_fusion_) {
+        if (needs_shared_mlp && !p640_staged && !wall_action_linear_ring && !decode_gate_up_fusion_) {
             shared_routes |= (qwen3vl_decode_gemv(physical_len)
                 ? FMB_SHARED_MLP_GEMV : FMB_SHARED_MLP_AUTO_TILE) |
                 FMB_SHARED_MLP_RING_REDUCE;
             if (mlp_tp() != num_cores()) shared_routes |= FMB_SHARED_MLP_PREPARE_INPUT;
-
+            const bool mixed_body = decoder_mixed_precision_ &&
+                physical_len > 1 && position == 0 && layout.is_causal;
+            if (mixed_body && num_layers() > 2) {
+                shared_routes |= FMB_SHARED_MLP_ACC32_OUT_BF16 |
+                    FMB_SHARED_MLP_BF16_FP16_REDUCE;
+            }
+            if (mixed_body && num_layers() > 3) {
+                shared_routes |= FMB_SHARED_MLP_FP16_BF16_REDUCE;
+            }
         }
         append_fmb_shared_runtime_routes(
             manifest, plan, hidden_size(), shared_routes,
             layout.batch_size, num_cores(), mlp_tp());
 
-        if (ordinary_silu_mul_route_enabled() && layout.is_causal &&
-            layout.batch_size == 1 && plan.chunk_mode == ChunkMode::SEQUENTIAL) {
+        const bool shared_prefill_silu =
+            wall_base_fp16_shared_gateup_enabled(plan, physical_len, position,
+                layout.is_causal, layout.use_attn_mask, layout.batch_size) ||
+            (wall_base_prefill_shared_silu_ &&
+             wall_base_prefill_shared_input_enabled(plan, physical_len, position,
+                 layout.is_causal, layout.use_attn_mask, layout.batch_size));
+        if (!shared_prefill_silu && (wall_small_prefill_fused || wall_fp16_long_prefill_fused ||
+            (ordinary_silu_mul_route_enabled() && layout.is_causal &&
+             layout.batch_size == 1 && plan.chunk_mode == ChunkMode::SEQUENTIAL))) {
             for (const auto& chunk : plan.compute.chunks) {
                 append(FmbRouteFamily::ACTIVATION, FMB_SHARED_MLP_SILU_MUL_SITE,
                        1, 0, {chunk.len, intermediate_size() / mlp_tp(), mlp_tp()},
@@ -4418,10 +5466,24 @@ protected:
     FmbPhysicalManifestForwardCapability
     physical_manifest_forward_capability(
         const FmbPhysicalExecutionManifest& manifest) const override {
-        // Route receipts below independently prove the active physical branch;
-        // the lifecycle is supplied by the same typed planner call that minted
-        // the descriptor and is limited to the four FMB lifecycle values there.
-        return {true, manifest.graph_lifecycle};
+        // FMB calls this before installing the current stage plan. Check any
+        // new owner-raw receipt structurally; exact plan admission is shared by
+        // producer and consumer. No new site is valid for other chunk plans.
+        std::array<bool, 2> seen{false, false};
+        int count = 0;
+        for (const auto& route : manifest.routes) {
+            if (route.site_id != WALL_BASE_PREFILL_O_OWNER_NORM_SITE) continue;
+            if (!wall_base_prefill_owner_norm_ || get_debug_export() ||
+                manifest.physical_length != 448 || manifest.linear_accumulation != FmbLinearAccumulationPolicy::ACC16 ||
+                route.family != FmbRouteFamily::ALL_REDUCE || route.selector != 1 ||
+                route.flags != 0 || route.invocation < 0 || route.invocation >= 2 ||
+                seen[route.invocation] ||
+                route.arguments != wall_base_prefill_owner_norm_arguments(route.invocation))
+                return {false, manifest.graph_lifecycle};
+            seen[route.invocation] = true;
+            ++count;
+        }
+        return {count == 0 || count == 2, manifest.graph_lifecycle};
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -4510,7 +5572,7 @@ protected:
             : AttentionExecutionPolicy::DDR_KV;
         // Per-forward runtime hook (NOT cached): selects the execution chunk mode
         // from the SAME (is_causal, attention_mask) that run_all_layers threads
-        // into layout_ctx. this is safe because the resulting
+        // into layout_ctx. MR!21 finding-5: this is safe because the resulting
         // KV_FIRST layout is now part of the allocation identity — declare_buffers
         // derives kv_first_layout from the hashed LayoutContext and the hash folds
         // in the derived bit + kv_insert_chunk_size (compute_params_hash_impl).
@@ -4586,6 +5648,28 @@ protected:
             cfg.chunk_outer_within_group = true;
         }
 
+        // Exact Wall RTC prefill stays SPM-resident.  The staged P640 candidate
+        // is layer-major: chunk 0 emits both attention halves plus one M640
+        // gate/up stage, and chunk 1 is an intentionally empty callback. P672
+        // retains the existing chunk-major C336 schedule.
+        if (decoder_mixed_precision_ && ctx().is_causal &&
+            !ctx().attention_mask.has_value() && ctx().position == 0 &&
+            (ctx().seq_len == 640 || ctx().seq_len == 672)) {
+            TORCH_CHECK(
+                (ctx().seq_len == 640 && plan.chunk_size == 320 &&
+                 plan.num_chunks == 2) ||
+                    (ctx().seq_len == 672 && plan.chunk_size == 336 &&
+                     plan.num_chunks == 2),
+                "Wall-OSS RTC resident schedule requires P640/C320x2 or "
+                "P672/C336x2; got seq_len=", ctx().seq_len,
+                ", chunk_size=", plan.chunk_size,
+                ", num_chunks=", plan.num_chunks);
+            cfg.chunk_mode = ChunkMode::SEQUENTIAL;
+            cfg.inter_layer_io = InterLayerIO::SPM_RESIDENT;
+            cfg.chunk_outer_within_group =
+                !(wall_prefill_staged_mlp_ && ctx().seq_len == 640);
+        }
+
         if (qwen3vl_pooler_z1_dispatch_) {
             TORCH_CHECK(ctx().is_causal && !ctx().attention_mask.has_value() &&
                             ctx().position == 0 &&
@@ -4635,7 +5719,7 @@ protected:
         // works as one upload per layer when there is a single chunk, so assert
         // it (action horizon H <= chunk_size; A3 chunk-validator is mask-aware so
         // cs>=H is reachable). sdpa_prepare_mask copies the (CPU) mask to a stable
-        // RPU DDR slot and returns mask_type=MASK_2D(4).
+        // device DDR slot and returns mask_type=MASK_2D(4).
         if (ctx().attention_mask.has_value()) {
             TORCH_CHECK(plan.num_chunks == 1,
                         "CausalDecoderModel: explicit 2D mask path requires a "
@@ -4644,7 +5728,7 @@ protected:
             if (planning_domain_query_) return cfg;
             const int64_t seq_q = ctx().seq_len;
             const int64_t seq_k = ctx().position + ctx().seq_len;   // P + H
-            // Skip the re-prepare (CPU→RPU upload + stable-slot copy) when the
+            // Skip the re-prepare (CPU→device upload + stable-slot copy) when the
             // caller passes the SAME (host-memoized) mask at the same dims — the
             // Wall-OSS action mask is _action_mask_cached (stable ptr across frames
             // for a fixed prefix), and this instance is the slot's only same-shape
@@ -4714,11 +5798,14 @@ protected:
         // The explicit-mask implementation prepares one rectangular mask for
         // the whole query. Multi-chunk candidates are not part of its domain.
         if (ctx().attention_mask.has_value() && cs < seq_len) return false;
-        // Causal prefill requires any trailing physical chunk to contain at least one
-        // v16. Apply the same guard to AUTO and EXACT plans; another aligned chunk
-        // size may preserve a valid off-grid logical request. A single physical chunk
-        // has no tail launch. KV_FIRST full-KV/MASK_NONE uses a separate contract and
-        // does not inherit this causal-only restriction.
+        // Qwen/Llama-family causal prefill kernels silently miscompute a final
+        // physical chunk shorter than one v16 (measured at 513=512+1 and
+        // 2049=512*4+1).  Reject that candidate here so both auto and exact
+        // planning share the same correctness gate; an off-grid logical length
+        // remains valid when another 16-aligned chunk size leaves a safe tail;
+        // a short input that fits in one physical chunk has no tail launch.
+        // KV_FIRST uses a separate full-KV/MASK_NONE path: LingBot's measured
+        // S65/C16 and S178/C16 must not inherit this causal-only restriction.
         const int64_t tail = seq_len % cs;
         if (ctx().is_causal && seq_len > cs && tail > 0 && tail < 16) return false;
         // MR-A: certified envelope, per candidate. This is the half that closes
@@ -4726,7 +5813,7 @@ protected:
         // override through THIS hook but never reads chunk_size_cap, so a guard
         // living only in the cap hook stops the auto scan and nothing else
         // (causal_decoder_set_chunk_size_override -> compute_chunks_impl -> here).
-        // Full route ledger: docs/roadmap/chunk_certified_envelope.md §4.
+        // Runtime configuration: docs/runtime_config.md
         if (seq_len > 1 && !chunk_within_envelope(cs)) return false;
         // Same reasoning for the pre-existing per-handle cap: it too was read
         // ONLY by the auto scan, so an override sailed straight past it.
@@ -4742,12 +5829,30 @@ protected:
             && cs != seq_len / 2) {
             return false;
         }
+        // Wall-OSS P672 keeps the Linear/MLP/ring/RMS work in two C336
+        // chunks, but the accumulated 336@336 LTM SDPA shape is the known
+        // product=6 hardware-corrupt case. The second chunk is emitted below
+        // as 112@336 + 224@448, so validate that exact three-call plan without
+        // weakening the generic SDPA guard.
+        if (decoder_mixed_precision_ && position == 0 &&
+            ((seq_len == 640 && cs != 320) ||
+             (seq_len == 672 && cs != 336))) {
+            return false;
+        }
+        if (decoder_mixed_precision_ && position == 0
+            && seq_len == 672 && cs == 336) {
+            const auto mixed_cfg = make_sdpa_config(1);
+            return sdpa_call_valid(mixed_cfg, 336, 0)
+                && sdpa_call_valid(mixed_cfg, 112, 336)
+                && sdpa_call_valid(mixed_cfg, 224, 448);
+        }
         // P4: validate against the mask type that will run. The LTM acc checks
         // (sQryAcc%16 / %sQry, rpu_helpers.h:336-340) gate chunk selection and
         // would reject an arbitrary-position action chunk before MASK_2D even
         // runs; with mask=4 those checks are skipped so cs>=H is reachable.
         // 无显式 mask 时一律按 LTM(1) 校验 chunk-size(保守):LTM tile 约束(sQryAcc%16 等)比
         // MASK_NONE 更严,把 auto-scan 逼到更小的 chunk —— 小 chunk = 小 SDPA 临时区 = 不撞 SPM 顶
+
         // LTM-valid chunk 必然 NONE-runnable,故 launch 仍按 is_causal=false 跑 MASK_NONE(:1285)结果正确。
         // KV_FIRST bidirectional (is_causal=false, no mask): the kernel runs
         // MASK_NONE (attn_mask_type=0), which does NOT enforce the
@@ -4803,24 +5908,42 @@ protected:
                 "need chunk=", seq_len / 2,
                 ", above the certified envelope chunk=", envelope_chunk,
                 " (seq_len=", seq_len, "). See "
-                "docs/roadmap/chunk_certified_envelope.md.");
+                "docs/runtime_config.md.");
             return seq_len / 2;
         }
         return tighten(configured_chunk_size_cap_, envelope_chunk);
     }
 
+
     ChunkPlan plan_kv_first_chunks(const ChunkPlan& compute_plan) {
-        // Reuse the compute chunk plan for KV insertion: compute_chunks_impl checks
-        // the real KV_FIRST declare_buffers footprint with kv_cs == comp_cs.
-        // An independent KV chunk size would need the same complete aliased-layout
-        // accounting before allocation; a compute-only temporary estimate is insufficient.
-        // Phase 2 attends the full cache, so this reuse changes staging granularity only.
-        // kv_insert_chunk_size remains part of the allocation key.
+        // MR!21 finding-6 fix (chunk-fit invariant, audit 2026-06-25): return the
+        // compute plan unchanged — the KV-insert chunk == the compute chunk.
+        //
+        // The prior body ran a DEAD binary search (placeholder `available/1024`
+        // bytes-per-row budget) and then UNCONDITIONALLY overwrote the result with
+        // a hardcoded `best_cs = 400`, returning a fictional "optimization" with no
+        // real SPM fit check. A genuine upgrade must pick the largest KV-insert
+        // chunk whose REAL footprint fits — but the framework's temp estimate
+        // (estimate_temporary_total: layer_wide + max(kvin,comp)) under-counts
+        // the KV_FIRST KvInsert/Compute aliased layout, so an estimate-driven
+        // upgrade over-picks and OOMs on board (measured: est 7.56MB vs actual
+        // 7.78MB at seq≈1564). compute_chunks_impl ALREADY validated comp_cs
+        // against the real KV_FIRST declare_buffers footprint (is_causal=false →
+        // kv_first_layout at kv_cs==comp_cs), so the compute plan provably fits.
+        //
+        // KV-insert chunk size is NUMERICALLY NEUTRAL (Phase-1 KV staging only;
+        // Phase-2 attention reads the full KV cache), so this preserves the
+        // board-validated vit_cache output bit-for-bit while dropping the unsafe
+        // hardcode. A real KV-insert batching upgrade needs a footprint model that
+        // matches alloc_temporary_aliased exactly and belongs to the profiling
+        // phase, not this correctness MR. kv_insert_chunk_size (== 0 here) is still
+        // folded into compute_params_hash_impl so any future upgrade re-keys the
+        // allocation instead of aliasing a stale layout.
         return compute_plan;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // HALO WS-2 /  per-tensor QK RoPE dispatch — **single
+    // HALO WS-2 / codex MR!21 CLASS-B: per-tensor QK RoPE dispatch — **single
     // source of truth**. The 3-way (1D-RoPE / M-RoPE / partial-M-RoPE) decision
     // used to be hand-copied in build_layer_subgraph (sequential) AND
     // emit_kv_first_body (KV_FIRST); the partial_mrope branch was added to the
@@ -4830,6 +5953,686 @@ protected:
     // (matching the per-forward keepalive contract): cos_il/position_ids are only
     // dereferenced on their active leaf. rotary_dim == dim at all current sites.
     // ─────────────────────────────────────────────────────────────────────────
+    bool wall_sorting_route_enabled() const {
+        return wall_prefill_mixed_requested_ || wall_action_fuse_silu_mul_ ||
+            wall_sorting_.silu_mul;
+    }
+
+    // The sorting M448 QKV payload bounds every load/store by param8. A single
+    // tile therefore covers base P336/C336 and P384/C384 without the packed
+    // C320x2 buffers, BF16 transition or owner-direct M640 schedule. Keep this
+    // exact cold candidate independent of the existing P640/P672 paths.
+    bool wall_small_prefill_fusion(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t position, bool is_causal, bool use_attn_mask,
+        int64_t batch_size) const {
+        if (!wall_sorting_.silu_mul ||
+            (physical_len != 336 && physical_len != 384) ||
+            position != 0 || !is_causal || use_attn_mask || batch_size != 1 ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL ||
+            plan.compute.chunks.size() != 1 ||
+            plan.compute.chunks.front().offset != 0 ||
+            plan.compute.chunks.front().len != physical_len ||
+            plan.compute.plan.chunk_size != physical_len ||
+            hidden_size() != 2048 || intermediate_size() != 11008 ||
+            num_layers() != 36 || num_q_heads() != 16 || num_kv_heads() != 8 ||
+            head_dim() != 128 || attn_tp() != NUM_CORES ||
+            mlp_tp() != NUM_CORES || num_cores() != NUM_CORES ||
+            !has_qkv_bias_ || has_qk_norm_ || !has_mrope_ ||
+            mrope_section_.size() != 3 || mrope_section_[0] != 16 ||
+            mrope_section_[1] != 24 || mrope_section_[2] != 24 ||
+            !use_silu_ || linear_acc32_ || nvfp4_ || decoder_mixed_precision_ ||
+            wall_prefill_mixed_requested_ || wall_prefill_staged_mlp_ ||
+            wall_prefill_owner_direct_kv_ || decode_gate_up_fusion_ || adarms_ ||
+            !deepstack_lang_layers_.empty() || pre_layers_residual1_ready_ ||
+            planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
+            wall_z1_dispatch_ || qwen3vl_pooler_z1_dispatch_ ||
+            qwen3vl_multiview_text_composite_dispatch_ ||
+            layer_weights_.size() != 36) return false;
+        const auto dtype = layer_weights_.front().q_w.scalar_type();
+        if (dtype != at::kChar &&
+            !(dtype == at::kHalf && (wall_sorting_.fp16_transfer_mask & 2u))) {
+            return false;
+        }
+        return std::all_of(layer_weights_.begin(), layer_weights_.end(),
+            [dtype](const LayerWeights& lw) {
+                return lw.q_w.scalar_type() == dtype &&
+                    lw.k_w.scalar_type() == dtype && lw.v_w.scalar_type() == dtype &&
+                    lw.o_w.scalar_type() == dtype && lw.gate_w.scalar_type() == dtype &&
+                    lw.up_w.scalar_type() == dtype && lw.down_w.scalar_type() == dtype;
+            });
+    }
+
+    bool wall_base_prefill_shared_input_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t position, bool is_causal, bool use_attn_mask,
+        int64_t batch_size) const {
+        if (!wall_base_prefill_shared_input_ ||
+            layer_weights_.front().q_w.scalar_type() != at::kChar) return false;
+        if (wall_small_prefill_fusion(plan, physical_len, position, is_causal,
+                                      use_attn_mask, batch_size)) return true;
+        // The no-Up payload bounds every load/store by the current chunk rows.
+        // Reuse it for the measured two-chunk long-prefix plans without widening
+        // QKV, attention, the chunk envelope, or the original single-chunk fusions.
+        // Cold shared-input admission above proves all 36 W8 layers/topology.
+        if (!wall_base_prefill_no_up_store_ || !wall_sorting_.silu_mul ||
+            (physical_len != 448 && physical_len != 512 && physical_len != 640) ||
+            position != 0 || !is_causal || use_attn_mask || batch_size != 1 ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL ||
+            plan.compute.chunks.size() != 2 || linear_acc32_ || nvfp4_ ||
+            decoder_mixed_precision_ || wall_prefill_mixed_requested_ ||
+            wall_prefill_staged_mlp_ || wall_prefill_owner_direct_kv_ ||
+            decode_gate_up_fusion_ || adarms_ || !has_mrope_ ||
+            pre_layers_residual1_ready_ || planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
+            wall_z1_dispatch_ || qwen3vl_pooler_z1_dispatch_ ||
+            qwen3vl_multiview_text_composite_dispatch_) return false;
+        const int64_t rows = physical_len / 2;
+        const auto& first = plan.compute.chunks.front();
+        const auto& second = plan.compute.chunks.back();
+        return plan.compute.plan.chunk_size == rows &&
+            first.idx == 0 && first.offset == 0 && first.len == rows &&
+            first.kv_seq_len == rows && second.idx == 1 &&
+            second.offset == rows && second.len == rows &&
+            second.kv_seq_len == physical_len;
+    }
+
+    bool wall_base_long_prefill_qkv_fusion(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t position, bool is_causal, bool use_attn_mask,
+        int64_t batch_size) const {
+        // Reuse the selected W8/no-Up profile's cold model proof, but keep
+        // QKV admission separate from the small-prefix activation switch.
+        if (!wall_base_prefill_long_qkv_ ||
+            (physical_len != 448 && physical_len != 512 && physical_len != 640) ||
+            !wall_base_prefill_shared_input_enabled(plan, physical_len, position,
+                is_causal, use_attn_mask, batch_size)) return false;
+        if (plan.input.plan.chunk_size != physical_len ||
+            plan.input.plan.num_chunks != 1 || plan.input.chunks.size() != 1)
+            return false;
+        const auto& input = plan.input.chunks.front();
+        if (input.idx != 0 || input.offset != 0 || input.len != physical_len ||
+            input.kv_seq_len != physical_len) return false;
+        const int64_t rows = physical_len / 2;
+        for (const auto* stage : {&plan.qkv, &plan.compute}) {
+            if (stage->plan.chunk_size != rows || stage->plan.num_chunks != 2 ||
+                stage->chunks.size() != 2) return false;
+            for (int64_t i = 0; i < 2; ++i) {
+                const auto& chunk = stage->chunks[i];
+                if (chunk.idx != i || chunk.offset != i * rows ||
+                    chunk.len != rows || chunk.kv_seq_len != (i + 1) * rows)
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    bool wall_base_fp16_long_prefill_fusion(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t position, bool is_causal, bool use_attn_mask,
+        int64_t batch_size) const {
+        if (!wall_base_fp16_long_prefill_ ||
+            (physical_len != 448 && physical_len != 512 && physical_len != 640) ||
+            position != 0 || !is_causal || use_attn_mask || batch_size != 1 ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL ||
+            attn_tp() != NUM_CORES || mlp_tp() != NUM_CORES ||
+            num_cores() != NUM_CORES || linear_acc32_ || nvfp4_ ||
+            decoder_mixed_precision_ || wall_prefill_mixed_requested_ ||
+            wall_prefill_staged_mlp_ || wall_prefill_owner_direct_kv_ ||
+            decode_gate_up_fusion_ || adarms_ || !has_mrope_ ||
+            pre_layers_residual1_ready_ ||
+            planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
+            wall_z1_dispatch_ || qwen3vl_pooler_z1_dispatch_ ||
+            qwen3vl_multiview_text_composite_dispatch_) return false;
+        if (plan.input.plan.chunk_size != physical_len ||
+            plan.input.plan.num_chunks != 1 || plan.input.chunks.size() != 1)
+            return false;
+        const auto& input = plan.input.chunks.front();
+        if (input.idx != 0 || input.offset != 0 || input.len != physical_len ||
+            input.kv_seq_len != physical_len) return false;
+        const int64_t rows = physical_len / 2;
+        for (const auto* stage : {&plan.qkv, &plan.compute}) {
+            if (stage->plan.chunk_size != rows || stage->plan.num_chunks != 2 ||
+                stage->chunks.size() != 2) return false;
+            for (int64_t i = 0; i < 2; ++i) {
+                const auto& chunk = stage->chunks[i];
+                if (chunk.idx != i || chunk.offset != i * rows ||
+                    chunk.len != rows || chunk.kv_seq_len != (i + 1) * rows)
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    bool wall_base_fp16_shared_gateup_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t position, bool is_causal, bool use_attn_mask,
+        int64_t batch_size) const {
+        return wall_base_fp16_shared_gateup_ &&
+            wall_base_fp16_long_prefill_fusion(plan, physical_len, position,
+                is_causal, use_attn_mask, batch_size);
+    }
+
+    std::vector<int64_t> wall_base_fp16_shared_gateup_arguments(int64_t rows) const {
+        // version, M/N/K/localN/TP, tile, grid, precision, VLM, fused SiLU.
+        return {1, rows, 11008, 2048, 1376, 8, 320, 80, 128, 18, 1, 1, 16, 400, 1};
+    }
+
+    bool wall_base_prefill_owner_norm_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t position, bool is_causal, bool use_attn_mask,
+        int64_t batch_size) const {
+        return wall_base_prefill_owner_norm_ && physical_len == 448 &&
+            eps_ == 1e-6 && !get_debug_export() && !rhinovla_high_precision_ &&
+            ordinary_rmsnorm_route_enabled() &&
+            ordinary_rmsnorm_spm_contract_.resolve(224, 2048) == RpuRmsNormSpmRoute::V32_GRID8 &&
+            (wall_base_long_prefill_qkv_fusion(plan, physical_len, position,
+                 is_causal, use_attn_mask, batch_size) ||
+             wall_base_fp16_long_prefill_fusion(plan, physical_len, position,
+                 is_causal, use_attn_mask, batch_size));
+    }
+
+    std::vector<int64_t> wall_base_prefill_owner_norm_arguments(int64_t invocation) const {
+        // version, M/H/TP, owner rows, norm blocks/rows, ring tile/rounds,
+        // original norm route, owner-only raw, consumed-residual alias, P/offset.
+        return {1,224,2048,8,28,7,4,63488,1,
+                static_cast<int64_t>(RpuRmsNormSpmRoute::V32_GRID8),1,1,448,invocation*224};
+    }
+
+    void consume_wall_base_prefill_owner_norm(const ChunkInfo& chunk, uint32_t residual) {
+        TORCH_CHECK(ctx().has_complete_physical_manifest() &&
+            wall_base_prefill_owner_norm_enabled(ctx().stage_plan, seq_len_, ctx().position,
+                ctx().is_causal, ctx().attention_mask.has_value(), ctx().batch_size) &&
+            chunk.idx >= 0 && chunk.idx < 2 && chunk.len == 224 &&
+            chunk.offset == chunk.idx * 224 && residual == addr(0, "residual1") &&
+            addr(0, "residual2") == addr(0, "input_norm"),
+            "Wall Prefill owner norm requires exact C224 plan and residual alias");
+        ctx().consume_physical_route(FmbRouteFamily::ALL_REDUCE,
+            WALL_BASE_PREFILL_O_OWNER_NORM_SITE, 1, 0,
+            wall_base_prefill_owner_norm_arguments(chunk.idx), chunk.idx);
+    }
+
+    int64_t wall_base_prefill_shared_gateup_site() const {
+        if (wall_base_prefill_no_up_store_) return WALL_BASE_PREFILL_SHARED_NOUP_SITE;
+        return wall_base_prefill_shared_silu_ ? WALL_BASE_PREFILL_SHARED_SILU_SITE
+                                              : WALL_BASE_PREFILL_SHARED_GATEUP_SITE;
+    }
+
+    std::vector<int64_t> wall_base_prefill_shared_input_arguments(int64_t rows) const {
+        std::vector<int64_t> arguments{1, rows, 11008, 2048, 1376, 8, 384, 48, 128, 29, 1, 1, 378, 2};
+        if (wall_base_prefill_shared_silu_) {
+            arguments[0] = 2;
+            arguments.push_back(1);  // canonical in-VLM SiLU/Mul
+        }
+        if (wall_base_prefill_no_up_store_) {
+            arguments[0] = 3;
+            arguments[13] = 1;  // only activated Gate is written to SPM
+        }
+        return arguments;
+    }
+
+    std::vector<int64_t> wall_small_prefill_qkv_arguments(int64_t rows) const {
+        return {rows, 2048, 2048, 1024, NUM_CORES, 448, 64, 128,
+                layer_weights_.front().q_w.scalar_type() == at::kHalf ? 16 : 8};
+    }
+
+    std::vector<int64_t> wall_sorting_route_arguments() const {
+        const bool fp16 = wall_action_fp16_transfer_enabled();
+        std::vector<int64_t> arguments{wall_prefill_mixed_requested_ ? 1 : 0,
+                wall_prefill_staged_mlp_ ? 1 : 0,
+                wall_prefill_owner_direct_kv_ ? 1 : 0,
+                wall_sorting_.fp16_transfer_mask, wall_sorting_.fp16_mlp_m224 ? 1 : 0,
+                wall_sorting_.silu_mul ? 1 : 0,
+                wall_sorting_.action_activation_reuse ? 1 : 0,
+                wall_sorting_.prefill_row_reuse ? 1 : 0,
+                wall_sorting_.prefill_mlp_retile ? 1 : 0,
+                wall_sorting_.paired_postnorm_tile40 ? 1 : 0,
+                wall_action_weight_residency_ ? 1 : 0,
+                wall_action_kv_owner_fanout_ ? 1 : 0,
+                wall_action_weight_residency_
+                    ? WALL_ACTION_RESIDENT_LAYER_COUNT / (fp16 ? 2 : 1) : 0,
+                wall_action_weight_residency_
+                    ? WALL_ACTION_WEIGHT_BYTES_PER_LAYER * (fp16 ? 2 : 1) : 0};
+        if (wall_base_prefill_shared_input_)
+            arguments.push_back(WALL_BASE_PREFILL_SHARED_GATEUP_SITE);
+        if (wall_base_prefill_shared_silu_)
+            arguments.push_back(WALL_BASE_PREFILL_SHARED_SILU_SITE);
+        if (wall_base_prefill_no_up_store_)
+            arguments.push_back(WALL_BASE_PREFILL_SHARED_NOUP_SITE);
+        if (wall_base_fp16_shared_gateup_)
+            arguments.insert(arguments.end(), {WALL_BASE_FP16_PREFILL_SHARED_GATEUP_SITE, 1});
+        if (wall_base_prefill_owner_norm_)
+            arguments.push_back(WALL_BASE_PREFILL_O_OWNER_NORM_SITE);
+        if (wall_base_fp16_long_prefill_)
+            arguments.insert(arguments.end(), {CAUSAL_DECODER_Q_SITE, 16,
+                FMB_SHARED_MLP_SILU_MUL_SITE, 1});
+        return arguments;
+    }
+
+    // Only the installed Wall Action owner can bind this marker. The input
+    // activations/cache remain FP16 for all admitted uniform projection precisions.
+    bool wall_base_paired_kv_profile() const {
+        if (!wall_action_fuse_silu_mul_ || !wall_sorting_.silu_mul ||
+            !pre_layers_residual1_ready_ || num_layers() != 36 ||
+            hidden_size() != 1024 || intermediate_size() != 2048 ||
+            num_q_heads() != 16 || num_kv_heads() != 8 || head_dim() != 128 ||
+            num_cores() != NUM_CORES || attn_tp() != NUM_CORES ||
+            mlp_tp() != NUM_CORES || !has_qkv_bias_ || has_qk_norm_ ||
+            !has_mrope_ || !use_silu_ || linear_acc32_ ||
+            decoder_mixed_precision_ || !deepstack_lang_layers_.empty() ||
+            layer_weights_.size() != 36) return false;
+        if (nvfp4_) {
+            // Packed NVFP4 changes the Linear operands, not the FP16 K/V
+            // insertion ABI. Keep mixed W8/W4 fallback layers off this route.
+            if (final_norm_w_.scalar_type() != at::kHalf) return false;
+            return std::all_of(layer_weights_.begin(), layer_weights_.end(),
+                [](const LayerWeights& lw) {
+                    for (const auto* weight : {&lw.q_w, &lw.k_w, &lw.v_w,
+                            &lw.o_w, &lw.gate_w, &lw.up_w, &lw.down_w}) {
+                        if (!weight->defined() ||
+                            weight->scalar_type() != at::kByte) return false;
+                    }
+                    for (const auto* scale : {&lw.q_ws, &lw.k_ws, &lw.v_ws,
+                            &lw.o_ws, &lw.gate_ws, &lw.up_ws, &lw.down_ws}) {
+                        if (!scale->defined() ||
+                            scale->scalar_type() != at::kByte) return false;
+                    }
+                    return lw.input_norm_w.scalar_type() == at::kHalf &&
+                        lw.post_norm_w.scalar_type() == at::kHalf;
+                });
+        }
+        const bool fp16 = wall_action_fp16_transfer_enabled();
+        return std::all_of(layer_weights_.begin(), layer_weights_.end(),
+            [fp16](const LayerWeights& lw) {
+                return wall_action_ring_weights_compatible(lw, fp16);
+            });
+    }
+
+    bool wall_base_paired_kv_enabled(
+        const FmbThreeStageChunkPlan& plan, const KvInsertSegmentPlan& kv_plan,
+        int64_t physical_len, int64_t logical_len, int64_t position,
+        bool is_causal, bool use_attn_mask, int64_t batch_size,
+        bool partial_mrope) const {
+        if (!wall_base_paired_kv_ || physical_len != 32 || logical_len != 32 ||
+            (position != 336 && position != 384) || is_causal ||
+            !use_attn_mask || batch_size != 1 || !partial_mrope ||
+            adarms_ || decoder_mixed_precision_ || wall_action_kv_owner_fanout_ ||
+            cache_batch_slot_ != 0 ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL ||
+            plan.compute.chunks.size() != 1 ||
+            kv_plan.route() != KvInsertRoute::ALIGNED_V16 ||
+            kv_plan.logical_rows() != 32 || kv_plan.physical_rows() != 32 ||
+            kv_plan.segment_count() != 1) return false;
+        const auto& chunk = plan.compute.chunks.front();
+        const auto& segment = kv_plan.segment(0);
+        return chunk.offset == 0 && chunk.len == 32 &&
+            chunk.kv_seq_len == position + 32 &&
+            segment.position == position && segment.rows == 32 &&
+            segment.token_offset == 0 && segment.kernel == KvInsertKernel::V16;
+    }
+
+    static std::vector<int64_t> wall_base_paired_kv_arguments(int64_t position) {
+        // ABI version, H, physical prefix/end, B, KV heads, D, TP, grid-x.
+        return {1, 32, position, position + 32, 1, 8, 128, 8, 2};
+    }
+
+    bool wall_base_nvfp4_qkv_bias_profile() const {
+        if (!nvfp4_ || !wall_base_paired_kv_profile()) return false;
+        for (const auto* scale : {&q_nvfp4_tensor_scales_,
+                &k_nvfp4_tensor_scales_, &v_nvfp4_tensor_scales_}) {
+            if (!scale->defined() || scale->scalar_type() != at::kFloat ||
+                scale->numel() != 40 || !scale->is_contiguous()) return false;
+        }
+        return std::all_of(layer_weights_.begin(), layer_weights_.end(),
+            [](const LayerWeights& lw) {
+                return lw.q_bias_w.defined() && lw.k_bias_w.defined() &&
+                    lw.v_bias_w.defined() &&
+                    lw.q_bias_w.scalar_type() == at::kHalf &&
+                    lw.k_bias_w.scalar_type() == at::kHalf &&
+                    lw.v_bias_w.scalar_type() == at::kHalf &&
+                    lw.q_bias_w.is_contiguous() && lw.k_bias_w.is_contiguous() &&
+                    lw.v_bias_w.is_contiguous() && lw.q_bias_w.numel() == 2048 &&
+                    lw.k_bias_w.numel() == 1024 && lw.v_bias_w.numel() == 1024;
+            });
+    }
+
+    bool wall_base_nvfp4_qkv_bias_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t logical_len, int64_t position, bool is_causal,
+        bool use_attn_mask, int64_t batch_size, bool partial_mrope) const {
+        if (!wall_base_nvfp4_qkv_bias_ || physical_len != 32 || logical_len != 32 ||
+            !wall_base_nvfp4_fused_prefix_supported(position) || is_causal || !use_attn_mask ||
+            batch_size != 1 || !partial_mrope || adarms_ || decoder_mixed_precision_ ||
+            wall_action_weight_residency_ || wall_action_kv_owner_fanout_ ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL ||
+            plan.compute.chunks.size() != 1) return false;
+        const auto& chunk = plan.compute.chunks.front();
+        return chunk.offset == 0 && chunk.len == 32 && chunk.kv_seq_len == position + 32;
+    }
+
+    bool wall_base_nvfp4_qkv_rope_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t logical_len, int64_t position, bool is_causal,
+        bool use_attn_mask, int64_t batch_size, bool partial_mrope) const {
+        return wall_base_nvfp4_qkv_rope_ &&
+            wall_base_nvfp4_qkv_parallel_enabled(plan, physical_len, logical_len,
+                position, is_causal, use_attn_mask, batch_size, partial_mrope);
+    }
+
+    static std::vector<int64_t> wall_base_nvfp4_qkv_rope_arguments(int64_t position) {
+        auto args = wall_base_nvfp4_qkv_parallel_arguments(position);
+        // Q/K heads, head/rotary dims, table width, RoPE blocks and owners,
+        // coupled physical-prefix/table position. QKV tile/bias ABI is retained.
+        args.insert(args.end(), {2, 1, 128, 128, 64, 2, 0, 1, 1});
+        return args;
+    }
+
+    void emit_wall_base_nvfp4_qkv_rope(
+        const LayerWeights& lw, int layer_idx, const ChunkInfo& chunk) {
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < 36 && chunk.offset == 0 &&
+                        chunk.len == 32 &&
+                        wall_base_nvfp4_fused_prefix_supported(ctx().position),
+                    "Wall QKV/RoPE requires H32/admitted-prefix layer<36");
+        ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+            CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_ROPE_SITE, 14, 0,
+            wall_base_nvfp4_qkv_rope_arguments(ctx().position), chunk.idx);
+        rpu_launch_wall_base_nvfp4_qkv_bias_rope_spm_kernel(
+            addr(0, "input_norm"), lw.q_w, lw.k_w, lw.v_w,
+            addr(0, "q"), addr(0, "k"), addr(0, "v"), lw.q_ws, lw.k_ws, lw.v_ws,
+            layer_addr(layer_idx, 0, "q_bias"), layer_addr(layer_idx, 0, "k_bias"),
+            layer_addr(layer_idx, 0, "v_bias"), nvfp4_scale_addr("nvfp4_q_ts"),
+            nvfp4_scale_addr("nvfp4_k_ts"), nvfp4_scale_addr("nvfp4_v_ts"),
+            q_nvfp4_tensor_scales_.numel(), static_cast<uint16_t>(layer_idx),
+            cos_il_keepalive_, sin_il_keepalive_, ctx().position);
+    }
+
+    bool wall_base_nvfp4_qkv_parallel_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t logical_len, int64_t position, bool is_causal,
+        bool use_attn_mask, int64_t batch_size, bool partial_mrope) const {
+        return wall_base_nvfp4_qkv_parallel_ &&
+            wall_base_nvfp4_kv_parallel_enabled(plan, physical_len, logical_len,
+                position, is_causal, use_attn_mask, batch_size, partial_mrope);
+    }
+
+    static std::vector<int64_t> wall_base_nvfp4_qkv_parallel_arguments(int64_t position) {
+        // Version, M/P/B, Q/K/V widths, input K, TP, common tile, TS count,
+        // grid, Q/K/V block counts, bias, barrier count and 36-layer range.
+        return {1, 32, position, 1, 2048, 1024, 1024, 1024, 8, 320, 64, 128,
+                40, 8, 1, 1, 4, 2, 2, 1, 8, 0, 36};
+    }
+
+    void emit_wall_base_nvfp4_qkv_parallel(
+        const LayerWeights& lw, int layer_idx, const ChunkInfo& chunk) {
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < 36 && chunk.offset == 0 &&
+                        chunk.len == 32 &&
+                        wall_base_nvfp4_fused_prefix_supported(ctx().position),
+                    "Wall parallel Q/K/V requires H32/admitted-prefix layer<36");
+        ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+            CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_PARALLEL_SITE, 13, 0,
+            wall_base_nvfp4_qkv_parallel_arguments(ctx().position), chunk.idx);
+        rpu_launch_wall_base_nvfp4_qkv_parallel_bias_spm_kernel(
+            addr(0, "input_norm"), lw.q_w, lw.k_w, lw.v_w,
+            addr(0, "q"), addr(0, "k"), addr(0, "v"), lw.q_ws, lw.k_ws, lw.v_ws,
+            layer_addr(layer_idx, 0, "q_bias"), layer_addr(layer_idx, 0, "k_bias"),
+            layer_addr(layer_idx, 0, "v_bias"), nvfp4_scale_addr("nvfp4_q_ts"),
+            nvfp4_scale_addr("nvfp4_k_ts"), nvfp4_scale_addr("nvfp4_v_ts"),
+            q_nvfp4_tensor_scales_.numel(), static_cast<uint16_t>(layer_idx));
+    }
+
+    bool wall_base_nvfp4_kv_parallel_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t logical_len, int64_t position, bool is_causal,
+        bool use_attn_mask, int64_t batch_size, bool partial_mrope) const {
+        return wall_base_nvfp4_kv_parallel_ &&
+            wall_base_nvfp4_qk_rope_enabled(plan, physical_len, logical_len,
+                position, is_causal, use_attn_mask, batch_size, partial_mrope);
+    }
+
+    static std::vector<int64_t> wall_base_nvfp4_kv_parallel_arguments(int64_t position) {
+        // Version, M/P/B, N/K/localN, TP, tile, TS count, grid, bias,
+        // eight-block barrier count and complete 36-layer range.
+        return {1, 32, position, 1, 1024, 1024, 128, 8, 480, 32, 128, 40,
+                4, 1, 2, 1, 8, 0, 36};
+    }
+
+    void emit_wall_base_nvfp4_kv_parallel(
+        const LayerWeights& lw, int layer_idx, const ChunkInfo& chunk) {
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < 36 && chunk.offset == 0 &&
+                        chunk.len == 32 &&
+                        wall_base_nvfp4_fused_prefix_supported(ctx().position),
+                    "Wall parallel K/V requires H32/admitted-prefix layer<36");
+        ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+            CAUSAL_DECODER_WALL_BASE_NVFP4_KV_PARALLEL_SITE, 12, 0,
+            wall_base_nvfp4_kv_parallel_arguments(ctx().position), chunk.idx);
+        rpu_launch_wall_base_nvfp4_kv_parallel_bias_spm_kernel(
+            addr(0, "input_norm"), lw.k_w, lw.v_w, addr(0, "k"), addr(0, "v"),
+            lw.k_ws, lw.v_ws, layer_addr(layer_idx, 0, "k_bias"),
+            layer_addr(layer_idx, 0, "v_bias"), nvfp4_scale_addr("nvfp4_k_ts"),
+            nvfp4_scale_addr("nvfp4_v_ts"), k_nvfp4_tensor_scales_.numel(),
+            static_cast<uint16_t>(layer_idx));
+    }
+
+    bool wall_base_nvfp4_gate_up_profile() const {
+        if (!wall_base_nvfp4_down_ring_norm_) return false;
+        for (const auto* ts : {&gate_nvfp4_tensor_scales_, &up_nvfp4_tensor_scales_}) {
+            if (!ts->defined() || ts->scalar_type() != at::kFloat ||
+                !ts->is_contiguous() || ts->numel() != 40) return false;
+        }
+        return true;
+    }
+
+    bool wall_base_nvfp4_gate_up_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t logical_len, int64_t position, bool is_causal,
+        bool use_attn_mask, int64_t batch_size, bool partial_mrope) const {
+        // Gate/Up geometry stays M32 for every admitted physical prefix.
+        return wall_base_nvfp4_gate_up_ && wall_base_nvfp4_fused_prefix_supported(position) &&
+            wall_base_nvfp4_down_ring_norm_enabled(plan, physical_len, logical_len,
+                position, is_causal, use_attn_mask, batch_size, partial_mrope);
+    }
+
+    static std::vector<int64_t> wall_base_nvfp4_gate_up_arguments(int64_t position) {
+        // Version, M/P/B, N/K/localN, TP, tile, TS count, grid, layer range,
+        // separate canonical SiLU/Mul. Final layer retains the shared pipeline.
+        return {1, 32, position, 1, 2048, 1024, 256, 8, 320, 64, 128, 40,
+                4, 1, 2, 0, 35, 1};
+    }
+
+    static std::vector<int64_t> wall_base_nvfp4_gate_up_silu_arguments(int64_t position) {
+        // Original parallel geometry, fused SiLU, eight 1024-element blocks,
+        // and counter0 threshold7. The final layer keeps the shared pipeline.
+        return {1, 32, position, 1, 2048, 1024, 256, 8, 320, 64, 128, 40,
+                4, 1, 2, 0, 35, 0, 8, 1024, 0, 7};
+    }
+
+    static std::vector<int64_t> wall_base_nvfp4_gate_up_shared_silu_arguments(int64_t position) {
+        // Four M32/N64 blocks share A, retain raw Up, and activate Gate in VLM.
+        // Counter0 threshold3 separates projection and local activation phases.
+        return {1, 32, position, 1, 2048, 1024, 256, 8, 32, 64, 128, 40,
+                4, 1, 1, 0, 35, 0, 4, 2048, 0, 3};
+    }
+
+    void emit_wall_base_nvfp4_gate_up(
+        const LayerWeights& lw, int layer_idx, const ChunkInfo& chunk) {
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < 35 && chunk.offset == 0 &&
+                        chunk.len == 32 &&
+                        wall_base_nvfp4_fused_prefix_supported(ctx().position),
+                    "Wall parallel Gate/Up requires nonfinal H32/admitted-prefix layer");
+        if (wall_base_nvfp4_gate_up_shared_silu_) {
+            ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+                CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SHARED_SILU_SITE, 15, 0,
+                wall_base_nvfp4_gate_up_shared_silu_arguments(ctx().position), chunk.idx);
+            rpu_launch_wall_base_nvfp4_gate_up_shared_silu_spm_kernel(
+                addr(0, "residual1"), lw.gate_w, lw.up_w, addr(0, "gate"), addr(0, "up"),
+                lw.gate_ws, lw.up_ws, nvfp4_scale_addr("nvfp4_gate_ts"),
+                nvfp4_scale_addr("nvfp4_up_ts"), gate_nvfp4_tensor_scales_.numel(),
+                static_cast<uint16_t>(layer_idx));
+        } else if (wall_base_nvfp4_gate_up_silu_) {
+            ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+                CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SILU_SITE, 15, 0,
+                wall_base_nvfp4_gate_up_silu_arguments(ctx().position), chunk.idx);
+            rpu_launch_wall_base_nvfp4_gate_up_parallel_silu_spm_kernel(
+                addr(0, "residual1"), lw.gate_w, lw.up_w, addr(0, "gate"), addr(0, "up"),
+                lw.gate_ws, lw.up_ws, nvfp4_scale_addr("nvfp4_gate_ts"),
+                nvfp4_scale_addr("nvfp4_up_ts"), gate_nvfp4_tensor_scales_.numel(),
+                static_cast<uint16_t>(layer_idx));
+        } else {
+            ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+                CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SITE, 11, 0,
+                wall_base_nvfp4_gate_up_arguments(ctx().position), chunk.idx);
+            rpu_launch_wall_base_nvfp4_gate_up_parallel_spm_kernel(
+                addr(0, "residual1"), lw.gate_w, lw.up_w, addr(0, "gate"), addr(0, "up"),
+                lw.gate_ws, lw.up_ws, nvfp4_scale_addr("nvfp4_gate_ts"),
+                nvfp4_scale_addr("nvfp4_up_ts"), gate_nvfp4_tensor_scales_.numel(),
+                static_cast<uint16_t>(layer_idx));
+            rpu_launch_silu_mul_spm_kernel(addr(0, "gate"), addr(0, "up"),
+                addr(0, "gate"), 32 * 256, NUM_CORES);
+        }
+    }
+
+    bool wall_base_nvfp4_qk_rope_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t logical_len, int64_t position, bool is_causal,
+        bool use_attn_mask, int64_t batch_size, bool partial_mrope) const {
+        return wall_base_nvfp4_qk_rope_ && cache_batch_slot_ == 0 &&
+            !wall_sorting_.action_activation_reuse &&
+            wall_base_nvfp4_qkv_bias_enabled(plan, physical_len, logical_len,
+                position, is_causal, use_attn_mask, batch_size, partial_mrope);
+    }
+
+    static std::vector<int64_t> wall_base_nvfp4_qk_rope_arguments(int64_t position) {
+        // Version, M/P/B, local Q/K heads, head/rotary dims, TP and grid.
+        return {1, 32, position, 1, 2, 1, 128, 128, 8, 1, 1, 2};
+    }
+
+    void emit_wall_base_nvfp4_qk_rope(const ChunkInfo& chunk, int64_t position) {
+        ctx().consume_physical_route(FmbRouteFamily::ROPE,
+            CAUSAL_DECODER_WALL_BASE_QK_ROPE_SITE, 1, 0,
+            wall_base_nvfp4_qk_rope_arguments(position), chunk.idx);
+        rpu_launch_wall_base_partial_mrope_qk_spm_kernel(
+            addr(0, "q"), addr(0, "k"), cos_il_keepalive_, sin_il_keepalive_, position);
+    }
+
+    bool wall_base_nvfp4_o_ring_norm_profile() const {
+        return nvfp4_ && wall_base_paired_kv_profile() &&
+            wall_rmsnorm_capability_ == RPU_RMSNORM_CAP_BASE &&
+            !rhinovla_high_precision_ &&
+            o_nvfp4_tensor_scales_.defined() &&
+            o_nvfp4_tensor_scales_.scalar_type() == at::kFloat &&
+            o_nvfp4_tensor_scales_.is_contiguous() &&
+            o_nvfp4_tensor_scales_.numel() == 40;
+    }
+
+    bool wall_base_nvfp4_o_ring_norm_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t logical_len, int64_t position, bool is_causal,
+        bool use_attn_mask, int64_t batch_size, bool partial_mrope) const {
+        if (!wall_base_nvfp4_o_ring_norm_ || physical_len != 32 || logical_len != 32 ||
+            !wall_base_nvfp4_fused_prefix_supported(position) || is_causal || !use_attn_mask ||
+            batch_size != 1 || !partial_mrope || adarms_ || decoder_mixed_precision_ ||
+            wall_action_weight_residency_ || wall_action_kv_owner_fanout_ ||
+            wall_sorting_.action_activation_reuse || cache_batch_slot_ != 0 ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL || plan.compute.chunks.size() != 1)
+            return false;
+        const auto& chunk = plan.compute.chunks.front();
+        return chunk.offset == 0 && chunk.len == 32 && chunk.kv_seq_len == position + 32;
+    }
+
+    static std::vector<int64_t> wall_base_nvfp4_o_ring_norm_arguments(int64_t position) {
+        // Version, M/P/B, global N/K, local K, TP, Linear tile, padded TS,
+        // ring roundmax/owner elements, BASE norm and full residual alias ABI.
+        return {1, 32, position, 1, 1024, 2048, 256, 8, 176, 128, 128,
+                40, 63488, 4096, static_cast<int64_t>(RpuRmsNormSpmRoute::BASE), 1};
+    }
+
+    bool wall_base_nvfp4_down_ring_norm_profile() const {
+        return wall_base_nvfp4_o_ring_norm_ &&
+            down_nvfp4_tensor_scales_.defined() &&
+            down_nvfp4_tensor_scales_.scalar_type() == at::kFloat &&
+            down_nvfp4_tensor_scales_.is_contiguous() &&
+            down_nvfp4_tensor_scales_.numel() == 40;
+    }
+
+    bool wall_base_nvfp4_down_ring_norm_enabled(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len,
+        int64_t logical_len, int64_t position, bool is_causal,
+        bool use_attn_mask, int64_t batch_size, bool partial_mrope) const {
+        // The exact one-chunk sequential owner uses one 36-layer SPM-resident
+        // group. All next-layer norm weights are preloaded before that group.
+        return wall_base_nvfp4_down_ring_norm_ &&
+            wall_base_nvfp4_o_ring_norm_enabled(plan, physical_len, logical_len,
+                position, is_causal, use_attn_mask, batch_size, partial_mrope);
+    }
+
+    static std::vector<int64_t> wall_base_nvfp4_down_ring_norm_arguments(int64_t position) {
+        auto args = wall_base_nvfp4_o_ring_norm_arguments(position);
+        // First layer, exclusive last layer, next gamma's layer offset.
+        args.insert(args.end(), {0, 35, 1});
+        return args;
+    }
+
+    void emit_wall_base_nvfp4_down_ring_norm(
+        const LayerWeights& lw, int layer_idx, const ChunkInfo& chunk) {
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < 35 && ctx().output_to_spm &&
+                        chunk.offset == 0 && chunk.len == 32 &&
+                        addr(0, "input_norm") == addr(0, "residual2"),
+                    "Wall NVFP4 Down/next norm requires nonfinal SPM-resident carry");
+        ctx().consume_physical_route(
+            FmbRouteFamily::LINEAR,
+            CAUSAL_DECODER_WALL_BASE_NVFP4_DOWN_RING_NORM_SITE,
+            static_cast<int64_t>(CausalDecoderLinearRoute::WALL_BASE_NVFP4_DOWN_RING_NORM),
+            0, wall_base_nvfp4_down_ring_norm_arguments(ctx().position), chunk.idx);
+        rpu_launch_wall_base_nvfp4_down_ring_norm_spm_kernel(
+            addr(0, "gate"), lw.down_w, addr(0, "down"), addr(0, "residual2"),
+            addr(0, "residual1"), addr(0, "input_norm"), norm_input_addr(layer_idx + 1, 0),
+            lw.down_ws, nvfp4_scale_addr("nvfp4_down_ts"),
+            down_nvfp4_tensor_scales_.numel(), static_cast<uint16_t>(layer_idx), eps_);
+    }
+
+    std::vector<int64_t> qkv_bias_topology_arguments(bool fused, int64_t position) const {
+        if (!fused) return {has_qkv_bias_ ? 1 : 0};
+        // has bias, fused ABI version, M, P, B, TP, Q/KV local-N, K, TS count.
+        return {1, 1, 32, position, 1, 8, 256, 128, 1024, 40};
+    }
+
+    bool wall_action_fp16_transfer_enabled() const {
+        return (wall_sorting_.fp16_transfer_mask & 4u) && !layer_weights_.empty() &&
+            layer_weights_.front().q_w.scalar_type() == at::kHalf &&
+            !layer_weights_.front().q_ws.defined();
+    }
+
+    static bool wall_action_qkv_weights_compatible(
+        const LayerWeights& weights, bool fp16) {
+        const auto dtype = fp16 ? at::kHalf : at::kChar;
+        return weights.q_w.scalar_type() == dtype &&
+            weights.k_w.scalar_type() == dtype &&
+            weights.v_w.scalar_type() == dtype &&
+            (fp16
+                 ? (!weights.q_ws.defined() && !weights.k_ws.defined() &&
+                    !weights.v_ws.defined())
+                 : (weights.q_ws.defined() && weights.k_ws.defined() &&
+                    weights.v_ws.defined()));
+    }
+
+    static bool wall_action_ring_weights_compatible(
+        const LayerWeights& weights, bool fp16) {
+        const auto dtype = fp16 ? at::kHalf : at::kChar;
+        if (!wall_action_qkv_weights_compatible(weights, fp16)) return false;
+        for (const auto* weight : {&weights.o_w, &weights.gate_w,
+                                   &weights.up_w, &weights.down_w}) {
+            if (weight->scalar_type() != dtype) return false;
+        }
+        for (const auto* scale : {&weights.q_ws, &weights.k_ws, &weights.v_ws,
+                                  &weights.o_ws, &weights.gate_ws,
+                                  &weights.up_ws, &weights.down_ws}) {
+            if (fp16 ? scale->defined() :
+                    (!scale->defined() || scale->scalar_type() != at::kHalf))
+                return false;
+        }
+        return weights.input_norm_w.scalar_type() == at::kHalf &&
+            weights.post_norm_w.scalar_type() == at::kHalf;
+    }
+
     void consume_causal_route(
         FmbRouteFamily family, int64_t site_id, int64_t selector,
         int64_t invocation = 0) const {
@@ -4896,7 +6699,8 @@ protected:
         if (typeid(*this) != typeid(CausalDecoderModel) ||
             num_cores() != 8 || attn_tp() != 8 || !is_causal || batch_size != 1 ||
             plan.chunk_mode != ChunkMode::SEQUENTIAL || linear_acc32_ ||
-            has_mrope_ || has_qkv_bias_ || nvfp4_ || decode_gate_up_fusion_ || adarms_ ||
+            has_mrope_ || has_qkv_bias_ || nvfp4_ || decoder_mixed_precision_ ||
+            wall_prefill_staged_mlp_ || decode_gate_up_fusion_ || adarms_ ||
             !deepstack_lang_layers_.empty() || pre_layers_residual1_ready_ ||
             planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
             wall_z1_dispatch_ || qwen3vl_pooler_z1_dispatch_ ||
@@ -4955,7 +6759,8 @@ protected:
         if (typeid(*this) != typeid(CausalDecoderModel) ||
             num_cores() != 8 || mlp_tp() != 8 || !use_silu_ || linear_acc32_ ||
             intermediate_size() <= 0 || intermediate_size() % 128 != 0 ||
-            has_mrope_ || has_qkv_bias_ || nvfp4_ || decode_gate_up_fusion_ || adarms_ ||
+            has_mrope_ || has_qkv_bias_ || nvfp4_ || decoder_mixed_precision_ ||
+            wall_prefill_staged_mlp_ || decode_gate_up_fusion_ || adarms_ ||
             !deepstack_lang_layers_.empty() || pre_layers_residual1_ready_ ||
             planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
             wall_z1_dispatch_ || qwen3vl_pooler_z1_dispatch_ ||
@@ -4987,7 +6792,9 @@ protected:
 
     bool ordinary_rmsnorm_route_enabled() const {
         return (rhinovla_high_precision_ || ordinary_rmsnorm_spm_contract_.has_vector_payload()) &&
-            !adarms_ && !qwen3vl_2b_w8_profile_;
+            !adarms_ && !decoder_mixed_precision_ &&
+            !qwen3vl_2b_w8_profile_ &&
+            wall_rmsnorm_capability_ == RPU_RMSNORM_CAP_BASE;
     }
 
     RpuRmsNormSpmRoute consume_ordinary_rmsnorm_route(
@@ -5020,7 +6827,7 @@ protected:
         return route;
     }
 
-    RpuRmsNormSpmRoute consume_decoder_rmsnorm_route(
+    RpuRmsNormSpmRoute consume_wall_rmsnorm_route(
         int64_t rows, int64_t cols, int64_t invocation) const {
         if (qwen3vl_2b_w8_profile_) {
             return consume_delivery_rmsnorm_route(rows, cols, invocation, 0);
@@ -5031,7 +6838,37 @@ protected:
             return consume_ordinary_rmsnorm_route(
                 rows, cols, invocation, /*role=*/0);
         }
-        return RpuRmsNormSpmRoute::BASE;
+        const RpuRmsNormSpmRoute route =
+            rpu_resolve_rmsnorm_spm_route(
+                wall_rmsnorm_capability_, rows, cols);
+        if (wall_rmsnorm_capability_ == RPU_RMSNORM_CAP_BASE) {
+            return route;
+        }
+        TORCH_CHECK(ctx().has_complete_physical_manifest(),
+                    "Wall-OSS RMSNorm route requires a COMPLETE physical "
+                    "descriptor");
+        ctx().consume_physical_route(
+            FmbRouteFamily::NORMALIZATION,
+            kCausalDecoderRmsNormRowsSite,
+            static_cast<int64_t>(route), /*resolved_flags=*/0,
+            {rows, cols, static_cast<int64_t>(wall_rmsnorm_capability_)},
+            invocation);
+        return route;
+    }
+
+    RpuMixedRmsNormSpmRoute consume_wall_mixed_rmsnorm_route(
+        int64_t site_id, int64_t rows, int64_t cols,
+        int64_t invocation) const {
+        const RpuMixedRmsNormSpmRoute route =
+            rpu_resolve_mixed_rmsnorm_spm_route(rows, cols);
+        TORCH_CHECK(ctx().has_complete_physical_manifest(),
+                    "Wall-OSS mixed RMSNorm route requires a COMPLETE "
+                    "physical descriptor");
+        ctx().consume_physical_route(
+            FmbRouteFamily::NORMALIZATION, site_id,
+            static_cast<int64_t>(route), /*resolved_flags=*/0,
+            {rows, cols}, invocation);
+        return route;
     }
 
     KvInsertSegmentPlan consume_causal_kv_plan(
@@ -5255,12 +7092,23 @@ protected:
 
     void emit_qwen3vl_4b_prefill_mlp(const LayerWeights& lw, const ChunkInfo& chunk) {
         const int64_t rows = chunk.len;
+        if (lingbot_prefill_gateup_for_plan(ctx().stage_plan, ctx().seq_len, ctx().position,
+                ctx().is_causal, ctx().attention_mask.has_value(), ctx().batch_size,
+                ctx().attention_policy)) {
+            ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+                LINGBOT2_PREFILL_GATEUP_SHARED_A_SITE, 1, 0,
+                lingbot_prefill_gateup_arguments(), chunk.idx);
+            rpu_launch_lingbot2_prefill_gate_up_shared_a_w8_m224_spm_kernel(
+                addr(0, "residual1"), lw.gate_w, lw.up_w, addr(0, "gate"),
+                lw.gate_ws, lw.up_ws);
+        } else {
         ctx().consume_physical_route(FmbRouteFamily::LINEAR,
             QWEN3VL_4B_PREFILL_GATEUP_SITE, 1, 0,
             {rows, 9728, 2560, 8, 320, 112}, chunk.idx);
         rpu_launch_qwen3vl_4b_prefill_gate_up_swiglu_w8a16_spm_kernel(
             addr(0, "residual1"), lw.gate_w, lw.up_w, addr(0, "gate"),
             rows, lw.gate_ws, lw.up_ws);
+        }
         ctx().consume_physical_route(FmbRouteFamily::LINEAR,
             QWEN3VL_4B_PREFILL_DOWN_SITE,
             static_cast<int64_t>(CausalDecoderLinearRoute::AUTO_TILE),
@@ -5274,6 +7122,75 @@ protected:
         rpu_launch_all_reduce_sum_residual_kernel(
             addr(0, "down"), addr(0, "residual2"), addr(0, "residual1"),
             rows, 2560, 8, 8);
+    }
+
+    void emit_wall_base_prefill_shared_input(const LayerWeights& lw, const ChunkInfo& chunk) {
+        TORCH_CHECK(ctx().has_complete_physical_manifest() &&
+                    wall_base_prefill_shared_input_enabled(
+                        ctx().stage_plan, seq_len_, ctx().position, ctx().is_causal,
+                        ctx().attention_mask.has_value(), ctx().batch_size),
+                    "Wall shared-input Prefill escaped its exact COMPLETE capability");
+        const int64_t rows = chunk.len;
+        ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+            wall_base_prefill_shared_gateup_site(), 1, 0,
+            wall_base_prefill_shared_input_arguments(rows), chunk.idx);
+        const auto launch = wall_base_prefill_no_up_store_
+            ? rpu_launch_wall_base_prefill_gate_up_shared_silu_no_up_spm_kernel
+            : wall_base_prefill_shared_silu_
+                ? rpu_launch_wall_base_prefill_gate_up_shared_silu_spm_kernel
+                : rpu_launch_wall_base_prefill_gate_up_shared_input_spm_kernel;
+        launch(
+            addr(0, "residual1"), lw.gate_w, lw.up_w,
+            addr(0, "gate"), addr(0, "up"), rows, lw.gate_ws, lw.up_ws);
+        if (!wall_base_prefill_shared_silu_) {
+            ctx().consume_physical_route(FmbRouteFamily::ACTIVATION,
+                FMB_SHARED_MLP_SILU_MUL_SITE, 1, 0, {rows, 1376, 8}, chunk.idx);
+            rpu_launch_silu_mul_spm_kernel(addr(0, "gate"), addr(0, "up"),
+                                          addr(0, "gate"), rows * 1376, 8);
+        }
+        ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+            WALL_BASE_PREFILL_SHARED_DOWN_SITE,
+            static_cast<int64_t>(CausalDecoderLinearRoute::AUTO_TILE),
+            0, {rows, 2048, 11008, 0, 8}, chunk.idx);
+        rpu_launch_linear_spm_to_spm_acc16_kernel(
+            addr(0, "gate"), lw.down_w, addr(0, "down"),
+            rows, 2048, 11008, /*partition=*/0, 8, /*bias=*/0, lw.down_ws);
+        ctx().consume_physical_route(FmbRouteFamily::ALL_REDUCE,
+            WALL_BASE_PREFILL_SHARED_REDUCE_SITE, causal_ring_route(rows, 2048),
+            0, {}, chunk.idx);
+        rpu_launch_all_reduce_sum_residual_kernel(
+            addr(0, "down"), addr(0, "residual2"), addr(0, "residual1"),
+            rows, 2048, 8, 8);
+    }
+
+    void emit_wall_base_fp16_shared_gateup(const LayerWeights& lw, const ChunkInfo& chunk) {
+        TORCH_CHECK(ctx().has_complete_physical_manifest() &&
+                    wall_base_fp16_shared_gateup_enabled(
+                        ctx().stage_plan, seq_len_, ctx().position, ctx().is_causal,
+                        ctx().attention_mask.has_value(), ctx().batch_size) &&
+                    chunk.idx >= 0 && chunk.idx < 2 && chunk.len == seq_len_ / 2 &&
+                    chunk.offset == chunk.idx * chunk.len &&
+                    chunk.kv_seq_len == (chunk.idx + 1) * chunk.len,
+                    "Wall FP16 shared-input Prefill requires its exact COMPLETE chunk");
+        const int64_t rows = chunk.len;
+        ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+            WALL_BASE_FP16_PREFILL_SHARED_GATEUP_SITE, 1, 0,
+            wall_base_fp16_shared_gateup_arguments(rows), chunk.idx);
+        rpu_launch_wall_base_prefill_gate_up_shared_fp16_spm_kernel(
+            addr(0, "residual1"), lw.gate_w, lw.up_w, addr(0, "gate"), rows);
+        ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+            WALL_BASE_PREFILL_SHARED_DOWN_SITE,
+            static_cast<int64_t>(CausalDecoderLinearRoute::AUTO_TILE),
+            0, {rows, 2048, 11008, 0, 8}, chunk.idx);
+        rpu_launch_linear_spm_to_spm_acc16_kernel(
+            addr(0, "gate"), lw.down_w, addr(0, "down"),
+            rows, 2048, 11008, /*partition=*/0, 8, /*bias=*/0, lw.down_ws);
+        ctx().consume_physical_route(FmbRouteFamily::ALL_REDUCE,
+            WALL_BASE_PREFILL_SHARED_REDUCE_SITE, causal_ring_route(rows, 2048),
+            0, {}, chunk.idx);
+        rpu_launch_all_reduce_sum_residual_kernel(
+            addr(0, "down"), addr(0, "residual2"), addr(0, "residual1"),
+            rows, 2048, 8, 8);
     }
 
     void emit_qwen3vl_decode_mlp(const LayerWeights& lw, const ChunkInfo& chunk) {
@@ -5582,7 +7499,7 @@ protected:
         int64_t local_q_heads = nq / tp;
         int64_t local_kv_dim  = nkv * hd / tp;
         bool has_qk_head_norm = has_qk_norm_;
-        // RoPE 经 emit_qk_rope 单一真相源:自动含 partial_mrope 叶,
+        // RoPE 经 emit_qk_rope 单一真相源(codex MR!21 CLASS-B):自动含 partial_mrope 叶,
         // 与 build_layer_subgraph 同枝 → KV_FIRST 不再漏抄 RoPE 分支。Q-split:Phase-1 Q
         // 在 KvInsert-scope "q_kv";QK-norm 中间值复用 "input_norm" 作 scratch。
         if (has_qk_head_norm) {
@@ -5633,7 +7550,495 @@ protected:
             /*num_cores=*/tp);
     }
 
+    // Exact Wall P640 staged prefill. The public planner still resolves two
+    // C320 chunks, but layer-major traversal lets one callback consume both
+    // halves and present gate/up as one contiguous M640 Linear. Down remains
+    // C320x2 so its full-hidden partial fits the existing scratch.
+    void build_wall_p640_staged_layer_subgraph(
+        int layer_idx, const ChunkInfo& scheduled_chunk)
+    {
+        constexpr int64_t kHalfRows = 320;
+        constexpr int64_t kPackedRows = 640;
+        constexpr int64_t kHidden = 2048;
+        constexpr int64_t kIntermediate = 11008;
+        constexpr int64_t kLocalIntermediate = kIntermediate / NUM_CORES;
+        constexpr int64_t kResidualShardElements =
+            kHalfRows * kHidden / NUM_CORES;
+        constexpr uint32_t kResidualShardBytes =
+            static_cast<uint32_t>(kResidualShardElements * DWIDTH);
+        constexpr uint32_t kHalfHiddenBytes =
+            static_cast<uint32_t>(kHalfRows * kHidden * DWIDTH);
+        constexpr uint32_t kHalfInterBytes =
+            static_cast<uint32_t>(kHalfRows * kLocalIntermediate * DWIDTH);
+        constexpr uint32_t kHalfQBytes = 163'840;
+        constexpr uint32_t kHalfKvBytes = 81'920;
+
+        TORCH_CHECK(
+            wall_prefill_staged_mlp_ && decoder_mixed_precision_ &&
+                ctx().is_causal && !ctx().attention_mask.has_value() &&
+                ctx().position == 0 && seq_len_ == kPackedRows &&
+                ctx().batch_size == 1 && hidden_size() == kHidden &&
+                intermediate_size() == kIntermediate && num_layers() == 36 &&
+                num_q_heads() == 16 && num_kv_heads() == 8 &&
+                head_dim() == 128 && attn_tp() == NUM_CORES &&
+                has_qkv_bias_ && !has_qk_norm_ && has_mrope_ &&
+                !nvfp4_ && !adarms_ && deepstack_lang_layers_.empty(),
+            "Wall P640 staged prefill received an unsupported runtime profile");
+        TORCH_CHECK(
+            scheduled_chunk.idx >= 0 && scheduled_chunk.idx < 2 &&
+                scheduled_chunk.offset == scheduled_chunk.idx * kHalfRows &&
+                scheduled_chunk.len == kHalfRows &&
+                scheduled_chunk.kv_seq_len ==
+                    (scheduled_chunk.idx + 1) * kHalfRows,
+            "Wall P640 staged prefill requires chunks 320@0 and 320@320; "
+            "got idx=", scheduled_chunk.idx,
+            " offset=", scheduled_chunk.offset,
+            " len=", scheduled_chunk.len,
+            " kv_seq_len=", scheduled_chunk.kv_seq_len);
+        TORCH_CHECK(use_silu_,
+                    "Wall P640 staged prefill requires SiLU MLP activation");
+
+        const bool transition_to_bf16 = layer_idx == 2;
+        const bool residual_is_bf16 = layer_idx > 2;
+        const bool normalized_compact_carry = layer_idx > 3;
+        if (!transition_to_bf16 && scheduled_chunk.idx != 0) {
+            // Same contract as exact Vision MIMC: chunk 0 emits the packed
+            // layer body; the remaining logical chunk callback is empty.
+            return;
+        }
+
+        const auto& lw = layer_weights_[layer_idx];
+        const int64_t h = hidden_size();
+        const int64_t nq = num_q_heads();
+        const int64_t nkv = num_kv_heads();
+        const int64_t hd = head_dim();
+        const int tp = attn_tp();
+        const int64_t local_q_heads = nq / tp;
+        const int64_t local_kv_dim = nkv * hd / tp;
+        auto& k_cache = (*ctx().k_caches)[layer_idx];
+        auto& v_cache = (*ctx().v_caches)[layer_idx];
+        const int64_t slot = cache_batch_slot_;
+        const int64_t k_cache_stride = slot > 0
+            ? k_cache.numel() / k_cache.size(0) : 0;
+        const int64_t v_cache_stride = slot > 0
+            ? v_cache.numel() / v_cache.size(0) : 0;
+        TORCH_CHECK(
+            slot == 0 ||
+                (k_cache.size(0) > slot && v_cache.size(0) > slot &&
+                 k_cache_stride == v_cache_stride),
+            "Wall P640 staged prefill received invalid KV cache slot ",
+            slot);
+
+        if (layer_idx == 0) {
+            TORCH_CHECK(!ctx().input_in_spm,
+                        "Wall P640 staged layer 0 requires DDR ingress");
+            const ChunkInfo packed_chunk{0, 0, kPackedRows, kPackedRows};
+            emit_layer_input_dma(layer_idx, packed_chunk, "residual1");
+        } else {
+            TORCH_CHECK(ctx().input_in_spm,
+                        "Wall P640 staged inner layers require SPM residency");
+        }
+
+        auto emit_qkv_cache_half = [&](int half, bool packed_qkv) {
+            const int64_t offset = half * kHalfRows;
+            const uint32_t hidden_half =
+                addr(0, "residual1") + half * kHalfHiddenBytes;
+            const uint32_t q_offset =
+                packed_qkv ? half * kHalfQBytes : 0;
+            const uint32_t kv_offset =
+                packed_qkv ? half * kHalfKvBytes : 0;
+
+            if (!packed_qkv) {
+                uint32_t qkv_input = hidden_half;
+                if (!normalized_compact_carry) {
+                    qkv_input = addr(0, "input_norm");
+                    if (residual_is_bf16) {
+                        rpu_launch_rmsnorm_bf16in_fp16out_spm_kernel(
+                            hidden_half, qkv_input,
+                            layer_addr(layer_idx, 0, "norm_w"),
+                            kHalfRows, h, eps_,
+                            consume_wall_mixed_rmsnorm_route(
+                                CAUSAL_DECODER_P640_MIXED_RMSNORM_SITE,
+                                kHalfRows, h, half));
+                    } else {
+                        rpu_launch_rmsnorm_spm_kernel(
+                            hidden_half, qkv_input,
+                            layer_addr(layer_idx, 0, "norm_w"),
+                            kHalfRows, h, eps_,
+                            consume_wall_rmsnorm_route(
+                                kHalfRows, h, half), num_cores());
+                    }
+                }
+                rpu_launch_wall_qkv_w8a16_multibase_spm_kernel(
+                    qkv_input, lw.q_w, lw.k_w, lw.v_w,
+                    addr(0, "q"), addr(0, "k"), addr(0, "v"),
+                    qkv_fused_bias_addr(layer_idx, "q_bias"),
+                    qkv_fused_bias_addr(layer_idx, "k_bias"),
+                    qkv_fused_bias_addr(layer_idx, "v_bias"),
+                    lw.q_ws, lw.k_ws, lw.v_ws, kHalfRows, /*kv_tile_owner=*/false, wall_sorting_);
+            }
+
+            const int64_t cos_sin_start = ctx().position + offset;
+            emit_qk_rope(
+                "q", "q", local_q_heads, hd, kHalfRows,
+                cos_sin_start, tp, q_offset);
+            emit_qk_rope(
+                "k", "k", /*local_heads=*/1, local_kv_dim, kHalfRows,
+                cos_sin_start, tp, kv_offset);
+            const KvInsertSegmentPlan kv_plan = consume_causal_kv_plan(
+                CAUSAL_DECODER_P640_KV_HALF_SITE, half,
+                ctx().position + offset, kHalfRows);
+            rpu_launch_insert_kvcache_spm_unified_with_plan(
+                k_cache, v_cache,
+                addr_offset("k").value + kv_offset,
+                addr_offset("v").value + kv_offset,
+                nkv, hd, tp,
+                slot * k_cache_stride, slot * v_cache_stride,
+                /*spm_rows=*/0, kv_plan);
+        };
+
+        auto emit_attention_half = [&](int half, bool packed_qkv) {
+            const int64_t offset = half * kHalfRows;
+            const int64_t kv_seq_len = offset + kHalfRows;
+            const uint32_t hidden_half =
+                addr(0, "residual1") + half * kHalfHiddenBytes;
+            const uint32_t q_offset =
+                packed_qkv ? half * kHalfQBytes : 0;
+            ctx().consume_physical_route(
+                FmbRouteFamily::ATTENTION,
+                CAUSAL_DECODER_P640_ATTN_HALF_SITE,
+                static_cast<int64_t>(AttentionExecutionPolicy::DDR_KV),
+                /*resolved_flags=*/0, {seq_len_}, half);
+            rpu_launch_sdpa_spm_dispatch(
+                sdpa_kernel_, k_cache, v_cache, /*MASK_LTM=*/1,
+                c10::nullopt, addr_offset("q").value + q_offset,
+                addr_offset("output").value,
+                addr_offset("sdpa_tmp").value, /*mask_off=*/0,
+                kHalfRows, nq, nkv, hd, kv_seq_len, tp, NUM_CORES,
+                slot * k_cache_stride);
+            consume_causal_route(
+                FmbRouteFamily::ALL_REDUCE,
+                CAUSAL_DECODER_P640_PREPARE_SITE,
+                static_cast<int64_t>(
+                    CausalDecoderAllReduceRoute::PREPARE_RING_INPUT));
+            rpu_prepare_ring_all_reduce_input(
+                addr(0, "oproj"), kHalfRows, h, tp, num_cores());
+            consume_causal_route(
+                FmbRouteFamily::LINEAR, CAUSAL_DECODER_P640_O_SITE,
+                static_cast<int64_t>(CausalDecoderLinearRoute::AUTO_TILE));
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                addr(0, "output"), lw.o_w, addr(0, "oproj"),
+                kHalfRows, h, nq * hd, /*partition=*/0, tp,
+                /*bias_spm_addr=*/0, lw.o_ws);
+
+            if (residual_is_bf16) {
+                const uint32_t raw_residual_local_spm = half == 0
+                    ? addr(0, "residual_local")
+                    : addr(0, "input_norm");
+                if (normalized_compact_carry) {
+                    rpu_launch_wall_ring_postnorm_fp16_partial_bf16_residual_local_spm_kernel(
+                        addr(0, "oproj"), raw_residual_local_spm,
+                        hidden_half,
+                        layer_addr(layer_idx, 0, "post_norm_w"), eps_);
+                } else {
+                    rpu_launch_wall_ring_postnorm_fp16_partial_bf16_residual_spm_kernel(
+                        addr(0, "oproj"), hidden_half,
+                        raw_residual_local_spm,
+                        layer_addr(layer_idx, 0, "post_norm_w"), eps_);
+                }
+            } else {
+                consume_causal_route(
+                    FmbRouteFamily::ALL_REDUCE,
+                    CAUSAL_DECODER_P640_ATTN_REDUCE_SITE,
+                    causal_ring_route(kHalfRows, h), half);
+                rpu_launch_all_reduce_sum_residual_kernel(
+                    addr(0, "oproj"), hidden_half,
+                    addr(0, "input_norm"), kHalfRows, h,
+                    tp, num_cores());
+                if (!transition_to_bf16 && half == 0) {
+                    // Only half 0 must cross the second attention invocation.
+                    // Half 1 stays as a full residual in input_norm until down1.
+                    rpu_launch_spm_local_shard_copy_dma(
+                        addr(0, "input_norm"), kResidualShardElements,
+                        kResidualShardBytes,
+                        addr(0, "residual_local"),
+                        NUM_CORES);
+                }
+                rpu_launch_rmsnorm_spm_kernel(
+                    addr(0, "input_norm"), hidden_half,
+                    layer_addr(layer_idx, 0, "post_norm_w"),
+                    kHalfRows, h, eps_,
+                    consume_wall_rmsnorm_route(kHalfRows, h, half), num_cores());
+            }
+        };
+
+        auto emit_unpacked_attention_half = [&](int half) {
+            emit_qkv_cache_half(half, /*packed_qkv=*/false);
+            emit_attention_half(half, /*packed_qkv=*/false);
+        };
+
+        auto emit_linear = [&](uint32_t input, const at::Tensor& weight,
+                               uint32_t output, int64_t rows,
+                               int64_t n, int64_t k, int partition,
+                               const at::Tensor& scale) {
+            consume_causal_route(
+                FmbRouteFamily::LINEAR, CAUSAL_DECODER_P640_DOWN_SITE,
+                static_cast<int64_t>(CausalDecoderLinearRoute::AUTO_TILE));
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                input, weight, output, rows, n, k, partition,
+                NUM_CORES, /*bias_spm_addr=*/0, scale);
+        };
+
+        if (transition_to_bf16) {
+            const int half = scheduled_chunk.idx;
+            const uint32_t hidden_half =
+                addr(0, "residual1") + half * kHalfHiddenBytes;
+            emit_unpacked_attention_half(half);
+            rpu_launch_wall_prefill_gate_up_swiglu_w8a16_spm_kernel(
+                hidden_half, lw.gate_w, lw.up_w,
+                addr(0, "gate"), addr(0, "down"), kHalfRows,
+                lw.gate_ws, lw.up_ws, wall_sorting_);
+            consume_causal_route(
+                FmbRouteFamily::LINEAR,
+                CAUSAL_DECODER_P640_DOWN_ACC32_SITE,
+                static_cast<int64_t>(CausalDecoderLinearRoute::ACC32_OUT_BF16));
+            rpu_launch_linear_spm_to_spm_acc32_out_bf16_kernel(
+                addr(0, "gate"), lw.down_w, addr(0, "down"),
+                kHalfRows, h, kIntermediate,
+                /*partition=*/0, NUM_CORES);
+            consume_causal_route(
+                FmbRouteFamily::ALL_REDUCE,
+                CAUSAL_DECODER_P640_MIXED_REDUCE_SITE,
+                static_cast<int64_t>(CausalDecoderAllReduceRoute::
+                    BF16_PARTIAL_FP16_RESIDUAL));
+            rpu_launch_all_reduce_bf16_partial_fp16_residual_spm_kernel(
+                addr(0, "down"), addr(0, "input_norm"), hidden_half,
+                kHalfRows, h);
+            return;
+        }
+
+        if (normalized_compact_carry) {
+            // Layers 4..35 already carry both normalized halves contiguously.
+            // Populate both K/V cache halves before SDPA. The fallback keeps
+            // full packed K/V; owner-direct stores only one D64 half on each
+            // owner core. Consume half-1 Q first; its dead slab and output then
+            // form the contiguous x0/x1 pair required by two-half O-proj.
+            rpu_launch_wall_qkv_w8a16_multibase_spm_kernel(
+                addr(0, "residual1"), lw.q_w, lw.k_w, lw.v_w,
+                addr(0, "q"), addr(0, "k"), addr(0, "v"),
+                qkv_fused_bias_addr(layer_idx, "q_bias"),
+                qkv_fused_bias_addr(layer_idx, "k_bias"),
+                qkv_fused_bias_addr(layer_idx, "v_bias"),
+                lw.q_ws, lw.k_ws, lw.v_ws, kPackedRows,
+                wall_prefill_owner_direct_kv_, wall_sorting_);
+            // Q is contiguous across both C320 halves. Prepare all P640 rows
+            // in one launch; the two causal SDPA calls
+            // below remain separate because their KV extents differ.
+            emit_qk_rope(
+                "q", "q", local_q_heads, hd, kPackedRows,
+                ctx().position, tp);
+            if (wall_prefill_owner_direct_kv_) {
+                TORCH_CHECK(
+                    partial_mrope_active_ && slot == 0,
+                    "Wall P640 owner-direct K/V requires partial M-RoPE and "
+                    "KV-cache slot 0");
+                ctx().consume_physical_route(
+                    FmbRouteFamily::GRAPH_SCHEDULE,
+                    CAUSAL_DECODER_WALL_OWNER_DIRECT_KV_SITE, 1, 0,
+                    {kPackedRows, h, nkv, hd, tp, ctx().position,
+                     partial_mrope_active_ ? 1 : 0});
+                rpu_launch_wall_prefill_owner_direct_kv_spm_kernel(
+                    k_cache, v_cache, addr(0, "k"), addr(0, "v"),
+                    cos_il_keepalive_, sin_il_keepalive_);
+            } else {
+                emit_qk_rope(
+                    "k", "k", /*local_heads=*/1, local_kv_dim, kPackedRows,
+                    ctx().position, tp);
+                const KvInsertSegmentPlan kv_plan = consume_causal_kv_plan(
+                    CAUSAL_DECODER_P640_KV_PACKED_SITE, /*invocation=*/0,
+                    ctx().position, kPackedRows);
+                rpu_launch_insert_kvcache_spm_unified_with_plan(
+                    k_cache, v_cache,
+                    addr_offset("k").value, addr_offset("v").value,
+                    nkv, hd, tp,
+                    slot * k_cache_stride, slot * v_cache_stride,
+                    /*spm_rows=*/0, kv_plan);
+            }
+
+            const uint32_t q_half1_off =
+                addr_offset("q").value + kHalfQBytes;
+            const uint32_t output_half1_off = addr_offset("output").value;
+            TORCH_CHECK(
+                output_half1_off == q_half1_off + kHalfQBytes,
+                "Wall P640 O-proj requires contiguous C320 SDPA outputs; "
+                "got q-half1 offset=", q_half1_off,
+                " output offset=", output_half1_off);
+
+            ctx().consume_physical_route(
+                FmbRouteFamily::ATTENTION,
+                CAUSAL_DECODER_P640_ATTN_PACKED_TAIL_SITE,
+                static_cast<int64_t>(AttentionExecutionPolicy::DDR_KV),
+                /*resolved_flags=*/0, {seq_len_});
+            rpu_launch_sdpa_spm_dispatch(
+                sdpa_kernel_, k_cache, v_cache, /*MASK_LTM=*/1,
+                c10::nullopt, q_half1_off, output_half1_off,
+                addr_offset("sdpa_tmp").value, /*mask_off=*/0,
+                kHalfRows, nq, nkv, hd, kPackedRows, tp, NUM_CORES,
+                slot * k_cache_stride);
+            ctx().consume_physical_route(
+                FmbRouteFamily::ATTENTION,
+                CAUSAL_DECODER_P640_ATTN_PACKED_HEAD_SITE,
+                static_cast<int64_t>(AttentionExecutionPolicy::DDR_KV),
+                /*resolved_flags=*/0, {seq_len_});
+            rpu_launch_sdpa_spm_dispatch(
+                sdpa_kernel_, k_cache, v_cache, /*MASK_LTM=*/1,
+                c10::nullopt, addr_offset("q").value, q_half1_off,
+                addr_offset("sdpa_tmp").value, /*mask_off=*/0,
+                kHalfRows, nq, nkv, hd, kHalfRows, tp, NUM_CORES,
+                slot * k_cache_stride);
+
+            rpu_launch_wall_prefill_oproj_w8a16_c320x2_spm_kernel(
+                addr(0, "q") + kHalfQBytes, lw.o_w,
+                addr(0, "residual1"),
+                addr(0, "residual1") + kHalfHiddenBytes, lw.o_ws, wall_sorting_);
+            rpu_launch_wall_ring_postnorm_pair_fp16_partial_bf16_residual_local_spm_kernel(
+                addr(0, "residual1"), addr(0, "residual_local"),
+                addr(0, "input_norm"),
+                layer_addr(layer_idx, 0, "post_norm_w"), eps_, wall_sorting_.paired_postnorm_tile40);
+        } else {
+            emit_unpacked_attention_half(0);
+            emit_unpacked_attention_half(1);
+        }
+
+        rpu_launch_wall_prefill_gate_up_swiglu_w8a16_spm_kernel(
+            addr(0, "residual1"), lw.gate_w, lw.up_w,
+            addr(0, "gate"), addr(0, "down"), kPackedRows,
+            lw.gate_ws, lw.up_ws, wall_sorting_);
+
+        const bool down_weight_outer = layer_idx >= 3;
+        const bool paired_down_postnorm =
+            down_weight_outer && residual_is_bf16;
+        if (down_weight_outer) {
+            rpu_launch_wall_prefill_down_w8a16_c320x2_spm_kernel(
+                addr(0, "gate"), lw.down_w,
+                paired_down_postnorm
+                    ? addr(0, "residual1") : addr(0, "down"),
+                addr(0, "residual1") + kHalfHiddenBytes, lw.down_ws, wall_sorting_);
+        }
+
+        if (paired_down_postnorm) {
+            const uint32_t next_norm_w = layer_idx + 1 == num_layers()
+                ? addr(0, "final_norm_w")
+                : layer_addr(layer_idx + 1, 0, "norm_w");
+            rpu_launch_wall_ring_postnorm_pair_fp16_partial_bf16_residual_local_spm_kernel(
+                addr(0, "residual1"), addr(0, "residual_local"),
+                addr(0, "input_norm"), next_norm_w, eps_, wall_sorting_.paired_postnorm_tile40);
+        } else {
+            for (int half = 0; half < 2; ++half) {
+                const uint32_t hidden_half =
+                    addr(0, "residual1") + half * kHalfHiddenBytes;
+                if (!down_weight_outer) {
+                    emit_linear(
+                        addr(0, "gate") + half * kHalfInterBytes,
+                        lw.down_w, addr(0, "down"),
+                        kHalfRows, h, kIntermediate, /*partition=*/0,
+                        lw.down_ws);
+                }
+                if (residual_is_bf16) {
+                    const uint32_t raw_residual_local_spm = half == 0
+                        ? addr(0, "residual_local")
+                        : addr(0, "input_norm");
+                    const uint32_t partial_spm =
+                        down_weight_outer && half == 1
+                        ? hidden_half : addr(0, "down");
+                    const uint32_t next_norm_w =
+                        layer_idx + 1 == num_layers()
+                        ? addr(0, "final_norm_w")
+                        : norm_input_addr(layer_idx + 1, 0);
+                    rpu_launch_wall_ring_postnorm_fp16_partial_bf16_residual_local_spm_kernel(
+                        partial_spm, raw_residual_local_spm,
+                        hidden_half, next_norm_w, eps_);
+                } else if (half == 0) {
+                    consume_causal_route(
+                        FmbRouteFamily::ALL_REDUCE,
+                        CAUSAL_DECODER_P640_LOCAL_REDUCE_SITE,
+                        static_cast<int64_t>(CausalDecoderAllReduceRoute::
+                            RING_LOCAL_RESIDUAL));
+                    rpu_launch_all_reduce_sum_residual_local_spm_kernel(
+                        addr(0, "down"), addr(0, "residual_local"),
+                        hidden_half, kHalfRows, h,
+                        NUM_CORES, NUM_CORES);
+                } else {
+                    consume_causal_route(
+                        FmbRouteFamily::ALL_REDUCE,
+                        CAUSAL_DECODER_P640_REDUCE_SITE,
+                        causal_ring_route(kHalfRows, h), /*invocation=*/1);
+                    rpu_launch_all_reduce_sum_residual_kernel(
+                        addr(0, "down"), addr(0, "input_norm"),
+                        hidden_half, kHalfRows, h,
+                        num_cores(), num_cores());
+                }
+            }
+        }
+
+        if (layer_idx + 1 == num_layers()) {
+            TORCH_CHECK(!ctx().output_to_spm,
+                        "Wall P640 staged final layer must publish to DDR");
+            for (int half = 0; half < 2; ++half) {
+                const uint32_t hidden_offset = half * kHalfHiddenBytes;
+                const ChunkInfo half_chunk{
+                    half, half * kHalfRows, kHalfRows,
+                    (half + 1) * kHalfRows};
+                emit_layer_output_dma(
+                    layer_idx, half_chunk, "residual1", hidden_offset);
+            }
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // build_layer_subgraph (8 phases + final_norm fuse)
+    //
+    // Body verbatim from v2 per-layer compute, with two mechanical edits:
+    //   - SDPA + KV-insert call sites use typed SPM offsets via addr_offset(name).value
+    //     (Pitfall 3 structural fix — compile-time distinct from addr() absolutes).
+    //   - Protected model-param members become pimpl getters (num_layers() etc.).
+    // ═══════════════════════════════════════════════════════════════════════
+
     void build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) override {
+        const bool wall_base_nvfp4_qkv_rope = wall_base_nvfp4_qkv_rope_enabled(
+            ctx().stage_plan, seq_len_, ctx().seq_len, ctx().position,
+            ctx().is_causal, ctx().attention_mask.has_value(),
+            ctx().batch_size, partial_mrope_active_);
+        const bool wall_base_nvfp4_qkv_parallel = wall_base_nvfp4_qkv_parallel_enabled(
+            ctx().stage_plan, seq_len_, ctx().seq_len, ctx().position,
+            ctx().is_causal, ctx().attention_mask.has_value(),
+            ctx().batch_size, partial_mrope_active_);
+        const bool wall_base_nvfp4_kv_parallel = wall_base_nvfp4_kv_parallel_enabled(
+            ctx().stage_plan, seq_len_, ctx().seq_len, ctx().position,
+            ctx().is_causal, ctx().attention_mask.has_value(),
+            ctx().batch_size, partial_mrope_active_);
+        const bool wall_base_nvfp4_qkv_bias = wall_base_nvfp4_qkv_bias_enabled(
+            ctx().stage_plan, seq_len_, ctx().seq_len, ctx().position,
+            ctx().is_causal, ctx().attention_mask.has_value(), ctx().batch_size,
+            partial_mrope_active_);
+        const bool wall_base_nvfp4_o_ring_norm = wall_base_nvfp4_o_ring_norm_enabled(
+            ctx().stage_plan, seq_len_, ctx().seq_len, ctx().position,
+            ctx().is_causal, ctx().attention_mask.has_value(), ctx().batch_size,
+            partial_mrope_active_);
+        const bool wall_base_nvfp4_gate_up = wall_base_nvfp4_gate_up_enabled(
+            ctx().stage_plan, seq_len_, ctx().seq_len, ctx().position,
+            ctx().is_causal, ctx().attention_mask.has_value(), ctx().batch_size,
+            partial_mrope_active_);
+        const bool wall_base_nvfp4_qk_rope = wall_base_nvfp4_qk_rope_enabled(
+            ctx().stage_plan, seq_len_, ctx().seq_len, ctx().position,
+            ctx().is_causal, ctx().attention_mask.has_value(), ctx().batch_size,
+            partial_mrope_active_);
+        const bool wall_base_nvfp4_down_ring_norm = wall_base_nvfp4_down_ring_norm_enabled(
+            ctx().stage_plan, seq_len_, ctx().seq_len, ctx().position,
+            ctx().is_causal, ctx().attention_mask.has_value(), ctx().batch_size,
+            partial_mrope_active_);
+        TORCH_CHECK(!wall_base_nvfp4_down_ring_norm || layer_idx == 0 || ctx().input_in_spm,
+                    "Wall NVFP4 next input norm requires the preceding SPM-resident layer");
         consume_qwen3vl_4b_w8_prefill_schedule(layer_idx, chunk);
         consume_qwen3vl_ordinary_prefill_schedule(layer_idx, chunk);
         if (layer_idx == 0 && chunk.idx == 0) {
@@ -5660,7 +8065,8 @@ protected:
             ctx().consume_physical_route(
                 FmbRouteFamily::GRAPH_SCHEDULE,
                 CAUSAL_DECODER_QKV_BIAS_TOPOLOGY_SITE, topology_selector,
-                /*resolved_flags=*/0, {has_qkv_bias_ ? 1 : 0});
+                /*resolved_flags=*/0,
+                qkv_bias_topology_arguments(wall_base_nvfp4_qkv_bias, ctx().position));
             ctx().consume_physical_route(
                 FmbRouteFamily::GRAPH_SCHEDULE,
                 CAUSAL_DECODER_NVFP4_TOPOLOGY_SITE, topology_selector,
@@ -5675,13 +8081,32 @@ protected:
                 CAUSAL_DECODER_LM_HEAD_TOPOLOGY_SITE, topology_selector,
                 /*resolved_flags=*/0,
                 {fuse_lm_head_ ? 1 : 0, vocab_size_});
+            if (lingbot_prefill_mode_bound_) {
+                ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+                    LINGBOT2_PREFILL_POLICY_SITE, topology_selector, 0,
+                    lingbot_prefill_policy_arguments());
+                validate_lingbot_prefill_gateup_schedule();
+                validate_lingbot_prefill_kv_pair_schedule();
+                validate_lingbot_prefill_qk_norm_rope_schedule();
+            }
+            if (wall_sorting_route_enabled()) {
+                ctx().consume_physical_route(
+                    FmbRouteFamily::GRAPH_SCHEDULE,
+                    CAUSAL_DECODER_WALL_SORTING_TOPOLOGY_SITE,
+                    topology_selector, 0, wall_sorting_route_arguments());
+            }
             if (qwen3vl_2b_w8_profile_) {
                 ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
                     QWEN3VL_DELIVERY_TOPOLOGY_SITE, 1, lm_head_exact_candidates_,
                     delivery_topology_arguments());
             }
         }
-
+        if (wall_prefill_staged_mlp_ && seq_len_ == 640 &&
+            ctx().is_causal && !ctx().attention_mask.has_value() &&
+            ctx().position == 0) {
+            build_wall_p640_staged_layer_subgraph(layer_idx, chunk);
+            return;
+        }
         const auto& lw = layer_weights_[layer_idx];
         int64_t seq_len = chunk.len;
         // HALO WS-2: RoPE table index. Legacy (rope_position_base_ < 0) and the
@@ -5707,6 +8132,18 @@ protected:
         const Z1LayerInputSelection z1_input =
             select_z1_layer_input(layer_idx, chunk);
         const uint32_t input_residual = z1_input.addr;
+        const bool rtc_prefill_mixed =
+            decoder_mixed_precision_ && ctx().is_causal && ctx().position == 0;
+        if (rtc_prefill_mixed) {
+            TORCH_CHECK(
+                (seq_len_ == 640 && seq_len == 320)
+                    || (seq_len_ == 672 && seq_len == 336),
+                "Wall-OSS prefill mixed precision requires P640/C320 or "
+                "P672/C336; got total seq ", seq_len_,
+                " and chunk len ", seq_len);
+        }
+        const bool residual_is_bf16 = rtc_prefill_mixed && layer_idx > 2;
+        const bool transition_to_bf16 = rtc_prefill_mixed && layer_idx == 2;
 
         const bool emit_prefill_last_lm_head =
             fuse_prefill_last_lm_head_ && ctx().is_causal &&
@@ -5720,19 +8157,90 @@ protected:
                         "not allocated for the whole forward");
         }
 
-        // Batch decode packs independent sequence rows into GEMM's M dimension, so
-        // row-parallel operations share launches and weights. KV insertion, SDPA and
-        // fused-lm_head output DMA remain per-sequence because each owns a cache slot.
-        //
-        // Optional DDR flushing scales with total cache bytes. Boundary pointer
-        // deduplication removes duplicate addresses, but does not reduce a cache's extent.
-        //
-        // Batched decode is admitted only at seq_len == 1 with a shared position.
-        // Presenting [bs,heads,hd] as one row with bs*heads keeps RoPE on that position
-        // for every sequence without changing the underlying memory layout.
         const int64_t bs = ctx().batch_size;
         const int64_t rows = bs * seq_len;
-
+        const bool wall_small_prefill_fused = wall_small_prefill_fusion(
+            ctx().stage_plan, seq_len_, ctx().position, ctx().is_causal,
+            ctx().attention_mask.has_value(), bs);
+        const bool wall_long_prefill_qkv = wall_base_long_prefill_qkv_fusion(
+            ctx().stage_plan, seq_len_, ctx().position, ctx().is_causal,
+            ctx().attention_mask.has_value(), bs);
+        const bool wall_fp16_long_prefill_fused = wall_base_fp16_long_prefill_fusion(
+            ctx().stage_plan, seq_len_, ctx().position, ctx().is_causal,
+            ctx().attention_mask.has_value(), bs);
+        const bool wall_p640_staged0_w8a16 =
+            rtc_prefill_mixed && !wall_prefill_staged_mlp_ &&
+            seq_len_ == 640 && seq_len == 320 && rows == 320 &&
+            h == 2048 && nq == 16 && nkv == 8 && hd == 128 && tp == NUM_CORES &&
+            has_qkv_bias_ && use_silu_ && !linear_acc32_ &&
+            lw.q_w.scalar_type() == at::kChar &&
+            lw.k_w.scalar_type() == at::kChar &&
+            lw.v_w.scalar_type() == at::kChar &&
+            lw.gate_w.scalar_type() == at::kChar &&
+            lw.up_w.scalar_type() == at::kChar;
+        const bool wall_action_fp16_transfer =
+            wall_action_fp16_transfer_enabled();
+        const auto wall_action_weight_type = wall_action_fp16_transfer
+            ? at::kHalf : at::kChar;
+        const bool wall_action_w8a16_silu_mul =
+            wall_action_fuse_silu_mul_ &&
+            wall_action_fused_rows_supported(rows, wall_sorting_) && h == 1024 &&
+            intermediate_size() == 2048 && num_layers() == 36 &&
+            tp == NUM_CORES && use_silu_ && !linear_acc32_ &&
+            lw.gate_w.scalar_type() == wall_action_weight_type &&
+            lw.up_w.scalar_type() == wall_action_weight_type;
+        const bool wall_action_w8a16_qkv =
+            wall_action_fuse_silu_mul_ &&
+            wall_action_fused_rows_supported(rows, wall_sorting_) && h == 1024 &&
+            nq == 16 && nkv == 8 && hd == 128 && num_layers() == 36 &&
+            tp == NUM_CORES && has_qkv_bias_ && !linear_acc32_ &&
+            wall_action_qkv_weights_compatible(lw, wall_action_fp16_transfer);
+        const bool wall_action_fused_qkv_partial_mrope =
+            wall_action_w8a16_qkv && has_mrope_ && partial_mrope_active_ &&
+            !has_qk_norm_;
+        const bool wall_action_linear_ring_postnorm =
+            wall_action_w8a16_qkv && wall_action_w8a16_silu_mul && bs == 1 &&
+            !ctx().is_causal && ctx().attention_mask.has_value() &&
+            pre_layers_residual1_ready_ && !adarms_ && !residual_is_bf16 &&
+            !transition_to_bf16 && deepstack_lang_layers_.empty() &&
+            qwen3vl_pooler_z1_retained_deepstack_count_ == 0 &&
+            !qwen3vl_pooler_z1_dispatch_ &&
+            !qwen3vl_multiview_text_dry_prepared_ &&
+            !qwen3vl_multiview_text_composite_prepared_ &&
+            !qwen3vl_multiview_text_composite_dispatch_ &&
+            final_norm_w_.scalar_type() == at::kHalf &&
+            layer_weights_.size() == 36 && std::all_of(
+                layer_weights_.begin(), layer_weights_.end(),
+                [wall_action_fp16_transfer](const LayerWeights& weights) {
+                    return wall_action_ring_weights_compatible(
+                        weights, wall_action_fp16_transfer);
+                });
+        const bool wall_action_resident_layer =
+            wall_action_weight_residency_ &&
+            layer_idx >= WALL_ACTION_FIRST_RESIDENT_LAYER &&
+            layer_idx < WALL_ACTION_FIRST_RESIDENT_LAYER +
+                WALL_ACTION_RESIDENT_LAYER_COUNT / (wall_action_fp16_transfer ? 2 : 1);
+        TORCH_CHECK(
+            !wall_action_resident_layer ||
+                (wall_action_linear_ring_postnorm &&
+                 wall_action_fused_qkv_partial_mrope),
+            "Wall Action resident weights require the H20 or opted-in H32 TP8 W8A16/FP16 "
+            "partial-MRoPE/ring path");
+        TORCH_CHECK(
+            !wall_action_kv_owner_fanout_ ||
+                wall_action_fused_qkv_partial_mrope,
+            "Wall Action K/V owner fanout requires the exact H20 TP8 W8A16/FP16 "
+            "partial-MRoPE path");
+        const bool wall_action_kv_owner_fanout =
+            wall_action_kv_owner_fanout_ && !wall_action_resident_layer;
+        const uint32_t wall_action_weight_base = wall_action_resident_layer
+            ? addr(0, "action_resident_weights") +
+                static_cast<uint32_t>(
+                    layer_idx - WALL_ACTION_FIRST_RESIDENT_LAYER) *
+                    WALL_ACTION_WEIGHT_BYTES_PER_LAYER * (wall_action_fp16_transfer ? 2 : 1)
+            : 0;
+        TORCH_CHECK(!decoder_mixed_precision_ || bs == 1,
+                    "Wall-OSS prefill mixed precision requires batch size 1");
         if (bs > 1) {
             TORCH_CHECK(seq_len == 1,
                         "CausalDecoderModel: batch decode requires chunk.len == 1, got ",
@@ -5939,14 +8447,24 @@ protected:
         // Static Qwen uses the packed norm slab; dynamic/bias variants retain
         // the per-layer slot. Both are preloaded once per BUILD.
         // ─────────────────────────────────────────────────────────────────────
-        {
+        if (layer_idx == 0 ||
+            (!wall_action_linear_ring_postnorm && !wall_base_nvfp4_down_ring_norm)) {
             emit_adarms_mut_refresh_input(layer_idx);  // replay-safe AdaRMS: refresh scale+shift SPM
-            {
+            if (residual_is_bf16) {
+                rpu_launch_rmsnorm_bf16in_fp16out_spm_kernel(
+                    input_residual, addr(0, "input_norm"),
+                    norm_input_addr(layer_idx, 0), rows, h, eps_,
+                    consume_wall_mixed_rmsnorm_route(
+                        CAUSAL_DECODER_INPUT_MIXED_RMSNORM_SITE,
+                        rows, h, chunk.idx));
+            } else if (lingbot_folded_rmsnorm_) {
+                emit_lingbot_nogamma_norm(input_residual, addr(0, "input_norm"), rows, chunk.idx);
+            } else {
                 rpu_launch_rmsnorm_spm_kernel(
                     input_residual, addr(0, "input_norm"),
                     norm_input_addr(layer_idx, 0),   // adarms_: scale rides here
                     rows, h, eps_,
-                    consume_decoder_rmsnorm_route(rows, h, chunk.idx), num_cores());
+                    consume_wall_rmsnorm_route(rows, h, chunk.idx), num_cores());
             }
             if (adarms_) {  // AdaRMS FiLM: input_norm += input_shift (LingBot-VLA expert)
                 rpu_launch_eltwise_binary_1xC_NxC_spm_kernel(
@@ -5959,9 +8477,15 @@ protected:
         // ─────────────────────────────────────────────────────────────────────
         // Phase 2: QKV Linear
         // ─────────────────────────────────────────────────────────────────────
+        if (lingbot_prefill_kv_only_ && is_last_layer) {
+            emit_lingbot_prefill_kv_tail(layer_idx, chunk);
+            return;  // K/V are the only outputs; never expose unwritten hidden state.
+        }
+
         // QKV col-partition over attn_tp() cores. Optional bias (Qwen2.5/Wall-OSS)
-        // is fused for FP16/W8/W4. NVFP4 uses the same persistent SPM bias slots
-        // but adds them separately to avoid the fused-bias replay hazard.
+        // is fused for FP16/W8/W4. NVFP4 normally uses separate ADD to avoid
+        // the fused-bias replay hazard; exact Wall H32 can use the cold-bound
+        // four-block phase barrier with those same persistent bias slots.
         // Batch decode: M = rows, so the q/k/v weights stream from DDR once for
         // all `bs` sequences instead of once per sequence.
         const bool direct_prefill_qkv =
@@ -5970,7 +8494,14 @@ protected:
         const bool fused_decode_qkv =
             bs == 1 && seq_len == 1 && decode_qkv_fusion_ &&
             lw.qkv_w.defined();
-        if (qwen3vl_4b_packed_decode_qkv(
+        if (validate_lingbot_prefill_qkv_schedule(layer_idx, chunk)) {
+            ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+                LINGBOT2_PREFILL_QKV_MULTIBASE_SITE, 1, 0, lingbot_prefill_qkv_arguments());
+            rpu_launch_lingbot2_prefill_qkv_m224_spm_kernel(
+                addr(0, "input_norm"), lw.q_w, lw.k_w, lw.v_w,
+                addr(0, "q"), addr(0, "k"), addr(0, "v"),
+                lw.q_ws, lw.k_ws, lw.v_ws);
+        } else if (qwen3vl_4b_packed_decode_qkv(
                 seq_len_, ctx().is_causal, ctx().attention_mask.has_value(), bs)) {
             TORCH_CHECK(rows == 1 && lw.qkv_w.defined() && lw.qkv_ws.defined(),
                         "4B packed QKV escaped its cold decode contract");
@@ -6012,6 +8543,86 @@ protected:
                 /*nvfp4_tensor_scale_spm_addr=*/0,
                 /*nvfp4_layer_id=*/0, /*force_acc32=*/false,
                 /*prefer_gemv=*/false, /*qkv_planar_direct=*/direct_prefill_qkv);
+        } else if (wall_p640_staged0_w8a16 || wall_small_prefill_fused ||
+                   wall_long_prefill_qkv || wall_fp16_long_prefill_fused) {
+            if (wall_small_prefill_fused || wall_long_prefill_qkv || wall_fp16_long_prefill_fused) {
+                ctx().consume_physical_route(
+                    FmbRouteFamily::LINEAR, CAUSAL_DECODER_Q_SITE,
+                    static_cast<int64_t>(CausalDecoderLinearRoute::WALL_QKV_MULTIBASE),
+                    0, wall_small_prefill_qkv_arguments(rows), chunk.idx);
+            }
+            rpu_launch_wall_qkv_w8a16_multibase_spm_kernel(
+                addr(0, "input_norm"), lw.q_w, lw.k_w, lw.v_w,
+                addr(0, "q"), addr(0, "k"), addr(0, "v"),
+                qkv_fused_bias_addr(layer_idx, "q_bias"),
+                qkv_fused_bias_addr(layer_idx, "k_bias"),
+                qkv_fused_bias_addr(layer_idx, "v_bias"),
+                lw.q_ws, lw.k_ws, lw.v_ws, rows,
+                /*kv_tile_owner=*/false, wall_sorting_);
+        } else if (wall_action_w8a16_qkv) {
+            rpu_launch_wall_action_qkv_w8a16_multibase_spm_kernel(
+                wall_action_linear_ring_postnorm && layer_idx > 0
+                    ? addr(0, "residual1") : addr(0, "input_norm"),
+                lw.q_w, lw.k_w, lw.v_w,
+                addr(0, "q"), addr(0, "k"), addr(0, "v"),
+                qkv_fused_bias_addr(layer_idx, "q_bias"),
+                qkv_fused_bias_addr(layer_idx, "k_bias"),
+                qkv_fused_bias_addr(layer_idx, "v_bias"),
+                lw.q_ws, lw.k_ws, lw.v_ws,
+                wall_action_fused_qkv_partial_mrope
+                    ? &cos_il_keepalive_ : nullptr,
+                wall_action_fused_qkv_partial_mrope
+                    ? &sin_il_keepalive_ : nullptr,
+                cos_sin_start,
+                wall_action_resident_layer
+                    ? wall_action_weight_base + WALL_ACTION_Q_OFFSET *
+                        (wall_action_fp16_transfer ? 2 : 1) : 0,
+                wall_action_resident_layer
+                    ? wall_action_weight_base + WALL_ACTION_K_OFFSET *
+                        (wall_action_fp16_transfer ? 2 : 1) : 0,
+                wall_action_resident_layer
+                    ? wall_action_weight_base + WALL_ACTION_V_OFFSET *
+                        (wall_action_fp16_transfer ? 2 : 1) : 0,
+                wall_action_kv_owner_fanout, wall_sorting_, rows);
+        } else if (wall_base_nvfp4_qkv_rope) {
+            emit_wall_base_nvfp4_qkv_rope(lw, layer_idx, chunk);
+        } else if (wall_base_nvfp4_qkv_parallel) {
+            emit_wall_base_nvfp4_qkv_parallel(lw, layer_idx, chunk);
+        } else if (wall_base_nvfp4_kv_parallel) {
+            consume_causal_route(
+                FmbRouteFamily::LINEAR, CAUSAL_DECODER_Q_SITE,
+                static_cast<int64_t>(decoder_projection_route(seq_len_)));
+            rpu_launch_wall_base_nvfp4_qkv_bias_spm_kernel(
+                addr(0, "input_norm"), lw.q_w, addr(0, "q"),
+                layer_addr(layer_idx, 0, "q_bias"), lw.q_ws,
+                nvfp4_scale_addr("nvfp4_q_ts"), q_nvfp4_tensor_scales_.numel(),
+                (uint16_t)layer_idx, nq * hd);
+            emit_wall_base_nvfp4_kv_parallel(lw, layer_idx, chunk);
+        } else if (wall_base_nvfp4_qkv_bias) {
+            consume_causal_route(
+                FmbRouteFamily::LINEAR, CAUSAL_DECODER_Q_SITE,
+                static_cast<int64_t>(decoder_projection_route(seq_len_)));
+            rpu_launch_wall_base_nvfp4_qkv_bias_spm_kernel(
+                addr(0, "input_norm"), lw.q_w, addr(0, "q"),
+                layer_addr(layer_idx, 0, "q_bias"), lw.q_ws,
+                nvfp4_scale_addr("nvfp4_q_ts"), q_nvfp4_tensor_scales_.numel(),
+                (uint16_t)layer_idx, nq * hd);
+            consume_causal_route(
+                FmbRouteFamily::LINEAR, CAUSAL_DECODER_K_SITE,
+                static_cast<int64_t>(decoder_projection_route(seq_len_)));
+            rpu_launch_wall_base_nvfp4_qkv_bias_spm_kernel(
+                addr(0, "input_norm"), lw.k_w, addr(0, "k"),
+                layer_addr(layer_idx, 0, "k_bias"), lw.k_ws,
+                nvfp4_scale_addr("nvfp4_k_ts"), k_nvfp4_tensor_scales_.numel(),
+                (uint16_t)layer_idx, nkv * hd);
+            consume_causal_route(
+                FmbRouteFamily::LINEAR, CAUSAL_DECODER_V_SITE,
+                static_cast<int64_t>(decoder_projection_route(seq_len_)));
+            rpu_launch_wall_base_nvfp4_qkv_bias_spm_kernel(
+                addr(0, "input_norm"), lw.v_w, addr(0, "v"),
+                layer_addr(layer_idx, 0, "v_bias"), lw.v_ws,
+                nvfp4_scale_addr("nvfp4_v_ts"), v_nvfp4_tensor_scales_.numel(),
+                (uint16_t)layer_idx, nkv * hd);
         } else {
             consume_causal_route(
                 FmbRouteFamily::LINEAR, CAUSAL_DECODER_Q_SITE,
@@ -6064,7 +8675,7 @@ protected:
         bool has_qk_head_norm = has_qk_norm_;
 
         // RoPE 表指针 / strobe masks / partial-mrope keepalive 现由 emit_qk_rope 内部从成员
-        // 按 has_mrope_/partial_mrope_active_ 派生(共享来源),此处不再展开。
+        // 按 has_mrope_/partial_mrope_active_ 派生(codex MR!21 CLASS-B SSoT),此处不再展开。
 
         // Phase 06.1 / R4-01 Path B / REN-05: op-boundary cos/sin parity dump.
         // Captures the EXACT cos/sin slice the rope kernel is about to consume,
@@ -6072,7 +8683,7 @@ protected:
         // (ctx().position, chunk.offset, cos_sin_start, seq_len, layer_idx, chunk_idx).
         // Gated behind get_debug_export(); zero default-path codegen impact.
         if (get_debug_export()) {
-            // partial-M-RoPE 的 rope kernel 实际消费 cos_il/sin_il
+            // codex MR!21 review F3:partial-M-RoPE 的 rope kernel 实际消费 cos_il/sin_il
             // keepalive 表(交错格式,dim=hd/2),非 cos_/sin_。debug dump 须跟随活跃叶
             // (emit_qk_rope 同款 has_mrope_×partial_mrope_active_ 派生),否则会误报正在喂给
             // kernel 的 RoPE 表。HALO(has_mrope_=false)走 else → cos_/sin_,与修前一致。
@@ -6096,7 +8707,7 @@ protected:
             g_debug_tensors[meta_key] = meta;
         }
 
-        // RoPE 经 emit_qk_rope 单一真相源:has_mrope_ ×
+        // RoPE 经 emit_qk_rope 单一真相源(codex MR!21 CLASS-B):has_mrope_ ×
         // partial_mrope_active_ → 1D-RoPE / M-RoPE / partial-M-RoPE 三变体,与
         // emit_kv_first_body 同枝(共享 cos/sin 表 + cos_sin_start = ctx().position +
         // chunk.offset 语义)。新增 RoPE 模式只改 helper 一处,两路自动同步。
@@ -6106,7 +8717,10 @@ protected:
             ctx().stage_plan.compute.chunks.size() == 1 &&
             qwen3vl_4b_decode_qk_norm_mrope(seq_len_, chunk.len, ctx().is_causal,
                 ctx().attention_mask.has_value(), bs, partial_mrope_active_);
-        if (qwen3vl4b_fused_qk_kv) {
+        if (emit_lingbot_prefill_qk_norm_rope(layer_idx, chunk, cos_sin_start)) {
+            // Both FP16 norm scratch outputs remain observable at the original
+            // addresses; the terminal K-only layer returned before Phase 3.
+        } else if (qwen3vl4b_fused_qk_kv) {
             emit_qwen3vl_4b_decode_qk_norm_mrope_kv_insert(layer_idx, chunk, cos_sin_start);
         } else if (qwen3vl_4b_decode_qk_fused_ &&
             ctx().stage_plan.chunk_mode == ChunkMode::SEQUENTIAL &&
@@ -6148,7 +8762,9 @@ protected:
             }
         } else {
             // No QK head norm, in-place RoPE
-            {
+            if (wall_base_nvfp4_qk_rope && !wall_base_nvfp4_qkv_rope) {
+                emit_wall_base_nvfp4_qk_rope(chunk, cos_sin_start);
+            } else if (!wall_base_nvfp4_qkv_rope && !wall_action_fused_qkv_partial_mrope) {
                 emit_qk_rope("q", "q", bs * local_q_heads, hd, seq_len,
                              cos_sin_start, tp);
                 emit_qk_rope("k", "k", tts_codec_mode_ ? bs * (nkv / tp) : bs,
@@ -6226,17 +8842,30 @@ protected:
         const KvInsertSegmentPlan kv_plan = consume_causal_kv_plan(
             CAUSAL_DECODER_KV_INSERT_SITE, chunk.idx,
             ctx().position + chunk.offset, seq_len);
-        for (int64_t b = 0; b < bs; ++b) {
-            rpu_launch_insert_kvcache_spm_unified_with_plan(
-                k_cache, v_cache,
-                addr_offset("k").value + (uint32_t)(b * k_spm_stride),
-                addr_offset("v").value + (uint32_t)(b * k_spm_stride),
-                nkv, hd, tp,
-                (slot0 + b) * k_cache_batch_stride,
-                (slot0 + b) * v_cache_batch_stride,
+        if (wall_base_paired_kv_enabled(
+                ctx().stage_plan, kv_plan, seq_len_, ctx().seq_len,
+                ctx().position, ctx().is_causal, ctx().attention_mask.has_value(),
+                bs, partial_mrope_active_)) {
+            ctx().consume_physical_route(
+                FmbRouteFamily::GRAPH_SCHEDULE,
+                CAUSAL_DECODER_WALL_BASE_PAIRED_KV_SITE, 1, 0,
+                wall_base_paired_kv_arguments(ctx().position), chunk.idx);
+            rpu_launch_wall_base_paired_kv_spm_kernel(
+                k_cache, v_cache, addr_offset("k").value, addr_offset("v").value,
                 kv_insert_spm_rows_, kv_plan);
+        } else if (!emit_lingbot_prefill_kv_pair(k_cache, v_cache,
+                addr_offset("k").value, addr_offset("v").value, kv_plan, 0)) {
+            for (int64_t b = 0; b < bs; ++b) {
+                rpu_launch_insert_kvcache_spm_unified_with_plan(
+                    k_cache, v_cache,
+                    addr_offset("k").value + (uint32_t)(b * k_spm_stride),
+                    addr_offset("v").value + (uint32_t)(b * k_spm_stride),
+                    nkv, hd, tp,
+                    (slot0 + b) * k_cache_batch_stride,
+                    (slot0 + b) * v_cache_batch_stride,
+                    kv_insert_spm_rows_, kv_plan);
+            }
         }
-
         }
 
         int64_t kv_seq_len = chunk.kv_seq_len;
@@ -6285,6 +8914,41 @@ protected:
                 addr(0, "output"), /*mask_spm=*/0, mask_type,
                 1.0 / std::sqrt(static_cast<double>(hd)),
                 /*batch=*/1, seq_len, kv_seq_len, nq, nkv, hd, tp);
+        } else if (rtc_prefill_mixed && seq_len_ == 672 &&
+                   chunk.offset == 336) {
+            // Keep the full C336 QKV/MLP work, but avoid the invalid
+            // accumulated 336@336 LTM call. Each sub-call writes its contiguous
+            // rows into the original C336 output buffer before O-proj consumes it.
+            constexpr int64_t kFirstRows = 112;
+            constexpr int64_t kSecondRows = 224;
+            const uint32_t second_row_bytes = static_cast<uint32_t>(
+                kFirstRows * local_q_heads * hd * DWIDTH);
+            ctx().consume_physical_route(
+                FmbRouteFamily::ATTENTION,
+                CAUSAL_DECODER_P672_ATTN_FIRST_SITE,
+                static_cast<int64_t>(AttentionExecutionPolicy::DDR_KV),
+                /*resolved_flags=*/0, {seq_len_}, chunk.idx);
+            rpu_launch_sdpa_spm_dispatch(
+                sdpa_kernel_,
+                k_cache, v_cache, mask_type, c10::nullopt,
+                addr_offset("q").value,
+                addr_offset("output").value,
+                addr_offset("sdpa_tmp").value, mask_off,
+                kFirstRows, nq, nkv, hd,
+                ctx().position + chunk.offset + kFirstRows,
+                tp, NUM_CORES);
+            ctx().consume_physical_route(
+                FmbRouteFamily::ATTENTION,
+                CAUSAL_DECODER_P672_ATTN_SECOND_SITE,
+                static_cast<int64_t>(AttentionExecutionPolicy::DDR_KV),
+                /*resolved_flags=*/0, {seq_len_}, chunk.idx);
+            rpu_launch_sdpa_spm_dispatch(
+                sdpa_kernel_,
+                k_cache, v_cache, mask_type, c10::nullopt,
+                addr_offset("q").value + second_row_bytes,
+                addr_offset("output").value + second_row_bytes,
+                addr_offset("sdpa_tmp").value, mask_off,
+                kSecondRows, nq, nkv, hd, kv_seq_len, tp, NUM_CORES);
         } else {
             // Batch decode: one launch per sequence, each reading only its own
             // cache slot. The launches safely reuse the one sdpa_tmp scratch.
@@ -6314,6 +8978,31 @@ protected:
             qwen3vl_4b_decode_o_ring_norm(seq_len_, chunk.len, ctx().is_causal,
                 ctx().attention_mask.has_value(), bs, partial_mrope_active_)) {
             emit_qwen3vl_4b_decode_o_ring_norm(lw, layer_idx, chunk, input_residual);
+        } else if (wall_base_nvfp4_o_ring_norm) {
+            ctx().consume_physical_route(
+                FmbRouteFamily::LINEAR,
+                CAUSAL_DECODER_WALL_BASE_NVFP4_O_RING_NORM_SITE,
+                static_cast<int64_t>(CausalDecoderLinearRoute::WALL_BASE_NVFP4_O_RING_NORM),
+                0, wall_base_nvfp4_o_ring_norm_arguments(ctx().position), chunk.idx);
+            rpu_launch_wall_base_nvfp4_o_ring_norm_spm_kernel(
+                addr(0, "output"), lw.o_w, addr(0, "oproj"), input_residual,
+                addr(0, "residual2"), addr(0, "residual1"), norm_post_addr(layer_idx, 0),
+                lw.o_ws, nvfp4_scale_addr("nvfp4_o_ts"),
+                o_nvfp4_tensor_scales_.numel(), static_cast<uint16_t>(layer_idx), eps_);
+        } else if (wall_action_linear_ring_postnorm && layer_idx > 0) {
+            consume_causal_route(
+                FmbRouteFamily::LINEAR, CAUSAL_DECODER_WALL_RING_O_SITE,
+                static_cast<int64_t>(
+                    CausalDecoderLinearRoute::WALL_RING_POSTNORM));
+            rpu_launch_wall_action_linear_ring_postnorm_spm_kernel(
+                addr(0, "output"), lw.o_w, addr(0, "oproj"),
+                addr(0, "action_compact_residual"),
+                addr(0, "action_compact_residual"), addr(0, "residual1"),
+                layer_addr(layer_idx, 0, "post_norm_w"), lw.o_ws,
+                /*residual_local_shard=*/true, eps_,
+                wall_action_resident_layer
+                    ? wall_action_weight_base + WALL_ACTION_O_OFFSET *
+                        (wall_action_fp16_transfer ? 2 : 1) : 0, wall_sorting_, rows);
         } else {
             // O-proj row-partition over attn_tp() cores; reduce back to NUM_CORES.
             consume_causal_route(
@@ -6332,35 +9021,74 @@ protected:
                 /*force_acc32=*/linear_acc32_,
                 /*prefer_gemv=*/qwen3vl_decode_gemv(seq_len_), /*qkv_planar_direct=*/false,
                 /*prefer_row_weight_reuse=*/reuse_o_weight);
-            {
-                consume_causal_route(
-                    FmbRouteFamily::ALL_REDUCE,
-                    CAUSAL_DECODER_REDUCE_SITE,
-                    causal_ring_route(rows, h), chunk.idx);
-                rpu_launch_all_reduce_sum_residual_kernel(
-                    addr(0, "oproj"), input_residual,
-                    addr(0, "residual2"), rows, h, tp, num_cores());
-            }
-            emit_adarms_mut_refresh_post(layer_idx);
-            {
-                rpu_launch_rmsnorm_spm_kernel(
-                    addr(0, "residual2"), addr(0, "residual1"),
-                    norm_post_addr(layer_idx, 0), rows, h, eps_,
-                    consume_decoder_rmsnorm_route(rows, h, chunk.idx), num_cores());
-            }
-            if (adarms_) {
-                rpu_launch_eltwise_binary_1xC_NxC_spm_kernel(
-                    layer_addr(layer_idx, 0, "post_shift"),
-                    addr(0, "residual1"), addr(0, "residual1"),
-                    rows, h, c10::Half(1.0f), ValuOpType::ADD,
-                    /*is_bopa=*/false);
+            if (wall_base_prefill_owner_norm_enabled(
+                    ctx().stage_plan, seq_len_, ctx().position, ctx().is_causal,
+                    ctx().attention_mask.has_value(), bs)) {
+                consume_wall_base_prefill_owner_norm(chunk, input_residual);
+                rpu_launch_wall_base_prefill_o_owner_ring_norm_m224_kernel(
+                    addr(0, "oproj"), input_residual, addr(0, "residual2"),
+                    norm_post_addr(layer_idx, 0), eps_);
+            } else {
+                if (residual_is_bf16) {
+                    consume_causal_route(
+                        FmbRouteFamily::ALL_REDUCE,
+                        CAUSAL_DECODER_MIXED_REDUCE_SITE,
+                        static_cast<int64_t>(CausalDecoderAllReduceRoute::
+                            FP16_PARTIAL_BF16_RESIDUAL),
+                        chunk.idx);
+                    rpu_launch_all_reduce_fp16_partial_bf16_residual_spm_kernel(
+                        addr(0, "oproj"), input_residual, addr(0, "residual2"),
+                        rows, h);
+                } else {
+                    consume_causal_route(
+                        FmbRouteFamily::ALL_REDUCE,
+                        CAUSAL_DECODER_REDUCE_SITE,
+                        causal_ring_route(rows, h), chunk.idx);
+                    rpu_launch_all_reduce_sum_residual_kernel(
+                        addr(0, "oproj"), input_residual,
+                        addr(0, "residual2"), rows, h, tp, num_cores());
+                }
+                emit_adarms_mut_refresh_post(layer_idx);
+                if (residual_is_bf16) {
+                    rpu_launch_rmsnorm_bf16in_fp16out_spm_kernel(
+                        addr(0, "residual2"), addr(0, "residual1"),
+                        layer_addr(layer_idx, 0, "post_norm_w"), rows, h, eps_,
+                        consume_wall_mixed_rmsnorm_route(
+                            CAUSAL_DECODER_POST_MIXED_RMSNORM_SITE,
+                            rows, h, chunk.idx));
+                } else if (lingbot_folded_rmsnorm_) {
+                    emit_lingbot_nogamma_norm(
+                        addr(0, "residual2"), addr(0, "residual1"), rows, chunk.idx);
+                } else {
+                    rpu_launch_rmsnorm_spm_kernel(
+                        addr(0, "residual2"), addr(0, "residual1"),
+                        norm_post_addr(layer_idx, 0), rows, h, eps_,
+                        consume_wall_rmsnorm_route(rows, h, chunk.idx), num_cores());
+                }
+                if (adarms_) {
+                    rpu_launch_eltwise_binary_1xC_NxC_spm_kernel(
+                        layer_addr(layer_idx, 0, "post_shift"),
+                        addr(0, "residual1"), addr(0, "residual1"),
+                        rows, h, c10::Half(1.0f), ValuOpType::ADD,
+                        /*is_bopa=*/false);
+                }
             }
         }
 
         // ─────────────────────────────────────────────────────────────────────
         // Phase 7-8: MLP (gate, up, silu?, mul, down) + reduce + residual → residual1
         // ─────────────────────────────────────────────────────────────────────
-        if (ctx().stage_plan.chunk_mode == ChunkMode::SEQUENTIAL &&
+        if (wall_base_nvfp4_gate_up && !is_last_layer) {
+            emit_wall_base_nvfp4_gate_up(lw, layer_idx, chunk);
+        } else if (wall_base_fp16_shared_gateup_enabled(
+                ctx().stage_plan, seq_len_, ctx().position, ctx().is_causal,
+                ctx().attention_mask.has_value(), bs)) {
+            emit_wall_base_fp16_shared_gateup(lw, chunk);
+        } else if (wall_base_prefill_shared_input_enabled(
+                ctx().stage_plan, seq_len_, ctx().position, ctx().is_causal,
+                ctx().attention_mask.has_value(), bs)) {
+            emit_wall_base_prefill_shared_input(lw, chunk);
+        } else if (ctx().stage_plan.chunk_mode == ChunkMode::SEQUENTIAL &&
             qwen3vl_4b_prefill_swiglu(seq_len_, chunk.len, ctx().position,
                 ctx().is_causal, ctx().attention_mask.has_value(), bs)) {
             emit_qwen3vl_4b_prefill_mlp(lw, chunk);
@@ -6369,7 +9097,8 @@ protected:
                 ctx().attention_mask.has_value(), bs)) {
             emit_qwen3vl_decode_mlp(lw, chunk);
         } else if (decode_gate_up_fusion_) {
-
+            TORCH_CHECK(!transition_to_bf16 && !residual_is_bf16,
+                        "Qwen3-VL packed gate/up does not support BF16 residuals");
             emit_qwen3vl_2b_mlp_pipeline(
                 lw, rows, h, nq, nkv, hd, tp, chunk.idx);
         } else {
@@ -6382,17 +9111,56 @@ protected:
                 nvfp4_scale_addr("nvfp4_up_ts"),
                 nvfp4_scale_addr("nvfp4_down_ts"),
                 (uint16_t)layer_idx,
-                /*down_out_bf16=*/false,
-                /*residual_is_bf16=*/false,
+                transition_to_bf16,
+                residual_is_bf16,
                 /*acc32=*/linear_acc32_,
-                /*fuse_silu_mul=*/use_planned_silu_mul(),
-                /*skip_down=*/false,
-                /*bind_silu_mul_route=*/use_planned_silu_mul(),
+                /*fuse_silu_mul=*/use_planned_silu_mul() ||
+                    wall_small_prefill_fused || wall_fp16_long_prefill_fused ||
+                    wall_p640_staged0_w8a16 || wall_action_w8a16_silu_mul ||
+                    (wall_sorting_.silu_mul && use_silu_ &&
+                     (rtc_prefill_mixed || wall_action_fuse_silu_mul_)),
+                /*skip_down=*/wall_action_linear_ring_postnorm ||
+                    (wall_base_nvfp4_down_ring_norm && !is_last_layer),
+                /*fuse_wall_gate_up=*/wall_action_w8a16_silu_mul,
+                /*bind_silu_mul_route=*/use_planned_silu_mul() ||
+                    wall_small_prefill_fused || wall_fp16_long_prefill_fused,
                 /*residual_spm_addr=*/0,
-                /*pi05_xor3=*/false, /*pi05_nvfp4_v2=*/false,
+                /*pi05_xor3=*/false,
+                /*pi05_nvfp4_v2=*/false,
+                wall_action_resident_layer
+                    ? wall_action_weight_base + WALL_ACTION_GATE_OFFSET *
+                        (wall_action_fp16_transfer ? 2 : 1) : 0,
+                wall_action_resident_layer
+                    ? wall_action_weight_base + WALL_ACTION_UP_OFFSET *
+                        (wall_action_fp16_transfer ? 2 : 1) : 0,
+                wall_sorting_,
                 /*prefer_gemv=*/qwen3vl_decode_gemv(seq_len_),
                 rhinovla_high_precision_ ? RpuUnaryPrecision::HIGH : RpuUnaryPrecision::BASE,
                 rhinovla_high_precision_fusions_);
+        }
+        if (wall_base_nvfp4_down_ring_norm && !is_last_layer) {
+            emit_wall_base_nvfp4_down_ring_norm(lw, layer_idx, chunk);
+        }
+        if (wall_action_linear_ring_postnorm) {
+            const bool residual_local_shard = layer_idx > 0;
+            const uint32_t next_gamma = is_last_layer
+                ? addr(0, "final_norm_w")
+                : layer_addr(layer_idx + 1, 0, "norm_w");
+            consume_causal_route(
+                FmbRouteFamily::LINEAR,
+                CAUSAL_DECODER_WALL_RING_DOWN_SITE,
+                static_cast<int64_t>(
+                    CausalDecoderLinearRoute::WALL_RING_POSTNORM));
+            rpu_launch_wall_action_linear_ring_postnorm_spm_kernel(
+                addr(0, "gate"), lw.down_w, addr(0, "down"),
+                residual_local_shard
+                    ? addr(0, "action_compact_residual")
+                    : addr(0, "residual2"),
+                addr(0, "action_compact_residual"), addr(0, "residual1"),
+                next_gamma, lw.down_ws, residual_local_shard, eps_,
+                wall_action_resident_layer
+                    ? wall_action_weight_base + WALL_ACTION_DOWN_OFFSET *
+                        (wall_action_fp16_transfer ? 2 : 1) : 0, wall_sorting_, rows);
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -6465,15 +9233,22 @@ protected:
         //   decode (seq_len=1) + fuse_lm_head_=true 时, 后面的 Output DMA 段会
         //   追加 lm_head GEMM 并跳过 spm2ddr, 实现全程 SPM 的 fused decode.
         // ─────────────────────────────────────────────────────────────────────
-        if (is_last_layer) {
+        if (is_last_layer && !wall_action_linear_ring_postnorm) {
             // final_norm_w is BUILD-preloaded into the packed slab or the
             // fallback single Persistent slot (see declare_buffers).
-            {
+            if (residual_is_bf16) {
+                rpu_launch_rmsnorm_bf16in_fp16out_spm_kernel(
+                    addr(0, "residual1"), addr(0, "residual1"),
+                    norm_final_addr(0), rows, h, eps_,
+                    consume_wall_mixed_rmsnorm_route(
+                        CAUSAL_DECODER_FINAL_MIXED_RMSNORM_SITE,
+                        rows, h, chunk.idx));
+            } else {
                 rpu_launch_rmsnorm_spm_kernel(
                     addr(0, "residual1"), addr(0, "residual1"),
                     norm_final_addr(0),
                     rows, h, eps_,
-                    consume_decoder_rmsnorm_route(rows, h, chunk.idx), num_cores());
+                    consume_wall_rmsnorm_route(rows, h, chunk.idx), num_cores());
             }
         }
 
@@ -6868,9 +9643,375 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     bool try_checked_layer_body_replay();
 
     // ── Model state (stored in C++, set via set_weights) ──
+    std::vector<int64_t> lingbot_prefill_policy_arguments() const {
+        // Preserve FP16 and old-REF metadata exactly; only the admitted W8
+        // owner appends its new capability to the pre-input topology receipt.
+        return lingbot_prefill_gateup_shared_a_
+            ? std::vector<int64_t>{1, lingbot_folded_rmsnorm_ ? 1 : 0, lingbot_prefill_kv_only_ ? 1 : 0,
+                36, 2560, 9728, 32, 8, 128, 8,
+                static_cast<int64_t>(lingbot_nogamma_contract_.capability),
+                LINGBOT2_PREFILL_GATEUP_SHARED_A_SITE, 1}
+            : std::vector<int64_t>{1, lingbot_folded_rmsnorm_ ? 1 : 0, lingbot_prefill_kv_only_ ? 1 : 0,
+                36, 2560, 9728, 32, 8, 128, 8,
+                static_cast<int64_t>(lingbot_nogamma_contract_.capability)};
+    }
+
+    bool select_lingbot_prefill_gateup_shared_a(bool folded, bool kv_only) const {
+        if (!folded || !kv_only || !qwen3vl_4b_w8_profile_ || linear_acc32_ ||
+                !use_silu_ || layer_weights_.size() != 36) return false;
+        for (const auto& layer : layer_weights_) {
+            const at::Tensor* weights[] = {&layer.gate_w, &layer.up_w, &layer.down_w};
+            const at::Tensor* scales[] = {&layer.gate_ws, &layer.up_ws, &layer.down_ws};
+            for (int i = 0; i < 3; ++i) {
+                const auto& weight = *weights[i]; const auto& scale = *scales[i];
+                const int64_t n = i == 2 ? 2560 : 9728, k = i == 2 ? 9728 : 2560;
+                if (!weight.defined() || weight.device().type() != at::kPrivateUse1 ||
+                    weight.scalar_type() != at::kChar || !weight.is_contiguous() ||
+                    weight.dim() != 2 || weight.size(0) != n || weight.size(1) != k ||
+                    !scale.defined() || scale.device() != weight.device() ||
+                    scale.scalar_type() != at::kHalf || !scale.is_contiguous() ||
+                    scale.dim() != 1 || scale.size(0) != n) return false;
+            }
+        }
+        return KernelCache::instance().has_loaded(KernelId::LINGBOT2_PREFILL_GATEUP_SHARED_A_W8_M224);
+    }
+
+    bool lingbot_prefill_gateup_for_plan(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len, int64_t position,
+        bool is_causal, bool use_attn_mask, int64_t batch_size,
+        AttentionExecutionPolicy attention_policy) const {
+        if (!lingbot_prefill_mode_bound_ || !lingbot_folded_rmsnorm_ ||
+            !lingbot_prefill_kv_only_ || !lingbot_prefill_gateup_shared_a_ ||
+            !qwen3vl_4b_prefill_swiglu(physical_len, physical_len, position,
+                is_causal, use_attn_mask, batch_size) || wall_z1_dispatch_ ||
+            physical_len != 224 || attention_policy != AttentionExecutionPolicy::DDR_KV ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL) return false;
+        for (const auto* stage : {&plan.input, &plan.qkv, &plan.compute}) {
+            if (stage->plan.chunk_size != 224 || stage->chunks.size() != 1) return false;
+            const auto& chunk = stage->chunks.front();
+            if (chunk.idx != 0 || chunk.offset != 0 || chunk.len != 224 || chunk.kv_seq_len != 224) return false;
+        }
+        return true;
+    }
+
+    std::vector<int64_t> lingbot_prefill_gateup_arguments() const {
+        return {224, 9728, 2560, 8, 320, 96, 128, 13};
+    }
+
+    void validate_lingbot_prefill_gateup_schedule() const {
+        const bool selected = lingbot_prefill_gateup_for_plan(ctx().stage_plan, ctx().seq_len,
+            ctx().position, ctx().is_causal, ctx().attention_mask.has_value(),
+            ctx().batch_size, ctx().attention_policy);
+        TORCH_CHECK(ctx().has_complete_physical_manifest(), "LingBot MLP requires a COMPLETE descriptor");
+        const auto& routes = ctx().physical_manifest().routes;
+        const auto count = std::count_if(routes.begin(), routes.end(), [](const auto& route) {
+            return route.site_id == LINGBOT2_PREFILL_GATEUP_SHARED_A_SITE;
+        });
+        TORCH_CHECK(count == (selected ? 1 : 0), "LingBot shared-A MLP differs from its COMPLETE descriptor");
+        if (selected) {
+            const auto& route = ctx().find_physical_route(
+                FmbRouteFamily::LINEAR, LINGBOT2_PREFILL_GATEUP_SHARED_A_SITE, 0);
+            TORCH_CHECK(route.selector == 1 && route.flags == 0 &&
+                            route.arguments == lingbot_prefill_gateup_arguments(),
+                        "LingBot shared-A MLP descriptor changed before input DMA");
+        }
+    }
+
+    // Bind the optional payload only for the explicit, folded LingBot owner.
+    // The existing cold bind forbids subsequent weight replacement; no packed
+    // weights or extra SPM/DDR allocations are introduced here.
+    int64_t select_lingbot_prefill_qkv_mode(bool folded, bool kv_only) const {
+        if (!folded || !kv_only || linear_acc32_ || layer_weights_.size() != 36) return 0;
+        const auto dtype = layer_weights_.front().q_w.scalar_type();
+        if (dtype != at::kHalf && dtype != at::kChar) return 0;
+        for (const auto& layer : layer_weights_) {
+            const at::Tensor* weights[] = {&layer.q_w, &layer.k_w, &layer.v_w};
+            const at::Tensor* scales[] = {&layer.q_ws, &layer.k_ws, &layer.v_ws};
+            for (int i = 0; i < 3; ++i) {
+                const auto& weight = *weights[i];
+                const auto& scale = *scales[i];
+                const int64_t n = i == 0 ? 4096 : 1024;
+                if (!weight.defined() || weight.device().type() != at::kPrivateUse1 ||
+                    weight.scalar_type() != dtype || !weight.is_contiguous() ||
+                    weight.dim() != 2 || weight.size(0) != n || weight.size(1) != 2560) return 0;
+                if (dtype == at::kChar) {
+                    if (!scale.defined() || scale.device().type() != at::kPrivateUse1 ||
+                        scale.scalar_type() != at::kHalf || !scale.is_contiguous() ||
+                        scale.dim() != 1 || scale.size(0) != n) return 0;
+                } else if (scale.defined()) return 0;
+            }
+        }
+        const auto id = dtype == at::kChar ? KernelId::LINGBOT2_PREFILL_QKV_MULTIBASE_W8_M224
+                                         : KernelId::LINGBOT2_PREFILL_QKV_MULTIBASE_FP16_M224;
+        return KernelCache::instance().has_loaded(id) ? (dtype == at::kChar ? 1 : 2) : 0;
+    }
+
+    bool lingbot_prefill_qkv_for_plan(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len, int64_t position,
+        bool is_causal, bool use_attn_mask, int64_t batch_size,
+        AttentionExecutionPolicy attention_policy) const {
+        if (!lingbot_prefill_mode_bound_ || !lingbot_folded_rmsnorm_ ||
+            !lingbot_prefill_kv_only_ || !lingbot_prefill_qkv_mode_ || linear_acc32_ ||
+            planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
+            qwen3vl_pooler_z1_dispatch_ || qwen3vl_multiview_text_composite_dispatch_ ||
+            wall_z1_dispatch_ || physical_len != 224 || position != 0 || !is_causal ||
+            use_attn_mask || batch_size != 1 ||
+            attention_policy != AttentionExecutionPolicy::DDR_KV ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL) return false;
+        for (const auto* stage : {&plan.input, &plan.qkv, &plan.compute}) {
+            if (stage->plan.chunk_size != 224 || stage->chunks.size() != 1) return false;
+            const auto& chunk = stage->chunks.front();
+            if (chunk.idx != 0 || chunk.offset != 0 || chunk.len != 224 || chunk.kv_seq_len != 224) return false;
+        }
+        return true;
+    }
+
+    std::vector<int64_t> lingbot_prefill_qkv_arguments() const {
+        const bool w8 = lingbot_prefill_qkv_mode_ == 1;
+        return {1, lingbot_prefill_qkv_mode_, 224, 2560, 4096, 1024, 1024, 8, 0,
+                w8 ? 320 : 384, w8 ? 112 : 96, w8 ? 512 : 480, w8 ? 48 : 64,
+                128, w8 ? 11 : 10};
+    }
+
+    bool validate_lingbot_prefill_qkv_schedule(int layer_idx, const ChunkInfo& chunk) {
+        const bool selected = lingbot_prefill_qkv_for_plan(ctx().stage_plan, ctx().seq_len,
+            ctx().position, ctx().is_causal, ctx().attention_mask.has_value(),
+            ctx().batch_size, ctx().attention_policy);
+        bool recorded = false;
+        if (ctx().has_complete_physical_manifest()) {
+            const auto& routes = ctx().physical_manifest().routes;
+            recorded = std::any_of(routes.begin(), routes.end(), [](const auto& route) {
+                return route.site_id == LINGBOT2_PREFILL_QKV_MULTIBASE_SITE;
+            });
+        }
+        TORCH_CHECK(selected == recorded,
+                    "LingBot prefill QKV differs from its COMPLETE descriptor");
+        if (!selected) return false;
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < 35 && chunk.idx == 0 &&
+                        chunk.offset == 0 && chunk.len == 224 && chunk.kv_seq_len == 224,
+                    "LingBot prefill QKV escaped its exact full-layer traversal");
+        return true;
+    }
+
+    bool lingbot_prefill_kv_pair_for_plan(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len, int64_t position,
+        bool is_causal, bool use_attn_mask, int64_t batch_size,
+        AttentionExecutionPolicy attention_policy) const {
+        if (!lingbot_prefill_mode_bound_ || !lingbot_prefill_kv_pair_ ||
+            !lingbot_folded_rmsnorm_ || !lingbot_prefill_kv_only_ ||
+            !qwen3vl_4b_w8_profile_ || linear_acc32_ ||
+            planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
+            qwen3vl_pooler_z1_dispatch_ || qwen3vl_multiview_text_composite_dispatch_ ||
+            wall_z1_dispatch_ || physical_len != 224 || position != 0 || !is_causal ||
+            use_attn_mask || batch_size != 1 ||
+            attention_policy != AttentionExecutionPolicy::DDR_KV ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL) return false;
+        for (const auto* stage : {&plan.input, &plan.qkv, &plan.compute}) {
+            if (stage->plan.chunk_size != 224 || stage->chunks.size() != 1) return false;
+            const auto& chunk = stage->chunks.front();
+            if (chunk.idx != 0 || chunk.offset != 0 || chunk.len != 224 || chunk.kv_seq_len != 224) return false;
+        }
+        return true;
+    }
+
+    std::vector<int64_t> lingbot_prefill_kv_pair_arguments() const {
+        return {1, 224, 0, 8, 128, 8, 14};
+    }
+
+    bool validate_lingbot_prefill_kv_pair_schedule() const {
+        const bool selected = lingbot_prefill_kv_pair_for_plan(ctx().stage_plan, ctx().seq_len,
+            ctx().position, ctx().is_causal, ctx().attention_mask.has_value(),
+            ctx().batch_size, ctx().attention_policy);
+        TORCH_CHECK(ctx().has_complete_physical_manifest(), "LingBot KV pair requires a COMPLETE descriptor");
+        const auto& routes = ctx().physical_manifest().routes;
+        const auto count = std::count_if(routes.begin(), routes.end(), [](const auto& route) {
+            return route.site_id == LINGBOT2_PREFILL_KV_PAIR_SITE;
+        });
+        TORCH_CHECK(count == (selected ? 2 : 0), "LingBot KV pair differs from its COMPLETE descriptor");
+        if (selected) {
+            for (int64_t role : {0, 1}) {
+                const auto& route = ctx().find_physical_route(
+                    FmbRouteFamily::GRAPH_SCHEDULE, LINGBOT2_PREFILL_KV_PAIR_SITE, role);
+                TORCH_CHECK(route.selector == 1 && route.flags == 0 &&
+                                route.arguments == lingbot_prefill_kv_pair_arguments(),
+                            "LingBot KV pair descriptor changed before input DMA");
+            }
+        }
+        return selected;
+    }
+
+    bool emit_lingbot_prefill_kv_pair(at::Tensor& k_cache, at::Tensor& v_cache,
+            uint32_t k_offset, uint32_t v_offset, const KvInsertSegmentPlan& plan, int64_t role) {
+        if (!lingbot_prefill_kv_pair_) return false;
+        if (!validate_lingbot_prefill_kv_pair_schedule()) return false;
+        TORCH_CHECK((role == 0 || role == 1) && cache_batch_slot_ == 0,
+                    "LingBot paired KV escaped its single cache slot");
+        ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+            LINGBOT2_PREFILL_KV_PAIR_SITE, 1, 0, lingbot_prefill_kv_pair_arguments(), role);
+        // Ordinary KV uses zero to mean logical_rows when no padding is
+        // inserted by this plan. The exact M224 writer takes an explicit extent.
+        const int64_t spm_rows = kv_insert_spm_rows_ == 0
+            ? plan.logical_rows() : kv_insert_spm_rows_;
+        rpu_launch_lingbot2_insert_kv_m224_spm_with_plan(k_cache, v_cache,
+            k_offset, v_offset, spm_rows, plan);
+        return true;
+    }
+
+    bool lingbot_prefill_qk_norm_rope_for_plan(
+        const FmbThreeStageChunkPlan& plan, int64_t physical_len, int64_t position,
+        bool is_causal, bool use_attn_mask, int64_t batch_size,
+        AttentionExecutionPolicy attention_policy, bool partial_mrope) const {
+        if (!lingbot_prefill_mode_bound_ || !lingbot_prefill_qk_norm_rope_ ||
+            !lingbot_folded_rmsnorm_ || !lingbot_prefill_kv_only_ || !partial_mrope ||
+            !has_qk_norm_ || !has_mrope_ || !qwen3vl_4b_w8_profile_ || linear_acc32_ ||
+            eps_ != 1e-6 || planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
+            qwen3vl_pooler_z1_dispatch_ || qwen3vl_multiview_text_composite_dispatch_ ||
+            wall_z1_dispatch_ || physical_len != 224 || position != 0 || !is_causal ||
+            use_attn_mask || batch_size != 1 || cache_batch_slot_ != 0 ||
+            attention_policy != AttentionExecutionPolicy::DDR_KV ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL) return false;
+        for (const auto* stage : {&plan.input, &plan.qkv, &plan.compute}) {
+            if (stage->plan.chunk_size != 224 || stage->chunks.size() != 1) return false;
+            const auto& chunk = stage->chunks.front();
+            if (chunk.idx != 0 || chunk.offset != 0 || chunk.len != 224 || chunk.kv_seq_len != 224) return false;
+        }
+        return true;
+    }
+
+    std::vector<int64_t> lingbot_prefill_qk_norm_rope_arguments() const {
+        // Schema, rows/position, local Q/K heads, D/TP, original norm selector,
+        // M-RoPE sections, FP16 epsilon, 32-token tile/7 blocks, FP16 scratch.
+        return {1, 224, 0, 4, 1, 128, 8, static_cast<int64_t>(RpuRmsNormSpmRoute::V32_GRID8),
+                24, 20, 20, static_cast<int64_t>(c10::Half(1e-6f).x), 32, 7, 1,
+                static_cast<int64_t>(ordinary_rmsnorm_spm_contract_.capability)};
+    }
+
+    bool validate_lingbot_prefill_qk_norm_rope_schedule() const {
+        const bool selected = lingbot_prefill_qk_norm_rope_for_plan(ctx().stage_plan,
+            ctx().seq_len, ctx().position, ctx().is_causal, ctx().attention_mask.has_value(),
+            ctx().batch_size, ctx().attention_policy, partial_mrope_active_);
+        TORCH_CHECK(ctx().has_complete_physical_manifest(),
+                    "LingBot QK norm/RoPE requires a COMPLETE descriptor");
+        const auto& routes = ctx().physical_manifest().routes;
+        const auto count = std::count_if(routes.begin(), routes.end(), [](const auto& route) {
+            return route.site_id == LINGBOT2_PREFILL_QK_NORM_ROPE_SITE;
+        });
+        TORCH_CHECK(count == (selected ? 1 : 0), "LingBot QK norm/RoPE differs from its COMPLETE descriptor");
+        if (!selected) return false;
+        const auto& route = ctx().find_physical_route(FmbRouteFamily::NORMALIZATION,
+            LINGBOT2_PREFILL_QK_NORM_ROPE_SITE, 0);
+        TORCH_CHECK(route.selector == 1 && route.flags == 0 &&
+                        route.arguments == lingbot_prefill_qk_norm_rope_arguments(),
+                    "LingBot QK norm/RoPE descriptor changed before input DMA");
+        TORCH_CHECK(KernelCache::instance().get(KernelId::LINGBOT2_PREFILL_QK_NORM_ROPE_M224) != nullptr,
+                    "LingBot QK norm/RoPE selected payload is unavailable");
+        for (int64_t role : {1, 2}) {
+            const int64_t rows = role == 1 ? 224 * 4 : 224;
+            const auto& norm = ctx().find_physical_route(FmbRouteFamily::NORMALIZATION,
+                CAUSAL_DECODER_ORDINARY_RMSNORM_SITE, role);
+            TORCH_CHECK(norm.selector == static_cast<int64_t>(RpuRmsNormSpmRoute::V32_GRID8) &&
+                            norm.flags == 0 && norm.arguments ==
+                                ordinary_rmsnorm_spm_contract_.manifest_arguments(rows, 128),
+                        "LingBot fused QK requires the original learned-gamma V32 contracts");
+        }
+        const auto& rope = ctx().find_physical_route(FmbRouteFamily::ROPE,
+            CAUSAL_DECODER_PARTIAL_MROPE_POINTER_SITE, 0);
+        TORCH_CHECK(rope.selector == static_cast<int64_t>(CausalDecoderRopeRoute::PARTIAL_MROPE) &&
+                        rope.flags == 0 && rope.arguments == std::vector<int64_t>({1, 1, 0}),
+                    "LingBot fused QK requires the original partial M-RoPE contract");
+        return true;
+    }
+
+    bool emit_lingbot_prefill_qk_norm_rope(
+        int layer_idx, const ChunkInfo& chunk, int64_t position) {
+        if (!lingbot_prefill_qk_norm_rope_ || !validate_lingbot_prefill_qk_norm_rope_schedule()) return false;
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < 35 && position == 0 &&
+                        chunk.idx == 0 && chunk.offset == 0 && chunk.len == 224 && chunk.kv_seq_len == 224,
+                    "LingBot QK norm/RoPE escaped its ordinary full-layer traversal");
+        TORCH_CHECK(consume_ordinary_rmsnorm_route(224 * 4, 128, 0, 1) == RpuRmsNormSpmRoute::V32_GRID8 &&
+                        consume_ordinary_rmsnorm_route(224, 128, 0, 2) == RpuRmsNormSpmRoute::V32_GRID8,
+                    "LingBot QK norm/RoPE lost its original norm route");
+        // Retain the baseline Q and K RoPE authority, also used by the K-only tail.
+        for (int side = 0; side < 2; ++side)
+            ctx().consume_physical_route(FmbRouteFamily::ROPE,
+                CAUSAL_DECODER_PARTIAL_MROPE_POINTER_SITE,
+                static_cast<int64_t>(CausalDecoderRopeRoute::PARTIAL_MROPE), 0, {1, 1, 0});
+        ctx().consume_physical_route(FmbRouteFamily::NORMALIZATION,
+            LINGBOT2_PREFILL_QK_NORM_ROPE_SITE, 1, 0, lingbot_prefill_qk_norm_rope_arguments());
+        rpu_launch_lingbot2_prefill_qk_norm_rope_m224_spm_kernel(
+            addr(0, "q"), addr(0, "k"), addr(0, "output"), addr(0, "input_norm"),
+            norm_q_addr(layer_idx, 0), norm_k_addr(layer_idx, 0),
+            cos_il_keepalive_, sin_il_keepalive_, position, eps_);
+        return true;
+    }
+
+    void emit_lingbot_nogamma_norm(uint32_t input, uint32_t output,
+                                   int64_t rows, int64_t chunk_index) {
+        const auto route = lingbot_nogamma_contract_.resolve(rows, hidden_size());
+        ctx().consume_physical_route(FmbRouteFamily::NORMALIZATION,
+            LINGBOT2_PREFILL_NOGAMMA_SITE, static_cast<int64_t>(route), 0,
+            lingbot_nogamma_contract_.manifest_arguments(rows, hidden_size()), chunk_index);
+        rpu_launch_rmsnorm_nogamma_spm_kernel(input, output, rows, hidden_size(), eps_, route, 8);
+    }
+
+    void emit_lingbot_prefill_kv_tail(int layer_idx, const ChunkInfo& chunk) {
+        TORCH_CHECK(lingbot_prefill_kv_only_ && layer_idx == 35 &&
+                        ctx().is_causal && ctx().position == 0 &&
+                        chunk.idx == 0 && chunk.offset == 0 && chunk.len == ctx().seq_len &&
+                        ctx().stage_plan.compute.chunks.size() == 1,
+                    "LingBot KV-only terminal layer escaped its planned prefill");
+        const auto& lw = layer_weights_[layer_idx];
+        const int64_t rows = chunk.len;
+        ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+            LINGBOT2_PREFILL_KV_TAIL_SITE, 1, 0, {35, rows, 2560, 8, 128, 8});
+        consume_causal_route(FmbRouteFamily::LINEAR, LINGBOT2_PREFILL_TAIL_K_SITE,
+            static_cast<int64_t>(decoder_projection_route(seq_len_)));
+        rpu_launch_linear_spm_to_spm_acc16_kernel(
+            addr(0, "input_norm"), lw.k_w, addr(0, "k"), rows, 1024, 2560, 1, 8,
+            0, lw.k_ws, 0, 0, linear_acc32_, false, false);
+        consume_causal_route(FmbRouteFamily::LINEAR, LINGBOT2_PREFILL_TAIL_V_SITE,
+            static_cast<int64_t>(decoder_projection_route(seq_len_)));
+        rpu_launch_linear_spm_to_spm_acc16_kernel(
+            addr(0, "input_norm"), lw.v_w, addr(0, "v"), rows, 1024, 2560, 1, 8,
+            0, lw.v_ws, 0, 0, linear_acc32_, false, false);
+        // K norm's output reuses the now-dead input norm slot. Q is never computed.
+        rpu_launch_rmsnorm_spm_kernel(
+            addr(0, "k"), addr(0, "input_norm"), norm_k_addr(layer_idx, 0),
+            rows, 128, eps_, consume_ordinary_rmsnorm_route(rows, 128, chunk.idx, 2), 8);
+        emit_qk_rope("input_norm", "k", 1, 128, rows, 0, 8);
+        const KvInsertSegmentPlan kv_plan = consume_causal_kv_plan(
+            LINGBOT2_PREFILL_TAIL_KV_INSERT_SITE, chunk.idx, 0, rows);
+        if (emit_lingbot_prefill_kv_pair((*ctx().k_caches)[layer_idx], (*ctx().v_caches)[layer_idx],
+                addr_offset("k").value, addr_offset("v").value, kv_plan, 1)) return;
+        rpu_launch_insert_kvcache_spm_unified_with_plan(
+            (*ctx().k_caches)[layer_idx], (*ctx().v_caches)[layer_idx],
+            addr_offset("k").value, addr_offset("v").value,
+            8, 128, 8, 0, 0, kv_insert_spm_rows_, kv_plan);
+    }
+
     std::vector<int64_t> causal_kvinsert_cost_weight_identity() const {
         if (layer_weights_.empty()) return {};
         std::vector<int64_t> identity{1};
+        if (lingbot_prefill_mode_bound_) {
+            identity.push_back(LINGBOT2_PREFILL_POLICY_SITE);
+            const auto policy = lingbot_prefill_policy_arguments();
+            identity.insert(identity.end(), policy.begin(), policy.end());
+            if (lingbot_prefill_qkv_mode_) {
+                identity.push_back(LINGBOT2_PREFILL_QKV_MULTIBASE_SITE);
+                const auto qkv = lingbot_prefill_qkv_arguments();
+                identity.insert(identity.end(), qkv.begin(), qkv.end());
+            }
+            if (lingbot_prefill_kv_pair_) {
+                identity.push_back(LINGBOT2_PREFILL_KV_PAIR_SITE);
+                const auto pair = lingbot_prefill_kv_pair_arguments();
+                identity.insert(identity.end(), pair.begin(), pair.end());
+            }
+            if (lingbot_prefill_qk_norm_rope_) {
+                identity.push_back(LINGBOT2_PREFILL_QK_NORM_ROPE_SITE);
+                const auto qk = lingbot_prefill_qk_norm_rope_arguments();
+                identity.insert(identity.end(), qk.begin(), qk.end());
+            }
+        }
         if (rhinovla_high_precision_) {
             identity.insert(identity.end(), {RHINOVLA_TEXT_HIGH_RMSNORM_SITE,
                                             rhinovla_high_precision_fusions_ ? 1 : 0});
@@ -6897,10 +10038,15 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
             static_cast<int64_t>(fuse_lm_head_),
             static_cast<int64_t>(equal_two_prefill_),
             static_cast<int64_t>(linear_acc32_),
+            static_cast<int64_t>(decoder_mixed_precision_),
+            static_cast<int64_t>(wall_prefill_staged_mlp_),
+            static_cast<int64_t>(wall_prefill_mixed_requested_),
+            static_cast<int64_t>(wall_prefill_staged_requested_),
             static_cast<int64_t>(has_mrope_),
             static_cast<int64_t>(configured_chunk_size_cap_),
             static_cast<int64_t>(
                 ordinary_rmsnorm_spm_contract_.capability),
+            static_cast<int64_t>(wall_rmsnorm_capability_),
             static_cast<int64_t>(vocab_size_),
             static_cast<int64_t>(sdpa_kernel_)});
         if (qwen3vl_4b_decode_qk_fused_) {
@@ -6934,6 +10080,75 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
                 &lm_head_w_, &lm_head_w_scale_}) {
             append_kvinsert_cost_tensor_identity(identity, *tensor);
         }
+        // Precision ABI v1 readers index the original scalar prefix and
+        // length-prefixed M-RoPE/DeepStack/tensor records. Keep that complete
+        // representation unchanged; Wall-only policy extends it at the end.
+        // Extension header: WALL tag, extension version, payload word count.
+        if (wall_sorting_route_enabled()) {
+            identity.insert(identity.end(), {0x57414c4c, 1, 11,
+                static_cast<int64_t>(wall_prefill_owner_direct_requested_),
+                static_cast<int64_t>(wall_prefill_owner_direct_kv_),
+                static_cast<int64_t>(wall_sorting_.fp16_transfer_mask),
+                static_cast<int64_t>(wall_sorting_.fp16_mlp_m224),
+                static_cast<int64_t>(wall_sorting_.silu_mul),
+                static_cast<int64_t>(wall_sorting_.action_activation_reuse),
+                static_cast<int64_t>(wall_sorting_.prefill_row_reuse),
+                static_cast<int64_t>(wall_sorting_.prefill_mlp_retile),
+                static_cast<int64_t>(wall_sorting_.paired_postnorm_tile40),
+                static_cast<int64_t>(wall_action_weight_residency_),
+                static_cast<int64_t>(wall_action_kv_owner_fanout_)});
+        }
+        // A two-launch certificate must not describe the marker-selected
+        // one-launch schedule. Preserve the old identity when the marker is absent.
+        if (wall_base_paired_kv_) {
+            identity.insert(identity.end(),
+                {0x57414b56, 1, CAUSAL_DECODER_WALL_BASE_PAIRED_KV_SITE});
+        }
+        if (wall_base_nvfp4_qkv_bias_) {
+            identity.insert(identity.end(),
+                {CAUSAL_DECODER_QKV_BIAS_TOPOLOGY_SITE, 1});
+        }
+        if (wall_base_nvfp4_kv_parallel_) {
+            identity.insert(identity.end(), {CAUSAL_DECODER_WALL_BASE_NVFP4_KV_PARALLEL_SITE, 1});
+        }
+        if (wall_base_nvfp4_qkv_parallel_) {
+            identity.insert(identity.end(), {CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_PARALLEL_SITE, 1});
+        }
+        if (wall_base_nvfp4_qkv_rope_) {
+            identity.insert(identity.end(), {CAUSAL_DECODER_WALL_BASE_NVFP4_QKV_ROPE_SITE, 1});
+        }
+        if (wall_base_nvfp4_gate_up_shared_silu_) {
+            identity.insert(identity.end(), {CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SHARED_SILU_SITE, 1});
+        }
+        if (wall_base_nvfp4_gate_up_silu_) {
+            identity.insert(identity.end(), {CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SILU_SITE, 1});
+        }
+        if (wall_base_nvfp4_gate_up_) {
+            identity.insert(identity.end(), {CAUSAL_DECODER_WALL_BASE_NVFP4_GATE_UP_SITE, 1});
+        }
+        if (wall_base_nvfp4_qk_rope_) {
+            identity.insert(identity.end(), {CAUSAL_DECODER_WALL_BASE_QK_ROPE_SITE, 1});
+        }
+        if (wall_base_nvfp4_o_ring_norm_) {
+            identity.insert(identity.end(),
+                {CAUSAL_DECODER_WALL_BASE_NVFP4_O_RING_NORM_SITE, 1});
+        }
+        if (wall_base_nvfp4_down_ring_norm_) {
+            identity.insert(identity.end(),
+                {CAUSAL_DECODER_WALL_BASE_NVFP4_DOWN_RING_NORM_SITE, 1});
+        }
+        if (wall_base_prefill_long_qkv_) {
+            identity.insert(identity.end(), {CAUSAL_DECODER_Q_SITE,
+                static_cast<int64_t>(CausalDecoderLinearRoute::WALL_QKV_MULTIBASE)});
+        }
+        if (wall_base_fp16_long_prefill_) {
+            identity.insert(identity.end(), {CAUSAL_DECODER_Q_SITE, 16,
+                FMB_SHARED_MLP_SILU_MUL_SITE, 1});
+        }
+        if (wall_base_fp16_shared_gateup_)
+            identity.insert(identity.end(), {WALL_BASE_FP16_PREFILL_SHARED_GATEUP_SITE, 1});
+        if (wall_base_prefill_owner_norm_)
+            identity.insert(identity.end(), {WALL_BASE_PREFILL_O_OWNER_NORM_SITE, 1});
         return identity;
     }
 
@@ -6964,7 +10179,7 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     // as those); this adds only the per-layer SHIFT + a broadcast shift-add after
     // each norm. Default off ⇒ plain RMS, byte-identical for all existing decoders.
     bool adarms_ = false;
-    std::vector<at::Tensor> input_shift_, post_shift_;  // per-layer [hidden] fp16 RPU
+    std::vector<at::Tensor> input_shift_, post_shift_;  // per-layer [hidden] fp16 device
     // Replay-safe AdaRMS (set_adarms_step_mutable): stable-addr [num_layers, hidden]
     // keepalives. Contents refreshed per Euler step; the per-layer scale/shift SPM slots
     // are re-DMA'd from these on every REPLAY via emit_adarms_mut_refresh (build-body op),
@@ -6984,7 +10199,7 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     // Default off ⇒ emit_adarms_mut_refresh_* keeps the mutable-keepalive path
     // byte-identical. Set via set_adarms_unroll (contents are call-invariant).
     bool adarms_unroll_ = false;
-    at::Tensor adarms_is_, adarms_ish_, adarms_ps_, adarms_psh_;  // [num_steps, num_layers, hidden] fp16 RPU
+    at::Tensor adarms_is_, adarms_ish_, adarms_ps_, adarms_psh_;  // [num_steps, num_layers, hidden] fp16 device
     // Host-bounce-free schedule selection (LingBot2 controlled path). The four schedule
     // tensors above own immutable [num_steps,num_layers,hidden] storage. Captured mutable
     // DMAs retain pointers to the live-base MEMBERS below; select_adarms_schedule_step only
@@ -7001,7 +10216,7 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     int64_t configured_vocab_size_ = 0;  // 0 preserves legacy eight-core callers
     int configured_lm_head_tp_ = 8;
     bool cold_routes_configured_ = false;
-    at::Tensor lm_head_w_;        // FP16/W8 [V,H] or packed W4 [V,H/2], RPU
+    at::Tensor lm_head_w_;        // FP16/W8 [V,H] or packed W4 [V,H/2], device
     at::Tensor lm_head_w_scale_;  // W8 [V] or W4 pgrp controller-striped scale
     bool fuse_lm_head_ = false;
     bool fuse_prefill_last_lm_head_ = false;
@@ -7023,11 +10238,26 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     bool linear_acc32_ = false;
     // Bound by the first exact reduced-profile weight install, never an env knob.
     bool reduced_qwen3vl_profile_ = false;
+    bool decoder_mixed_precision_ = false;
+    bool wall_prefill_staged_mlp_ = false;
+    bool wall_prefill_mixed_requested_ = false;
+    bool wall_prefill_staged_requested_ = false;
     RpuRmsNormSpmContract ordinary_rmsnorm_spm_contract_;
     bool rhinovla_high_precision_ = false;
     bool rhinovla_precision_bound_ = false;
     bool rhinovla_high_precision_fusions_ = false;
     bool rhinovla_precision_fusions_bound_ = false;
+    RpuRmsNormSpmContract lingbot_nogamma_contract_;
+    int64_t lingbot_prefill_qkv_mode_ = 0;
+    bool lingbot_prefill_gateup_shared_a_ = false;
+    bool lingbot_prefill_kv_pair_ = false;
+    bool lingbot_prefill_kv_pair_bound_ = false;
+    bool lingbot_prefill_qk_norm_rope_ = false;
+    bool lingbot_prefill_qk_norm_rope_bound_ = false;
+    bool lingbot_prefill_mode_bound_ = false;
+    bool lingbot_folded_rmsnorm_ = false;
+    bool lingbot_prefill_kv_only_ = false;
+    uint32_t wall_rmsnorm_capability_ = RPU_RMSNORM_CAP_BASE;
     // Scoped only while the native A6 domain is enumerated.  These are inputs
     // that do not exist in LayoutContext but select a real physical route.
     int64_t planning_rope_mode_ = 0;
@@ -7043,6 +10273,13 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     bool qwen3vl_4b_w8_profile_ = false;
     bool qwen3vl_fp16_decode_profile_ = false;
     bool qwen3vl_4b_decode_gateup_fused_ = false;
+    bool wall_base_prefill_shared_input_ = false;
+    bool wall_base_fp16_long_prefill_ = false;
+    bool wall_base_fp16_shared_gateup_ = false;
+    bool wall_base_prefill_long_qkv_ = false;
+    bool wall_base_prefill_owner_norm_ = false;
+    bool wall_base_prefill_shared_silu_ = false;
+    bool wall_base_prefill_no_up_store_ = false;
     bool qwen3vl_4b_decode_qk_fused_ = false;
     bool qwen3vl_4b_decode_qk_kv_fused_ = false;
     bool qwen3vl_4b_decode_o_ring_norm_fused_ = false;
@@ -7057,6 +10294,9 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     bool fused_decode_kv_insert_ = false;
     bool fused_prefill_qk_mrope_ = false;
     bool fused_decode_qk_mrope_ = false;
+    bool wall_prefill_owner_direct_kv_ = false;
+    bool wall_prefill_owner_direct_requested_ = false;
+    WallSortingConfig wall_sorting_;
 
     // ── HALO WS-2: 1D-RoPE position-base override (cache-insert ↔ RoPE decouple) ──
     //
@@ -7076,7 +10316,63 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     bool has_mrope_ = false;
     std::vector<int32_t> mrope_section_;                            // [T, H, W] half-dim split
     std::array<std::array<uint16_t, 16>, 3> mrope_strobe_masks_{};  // T/H/W × WARP_SIZE strobe
-    at::Tensor position_ids_keepalive_;                             // [MAX_KEEPALIVE_SEQ, 3] int32 RPU DDR
+    at::Tensor position_ids_keepalive_;                             // [MAX_KEEPALIVE_SEQ, 3] int32 device DDR
+    std::array<uint8_t, QWEN3_MROPE_MAX_KEEPALIVE_SEQ> ka_cpu_pos_published_rows_{};
+    uint64_t ka_cpu_pos_model_generation_ = 0;
+    mutable bool ka_cpu_pos_owner_exported_ = false;
+
+    void invalidate_cpu_position_keepalive(int64_t position, int64_t rows) {
+        std::fill(ka_cpu_pos_published_rows_.begin() + position,
+                  ka_cpu_pos_published_rows_.begin() + position + rows, 0);
+    }
+
+    bool cpu_position_source_is_disjoint(const at::Tensor& source) const {
+        const auto storage = position_ids_keepalive_.storage();
+        const uintptr_t owner_begin =
+            reinterpret_cast<uintptr_t>(storage.data_ptr().get());
+        const uintptr_t source_begin =
+            reinterpret_cast<uintptr_t>(source.data_ptr());
+        const size_t owner_bytes = storage.nbytes();
+        const size_t source_bytes = source.nbytes();
+        if (owner_bytes > std::numeric_limits<uintptr_t>::max() - owner_begin ||
+            source_bytes > std::numeric_limits<uintptr_t>::max() - source_begin) {
+            return false;
+        }
+        return source_begin + source_bytes <= owner_begin ||
+               owner_begin + owner_bytes <= source_begin;
+    }
+
+    bool cpu_position_keepalive_hit(
+        const at::Tensor& source, int64_t position, int64_t rows) {
+        const uint64_t generation = installed_model_state_generation();
+        if (ka_cpu_pos_model_generation_ != generation) {
+            ka_cpu_pos_published_rows_.fill(0);
+            ka_cpu_pos_model_generation_ = generation;
+        }
+        if (!g_rpu_ddr_flush_force_enabled || ka_cpu_pos_owner_exported_ ||
+            !cpu_position_source_is_disjoint(source)) {
+            return false;
+        }
+        const auto begin = ka_cpu_pos_published_rows_.begin() + position;
+        if (!std::all_of(begin, begin + rows,
+                         [](uint8_t valid) { return valid != 0; })) {
+            return false;
+        }
+        const auto* destination =
+            position_ids_keepalive_.data_ptr<int32_t>() + position * 3;
+        return std::memcmp(source.data_ptr(), destination, source.nbytes()) == 0;
+    }
+
+    void mark_cpu_position_keepalive(
+        const at::Tensor& source, int64_t position, int64_t rows) {
+        // Called only after synchronous CPU copy_ returns. With force off no
+        // publication occurred, regardless of versions or matching CPU bytes.
+        if (g_rpu_ddr_flush_force_enabled && !ka_cpu_pos_owner_exported_ &&
+            cpu_position_source_is_disjoint(source)) {
+            std::fill(ka_cpu_pos_published_rows_.begin() + position,
+                      ka_cpu_pos_published_rows_.begin() + position + rows, 1);
+        }
+    }
 
     // ── partial_mrope path (wall-oss perf): host-baked interleaved cos/sin ──
     // When the caller supplies per-forward interleaved cos/sin (rope_cos_il), the
@@ -7086,8 +10382,8 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     // forward in the prologue (FAST_REPLAY-safe). partial_mrope_active_ is set
     // per-forward from rope_cos_il.defined() and read by build_layer_subgraph.
     bool partial_mrope_active_ = false;
-    at::Tensor cos_il_keepalive_;                                   // [MAX_KEEPALIVE_SEQ, hd/2] fp16 RPU DDR
-    at::Tensor sin_il_keepalive_;                                   // [MAX_KEEPALIVE_SEQ, hd/2] fp16 RPU DDR
+    at::Tensor cos_il_keepalive_;                                   // [MAX_KEEPALIVE_SEQ, hd/2] fp16 device DDR
+    at::Tensor sin_il_keepalive_;                                   // [MAX_KEEPALIVE_SEQ, hd/2] fp16 device DDR
     using KeepaliveSegmentKey = std::pair<int64_t, int64_t>;
     struct KeepaliveSourceStamp {
         at::Tensor tensor;
@@ -7174,7 +10470,7 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     PreparedMask prepared_attn_mask_;
     // sdpa_prepare_mask cache (mirrors vision #23): the explicit 2D mask is
     // host-memoized → stable identity across frames for a fixed prefix, but
-    // sdpa_prepare_mask re-uploads it [seq_q,seq_k] CPU→RPU + stable-slot copy
+    // sdpa_prepare_mask re-uploads it [seq_q,seq_k] CPU→device + stable-slot copy
     // every forward. Skip only when the same live tensor, its mutation version,
     // and dimensions are unchanged. The strong ref prevents allocator ABA.
     at::Tensor last_attn_mask_ref_;
@@ -7190,6 +10486,32 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     bool explicit_mask_residency_requested_ = false;
     bool explicit_mask_residency_configured_ = false;
     bool pre_layers_residual1_ready_ = false;
+    bool wall_action_fuse_silu_mul_ = false;
+    bool wall_base_paired_kv_ = false;
+    bool wall_base_nvfp4_qkv_bias_ = false;
+    bool wall_base_nvfp4_o_ring_norm_ = false;
+    bool wall_base_nvfp4_down_ring_norm_ = false;
+    bool wall_base_nvfp4_qk_rope_ = false;
+    bool wall_base_nvfp4_gate_up_ = false;
+    bool wall_base_nvfp4_gate_up_silu_ = false;
+    bool wall_base_nvfp4_gate_up_shared_silu_ = false;
+    bool wall_base_nvfp4_kv_parallel_ = false;
+    bool wall_base_nvfp4_qkv_parallel_ = false;
+    bool wall_base_nvfp4_qkv_rope_ = false;
+    static constexpr int64_t WALL_ACTION_FIRST_RESIDENT_LAYER = 1;
+    static constexpr int64_t WALL_ACTION_RESIDENT_LAYER_COUNT = 4;
+    static constexpr uint32_t WALL_ACTION_Q_OFFSET = 0x000000;
+    static constexpr uint32_t WALL_ACTION_K_OFFSET = 0x040000;
+    static constexpr uint32_t WALL_ACTION_V_OFFSET = 0x060000;
+    static constexpr uint32_t WALL_ACTION_O_OFFSET = 0x080000;
+    static constexpr uint32_t WALL_ACTION_GATE_OFFSET = 0x0c0000;
+    static constexpr uint32_t WALL_ACTION_UP_OFFSET = 0x100000;
+    static constexpr uint32_t WALL_ACTION_DOWN_OFFSET = 0x140000;
+    static constexpr uint32_t WALL_ACTION_WEIGHT_BYTES_PER_LAYER = 0x180000;
+    static constexpr uint32_t WALL_ACTION_WEIGHT_BYTES_PER_CORE =
+        WALL_ACTION_RESIDENT_LAYER_COUNT * WALL_ACTION_WEIGHT_BYTES_PER_LAYER;
+    bool wall_action_weight_residency_ = false;
+    bool wall_action_kv_owner_fanout_ = false;
 
     // ── KV_FIRST bidirectional no-mask state ──
     // Q staging keyed by {seq_len, q_ddr_local_dim} (= (num_q_heads()/attn_tp())*

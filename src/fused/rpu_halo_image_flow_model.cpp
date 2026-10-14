@@ -107,7 +107,7 @@ void HaloImageFlowModel::set_weights_image_flow(
                         && list[i].device().type() == at::kPrivateUse1
                         && list[i].is_contiguous(),
                         "halo image_flow set_weights: ", name, "[", i,
-                        "] must be fp16 contiguous RPU tensor, got dtype=",
+                        "] must be fp16 contiguous device tensor, got dtype=",
                         list[i].scalar_type(), " device=", list[i].device().type(),
                         " contiguous=", list[i].is_contiguous());
         }
@@ -133,7 +133,7 @@ void HaloImageFlowModel::set_weights_image_flow(
                     && t.scalar_type() == at::kHalf
                     && t.device().type() == at::kPrivateUse1 && t.is_contiguous(),
                     "halo image_flow set_weights: ", name,
-                    " must be ", rank, "D fp16 contiguous RPU tensor");
+                    " must be ", rank, "D fp16 contiguous device tensor");
     };
     check_global(cos,          "cos",          2);
     check_global(sin,          "sin",          2);
@@ -252,7 +252,7 @@ void HaloImageFlowModel::set_gen_weights(
                         && list[i].device().type() == at::kPrivateUse1
                         && list[i].is_contiguous(),
                         "halo image_flow set_gen_weights: ", name, "[", i,
-                        "] must be fp16 + RPU(PrivateUse1) + contiguous, got dtype=",
+                        "] must be fp16 + device(PrivateUse1) + contiguous, got dtype=",
                         list[i].scalar_type(), " device=", list[i].device().type(),
                         " contiguous=", list[i].is_contiguous());
         }
@@ -280,17 +280,17 @@ void HaloImageFlowModel::set_gen_weights(
                 && final_norm_gen_w.device().type() == at::kPrivateUse1
                 && final_norm_gen_w.is_contiguous(),
                 "halo image_flow set_gen_weights: final_norm_gen_w must be 1D [hidden=",
-                hidden_size(), "] fp16 + RPU(PrivateUse1) + contiguous, got ",
+                hidden_size(), "] fp16 + device(PrivateUse1) + contiguous, got ",
                 final_norm_gen_w.sizes(), " dtype=", final_norm_gen_w.scalar_type());
 
-    // 行掩码: [query_len] fp16 RPU contig, 取值 {0,1} (1 = und/text 行)。
+    // 行掩码: [query_len] fp16 device contig, 取值 {0,1} (1 = und/text 行)。
     TORCH_CHECK(row_mask.defined() && row_mask.dim() == 1
                 && row_mask.size(0) == query_len
                 && row_mask.scalar_type() == at::kHalf
                 && row_mask.is_contiguous()
                 && row_mask.device().type() == at::kPrivateUse1,
                 "halo image_flow set_gen_weights: row_mask must be [", query_len,
-                "] fp16 contig RPU");
+                "] fp16 contig device");
     at::Tensor mask_cpu = row_mask.to(at::kCPU).to(at::kFloat);
     TORCH_CHECK(((mask_cpu == 0.0f) | (mask_cpu == 1.0f)).all().item<bool>(),
                 "halo image_flow set_gen_weights: row_mask values must be exactly 0/1");
@@ -298,7 +298,7 @@ void HaloImageFlowModel::set_gen_weights(
     // ── 行掩码常量化: [query_len,1] fp16 DDR (und=行掩码, gen=1-行掩码) ──
     // merge 用 Nx1_NxC_spm 把 [n,1] 行掩码广播到任意宽度 (q=local_q*hd / kv / h) →
     // 单一行掩码通吃, 替代旧 per-width [query_len,W] 全宽常量 (SPM 掩码 6 槽→2 槽)。
-    // 展开在 host (CPU) 后整体复制到 RPU DDR (Pitfall B-1: 不在 device 上构造常量);
+    // 展开在 host (CPU) 后整体复制到 device DDR (Pitfall B-1: 不在 device 上构造常量);
     // body 内按 chunk 行切片 DMA 进 SPM (preload_callback 无 chunk.offset)。
     // DMA 16-byte 对齐: 行掩码上传字节 = len*2 须 %16 → 行数 padto 8 的倍数 (tail chunk
     // 的 len 非 8 倍数时读到 padding 行; merge 只用 seq_len 真行, padding=0 不参与)。
@@ -309,7 +309,7 @@ void HaloImageFlowModel::set_gen_weights(
         at::Tensor p = at::zeros({pad_len, 1},
                                  at::TensorOptions().dtype(at::kHalf));
         p.narrow(0, 0, query_len).copy_(m1d.unsqueeze(1));
-        return p.contiguous().to(rpu_opts);                    // [pad_len,1] RPU
+        return p.contiguous().to(rpu_opts);                    // [pad_len,1] device
     };
     und_mask_row_ = pad_row_mask(mask_cpu.to(at::kHalf));
     gen_mask_row_ = pad_row_mask((1.0f - mask_cpu).to(at::kHalf));
@@ -1260,7 +1260,7 @@ at::Tensor HaloImageFlowModel::step_forward(
                 && x_emb.scalar_type() == at::kHalf && x_emb.is_contiguous()
                 && x_emb.device().type() == at::kPrivateUse1,
                 "halo image_flow step_forward: x_emb must be [1,seq,", h,
-                "] fp16 contig RPU");
+                "] fp16 contig device");
     TORCH_CHECK(prefix_len >= 0, "halo image_flow step_forward: prefix_len >= 0");
     const int64_t seq_len = x_emb.size(1);
     TORCH_CHECK(seq_len == merge_seq_len_,
@@ -1279,7 +1279,7 @@ at::Tensor HaloImageFlowModel::step_forward(
                 && cos.dim() == 2 && sin.sizes() == cos.sizes()
                 && cos.size(1) == head_dim() / 2,
                 "halo image_flow step_forward: cos/sin must be [*, head_dim/2] fp16 "
-                "contig RPU, equal shape");
+                "contig device, equal shape");
     TORCH_CHECK(cos.size(0) >= prefix_len + seq_len,
                 "halo image_flow step_forward: cos rows (", cos.size(0),
                 ") < prefix_len+seq (", prefix_len + seq_len, ")");

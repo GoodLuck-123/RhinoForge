@@ -1,39 +1,17 @@
-"""Qwen3-VL vision encoder → rpu_backend (R-Phase 3).
+"""Qwen3-VL vision encoder integration.
 
-Wires `Qwen3VLVisionModel` into the C++ vision subsystem registered as
-`torch.ops.rpu.qwen3vl_vision_*`. Mirrors SigLIP's `patch_siglip_model_for_rpu`
-pattern: handle lifecycle, weight conversion, forward replacement.
+Installs the vision forward path through ``torch.ops.rpu.qwen3vl_vision_*``
+and returns ``BaseModelOutputWithDeepstackFeatures`` for the caller.
 
-R-Phase 3 deliverable surface:
-  - install_qwen3_vl_vision_for_rpu(vision_model)
-  - build_vision_rope_tables(...)              # FreqCos / FreqSin static tables
-  - The forward replacement returns
-    BaseModelOutputWithDeepstackFeatures(last_hidden_state, pooler_output,
-                                          deepstack_features) matching the HF
-    reference (so callers and R-Phase 4 e2e can use it transparently).
+Patch embedding runs on CPU FP16: device linear operations require swizzled
+weights, while the folded Conv3d weights have a row-major layout. Position
+embedding interpolation also stays on CPU FP16 to avoid the device
+permute-then-flatten contiguity issue. Merger and DeepStack projections run
+on CPU FP32 after the encoder.
 
-Architecture decisions (carried over from save branch findings F7 / F13 /
-F31 / F32):
-  - Patch embed runs OUTSIDE the fused graph on **CPU fp16**. `aten::linear`
-    on RPU expects the weight to be pre-swizzled (col/row partition); the
-    folded Conv3d weight is plain `[embed_dim, cin*tp*ps*ps]` row-major and
-    silently produces garbage if run on RPU without swizzle. (F31)
-  - `fast_pos_embed_interpolate` runs on **CPU fp16**. The HF
-    `nn.Embedding` + `view` + `permute(0,1,3,2,4,5)` + `flatten(0,4)` path
-    has a permute-then-flatten contiguity bug on RPU (empirically cos_sim
-    mean ~0.1 with bimodal distribution). (F32)
-  - Merger + DeepStack mergers run on **CPU fp32** — saves ~192 MB RPU DDR
-    and runs once per image post-encoder on small `[N/sm², 2048]` tensors.
-  - 2D RoPE: position_idx built per forward, copy_in to model-owned
-    keepalive `[MAX_KEEPALIVE_SEQ, 2] int16`.
-
-R-Phase 3 migration vs save branch:
-  - Per-image vision call wrapped in `with cache.capture(sig)` (F8) so each
-    unique `num_patches` produces one BUILD + many REPLAYs. Replaces the
-    deleted C++ `cfg.main_graph_id / weights_graph_id` admission.
-  - Dynamo-safety stamping (F6): eager RPUCache init, `_rpu_lazy_init_checked`,
-    `_rpu_required_attrs`, `_verify_lazy_init(...)` — mirrors
-    `siglip.py:481`.
+2D RoPE positions use a model-owned ``[MAX_KEEPALIVE_SEQ, 2]`` INT16 buffer.
+Each image shape has one Graph BUILD followed by REPLAY. Eager cache setup
+and lazy-initialization checks keep the installed forward path Dynamo-safe.
 """
 from __future__ import annotations
 
@@ -47,7 +25,7 @@ import torch.nn as nn
 import rpu_backend
 from rpu_backend.runtime import rpu_env_bool
 from rpu_backend.runtime.decoder import plan_bounded_prefill_execution
-from rpu_backend.runtime.execution_planner import GRAPH_COMPOSITE_CHILD
+from rpu_backend.runtime.execution_planner import GRAPH_COMPOSITE_CHILD, PlannerRejectError
 from rpu_backend.runtime.log import _LOG
 from rpu_backend.runtime._native_retirement import _InstalledNativeResource
 from rpu_backend.runtime.weights import (
@@ -817,7 +795,7 @@ def _fold_conv3d_to_linear_weight(conv3d_weight: torch.Tensor) -> torch.Tensor:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Opt-in: run the patch-merger GEMMs on RPU (default keeps them CPU fp32)
+# Opt-in: run the patch-merger GEMMs on device (default keeps them CPU fp32)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _VISION_MERGER_AUX_ATTRS = (
@@ -838,7 +816,7 @@ def _clear_vision_merger_aux(vision_model) -> None:
 
 
 def _convert_vision_merger_for_rpu(merger, cores: int = 8, *, w8a16: bool = False) -> None:
-    """In-place: stash RPU-resident, col-swizzled FP16 or W8 weights for a
+    """In-place: stash device-resident, col-swizzled FP16 or W8 weights for a
     `Qwen3VLVisionPatchMerger`'s two GEMMs (`linear_fc1` → GELU → `linear_fc2`).
 
     The LayerNorm (`merger.norm`) is left on CPU fp32 — it is cheap and keeping
@@ -884,10 +862,10 @@ def _merger_forward_on_device(
     merger, x_cpu_f32: torch.Tensor, *, keep_fp16: bool = False,
     linear_acc32: bool = False,
 ) -> torch.Tensor:
-    """Mirror `Qwen3VLVisionPatchMerger.forward` with its GEMMs on RPU.
+    """Mirror `Qwen3VLVisionPatchMerger.forward` with its GEMMs on device.
 
     `merger.norm` runs on CPU fp32 (as installed); the post-norm `[N/sm², merge_hidden]`
-    activation hops to RPU fp16 for both Linear calls; eager exact-ERF GELU follows the
+    activation hops to device fp16 for both Linear calls; eager exact-ERF GELU follows the
     registered CPU fallback. The result is an independent CPU FP32 snapshot by
     default, or FP16 for the internal text consumer. Requires
     `_convert_vision_merger_for_rpu`.
@@ -903,7 +881,7 @@ def _merger_forward_on_device(
     xr = torch.ops.rpu.linear_with_accumulation(
         xr, merger._rpu_fc2_w, merger._rpu_fc2_b, 1, 8, linear_acc32,
         merger._rpu_fc2_scale if w8a16 else None)
-    # RPU .cpu() may expose shared DDR. Both consumers need an independent
+    # device .cpu() may expose shared DDR. Both consumers need an independent
     # snapshot; the text consumer can keep the existing FP16 values instead
     # of expanding them to FP32 only to round back before its scatter.
     host = xr.cpu()
@@ -911,7 +889,7 @@ def _merger_forward_on_device(
 
 
 def enable_qwen3_vl_vision_merger_on_device(vision_model, cores: int = 8, *, w8a16: bool = False) -> None:
-    """Move patch and merger GEMMs to RPU before the first Vision dispatch.
+    """Move patch and merger GEMMs to device before the first Vision dispatch.
 
     An already enabled install is a no-op. CPU FP32 LayerNorm is retained;
     patch/merger activations and GELU intermediates use FP16, changing rounding relative
@@ -1012,7 +990,7 @@ def register_qwen3vl_vision_fused_merger(vision_model, cores: int = 8, *, w8a16:
                 tp_row_swizzle_mc_weight(mg._rpu_fc2_quantized, cores, dwidth=1).to(device="rpu").contiguous(),
                 mg._rpu_fc2_b, mg._rpu_fc1_scale, mg._rpu_fc2_scale,
             )
-        # (ln_q_w, ln_q_b, m0_w[col], m0_b, m2_w[row], m2_b) — all fp16 RPU.
+        # (ln_q_w, ln_q_b, m0_w[col], m0_b, m2_w[row], m2_b) — all fp16 device.
         return (
             mg.norm.weight.data.detach().half().to(device="rpu").contiguous(),
             mg.norm.bias.data.detach().half().to(device="rpu").contiguous(),
@@ -1053,7 +1031,7 @@ def _compute_vision_position_idx_cpu(
     """Build `[num_patches, 2]` int16 (row_idx, col_idx) on CPU from grid_thw.
 
     Mirrors HF `Qwen3VLVisionModel.rot_pos_emb` body — same `coords` layout
-    (row, col stacked along the trailing dim of size 2). The RPU rope_2d
+    (row, col stacked along the trailing dim of size 2). The device rope_2d
     kernel does the `freq_table[pos_ids]` lookup internally via position_idx
     + FreqCos/Sin table indexing.
     """
@@ -1112,8 +1090,8 @@ def _prepare_qwen3vl_vision_input_for_spm_pipeline(
     it accepts either one image or the LingBot2 three-camera pack, all with
     ``grid_thw=[1,16,16]`` (256 patches/image).  It runs one installed folded
     patch embedding through either the default CPU FP16 path or an explicitly
-    selected RPU device path, stages the model-owned RoPE position keepalive
-    once, and returns contiguous RPU FP16
+    selected device device path, stages the model-owned RoPE position keepalive
+    once, and returns contiguous device FP16
     ``[image_count,256,1024]`` storage.  Packing here does not batch the native
     Vision encoder: the outer owner still consumes three sequential N=256
     views, so its Graph/SPM topology is unchanged.
@@ -1226,7 +1204,7 @@ def _prepare_qwen3vl_vision_input_for_spm_pipeline(
         ):
             raise RuntimeError(
                 f"{error_prefix}: installed device patch weight must be contiguous "
-                "RPU FP16 [1024, patch_dim] and match hidden_states"
+                "device FP16 [1024, patch_dim] and match hidden_states"
             )
         if (patch_bias is None) != (patch_bias_rpu is None):
             raise RuntimeError(
@@ -1242,7 +1220,7 @@ def _prepare_qwen3vl_vision_input_for_spm_pipeline(
         ):
             raise RuntimeError(
                 f"{error_prefix}: installed device patch bias must be contiguous "
-                "RPU FP16 [1024]"
+                "device FP16 [1024]"
             )
 
     keepalive = getattr(
@@ -1259,7 +1237,7 @@ def _prepare_qwen3vl_vision_input_for_spm_pipeline(
     ):
         raise RuntimeError(
             f"{error_prefix}: installed position_idx keepalive must be contiguous "
-            "RPU int16 [capacity>=256,2]"
+            "device int16 [capacity>=256,2]"
         )
 
     # Use the same memo fields as the ordinary forward without calling it or
@@ -1304,7 +1282,7 @@ def _prepare_qwen3vl_vision_input_for_spm_pipeline(
     ):
         raise RuntimeError(
             f"{error_prefix}: memoized position embedding must be contiguous "
-            f"RPU FP16 [{image_count * 256},1024]"
+            f"device FP16 [{image_count * 256},1024]"
         )
 
     position_idx_cpu = _compute_vision_position_idx_cpu(
@@ -1315,7 +1293,7 @@ def _prepare_qwen3vl_vision_input_for_spm_pipeline(
             f"{error_prefix}: position_idx must be [256,2], got "
             f"{tuple(position_idx_cpu.shape)}"
         )
-    keepalive.narrow(0, 0, 256).copy_(position_idx_cpu.to(device="rpu"))
+    keepalive.narrow(0, 0, 256).copy_(position_idx_cpu)
     vision_model._rpu_vision_pos_idx_key = (1, 16, 16, 1, 2)
     vision_model._rpu_vision_pos_idx_val = position_idx_cpu
     vision_model._rpu_vision_keepalive_key = ((1, 16, 16, 1, 2), 256, False)
@@ -1350,7 +1328,7 @@ def _prepare_qwen3vl_vision_input_for_spm_pipeline(
             or not patch_rpu.is_contiguous()
         ):
             raise RuntimeError(
-                f"{error_prefix}: patch embedding must produce contiguous RPU "
+                f"{error_prefix}: patch embedding must produce contiguous device "
                 f"FP16 [{image_count * 256},1024]"
             )
         prepared = (patch_rpu + position_rpu).view(
@@ -1364,7 +1342,7 @@ def _prepare_qwen3vl_vision_input_for_spm_pipeline(
         or not prepared.is_contiguous()
     ):
         raise RuntimeError(
-            f"{error_prefix}: prepared input must be contiguous RPU FP16 "
+            f"{error_prefix}: prepared input must be contiguous device FP16 "
             f"[{image_count},256,1024]"
         )
     return prepared
@@ -1409,6 +1387,7 @@ def install_qwen3_vl_vision_for_rpu(
     _allow_runtime_quantized_large: bool = False,
     _pack_fp16_block_weights: bool = False,
     _graph_cache_max_entries: int | None = None,
+    graph_runtime_policy=None,
 ) -> int:
     """Install or replace the Qwen3-VL vision runtime transactionally.
 
@@ -1416,6 +1395,12 @@ def install_qwen3_vl_vision_for_rpu(
     are fully configured. Any failure destroys the pending handle immediately
     and restores the previously published install.
     """
+    if graph_runtime_policy is not None and not isinstance(
+        graph_runtime_policy, rpu_backend.graph.GraphRuntimePolicy
+    ):
+        raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
+    if graph_runtime_policy is not None and graph_runtime_policy.execution_core_count != num_cores:
+        raise ValueError("Vision graph_runtime_policy core count must match num_cores")
     if _graph_cache_max_entries is not None and (
         type(_graph_cache_max_entries) is not int or _graph_cache_max_entries < 1
     ):
@@ -1579,6 +1564,7 @@ def install_qwen3_vl_vision_for_rpu(
             _allow_runtime_quantized_large=_allow_runtime_quantized_large,
             _pack_fp16_block_weights=_pack_fp16_block_weights,
             _graph_cache_max_entries=_graph_cache_max_entries,
+            graph_runtime_policy=graph_runtime_policy,
             _install_state=install_state,
         )
     except BaseException as error:
@@ -1640,9 +1626,10 @@ def _install_qwen3_vl_vision_for_rpu_impl(
     _allow_runtime_quantized_large: bool = False,
     _pack_fp16_block_weights: bool = False,
     _graph_cache_max_entries: int | None = None,
+    graph_runtime_policy=None,
     _install_state: dict[str, Any],
 ) -> int:
-    """Install RPU all-layers-once forward on a `Qwen3VLVisionModel` instance.
+    """Install device all-layers-once forward on a `Qwen3VLVisionModel` instance.
 
     Prerequisites:
         - vision_model.to('rpu') NOT required (this function moves weights).
@@ -1770,7 +1757,7 @@ def _install_qwen3_vl_vision_for_rpu_impl(
     # ------------------------------------------------------------------ #
     # Step 5: fold patch_embed Conv3d → Linear weight, KEEP ON CPU fp16. (F31)
     #
-    # `aten::linear` on RPU expects the weight to be pre-swizzled (col- or
+    # `aten::linear` on device expects the weight to be pre-swizzled (col- or
     # row-partition layout for the 8-core GEMM). Passing an unswizzled weight
     # silently produces garbage (each core reads the wrong slice). The fold
     # output is plain `[embed_dim=1024, cin*tp*ps*ps=1536]` row-major — not
@@ -1801,11 +1788,14 @@ def _install_qwen3_vl_vision_for_rpu_impl(
         num_layers, max_seq_len, num_heads, physical_head_dim,
         **({"num_cores": num_cores} if num_cores != 8 else {}),
     )
+    if graph_runtime_policy is None and num_cores != 8:
+        graph_runtime_policy = rpu_backend.graph.GraphRuntimePolicy.from_environment(
+            execution_core_count=num_cores)
     vision_graph_cache = rpu_backend.graph.GraphCache(
         **({"max_entries": _graph_cache_max_entries}
            if _graph_cache_max_entries is not None else {}),
-        **({"runtime_policy": rpu_backend.graph.GraphRuntimePolicy.from_environment(
-            execution_core_count=num_cores)} if num_cores != 8 else {}))
+        **({"runtime_policy": graph_runtime_policy}
+           if graph_runtime_policy is not None else {}))
 
     # FNV1a-style hash of the deepstack indexes list — used as a tiebreaker
     # in the GraphSignature so two models with different deepstack layouts
@@ -1932,9 +1922,29 @@ def _install_qwen3_vl_vision_for_rpu_impl(
 # Forward replacement (instance method bound by install_qwen3_vl_vision_for_rpu)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _vision_raw_group_plan(resolve, packed_rows):
+    """Accept only the native unpadded raw plan; typed capacity misses fall back."""
+    try:
+        plan = resolve()
+    except PlannerRejectError as exc:
+        if exc.code not in ("NO_FEASIBLE", "CAPABILITY", "EXACT_MISMATCH"):
+            raise
+        return None
+    selected = plan.selected
+    metadata = dict(selected.stage_tuple.physical_metadata)
+    # Older native libraries may publish a DDR minibatch candidate whose
+    # aligned-image kernel cannot consume this packed stride.
+    if (metadata.get("manifest_state") != 1
+            or metadata.get("raw_attention_site_count", 0) == 0
+            or metadata.get("capability_attention_ddr_site_count") != 0
+            or selected.execution_len != packed_rows):
+        return None
+    return plan
+
+
 def _vision_image_groups(grid_thw_cpu, patches_per_image, *, batch_cap, cache_capacity,
                          exact_chunk, fused_merger, allow_chunked_single=False,
-                         default_pair_n256=False):
+                         default_pair_n256=False, raw_group_supported=None):
     """Original forward grouping, also inspected before cost installation."""
     def _minibatch_sdpa_supported(per_image_ctx_len: int, image_batch_count: int) -> bool:
         # Keep the native tile/grid predicate: at least two whole 128-row
@@ -1944,6 +1954,17 @@ def _vision_image_groups(grid_thw_cpu, patches_per_image, *, batch_cap, cache_ca
             return False
         grid_dim_x = blocks_per_image * image_batch_count
         return grid_dim_x <= 8 or grid_dim_x % 8 == 0
+
+    def attention_supported(first, count):
+        rows = int(patches_per_image[first])
+        if _minibatch_sdpa_supported(rows, count):
+            return True
+        # The native planner may admit packed projections with separate B1
+        # raw attention calls. Do not infer that capability from a resolution
+        # or bypass the native per-image stride/budget checks.
+        return (raw_group_supported is not None and 1 < count <= 3
+                and 0 < rows <= 256 and rows % 4 == 0 and rows % 16 != 0
+                and raw_group_supported(first, count))
 
     groups = []
     gi = 0
@@ -1957,7 +1978,7 @@ def _vision_image_groups(grid_thw_cpu, patches_per_image, *, batch_cap, cache_ca
             while (g < group_cap and gi + g < len(patches_per_image)
                    and torch.equal(grid_thw_cpu[gi + g], grid_thw_cpu[gi])
                    and (g + 1) * patches_per_image[gi] <= cache_capacity
-                   and _minibatch_sdpa_supported(patches_per_image[gi], g + 1)):
+                   and attention_supported(gi, g + 1)):
                 g += 1
         else:
             n_i = int(patches_per_image[gi])
@@ -1969,7 +1990,7 @@ def _vision_image_groups(grid_thw_cpu, patches_per_image, *, batch_cap, cache_ca
             for candidate in range(1, min(run, 3) + 1):
                 if run % candidate or candidate * n_i > int(cache_capacity):
                     continue
-                if candidate > 1 and not _minibatch_sdpa_supported(n_i, candidate):
+                if candidate > 1 and not attention_supported(gi, candidate):
                     continue
                 full_chunk = ((candidate * n_i + 15) // 16) * 16
                 if allow_chunked_single and candidate == 1:
@@ -1998,14 +2019,62 @@ def _vision_image_groups(grid_thw_cpu, patches_per_image, *, batch_cap, cache_ca
     return groups
 
 
+def _refresh_vision_patch_input_slot(
+        self, hidden_states, *, prefix_scatter_consume_only):
+    """Refresh the stable FP16 input before entering the Vision graph."""
+    input_slot = getattr(self, "_rpu_vision_input_slot", None)
+    graph_cache = getattr(self, "_rpu_vision_graph_cache", None)
+    if (
+        prefix_scatter_consume_only
+        and getattr(self, "_rpu_patch_embed_on_device", False)
+        and not getattr(self, "_rpu_vision_aux_w8a16", False)
+        and graph_cache is not None
+        and graph_cache.is_frozen()
+        and graph_cache.size() > 0
+        and not getattr(
+            graph_cache.runtime_policy, "lingbot2_multiview_spm_z2", False)
+        and hidden_states.device.type == "cpu"
+        and hidden_states.dtype == torch.float32
+        and tuple(hidden_states.shape) in ((768, 1536), (3, 256, 1536))
+        and hidden_states.is_contiguous()
+        and input_slot is not None
+        and input_slot.device.type == "rpu"
+        and input_slot.dtype == torch.float16
+        and input_slot.shape == hidden_states.shape
+        and input_slot.is_contiguous()
+        and input_slot.storage_offset() == 0
+        and input_slot.untyped_storage().nbytes() == input_slot.numel() * 2
+    ):
+        # A newer Python adapter can still run with an older native library.
+        direct_copy = getattr(
+            torch.ops.rpu, "vision_input_fp32_to_fp16_into", None)
+        if direct_copy is not None:
+            # Native owner/Graph safety failures propagate after admission.
+            direct_copy(input_slot, hidden_states)
+            return input_slot
+
+    # Cold preparation and other Vision callers retain the original upload.
+    source = hidden_states.to(dtype=torch.float16).contiguous()
+    if (
+        input_slot is None
+        or input_slot.shape != source.shape
+        or input_slot.dtype != source.dtype
+    ):
+        input_slot = source.to(device="rpu").contiguous()
+        self._rpu_vision_input_slot = input_slot
+    else:
+        input_slot.copy_(source)
+    return input_slot
+
+
 def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs):
-    """RPU-dispatching forward for Qwen3VLVisionModel.
+    """device-dispatching forward for Qwen3VLVisionModel.
 
     Args (mirror HF):
         hidden_states: `[seq_len, cin*tp*ps*ps]` fp16/fp32 pixel features
             (pre-flattened patches). Will be moved to CPU + cast to fp16 for
             patch_embed (F31).
-        grid_thw: `[n_images, 3]` int (T, H, W) per image. CPU OR RPU; will
+        grid_thw: `[n_images, 3]` int (T, H, W) per image. CPU OR device; will
             be moved to CPU for position_idx + pos_emb_interpolate compute.
 
     Returns BaseModelOutputWithDeepstackFeatures matching HF semantics.
@@ -2027,13 +2096,20 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
     # popped/cloned.  The normal/public path below is unchanged.
     _prefix_scatter_consume_only = bool(
         kwargs.pop("_rpu_prefix_scatter_consume_only", False))
+    # GR's synchronous assembler consumes private native slots before another
+    # Vision request can overwrite them. Public outputs keep their snapshots.
+    _merged_consumer = kwargs.pop("_rpu_merged_consumer", None)
+    if _merged_consumer is not None and not callable(_merged_consumer):
+        raise TypeError("Qwen3-VL internal merged consumer must be callable")
+    if _merged_consumer is not None and _prefix_scatter_consume_only:
+        raise ValueError("Qwen3-VL merged consumer cannot use prefix-scatter outputs")
     # The composite text path consumes FP16 merged features. Standalone
     # Vision retains its public CPU FP32 merger outputs by default.
     _keep_merged_fp16 = kwargs.pop("_rpu_keep_merged_fp16", False)
     if type(_keep_merged_fp16) is not bool:
         raise TypeError("Qwen3-VL internal merged-output request must be a bool")
     if _keep_merged_fp16 and not getattr(self, "_rpu_vision_merger_on_device", False):
-        raise RuntimeError("FP16 merged snapshots require installed RPU mergers")
+        raise RuntimeError("FP16 merged snapshots require installed device mergers")
     if (_prefix_scatter_consume_only
             and not getattr(
                 self, "_rpu_prefix_scatter_consume_only_allowed", False)):
@@ -2042,7 +2118,8 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
             "path and was not enabled for this Vision instance.")
 
     BaseModelOutputWithDeepstackFeatures = (
-        None if _prefix_scatter_consume_only else _deepstack_output_cls())
+        None if _prefix_scatter_consume_only or _merged_consumer is not None
+        else _deepstack_output_cls())
 
     handle = self._rpu_vision_handle
     spatial_merge_size = self._rpu_vision_spatial_merge_size
@@ -2064,7 +2141,7 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
             f"Qwen3VL vision grid H/W max {grid_hw_max} exceeds installed max_hw "
             f"{self._rpu_vision_max_hw}; reinstall with a larger max_hw")
 
-    # Position embeddings are prompt-geometry constants. Cache both the RPU
+    # Position embeddings are prompt-geometry constants. Cache both the device
     # fp16 form and a CPU fp32 form used by LingBot2's host patch-embed path.
     _pe_key = getattr(self, "_rpu_vision_pos_embeds_key", None)
     if _pe_key is None or not torch.equal(grid_thw_cpu, _pe_key):
@@ -2081,18 +2158,9 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
         # On-device patch_embed uses the column-swizzled folded weight and
         # uploads raw patches instead of CPU-computed embeddings.
         if hidden_states.device.type == "cpu":
-            source = hidden_states.to(dtype=torch.float16).contiguous()
-            input_slot = getattr(self, "_rpu_vision_input_slot", None)
-            if (
-                input_slot is None
-                or input_slot.shape != source.shape
-                or input_slot.dtype != source.dtype
-            ):
-                input_slot = source.to(device="rpu").contiguous()
-                self._rpu_vision_input_slot = input_slot
-            else:
-                input_slot.copy_(source)
-            hs = input_slot
+            hs = _refresh_vision_patch_input_slot(
+                self, hidden_states,
+                prefix_scatter_consume_only=_prefix_scatter_consume_only)
         else:
             hs = hidden_states.to(
                 device="rpu", dtype=torch.float16
@@ -2213,14 +2281,38 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
     if _fp16_chunked_merger and _fused_merger:
         _batch_cap = 1
 
+    def group_plan(first_idx, count):
+        return _plan_qwen3_vl_vision_execution(
+            handle, count * patches_per_image[first_idx], count, _exact_chunk,
+            execution_owner=self,
+            graph_cache=None if getattr(self, "_rpu_vision_graph_disable", False) else graph_cache,
+            plan_signature=(tuple(int(v) for v in grid_thw_cpu[first_idx].tolist()), int(spatial_merge_size), bool(_fused_merger), bool(getattr(self, "_rpu_vision_rope_disable", False)), *((num_cores,) if num_cores != 8 else ())),
+        )
+
+    prepared_groups = {}
+    def raw_group_supported(first_idx, count):
+        plan = _vision_raw_group_plan(
+            lambda: group_plan(first_idx, count), count * patches_per_image[first_idx])
+        if plan is None:
+            return False
+        prepared_groups[first_idx, count] = plan
+        return True
+
     groups = _vision_image_groups(grid_thw_cpu, patches_per_image,
         batch_cap=_batch_cap, cache_capacity=cache.max_seq_len,
         exact_chunk=_exact_chunk, fused_merger=_fused_merger and not _adaptive_merger,
-        allow_chunked_single=_adaptive_merger, default_pair_n256=_default_pair_n256)
+        allow_chunked_single=_adaptive_merger, default_pair_n256=_default_pair_n256,
+        raw_group_supported=(raw_group_supported if _batch_on and _fused_merger
+            and not _fp16_chunked_merger and num_cores == 8 else None))
     if _prefix_scatter_consume_only and len(groups) != 1:
         raise RuntimeError(
             "Qwen3-VL prefix-scatter consume-only requires exactly one packed "
             f"Vision group; planner produced {groups}.")
+
+    _borrow_merged = (
+        _merged_consumer is not None and _fused_merger and not _adaptive_merger
+        and n_deepstack == 3 and spatial_merge_size == 2 and len(groups) == 1
+    )
 
     # Snapshot each stable native slot directly into its final request-owned
     # rows. Ordinary N1200 multi-image callers otherwise clone every group and
@@ -2251,11 +2343,9 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
                 f"Qwen3VL vision group@{first_idx} packs {g} image(s) into "
                 f"{g_patches} patches, exceeding KV-cache capacity "
                 f"{cache.max_seq_len}; increase max_seq_len or reduce image size")
-        vision_plan = _plan_qwen3_vl_vision_execution(
-            handle, g_patches, g, _exact_chunk, execution_owner=self,
-            graph_cache=None if getattr(self, "_rpu_vision_graph_disable", False) else graph_cache,
-            plan_signature=(tuple(int(v) for v in grid_thw_cpu[first_idx].tolist()), int(spatial_merge_size), bool(_fused_merger), bool(getattr(self, "_rpu_vision_rope_disable", False)), *((num_cores,) if num_cores != 8 else ())),
-        )
+        vision_plan = prepared_groups.get((first_idx, g))
+        if vision_plan is None:
+            vision_plan = group_plan(first_idx, g)
         selected = vision_plan.selected
         if selected is None:
             raise RuntimeError("Qwen3-VL vision dry planner selected no plan")
@@ -2265,6 +2355,10 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
             not _adaptive_merger or selected.stage_tuple.compute_chunk >= g_patches
             or _fp16_chunked_merger
             or getattr(self, "_rpu_vision_chunked_merger_w8a16", False))
+        _merged_only = (
+            _merged_consumer is not None and _adaptive_merger and _group_fused_merger
+            and len(groups) == 1 and n_deepstack == 3 and spatial_merge_size == 2
+        )
         planned_stage_descriptor = list(
             selected.stage_tuple.physical_descriptor
         )
@@ -2363,7 +2457,7 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
             )
         _dispatched_descriptors.append(tuple(planned_stage_descriptor))
 
-        if _adaptive_merger:
+        if _adaptive_merger and not _merged_only:
             # Public ordinary Vision continues returning raw [N,H] hidden,
             # including when native post_fn additionally produces pooler/DS.
             if _pack_merged:
@@ -2394,7 +2488,20 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
                         f"group@{first_idx}: merged count {len(merged_all)} != "
                         f"{expected_merged}"
                     )
-                if _pack_merged:
+                if _borrow_merged or _merged_only:
+                    rows = g_patches // (spatial_merge_size ** 2)
+                    width = merged_all[0].size(1) if merged_all[0].ndim == 2 else 0
+                    if width <= 0 or any(
+                            value.dtype != torch.float16
+                            or value.device != embed_group.device
+                            or tuple(value.shape) != (rows, width)
+                            or not value.is_contiguous() for value in merged_all):
+                        raise RuntimeError("Qwen3-VL invalid private merged slot geometry")
+                if _borrow_merged:
+                    merged_per_image.append(merged_all[0])
+                    for layer_k in range(n_deepstack):
+                        deepstack_merged_per_layer[layer_k].append(merged_all[1 + layer_k])
+                elif _pack_merged:
                     rows = g_patches // (spatial_merge_size ** 2)
                     total_rows = total_patches // (spatial_merge_size ** 2)
                     sources = [value.cpu() for value in merged_all]
@@ -2459,7 +2566,7 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
         return None
 
     # ----- Concatenate per-image outputs ----------------------------------
-    # Merger + deepstack mergers: CPU fp32 by default; on RPU when opted in
+    # Merger + deepstack mergers: CPU fp32 by default; on device when opted in
     # (enable_qwen3_vl_vision_merger_on_device) — the GEMMs are the dominant per-image CPU
     # cost (e.g. GR00T VLA). When the fused in-graph merger is active the C++ op already
     # returned the merged pooler; we just concat. norm stays CPU fp32 in the eager path.
@@ -2477,12 +2584,14 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
                   merged_per_image[0] if len(merged_per_image) == 1
                   else torch.cat(merged_per_image, dim=0))     # [N_total/sm², out_hidden] (in-graph)
         # Raw snapshots own their storage before another group reuses the slot.
-        last_hidden = (packed_raw if _pack_merged else
+        last_hidden = (None if _merged_only else packed_raw if _pack_merged else
                        (last_hidden_per_image[0] if len(last_hidden_per_image) == 1
                         else torch.cat(last_hidden_per_image, dim=0)) if _adaptive_merger
                        else merged)  # Legacy composite consumers ignore raw hidden.
     else:
-        last_hidden = torch.cat(last_hidden_per_image, dim=0)  # [N_total, hidden] RPU
+        # Each group already owns a fresh snapshot before its native slot is reused.
+        last_hidden = (last_hidden_per_image[0] if len(last_hidden_per_image) == 1
+                       else torch.cat(last_hidden_per_image, dim=0))  # [N_total, hidden] device
         last_hidden_cpu = last_hidden.detach().cpu().float()
         if merger_on_device:
             merged = _merger_forward_on_device(
@@ -2516,6 +2625,11 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
         self, total_patches, _vision_plans, _resolved_chunks,
         _dispatched_descriptors,
     )
+
+    if _merged_consumer is not None:
+        # No active Vision capture or pending native writer remains. The
+        # callback must finish consuming these owners before it returns.
+        return _merged_consumer(merged, deepstack_features)
 
     return BaseModelOutputWithDeepstackFeatures(
         last_hidden_state=last_hidden,

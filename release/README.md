@@ -4,22 +4,19 @@ This directory contains the operator-manifest generator and provenance manifests
 for public model sources and weights. Runtime binaries, opaque operator payloads,
 and model checkpoints are distributed separately under their own terms.
 
-The RhinoForge v1.1.0 internal prerelease uses the provider-delivered
-`RhinoForge-runtime-v1.1.0.tar.gz`, extracted under `RhinoForge-runtime-v1.1.0/`,
-with `rhinoOpLib_rhinoforge_v1.1.0.ref` and its adjacent `.ref.kernels` manifest.
-Rhino Launch remains version 1.0.0; `RELEASE.txt` selects the matching sanitized
-Release package. Verify the outer checksum and inner `SHA256SUMS` before using
-the [provider paths](../docs/runtime_assets.md#configure-paths). These filenames
-do not imply that a GitHub release/tag has been published.
+RhinoForge `1.3.0.dev0` is a source-only development version. Matching runtime
+binaries are not published. Build the Launch revision and use the two operator
+assets pinned in [runtime-dependencies.json](runtime-dependencies.json).
+Rhino Launch uses release version `1.3.0.dev0`, CMake version `1.3.0` and ABI
+version `1`. Keep each operator payload with its adjacent `.ref.kernels` file.
+For packaged runtime assets, select a published release and its matching source.
+See the [release policy](../docs/release_policy.md).
 
-Internal board measurements, benchmark tables and performance comparisons are
-not included in source releases, package artifacts or release notes. Keep local
-measurement reports outside the repository. Model configuration guides describe
-supported options and tuning practices without publishing measured results.
+Keep model evaluation data and reports outside source releases, package artifacts and release notes.
 
-Obsolete runtime receipts, model qualification matrices, and candidate validation
-closures have been removed. They described earlier source and asset combinations
-and do not establish correctness or performance for the current checkout.
+For version changes and installation steps, see the [changelog](../CHANGELOG.md)
+and [upgrade guide](../docs/upgrading_1_2.md). Request separately distributed
+assets through the [runtime asset guide](../docs/runtime_assets.md#request-runtime-assets).
 
 For current examples, see [Examples](../examples/README.md); for
 installation, see [runtime assets](../docs/runtime_assets.md). Use the

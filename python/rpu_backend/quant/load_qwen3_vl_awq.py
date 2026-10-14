@@ -343,7 +343,7 @@ def _move_materialized_awq_decoder_for_rpu(model) -> None:
             module.weight = nn.Parameter(target, requires_grad=False)
             if scale_views is not None:
                 module.weight_scale = scale_views[f"model.language_model.layers.{i}.{role}"]
-        # Bank views are already RPU buffers; only norms still move on 4B.
+        # Bank views are already device buffers; only norms still move on 4B.
         # Native set_weights retains an aligned cold copy whenever a scale's
         # actual device address is not already 4096B-aligned.
         layer.to("rpu")

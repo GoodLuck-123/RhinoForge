@@ -247,7 +247,7 @@ void stage_non_image_rows_locked(WallOssZ1State& s,
                     hidden.size(0) == 1 &&
                     hidden.size(1) == s.execution_len &&
                     hidden.size(2) == kCanaryTextHidden,
-                "wall_oss_spm_z1: text_hidden must be contiguous fp16 RPU "
+                "wall_oss_spm_z1: text_hidden must be contiguous fp16 device "
                 "[1,192,2048]");
     TORCH_CHECK(s.destination_addr != 0,
                 "wall_oss_spm_z1: destination port is not bound");

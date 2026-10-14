@@ -1,5 +1,6 @@
-cmake_minimum_required(VERSION 3.18)
-project(RhinoForge VERSION 1.1.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.19)
+include(release/version.cmake)
+project(RhinoForge VERSION ${RHINOFORGE_CMAKE_VERSION} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -26,7 +27,11 @@ execute_process(
 )
 set(CMAKE_PREFIX_PATH ${TORCH_CMAKE_PREFIX} ${CMAKE_PREFIX_PATH})
 find_package(Torch REQUIRED)
-find_package(rhino_launch 1.0.0 EXACT CONFIG REQUIRED)
+find_package(rhino_launch ${RHINOFORGE_LAUNCH_CMAKE_VERSION} EXACT CONFIG REQUIRED)
+if(NOT "${RHINO_LAUNCH_RELEASE_VERSION}" STREQUAL "${RHINOFORGE_LAUNCH_RELEASE_VERSION}" OR
+   NOT "${RHINO_LAUNCH_ABI_VERSION}" STREQUAL "${RHINOFORGE_LAUNCH_ABI_VERSION}")
+    message(FATAL_ERROR "Rhino Launch release or ABI does not match runtime-dependencies.json")
+endif()
 
 # Check exact capabilities because package version/SONAME alone do not prove
 # that headers and the shared object came from the required Release build.
@@ -117,6 +122,14 @@ include_directories(
     ${Python3_INCLUDE_DIRS}
 )
 
+rhinoforge_generate_runtime_identity("${CMAKE_BINARY_DIR}/generated")
+include_directories("${CMAKE_BINARY_DIR}/generated")
+
+option(RHINOFORGE_BUILD_DEVICE_TESTS "Build device contract test executables" OFF)
+option(RHINOFORGE_BUILD_HOST_TESTS "Build standalone host contract tests" OFF)
+if(RHINOFORGE_BUILD_HOST_TESTS)
+    enable_testing()
+endif()
 add_subdirectory(src)
 set_target_properties(rpu_backend PROPERTIES PREFIX "")
 

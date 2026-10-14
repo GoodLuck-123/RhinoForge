@@ -13,12 +13,14 @@ from rpu_backend.quant import load_qwen3_vl_awq as awq
 
 
 def exact_config(size=2):
-    h, inter, layers, heads = (2048, 6144, 28, 16) if size == 2 else (2560, 9728, 36, 32)
-    ignored = [f"model.visual.blocks.{i}.{role}" for i in range(24)
+    h, inter, layers, heads = {2: (2048, 6144, 28, 16), 4: (2560, 9728, 36, 32),
+                               8: (4096, 12288, 36, 32)}[size]
+    vh, vi, depth, taps = (1152, 4304, 27, [8,16,24]) if size == 8 else (1024, 4096, 24, [5,11,17])
+    ignored = [f"model.visual.blocks.{i}.{role}" for i in range(depth)
                for role in ("attn.qkv", "attn.proj", "mlp.linear_fc1", "mlp.linear_fc2")]
     ignored += [f"model.visual.{owner}.linear_fc{fc}" for owner in
                 ("merger", "deepstack_merger_list.0", "deepstack_merger_list.1", "deepstack_merger_list.2") for fc in (1, 2)]
-    return Qwen3VLConfig(
+    result = Qwen3VLConfig(
         architectures=["Qwen3VLForConditionalGeneration"], tie_word_embeddings=size == 2,
         text_config=dict(hidden_size=h, intermediate_size=inter, num_hidden_layers=layers,
                          num_attention_heads=heads, num_key_value_heads=8, head_dim=128,
@@ -27,16 +29,34 @@ def exact_config(size=2):
                          use_cache=True, tie_word_embeddings=True,
                          rope_parameters=dict(rope_type="default", rope_theta=5000000,
                                               mrope_interleaved=True, mrope_section=[24,20,20])),
-        vision_config=dict(hidden_size=1024, intermediate_size=4096, depth=24,
+        vision_config=dict(hidden_size=vh, intermediate_size=vi, depth=depth,
                            num_heads=16, patch_size=16, temporal_patch_size=2,
                            spatial_merge_size=2, out_hidden_size=h, hidden_act="gelu_pytorch_tanh",
-                           in_channels=3, num_position_embeddings=2304, deepstack_visual_indexes=[5,11,17]),
+                           in_channels=3, num_position_embeddings=2304, deepstack_visual_indexes=taps),
         image_token_id=151655, video_token_id=151656, vision_start_token_id=151652, vision_end_token_id=151653,
         quantization_config=dict(quant_method="compressed-tensors", format="pack-quantized",
             quantization_status="compressed", kv_cache_scheme=None, sparsity_config={}, transform_config={},
             ignore=ignored+["lm_head"], config_groups={"group_0": dict(format="pack-quantized", targets=["Linear"],
                 input_activations=None, output_activations=None, weights=dict(num_bits=4, group_size=32,
                     symmetric=True, dynamic=False, strategy="group", type="int", actorder=None, block_structure=None))}))
+    if size == 8:
+        del result.text_config.tie_word_embeddings
+    return result
+
+
+def test_padded_8b_awq_source_is_conversion_only_with_exact_geometry_and_ignore_scope():
+    source = exact_config(8)
+    assert awq.is_qwen3_vl_awq_config(source, allow_padded_8b=True)
+    assert awq.is_qwen3_vl_awq_config(source.to_dict(), allow_padded_8b=True)
+    assert not awq.is_qwen3_vl_awq_config(source)
+    assert not load.is_qwen3_vl_awq_config(source)
+    for fault in ('head_tie', 'text_tie', 'padded_source', 'ignore'):
+        changed = copy.deepcopy(source)
+        if fault == 'head_tie': changed.tie_word_embeddings = True
+        elif fault == 'text_tie': changed.text_config.tie_word_embeddings = True
+        elif fault == 'padded_source': changed.vision_config.intermediate_size = 4352
+        else: changed.quantization_config['ignore'].pop()
+        assert not awq.is_qwen3_vl_awq_config(changed, allow_padded_8b=True)
 
 
 def source_pack(q):

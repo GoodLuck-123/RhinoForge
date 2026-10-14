@@ -79,6 +79,7 @@ public:
  bool qwen3vl_4b_decode_o_ring_norm_fused_=false;
  bool qwen3vl_fp16_decode_profile_=false,linear_acc32_=false;
  bool qwen3vl_ordinary_resident_prefill_profile_=false,qwen3vl_4b_w8_profile_=true;
+ bool decoder_mixed_precision_=false,wall_prefill_staged_mlp_=false,wall_prefill_mixed_requested_=false,wall_prefill_staged_requested_=false;
  bool adarms_=false,qwen3vl_pooler_z1_dispatch_=false,qwen3vl_multiview_text_composite_dispatch_=false;
  bool has_qk_norm_=true,has_mrope_=true;
  CausalDecoderPlanningMode planning_mode_=CausalDecoderPlanningMode::ORDINARY;
@@ -364,6 +365,12 @@ void exact_8b_cases(){
 }
 int main(){
  tts_cases();
+ for(auto flag:{&Model::decoder_mixed_precision_,&Model::wall_prefill_staged_mlp_,
+                 &Model::wall_prefill_mixed_requested_,&Model::wall_prefill_staged_requested_}){
+  Fixture f;RpuKernelGraph g;assert(f.begin(g,0));f.m.cancel_qwen3vl_decode_replay();
+  f.m.*flag=true;assert(!f.begin(g,0));
+ }
+
  cross_profile_cases();
  exact_8b_cases();
  for(int64_t cap:{2048,4176}){cold_envelope=cap;

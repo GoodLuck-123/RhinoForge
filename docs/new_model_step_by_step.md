@@ -24,7 +24,7 @@ outputs for:
 - the maximum admitted cache length; and
 - two different inputs with the same shapes.
 
-Keep the CPU reference instance separate. RPU weight transformation is in place
+Keep the CPU reference instance separate. device weight transformation is in place
 and cannot be reversed safely.
 
 **Done means:** the same pinned inputs reproduce both reference contracts
@@ -148,19 +148,19 @@ overwrite an earlier returned output.
 
 ## 7. Add one public example and its checks
 
-Reuse `examples/causal_lm.py` when its TOML schema already covers the model.
-Add only a new file under `examples/configs/` for the exact profile; create a
-new script only when the input or output contract is genuinely different.
+Use `python -m examples.run --config <TOML>` and the existing runner for the
+model family. Add an exact-profile TOML under `examples/configs/`; add a runner
+under `examples/runners/` only when the input or output contract differs.
 
 The example must pass configuration validation without importing the native
 backend:
 
 ```bash
-python examples/causal_lm.py --config examples/configs/<model>/<checkpoint>/<precision>.toml --check-config
+python -m examples.run --config examples/configs/<model>/<checkpoint>/<precision>.toml --check-config
 ```
 
 Update [Model assets](model_assets.md) with the source, revision, destination,
-and hashes, and update [Model execution and profiling](model_testing.md) only
+and hashes, and update [Run and debug models](model_testing.md) only
 when the entry-point inventory changes. Keep release-only environment values
 out of TOML; use [Runtime configuration](runtime_config.md) as the allowlist.
 

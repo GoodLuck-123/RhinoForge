@@ -1,5 +1,5 @@
 // rpu_caching_allocator.cpp
-// RPU Caching Allocator Implementation
+// device Caching Allocator Implementation
 
 #include "rpu_caching_allocator.h"
 #include "rpu_allocator_policy.h"
@@ -79,7 +79,7 @@ public:
         if (!inserted.second) return inserted;
         try {
             TORCH_CHECK(exact_.emplace(key, inserted.first).second,
-                        "RPU DDR allocator: duplicate logical address index");
+                        "device DDR allocator: duplicate logical address index");
         } catch (...) {
             ordered_.erase(inserted.first);
             throw;
@@ -237,10 +237,10 @@ void RpuDmaSubmissionLease::release() noexcept {
 
 void rpu_register_ddr_dma_segment(void* cpu_base, size_t bytes) {
     TORCH_CHECK(cpu_base != nullptr && bytes > 0,
-                "RPU DDR allocator: cannot register an empty HostDDR segment");
+                "device DDR allocator: cannot register an empty HostDDR segment");
     auto* owner = ::rhino_lkn::RpuGetHostddr(cpu_base);
     TORCH_CHECK(owner != nullptr,
-                "RPU DDR allocator: RpuDdrAlloc returned an unregistered "
+                "device DDR allocator: RpuDdrAlloc returned an unregistered "
                 "HostDDR allocation");
     const uint64_t device_base = owner->get_rpu_addr();
     const size_t owner_bytes = owner->get_memory_size();
@@ -249,7 +249,7 @@ void rpu_register_ddr_dma_segment(void* cpu_base, size_t bytes) {
                     bytes <= owner_bytes &&
                     cpu_range_fits_address_space(cpu_address, owner_bytes) &&
                     device_range_fits_address_space(device_base, owner_bytes),
-                "RPU DDR allocator: inconsistent managed DDR allocation");
+                "device DDR allocator: inconsistent managed DDR allocation");
     const ManagedDdrSegment segment{
         cpu_base, device_base, owner_bytes, owner};
     std::lock_guard<std::mutex> lock(g_managed_ddr_mutex);
@@ -258,16 +258,16 @@ void rpu_register_ddr_dma_segment(void* cpu_base, size_t bytes) {
                     interval_is_available(
                         g_managed_ddr_segments_by_device,
                         device_base, owner_bytes),
-                "RPU DDR allocator: overlapping managed HostDDR segment");
+                "device DDR allocator: overlapping managed HostDDR segment");
     const bool cpu_inserted =
         g_managed_ddr_segments_by_cpu.emplace(cpu_address, segment).second;
     TORCH_CHECK(cpu_inserted,
-                "RPU DDR allocator: duplicate managed DDR CPU base");
+                "device DDR allocator: duplicate managed DDR CPU base");
     try {
         const bool device_inserted =
             g_managed_ddr_segments_by_device.emplace(device_base, segment).second;
         TORCH_CHECK(device_inserted,
-                    "RPU DDR allocator: duplicate managed DDR device base");
+                    "device DDR allocator: duplicate managed DDR device base");
     } catch (...) {
         g_managed_ddr_segments_by_cpu.erase(cpu_address);
         throw;
@@ -286,13 +286,13 @@ void rpu_unregister_ddr_dma_segment(void* cpu_base) {
         logical_it == g_logical_ddr_by_cpu.end() ||
             !cpu_range_contains(cpu_address, segment.bytes,
                                 logical_it->first, /*bytes=*/1),
-        "RPU DDR allocator: cannot release a HostDDR segment containing a "
+        "device DDR allocator: cannot release a HostDDR segment containing a "
         "live logical allocation");
     const auto device_it =
         g_managed_ddr_segments_by_device.find(segment.device_base);
     TORCH_CHECK(device_it != g_managed_ddr_segments_by_device.end() &&
                     same_managed_ddr_segment(segment, device_it->second),
-                "RPU DDR allocator: managed HostDDR segment indexes disagree");
+                "device DDR allocator: managed HostDDR segment indexes disagree");
     g_managed_ddr_segments_by_device.erase(device_it);
     g_managed_ddr_segments_by_cpu.erase(segment_it);
 }
@@ -300,20 +300,20 @@ void rpu_unregister_ddr_dma_segment(void* cpu_base) {
 uint64_t rpu_register_ddr_dma_logical_allocation(
         void* cpu_base, size_t bytes) {
     TORCH_CHECK(cpu_base != nullptr && bytes > 0,
-                "RPU DDR allocator: cannot register an empty logical allocation");
+                "device DDR allocator: cannot register an empty logical allocation");
     auto* owner = ::rhino_lkn::RpuGetHostddr(cpu_base);
     TORCH_CHECK(owner != nullptr,
-                "RPU DDR allocator: logical allocation has no HostDDR owner");
+                "device DDR allocator: logical allocation has no HostDDR owner");
     const uintptr_t cpu_address = reinterpret_cast<uintptr_t>(cpu_base);
     const uintptr_t owner_cpu =
         reinterpret_cast<uintptr_t>(owner->get_cpu_ptr());
     TORCH_CHECK(cpu_range_contains(owner_cpu, owner->get_memory_size(),
                                    cpu_address, bytes),
-                "RPU DDR allocator: logical allocation exceeds its HostDDR owner");
+                "device DDR allocator: logical allocation exceeds its HostDDR owner");
     const size_t owner_offset = static_cast<size_t>(cpu_address - owner_cpu);
     TORCH_CHECK(owner->get_rpu_addr() <=
                     std::numeric_limits<uint64_t>::max() - owner_offset,
-                "RPU DDR allocator: logical device address overflows");
+                "device DDR allocator: logical device address overflows");
     const uint64_t device_base = owner->get_rpu_addr() + owner_offset;
 
     std::lock_guard<std::mutex> lock(g_managed_ddr_mutex);
@@ -321,17 +321,17 @@ uint64_t rpu_register_ddr_dma_logical_allocation(
     TORCH_CHECK(segment != nullptr && segment->owner == owner &&
                     segment->device_base <= device_base &&
                     device_base - segment->device_base == owner_offset,
-                "RPU DDR allocator: logical allocation is not backed by its "
+                "device DDR allocator: logical allocation is not backed by its "
                 "registered HostDDR segment");
     TORCH_CHECK(interval_is_available(
                     g_logical_ddr_by_cpu, cpu_address, bytes) &&
                     interval_is_available(
                         g_logical_ddr_by_device, device_base, bytes),
-                "RPU DDR allocator: overlapping live logical allocation");
+                "device DDR allocator: overlapping live logical allocation");
     TORCH_CHECK(g_next_logical_ddr_allocation_id != 0 &&
                     g_next_logical_ddr_allocation_id !=
                         std::numeric_limits<uint64_t>::max(),
-                "RPU DDR allocator: logical allocation identity exhausted");
+                "device DDR allocator: logical allocation identity exhausted");
     const uint64_t allocation_id = g_next_logical_ddr_allocation_id++;
     const LogicalDdrAllocation allocation{
         cpu_base, device_base, bytes, owner, owner_offset, allocation_id};
@@ -342,15 +342,15 @@ uint64_t rpu_register_ddr_dma_logical_allocation(
         cpu_inserted =
             g_logical_ddr_by_cpu.emplace(cpu_address, allocation).second;
         TORCH_CHECK(cpu_inserted,
-                    "RPU DDR allocator: duplicate logical DDR CPU base");
+                    "device DDR allocator: duplicate logical DDR CPU base");
         device_inserted =
             g_logical_ddr_by_device.emplace(device_base, allocation).second;
         TORCH_CHECK(device_inserted,
-                    "RPU DDR allocator: duplicate logical DDR device base");
+                    "device DDR allocator: duplicate logical DDR device base");
         id_inserted = g_logical_ddr_by_allocation_id.emplace(
             allocation_id, allocation).second;
         TORCH_CHECK(id_inserted,
-                    "RPU DDR allocator: duplicate logical allocation identity");
+                    "device DDR allocator: duplicate logical allocation identity");
     } catch (...) {
         if (id_inserted)
             g_logical_ddr_by_allocation_id.erase(allocation_id);
@@ -518,11 +518,117 @@ RpuDmaSubmissionLease rpu_resolve_cpu_dma_endpoints(
     TORCH_CHECK(
         g_active_ddr_submission_leases !=
             std::numeric_limits<size_t>::max(),
-        "RPU DDR allocator: DMA submission lease count exhausted");
+        "device DDR allocator: DMA submission lease count exhausted");
     ++g_active_ddr_submission_leases;
     std::copy(resolved, resolved + count, endpoints);
     return RpuDmaSubmissionLease(true);
 }
+
+// Both publication APIs use this same envelope, lazy SPM and live logical DDR
+// transaction. The caller provides private zero-initialized storage; the lease
+// is constructed immediately after its count increment, while still locked.
+struct RpuDeviceDmaEndpointResolver {
+    static void validate_envelope(const RpuDeviceDmaEndpointRequest* requests,
+                                  size_t count) {
+        TORCH_CHECK(count == 0 || requests != nullptr,
+                    "rpu_resolve_device_dma_endpoints: null batch storage");
+        // Validate the complete request envelope before consulting either address
+        // space. This also keeps caller-owned output unchanged on malformed input.
+        for (size_t i = 0; i < count; ++i) {
+            TORCH_CHECK(requests[i].where != nullptr,
+                        "rpu_resolve_device_dma_endpoints: request ", i,
+                        " has no diagnostic context");
+            TORCH_CHECK(requests[i].device_addr != 0 && requests[i].bytes > 0,
+                        requests[i].where,
+                        ": zero device address or empty DMA range");
+            TORCH_CHECK(device_range_fits_address_space(
+                            requests[i].device_addr, requests[i].bytes),
+                        requests[i].where,
+                        ": device DMA range overflows the address space");
+        }
+    }
+
+    static RpuDmaSubmissionLease resolve(
+            const RpuDeviceDmaEndpointRequest* requests,
+            size_t count, RpuDmaEndpoint* resolved) {
+        // Root Buffer metadata is immutable during one resolution batch. Load a
+        // core lazily so an endpoint that resolves on an earlier core keeps the
+        // existing validation order. Never retain roots across calls/lifetimes.
+        struct SpmRootSnapshot {
+            ::rhino_lkn::Buffer_t* root = nullptr;
+            uint64_t base = 0;
+            size_t bytes = 0;
+        };
+        SpmRootSnapshot spm_roots[SpmAllocator::NUM_CORES];
+        bool has_ddr_request = false;
+        const bool spm_initialized = SPM_ALLOC.is_initialized();
+        for (size_t i = 0; i < count; ++i) {
+            if (spm_initialized) {
+                for (int core = 0; core < SpmAllocator::NUM_CORES; ++core) {
+                    auto& snapshot = spm_roots[core];
+                    if (snapshot.root == nullptr) {
+                        snapshot.root = SPM_ALLOC.root_buffer(core);
+                        TORCH_CHECK(
+                            snapshot.root != nullptr,
+                            requests[i].where,
+                            ": initialized SPM allocator has no root for core ", core);
+                        snapshot.base = snapshot.root->get_rpu_addr();
+                        snapshot.bytes = snapshot.root->get_memory_size();
+                    }
+                    if (requests[i].device_addr >= snapshot.base) {
+                        const uint64_t delta = requests[i].device_addr - snapshot.base;
+                        if (delta <= snapshot.bytes &&
+                            requests[i].bytes <= snapshot.bytes - delta) {
+                            resolved[i] = RpuDmaEndpoint{
+                                snapshot.root, static_cast<size_t>(delta),
+                                /*allocation_id=*/0};
+                            break;
+                        }
+                    }
+                }
+            }
+            has_ddr_request = has_ddr_request || !resolved[i];
+        }
+
+        if (has_ddr_request) {
+            std::lock_guard<std::mutex> lock(g_managed_ddr_mutex);
+            // Registry ranges are disjoint and cannot change under this lock.
+            // Repeated controller ranges inside the last allocation therefore
+            // resolve to exactly the same owner as another map lookup would.
+            const LogicalDdrAllocation* previous_allocation = nullptr;
+            for (size_t i = 0; i < count; ++i) {
+                if (resolved[i]) continue;
+                const auto* allocation = previous_allocation;
+                if (allocation == nullptr || !device_range_contains(
+                        allocation->device_base, allocation->bytes,
+                        requests[i].device_addr, requests[i].bytes)) {
+                    allocation = find_device_logical_locked(
+                        requests[i].device_addr, requests[i].bytes);
+                }
+                TORCH_CHECK(
+                    allocation != nullptr,
+                    requests[i].where,
+                    ": device DDR DMA range is outside every live logical "
+                    "allocation or SPM_ALLOC root");
+                previous_allocation = allocation;
+                const size_t logical_offset = static_cast<size_t>(
+                    requests[i].device_addr - allocation->device_base);
+                resolved[i] = RpuDmaEndpoint{
+                    allocation->owner,
+                    allocation->owner_offset + logical_offset,
+                    allocation->allocation_id};
+            }
+            TORCH_CHECK(
+                g_active_ddr_submission_leases !=
+                    std::numeric_limits<size_t>::max(),
+                "device DDR allocator: DMA submission lease count exhausted");
+            ++g_active_ddr_submission_leases;
+            return RpuDmaSubmissionLease(true);
+        }
+
+        return {};
+    }
+};
 
 RpuDmaSubmissionLease rpu_resolve_device_dma_endpoints(
         const RpuDeviceDmaEndpointRequest* requests,
@@ -531,24 +637,10 @@ RpuDmaSubmissionLease rpu_resolve_device_dma_endpoints(
     TORCH_CHECK(count == 0 || (requests != nullptr && endpoints != nullptr),
                 "rpu_resolve_device_dma_endpoints: null batch storage");
     if (count == 0) return {};
+    RpuDeviceDmaEndpointResolver::validate_envelope(requests, count);
 
-    // Validate the complete request envelope before consulting either address
-    // space. This also keeps caller-owned output unchanged on malformed input.
-    for (size_t i = 0; i < count; ++i) {
-        TORCH_CHECK(requests[i].where != nullptr,
-                    "rpu_resolve_device_dma_endpoints: request ", i,
-                    " has no diagnostic context");
-        TORCH_CHECK(requests[i].device_addr != 0 && requests[i].bytes > 0,
-                    requests[i].where,
-                    ": zero device address or empty DMA range");
-        TORCH_CHECK(device_range_fits_address_space(
-                        requests[i].device_addr, requests[i].bytes),
-                    requests[i].where,
-                    ": device DMA range overflows the address space");
-    }
-
-    // Keep the compatibility scalar wrapper allocation-free while retaining a
-    // private publication buffer for a real batch.
+    // Compatibility count1 remains allocation-free. Any real batch owns its
+    // private validation buffer, so a late failure cannot change caller output.
     RpuDmaEndpoint scalar_resolved;
     std::vector<RpuDmaEndpoint> batch_resolved;
     RpuDmaEndpoint* resolved = &scalar_resolved;
@@ -556,84 +648,22 @@ RpuDmaSubmissionLease rpu_resolve_device_dma_endpoints(
         batch_resolved.resize(count);
         resolved = batch_resolved.data();
     }
-    // Root Buffer metadata is immutable during one resolution batch. Load a
-    // core lazily so an endpoint that resolves on an earlier core keeps the
-    // existing validation order. Never retain roots across calls/lifetimes.
-    struct SpmRootSnapshot {
-        ::rhino_lkn::Buffer_t* root = nullptr;
-        uint64_t base = 0;
-        size_t bytes = 0;
-    };
-    SpmRootSnapshot spm_roots[SpmAllocator::NUM_CORES];
-    bool has_ddr_request = false;
-    const bool spm_initialized = SPM_ALLOC.is_initialized();
-    for (size_t i = 0; i < count; ++i) {
-        if (spm_initialized) {
-            for (int core = 0; core < SpmAllocator::NUM_CORES; ++core) {
-                auto& snapshot = spm_roots[core];
-                if (snapshot.root == nullptr) {
-                    snapshot.root = SPM_ALLOC.root_buffer(core);
-                    TORCH_CHECK(
-                        snapshot.root != nullptr,
-                        requests[i].where,
-                        ": initialized SPM allocator has no root for core ", core);
-                    snapshot.base = snapshot.root->get_rpu_addr();
-                    snapshot.bytes = snapshot.root->get_memory_size();
-                }
-                if (requests[i].device_addr >= snapshot.base) {
-                    const uint64_t delta = requests[i].device_addr - snapshot.base;
-                    if (delta <= snapshot.bytes &&
-                        requests[i].bytes <= snapshot.bytes - delta) {
-                        resolved[i] = RpuDmaEndpoint{
-                            snapshot.root, static_cast<size_t>(delta),
-                            /*allocation_id=*/0};
-                        break;
-                    }
-                }
-            }
-        }
-        has_ddr_request = has_ddr_request || !resolved[i];
-    }
-
-    if (has_ddr_request) {
-        std::lock_guard<std::mutex> lock(g_managed_ddr_mutex);
-        // Registry ranges are disjoint and cannot change under this lock.
-        // Repeated controller ranges inside the last allocation therefore
-        // resolve to exactly the same owner as another map lookup would.
-        const LogicalDdrAllocation* previous_allocation = nullptr;
-        for (size_t i = 0; i < count; ++i) {
-            if (resolved[i]) continue;
-            const auto* allocation = previous_allocation;
-            if (allocation == nullptr || !device_range_contains(
-                    allocation->device_base, allocation->bytes,
-                    requests[i].device_addr, requests[i].bytes)) {
-                allocation = find_device_logical_locked(
-                    requests[i].device_addr, requests[i].bytes);
-            }
-            TORCH_CHECK(
-                allocation != nullptr,
-                requests[i].where,
-                ": device DDR DMA range is outside every live logical "
-                "allocation or SPM_ALLOC root");
-            previous_allocation = allocation;
-            const size_t logical_offset = static_cast<size_t>(
-                requests[i].device_addr - allocation->device_base);
-            resolved[i] = RpuDmaEndpoint{
-                allocation->owner,
-                allocation->owner_offset + logical_offset,
-                allocation->allocation_id};
-        }
-        TORCH_CHECK(
-            g_active_ddr_submission_leases !=
-                std::numeric_limits<size_t>::max(),
-            "RPU DDR allocator: DMA submission lease count exhausted");
-        ++g_active_ddr_submission_leases;
-        std::copy(resolved, resolved + count, endpoints);
-        return RpuDmaSubmissionLease(true);
-    }
-
+    auto lease = RpuDeviceDmaEndpointResolver::resolve(requests, count, resolved);
     std::copy(resolved, resolved + count, endpoints);
-    return {};
+    return lease;
+}
+
+RpuResolvedDeviceDmaBatch rpu_resolve_device_dma_endpoints_owned(
+        const RpuDeviceDmaEndpointRequest* requests, size_t count) {
+    if (count == 0) return {};
+    RpuDeviceDmaEndpointResolver::validate_envelope(requests, count);
+    RpuResolvedDeviceDmaBatch resolved;
+    resolved.endpoints_.resize(count);
+    resolved.lease_ = RpuDeviceDmaEndpointResolver::resolve(
+        requests, count, resolved.endpoints_.data());
+    // No allocation, check, endpoint copy or throwing operation after the
+    // registry transaction published its lease; default moves are noexcept.
+    return resolved;
 }
 
 RpuDmaEndpoint rpu_resolve_device_dma_endpoint(
@@ -719,7 +749,7 @@ RpuDmaSubmissionLease rpu_validate_live_dma_allocation_witnesses(
     TORCH_CHECK(
         g_active_ddr_submission_leases !=
             std::numeric_limits<size_t>::max(),
-        "RPU DDR allocator: DMA submission lease count exhausted");
+        "device DDR allocator: DMA submission lease count exhausted");
     ++g_active_ddr_submission_leases;
     return RpuDmaSubmissionLease(true);
 }
@@ -756,7 +786,7 @@ RPUCachingAllocator::~RPUCachingAllocator() {
     // Note: We intentionally don't call emptyCache() here.
     // During program shutdown, the order of static object destruction
     // is undefined, and calling RpuDdrFree at this point may cause
-    // issues if the RPU runtime has already been deinitialized.
+    // issues if the device runtime has already been deinitialized.
     // The OS will reclaim all memory when the process exits anyway.
 }
 
@@ -897,7 +927,7 @@ void* RPUCachingAllocator::malloc(size_t orig_size) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     if (shutdown_called_) {
-        throw std::runtime_error("RPU caching allocator is shut down");
+        throw std::runtime_error("device caching allocator is shut down");
     }
 
     // Handle zero-size allocation

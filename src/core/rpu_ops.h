@@ -1,4 +1,4 @@
-// rpu_ops.h — Umbrella header for RPU backend operations
+// rpu_ops.h — Umbrella header for device backend operations
 //
 // Split into focused sub-headers for maintainability:
 //   rpu_profile.h       — Profile data structures, macros, global switches, Align/CeilDiv

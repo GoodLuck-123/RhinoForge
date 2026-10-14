@@ -22,9 +22,22 @@ MODELS: Dict[str, str] = {
     "qwen3-14b-w8a16-lmhead-int8": "qwen3_lmhead_int8_ckpts/qwen3-14b-w8a16-lmhead-int8",
     # Qwen3.5 hybrid-attention text profiles.
     "qwen3_5-0.8b": "qwen3_5-0.8b",
+    "qwen3_5-27b": "Qwen3.5-27B",
+    "qwen3_5-27b-w8a16": 'qwen3_5_quant_ckpts/qwen3_5-27b-w8a16',
+    "qwen3_5-27b-w4a16": 'qwen3_5_quant_ckpts/qwen3_5-27b-w4a16',
     "qwen3_5-2b": "Qwen3.5-2B",      # symmetric GDN 16/16
     "qwen3_5-4b": "Qwen3.5-4B",      # GQA-GDN 16/32 (key-replicated)
     "qwen3_5-9b": "Qwen3.5-9B",      # GQA-GDN 16/32 + untied lm_head
+    # Exact 35B-A3B TP8 controlled bundle. The adapter additionally validates
+    # the complete mixed-E4M3 inventory before materializing model weights.
+    "qwen3_5-35b-a3b-mixed": "Qwen3.5-35B-A3B-rpu-fp8-mixed",
+    # Routed-only RTN G128; public examples may override the checkpoint with
+    # --model PATH. The alias does not certify the current main runtime.
+    "qwen3_5-35b-a3b-rtn-w4a16": "Qwen3.5-35B-A3B-RTN-W4A16-G128",
+    # Official routed-only GPTQ G128, with the same explicit-path override.
+    "qwen3_5-35b-a3b-gptq-w4a16": "Qwen3.5-35B-A3B-GPTQ-Int4",
+    # Exact legacy W8 checkpoint using the Qwen3.5 text adapter; controlled only.
+    "qwen3_8-27b-w8a16": "Qwen3.8-27B-w8a16",
     # Galaxea G0.5 VLA (Qwen3.5-2B VLM + action expert).
     "g05-base": "G05/g05-base",
     # Pi0.5 VLA (LeRobot)
@@ -33,20 +46,14 @@ MODELS: Dict[str, str] = {
     # Source-only local conversion outputs; aliases are path mappings, not
     # immutable derived-asset identities or support claims.
     "pi05-libero-finetuned-w8a16-vlm-expert": "pi05_libero_finetuned-w8a16-vlm-expert",
-    # Legacy alias name: this is mixed W4A16-G32-KV8, not a pure-W4 profile.
+    # Per-channel INT4 projections with KV8; the legacy alias is retained.
     "pi05-libero-finetuned-w4real-kvint8": "pi05_libero_finetuned-w4real-kvint8",
     # Wall-OSS-0.5 VLA (Qwen2.5-VL-3B)
     "wall-oss-0.5": "wall-oss-0.5",
     "wall-oss-0.5-w8a16": "wall-oss-0.5-w8a16",
     "wall-oss-0.5-w4a16": "wall-oss-0.5-w4a16",
-    # Group-wise int4 profile: expert-0 down remains int8; the other seven
-    # projections use int4-pgrp with group_size=32.
+    # G32 INT4 checkpoints; the runtime also accepts legacy INT8 Down payloads.
     "wall-oss-0.5-w4a16-pgrp": "wall-oss-0.5-w4a16-pgrp",
-    # Distinct Source-only DROID checkpoint identities. Registry resolution is
-    # not admission: the GR00T builder remains fail-closed until the exact
-    # gated Cosmos processor/config manifest is release-bound.
-    "gr00t-n1d7-3b-droid-zero-shot": "GR00T-N1.7-3B",
-    "gr00t-n1d7-droid-finetuned": "GR00T-N1.7-DROID",
     # LingBot-VLA V2 (Qwen3-VL-4B + 32-expert top-4 AdaRMS sparse-MoE
     # action expert). Registry resolution is not a support claim.
     "lingbot-vla-v2-6b": "hf/robbyant/lingbot-vla-v2-6b",
@@ -55,12 +62,17 @@ MODELS: Dict[str, str] = {
     # complete policy is not admitted by this alias.
     "internvla-n1-navdp": "InternVLA-N1-w-NavDP",
     # Hy-Embodied-0.5-VLA (HunYuanVL dual-tower: HYViT2-400M AnyRes ViT + MoT VLM
-    # + flow-matching action expert). RPU runtime = adapters/hy_vla (build_hy_vla).
+    # + flow-matching action expert). device runtime = adapters/hy_vla (build_hy_vla).
     # obs supplies pre-tokenized lang_tokens + the prefill/denoise masks, so no
     # tokenizer is needed at inference; the ckpt is a single model.safetensors.
     "hy-embodied-0.5-vla-umi": "Hy-Embodied-0.5-VLA-UMI",
     # DINOv3 ViT-B component-scope feature encoder.
     "dinov3-vit-b": "dinov3-vitb16-pretrain-lvd1689m",
+    # Diagnostic assets; loader admission is unchanged.
+    "dinov3-vit-s": "dinov3-vits16-pretrain-lvd1689m",
+    "dinov3-vit-l": "dinov3-vitl16-pretrain-lvd1689m",
+    "paligemma2-3b-pt-224": "paligemma2-3b-pt-224",
+    "paligemma2-3b-mix-224": "paligemma2-3b-mix-224",
     # Qwen3-VL (vision + text)
     "qwen3-vl-2b": "Qwen3-VL-2B-Instruct",
     "qwen3-vl-4b": "Qwen3-VL-4B-Instruct",
@@ -85,7 +97,7 @@ MODELS: Dict[str, str] = {
     "qwen3-vl-2b-text-w8a16": "Qwen3-VL-2B-Instruct-w8a16-text",
     "qwen3-vl-32b-runtime-w4a16": "Qwen3-VL-32B-Instruct-runtime-w4",
     "qwen3-vl-32b-runtime-w8a16": "Qwen3-VL-32B-Instruct-runtime-w8",
-    "qwen3-vl-32b-w8a16": "Qwen3-VL-32B-Instruct-w8a16-legacy",
+    "qwen3-vl-32b-w8a16": 'Qwen3-VL-32B-Instruct-w8a16-full-20260816',
     "qwen3-vl-4b-runtime-w4a16": "Qwen3-VL-4B-Instruct-runtime-w4-awq",
     "qwen3-vl-4b-runtime-w8a16": "Qwen3-VL-4B-Instruct-runtime-w8",
     "qwen3-vl-4b-text-awq-w4a16": "Qwen3-VL-4B-Instruct-AWQ",
@@ -94,6 +106,11 @@ MODELS: Dict[str, str] = {
     "qwen3_5-0.8b-w4a16": "qwen3_5_quant_ckpts/qwen3_5-0.8b-w4a16",
     "qwen3_5-0.8b-w8a16": "qwen3_5_quant_ckpts/qwen3_5-0.8b-w8a16",
     "qwen3_5-2b-w4a16": "qwen3_5_quant_ckpts/qwen3_5-2b-w4a16",
+    "qwen3_5-2b-w4-mlp-only-g32": "qwen3_5-2b-w4a16-g32-mlp-only",
+    "qwen3_5-2b-w4-mlp-w8-attn-gdn-g32": "qwen3_5-2b-w4a16-g32-mlp-w8-attn-gdn",
+    "qwen3_5-2b-quanttrio-awq-g128": "Qwen3.5-2B-AWQ",
+    "qwen3_5-4b-quanttrio-awq-g128": "Qwen3.5-4B-AWQ",
+    "qwen3_5-9b-quanttrio-awq-g128": "Qwen3.5-9B-AWQ",
     "qwen3_5-2b-w8a16": "qwen3_5_quant_ckpts/qwen3_5-2b-w8a16",
     "qwen3_5-35b-a3b-mixed": "Qwen3.5-35B-A3B-rpu-fp8-mixed",
     "qwen3_5-4b-w4a16": "qwen3_5_quant_ckpts/qwen3_5-4b-w4a16",
@@ -105,6 +122,8 @@ MODELS: Dict[str, str] = {
     # Gemma 4 E4B source-only adapter. Registry resolution is not a support
     # claim; the first release does not provide a compatible runnable profile.
     "gemma4-e4b": "gemma-4-e4b-it",
+    'gr00t-n1d7-3b': 'GR00T-N1.7-3B',
+    'internvla-n1-controlled': 'internvla_n1-controlled',
 }
 
 
@@ -114,7 +133,7 @@ def cache_root() -> Path:
     Override with the ``RPU_MODEL_CACHE`` environment variable.
     """
     override = os.environ.get("RPU_MODEL_CACHE")
-    return Path(override).expanduser() if override else DEFAULT_CACHE_ROOT
+    return Path(override) if override else DEFAULT_CACHE_ROOT
 
 
 def model_path(name: str) -> Path:
@@ -129,19 +148,12 @@ def model_path(name: str) -> Path:
 
 
 def hf_cache_root() -> Path:
-    """Return the effective Hugging Face cache root."""
-    configured = os.environ.get("HF_HOME")
-    if configured:
-        return Path(configured).expanduser()
-    if os.environ.get("RPU_MODEL_CACHE"):
-        return cache_root() / ".hf"
-    return Path.home() / ".cache" / "huggingface"
+    """Return the default Hugging Face cache beneath the model cache root."""
+    return cache_root() / ".hf"
 
 
 def set_hf_home_env() -> None:
-    """Route Hugging Face caches under an explicit RPU_MODEL_CACHE override."""
-    if not os.environ.get("RPU_MODEL_CACHE"):
-        return
+    """Fill missing Hugging Face cache variables, preserving explicit overrides."""
     root = os.environ.setdefault("HF_HOME", str(hf_cache_root()))
     hub = str(Path(root) / "hub")
     os.environ.setdefault("HF_HUB_CACHE", hub)

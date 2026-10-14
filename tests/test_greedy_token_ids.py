@@ -92,6 +92,6 @@ def test_rpu_route_uses_only_final_rows_and_rejects_non_fp16(monkeypatch):
     assert got.tolist() == [[12], [12]]
     assert len(calls) == 1 and calls[0].shape == (2, 13) and calls[0].is_contiguous()
     assert torch.equal(calls[0].as_subclass(torch.Tensor), values[:, -1])
-    with pytest.raises(TypeError, match="FP16 RPU"):
+    with pytest.raises(TypeError, match="FP16 device"):
         greedy_token_ids(values.float().as_subclass(RpuStandIn))
     assert len(calls) == 1

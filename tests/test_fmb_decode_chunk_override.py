@@ -1,4 +1,4 @@
-"""Exercise the actual COMPLETE capacity guard without loading an RPU model."""
+"""Exercise the actual COMPLETE capacity guard without loading an device model."""
 from pathlib import Path
 import shutil
 import subprocess

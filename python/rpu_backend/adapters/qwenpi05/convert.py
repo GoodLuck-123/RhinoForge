@@ -1,9 +1,9 @@
 """
-QwenPI05 Action Model Converter for RPU (Phase 1: Op-by-Op)
+QwenPI05 Action Model Converter for device (Phase 1: Op-by-Op)
 
 Converts a QwenPI05 action expert (ActionExpert + ActionIO) to run
-on RPU via individual op dispatch. No fused decoder layer — each
-Linear/RMSNorm/SDPA/RoPE op dispatches independently to RPU kernels.
+on device via individual op dispatch. No fused decoder layer — each
+Linear/RMSNorm/SDPA/RoPE op dispatches independently to device kernels.
 
 Architecture handled:
   - QwenPI05ActionExpert: 10 transformer layers
@@ -19,7 +19,7 @@ Usage:
     action_expert, action_io = convert_qwenpi05_action_model_for_rpu(
         action_expert, action_io
     )
-    # action_expert and action_io are now on RPU with converted weights
+    # action_expert and action_io are now on device with converted weights
 """
 
 import copy
@@ -29,10 +29,10 @@ import torch.nn as nn
 
 
 def _patch_rmsnorm_for_rpu():
-    """Patch Qwen3VLTextRMSNorm to use RPU kernel when on RPU device.
+    """Patch Qwen3VLTextRMSNorm to use device kernel when on device device.
 
-    The standard RMSNorm upcasts to float32, which is inefficient on RPU.
-    The patched version uses torch.ops.rpu.rms_norm for RPU tensors and
+    The standard RMSNorm upcasts to float32, which is inefficient on device.
+    The patched version uses torch.ops.rpu.rms_norm for device tensors and
     falls back to the original implementation for CPU/CUDA.
 
     Safe to call multiple times (idempotent via _rpu_patched flag).
@@ -42,7 +42,7 @@ def _patch_rmsnorm_for_rpu():
             Qwen3VLTextRMSNorm,
         )
     except ImportError:
-        print("[QwenPI05-RPU] Warning: Qwen3VLTextRMSNorm not available, skipping patch")
+        print("[QwenPI05-device] Warning: Qwen3VLTextRMSNorm not available, skipping patch")
         return
 
     if getattr(Qwen3VLTextRMSNorm, '_rpu_patched', False):
@@ -65,14 +65,14 @@ def _patch_rmsnorm_for_rpu():
 
     Qwen3VLTextRMSNorm.forward = rpu_forward
     Qwen3VLTextRMSNorm._rpu_patched = True
-    print("[QwenPI05-RPU] Patched Qwen3VLTextRMSNorm for RPU dispatch")
+    print("[QwenPI05-device] Patched Qwen3VLTextRMSNorm for device dispatch")
 
 
 class _RPURotaryEmbWrapper(nn.Module):
-    """Wrapper that computes M-RoPE on CPU, then transfers cos/sin to RPU.
+    """Wrapper that computes M-RoPE on CPU, then transfers cos/sin to device.
 
     The Qwen3-VL M-RoPE forward uses float32 matmul and autocast context
-    managers that don't work on RPU. This wrapper keeps the computation
+    managers that don't work on device. This wrapper keeps the computation
     on CPU (it's cheap — just frequency table lookup) and moves the
     output to match the caller's device/dtype.
 
@@ -98,11 +98,11 @@ class _RPURotaryEmbWrapper(nn.Module):
 
 
 def _clone_rotary_emb_for_rpu(rotary_emb: nn.Module) -> nn.Module:
-    """Create an RPU-compatible rotary embedding wrapper.
+    """Create an device-compatible rotary embedding wrapper.
 
     The action expert shares rotary_emb with the VLM (which stays on CPU).
     We clone the underlying module and wrap it so that M-RoPE computation
-    stays on CPU (cheap, reliable) while outputs are transferred to RPU.
+    stays on CPU (cheap, reliable) while outputs are transferred to device.
     """
     cloned = copy.deepcopy(rotary_emb)
     # Keep the clone on CPU — the wrapper handles device transfer
@@ -115,14 +115,14 @@ def convert_qwenpi05_action_model_for_rpu(
     *,
     patch_rmsnorm: bool = True,
 ):
-    """Convert QwenPI05 action model for RPU inference (op-by-op dispatch).
+    """Convert QwenPI05 action model for device inference (op-by-op dispatch).
 
     Steps:
-      1. Patch Qwen3VLTextRMSNorm for RPU kernel dispatch
-      2. Clone rotary embedding to RPU (decouple from VLM's CPU copy)
+      1. Patch Qwen3VLTextRMSNorm for device kernel dispatch
+      2. Clone rotary embedding to device (decouple from VLM's CPU copy)
       3. Convert to fp16
-      4. Convert linear weights for RPU layout (row/col partition swizzle)
-      5. Move modules to RPU device
+      4. Convert linear weights for device layout (row/col partition swizzle)
+      5. Move modules to device device
 
     Args:
         action_expert: QwenPI05ActionExpert instance (will be modified in-place).
@@ -131,7 +131,7 @@ def convert_qwenpi05_action_model_for_rpu(
                        if already patched elsewhere.
 
     Returns:
-        Tuple of (action_expert, action_io) on RPU device with converted weights.
+        Tuple of (action_expert, action_io) on device device with converted weights.
     """
     from rpu_backend.runtime.weights import convert_linear_weights_inplace
 
@@ -160,23 +160,23 @@ def convert_qwenpi05_action_model_for_rpu(
             "in an undefined state. Reload the action model fresh."
         )
 
-    # Step 1: Patch RMSNorm class for RPU
+    # Step 1: Patch RMSNorm class for device
     if patch_rmsnorm:
         _patch_rmsnorm_for_rpu()
 
-    # Step 2: Clone rotary embedding to RPU
+    # Step 2: Clone rotary embedding to device
     if hasattr(action_expert, 'qwen_rotary_emb'):
         action_expert.qwen_rotary_emb = _clone_rotary_emb_for_rpu(
             action_expert.qwen_rotary_emb
         )
-        print(f"[QwenPI05-RPU] Cloned rotary_emb to RPU")
+        print(f"[QwenPI05-device] Cloned rotary_emb to device")
 
     # Step 3: Convert to fp16
     action_expert = action_expert.half()
     action_io = action_io.half()
 
-    # Step 4: Convert linear weights for RPU layout
-    # This swizzles weight matrices for optimal RPU GEMV/GEMM partitioning.
+    # Step 4: Convert linear weights for device layout
+    # This swizzles weight matrices for optimal device GEMV/GEMM partitioning.
     # The `cond` Linear in AdaRMSNorm is converted normally (unlike Pi0.5's
     # `dense` which is skipped for separate expand+swizzle in fused mode).
     # Round-5: stamp _rpu_swizzle_started BEFORE mutation so a failure
@@ -189,13 +189,13 @@ def convert_qwenpi05_action_model_for_rpu(
     n_expert = sum(1 for v in expert_info.values() if v >= 0)
     n_io = sum(1 for v in io_info.values() if v >= 0)
     n_fallback = sum(1 for v in {**expert_info, **io_info}.values() if v < 0)
-    print(f"[QwenPI05-RPU] Converted {n_expert} expert + {n_io} IO linear layers "
+    print(f"[QwenPI05-device] Converted {n_expert} expert + {n_io} IO linear layers "
           f"({n_fallback} fallback)")
 
-    # Step 5: Move to RPU device
+    # Step 5: Move to device device
     action_expert = action_expert.to("rpu")
     action_io = action_io.to("rpu")
-    print("[QwenPI05-RPU] Moved action model to RPU device")
+    print("[QwenPI05-device] Moved action model to device device")
 
     # Round-5: stamp _rpu_swizzled only on full success (after weight
     # swizzle + device move). A retry finds this flag and raises cleanly.
@@ -216,15 +216,15 @@ def run_qwenpi05_action_on_rpu(
     time: torch.Tensor,
     prefix_layer_offset: int,
 ):
-    """Run a single QwenPI05 action forward pass with model on RPU.
+    """Run a single QwenPI05 action forward pass with model on device.
 
-    Handles device transfer: inputs on CPU → RPU for expert → CPU for decode.
+    Handles device transfer: inputs on CPU → device for expert → CPU for decode.
 
     Args:
-        action_expert: QwenPI05ActionExpert on RPU.
-        action_io: QwenPI05ActionIO on RPU.
+        action_expert: QwenPI05ActionExpert on device.
+        action_io: QwenPI05ActionIO on device.
         prefix_key_values: List of (K, V) tuples from Qwen3-VL prefix encoding.
-                           Can be on any device (will be transferred to RPU).
+                           Can be on any device (will be transferred to device).
         prefix_mask: Bool mask for prefix tokens, shape (B, P).
         state: Optional state vector, shape (B, state_dim) or (B, 1, state_dim).
         x_t: Noisy action tensor, shape (B, H, action_dim), float32.
@@ -237,11 +237,11 @@ def run_qwenpi05_action_on_rpu(
     device = torch.device("rpu")
     dtype = torch.float16
 
-    # Transfer inputs to RPU in fp16
+    # Transfer inputs to device in fp16
     x_t_rpu = x_t.to(device=device, dtype=dtype)
     # Keep timestep on CPU: create_sinusoidal_pos_embedding uses float64
-    # on non-CPU devices, which RPU doesn't support. The sinusoidal
-    # computation is cheap; embed_suffix transfers the result to RPU via
+    # on non-CPU devices, which device doesn't support. The sinusoidal
+    # computation is cheap; embed_suffix transfers the result to device via
     # `.to(action_embeds.device, action_embeds.dtype)`.
     time_cpu = time.to(device="cpu", dtype=torch.float32)
     state_rpu = state.to(device=device, dtype=dtype) if state is not None else None
@@ -249,7 +249,7 @@ def run_qwenpi05_action_on_rpu(
     # bool_mask_to_attention_bias compute on CPU internally.
     prefix_mask_cpu = prefix_mask.to(device="cpu")
 
-    # Transfer prefix K/V to RPU
+    # Transfer prefix K/V to device
     prefix_kv_rpu = []
     for k, v in prefix_key_values:
         prefix_kv_rpu.append((
@@ -257,17 +257,17 @@ def run_qwenpi05_action_on_rpu(
             v.to(device=device, dtype=dtype),
         ))
 
-    # Embed suffix (action_io on RPU)
+    # Embed suffix (action_io on device)
     suffix_embeds, suffix_mask, adarms_cond = action_io.embed_suffix(
         state_rpu, x_t_rpu, time_cpu
     )
 
-    # Compute suffix position IDs on CPU (sum/cumsum trigger RPU fallbacks)
+    # Compute suffix position IDs on CPU (sum/cumsum trigger device fallbacks)
     prefix_offsets = prefix_mask.long().sum(dim=-1)[:, None]
     suffix_pos = prefix_offsets + torch.cumsum(suffix_mask.cpu().long(), dim=1) - 1
     position_ids = suffix_pos[None, ...].expand(3, -1, -1).to(device)
 
-    # Run action expert (on RPU).
+    # Run action expert (on device).
     # prefix_mask and suffix_mask stay on CPU — make_suffix_attn_mask
     # and bool_mask_to_attention_bias compute on CPU and transfer results.
     suffix_hidden = action_expert(
@@ -284,8 +284,8 @@ def run_qwenpi05_action_on_rpu(
     suffix_hidden_cpu = suffix_hidden.to(device="cpu", dtype=torch.float32)
     action_horizon = action_io.config.action_horizon
     action_hidden = suffix_hidden_cpu[:, -action_horizon:]
-    # action_out_proj is on RPU in fp16, but we need fp32 output.
-    # Move the slice to RPU, project, then back to CPU.
+    # action_out_proj is on device in fp16, but we need fp32 output.
+    # Move the slice to device, project, then back to CPU.
     action_hidden_rpu = action_hidden.to(device=device, dtype=dtype)
     pred = action_io.action_out_proj(action_hidden_rpu)
     return pred.to(device="cpu", dtype=torch.float32)
@@ -303,11 +303,11 @@ def predict_action_rpu(
     prefix_layer_offset: int,
     num_steps: int = 10,
 ) -> torch.Tensor:
-    """Run full DDIM denoising loop on RPU.
+    """Run full DDIM denoising loop on device.
 
     Args:
-        action_expert: QwenPI05ActionExpert on RPU.
-        action_io: QwenPI05ActionIO on RPU.
+        action_expert: QwenPI05ActionExpert on device.
+        action_io: QwenPI05ActionIO on device.
         prefix_key_values: Prefix KV cache (any device).
         prefix_mask: (B, P) bool mask.
         state: Optional state (B, state_dim).

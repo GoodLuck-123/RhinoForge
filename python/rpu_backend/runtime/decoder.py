@@ -44,10 +44,10 @@ from rpu_backend.runtime.execution_planner import (
 )
 
 
-# patch-reason: (a) RMSNorm kernel dispatch — §3a (a) run-different-op-on-RPU
+# patch-reason: (a) RMSNorm kernel dispatch — §3a (a) run-different-op-on-device
 def _install_rmsnorm_class_swap(rmsnorm_class: Type) -> None:
     """
-    Patch RMSNorm class to use RPU kernel when on RPU device.
+    Patch RMSNorm class to use device kernel when on device device.
 
     Args:
         rmsnorm_class: The RMSNorm class (e.g., Qwen3RMSNorm, LlamaRMSNorm)
@@ -58,7 +58,7 @@ def _install_rmsnorm_class_swap(rmsnorm_class: Type) -> None:
     """
     def rpu_forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.device.type == "rpu":
-            # Use native PyTorch operator dispatch for the RPU RMSNorm kernel.
+            # Use native PyTorch operator dispatch for the device RMSNorm kernel.
             return torch.ops.rpu.rms_norm(
                 hidden_states,
                 [self.weight.shape[0]],
@@ -74,15 +74,15 @@ def _install_rmsnorm_class_swap(rmsnorm_class: Type) -> None:
             return self.weight * hidden_states.to(input_dtype)
 
     rmsnorm_class.forward = rpu_forward
-    _LOG.info("Patched %s to use RPU kernel (native dispatch)", rmsnorm_class.__name__)
+    _LOG.info("Patched %s to use device kernel (native dispatch)", rmsnorm_class.__name__)
 
 
-# patch-reason: (a) RoPE class swap — §3a (a) run-different-op-on-RPU
+# patch-reason: (a) RoPE class swap — §3a (a) run-different-op-on-device
 def _install_rotary_class_swap(rotary_emb_class) -> None:
     """
-    Patch RotaryEmbedding class to output kernel format cos/sin on RPU, original on CPU.
+    Patch RotaryEmbedding class to output kernel format cos/sin on device, original on CPU.
 
-    RPU output:  [seq_len, head_dim//2] (kernel format)
+    device output:  [seq_len, head_dim//2] (kernel format)
     CPU output:  [batch, seq_len, head_dim] (original format, expanded)
 
     Args:
@@ -94,11 +94,11 @@ def _install_rotary_class_swap(rotary_emb_class) -> None:
     def patched_forward(self, x, position_ids):
         if x.device.type == "rpu":
             with torch.profiler.record_function("rpu::rope_compute"):
-                # Compute rotary phase in fp32 on CPU to avoid the RPU permute
+                # Compute rotary phase in fp32 on CPU to avoid the device permute
                 # kernel (fp16-only) that .contiguous() on the transposed fp32
                 # `freqs` tensor would dispatch to. Phase precision still
                 # accumulates in fp32 (matching Gemma's reference path); only
-                # the final cos/sin are cast to fp16 when shipped to RPU.
+                # the final cos/sin are cast to fp16 when shipped to device.
                 # The tensors are tiny ([B, seq_len, head_dim], ~few KB) so the
                 # per-forward CPU cost is negligible vs the rotary apply kernel.
                 inv_freq_cpu = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).cpu()
@@ -115,7 +115,7 @@ def _install_rotary_class_swap(rotary_emb_class) -> None:
             return original_forward(self, x, position_ids)
 
     rotary_emb_class.forward = patched_forward
-    _LOG.info("Patched %s (RPU: kernel format, CPU: original)", rotary_emb_class.__name__)
+    _LOG.info("Patched %s (device: kernel format, CPU: original)", rotary_emb_class.__name__)
 
 
 def _rotary_table_capacity(rotary, model) -> int:
@@ -242,6 +242,7 @@ _CAUSAL_DECODER_INSTALL_ATTRS = (
     "_rpu_decoder_handle",
     "_rpu_decoder_handle_finalizer",
     "_rpu_decoder_retirement_state",
+    "_rpu_prefill_kv_only",
     "_rpu_prefill_execution_alignment",
     "_rpu_kv_cache_layer_bank_size",
     "_rpu_execution",
@@ -395,7 +396,7 @@ def _enable_causal_decoder_execution_reconfigure(inner) -> None:
     )
     if enable is None:
         raise RuntimeError(
-            "RPU binary lacks causal-decoder hot-reconfigure support"
+            "device binary lacks causal-decoder hot-reconfigure support"
         )
     enable(inner._rpu_decoder_handle)
 
@@ -937,7 +938,7 @@ def _canonicalize_plain_text_controls(
     if attention_mask is not None:
         if not isinstance(attention_mask, torch.Tensor):
             raise TypeError(
-                "RPU plain-text attention_mask must be a tensor or None"
+                "device plain-text attention_mask must be a tensor or None"
             )
         mask_cpu = attention_mask.detach().to("cpu")
         all_ones = (
@@ -947,7 +948,7 @@ def _canonicalize_plain_text_controls(
         )
         if mask_cpu.numel() == 0 or not bool(all_ones.item()):
             raise NotImplementedError(
-                "RPU plain-text fused forward supports only an all-ones "
+                "device plain-text fused forward supports only an all-ones "
                 "attention_mask; padding/zero entries are not supported"
             )
         expected_mask_shape = (
@@ -956,7 +957,7 @@ def _canonicalize_plain_text_controls(
         )
         if tuple(mask_cpu.shape) != expected_mask_shape:
             raise NotImplementedError(
-                "RPU plain-text fused forward requires attention_mask shape "
+                "device plain-text fused forward requires attention_mask shape "
                 f"{expected_mask_shape} for the current cache position; got "
                 f"{tuple(mask_cpu.shape)}"
             )
@@ -981,7 +982,7 @@ def _canonicalize_plain_text_controls(
             continue
         if not isinstance(value, torch.Tensor) or value.dtype not in integer_dtypes:
             raise TypeError(
-                f"RPU plain-text {name} must be an integer tensor or None"
+                f"device plain-text {name} must be an integer tensor or None"
             )
         actual = value.detach().reshape(-1).to("cpu", dtype=torch.long)
         expected_values = expected
@@ -989,7 +990,7 @@ def _canonicalize_plain_text_controls(
             expected_values = expected.repeat(int(batch_size))
         if not torch.equal(actual, expected_values):
             raise NotImplementedError(
-                f"RPU plain-text fused forward requires {name} to match "
+                f"device plain-text fused forward requires {name} to match "
                 f"the contiguous cache range [{int(past_key_values.position)}, "
                 f"{int(past_key_values.position) + int(seq_len)}); got "
                 f"{actual.tolist()}"
@@ -1050,9 +1051,10 @@ def _run_causal_decoder_forward(
     decode_descriptor=None,
     batch_slot=0,
     _validated_all_ones_attention_mask=None,
+    _cache_only=False,
     **kwargs,
 ):
-    """Shared RPU forward runner for the all-layers-once causal-decoder kernel.
+    """Shared device forward runner for the all-layers-once causal-decoder kernel.
 
     v5-11 Step-4 deviation rename: was `_rpu_qwen3_run_forward` at
     `_internal/patches/__init__.py:277`. The body is genuinely cross-arch
@@ -1062,12 +1064,18 @@ def _run_causal_decoder_forward(
 
     Returns:
         (raw_tensor, past_key_values)
-        raw_tensor is [batch, seq_len, hidden_size] hidden states.
+        raw_tensor is [batch, seq_len, hidden_size] hidden states, or None for
+        the explicitly installed cache-only entry.
         (Phase 2.5: C++ post_graph for shape-changing logits output is deferred;
         the C++ side always returns hidden states.)
     """
     # Late import (avoids module-load circular with api.cache).
     from rpu_backend.api.cache import RPUCache
+    if type(_cache_only) is not bool or _cache_only != callable(
+            getattr(model, "_rpu_prefill_kv_only", None)):
+        raise RuntimeError(
+            "decoder forward does not match its cold KV-only policy; "
+            "use the installed cache-only entry for a KV-only owner")
     # D-32 wire-point #3 (first-forward marker). Idempotent per D-22 — safe
     # to call every forward.
     from rpu_backend.runtime.hw_attrs import mark_first_forward_done
@@ -1076,14 +1084,14 @@ def _run_causal_decoder_forward(
     # HF contract: input_ids XOR inputs_embeds
     if (input_ids is None) == (inputs_embeds is None):
         raise AssertionError(
-            "RPU all-layers-once: must provide exactly one of "
+            "device all-layers-once: must provide exactly one of "
             "input_ids or inputs_embeds (HF contract modeling_qwen3.py:401)"
         )
 
     # past_key_values must be an RPUCache instance
     if not isinstance(past_key_values, RPUCache):
         raise AssertionError(
-            f"RPU all-layers-once: past_key_values must be an "
+            f"device all-layers-once: past_key_values must be an "
             f"RPUCache instance, got {type(past_key_values).__name__}. "
             f"Create one via: "
             f"cache = rpu_backend.RPUCache(num_layers, batch_size, max_seq_len, "
@@ -1095,20 +1103,20 @@ def _run_causal_decoder_forward(
     # Unsupported HF options — fail-fast instead of silent drop
     if output_attentions:
         raise AssertionError(
-            "RPU all-layers-once: output_attentions is not supported"
+            "device all-layers-once: output_attentions is not supported"
         )
     if output_hidden_states:
         raise AssertionError(
-            "RPU all-layers-once: output_hidden_states is not supported"
+            "device all-layers-once: output_hidden_states is not supported"
         )
     if return_dict is False:
         raise AssertionError(
-            "RPU all-layers-once: return_dict=False is not supported "
+            "device all-layers-once: return_dict=False is not supported "
             "(Phase 1 only returns OutputWithPast)"
         )
     if use_cache is False:
         raise AssertionError(
-            "RPU all-layers-once: use_cache=False is not supported "
+            "device all-layers-once: use_cache=False is not supported "
             "in Phase 1 (caching path only; no-cache training scenario deferred)"
         )
     # cache_position is received but ignored (RPUCache.position owns position).
@@ -1118,20 +1126,20 @@ def _run_causal_decoder_forward(
     # to the op — the C++ side silently ignores it.
     #
     # HF's Qwen3-VL forward emits position_ids in shape [3, batch, seq_len];
-    # the C++ M-RoPE entry check expects [seq_len, 3] int32 RPU contig.
+    # the C++ M-RoPE entry accepts [seq_len, 3] int32 CPU or device contig.
     # Normalize here so adapters don't each duplicate the reshape.
     if position_ids is not None and position_ids.dim() == 3:
         # [3, batch, seq_len] → [seq_len, 3]; only batch==1 supported in R-Phase 1.
         if position_ids.size(0) != 3 or position_ids.size(1) != 1:
             raise AssertionError(
-                f"RPU all-layers-once: 3D position_ids must be [3, batch=1, seq_len], "
+                f"device all-layers-once: 3D position_ids must be [3, batch=1, seq_len], "
                 f"got {tuple(position_ids.shape)}"
             )
         position_ids = position_ids.squeeze(1).transpose(0, 1).contiguous()
     if position_ids is not None:
         if position_ids.dtype != torch.int32:
             position_ids = position_ids.to(torch.int32)
-        if position_ids.device.type != "rpu":
+        if position_ids.device.type not in {"cpu", "rpu"}:
             position_ids = position_ids.to("rpu")
         if not position_ids.is_contiguous():
             position_ids = position_ids.contiguous()
@@ -1156,29 +1164,29 @@ def _run_causal_decoder_forward(
     # The C++ side TORCH_CHECKs the same pair.
     if batch_size > 1 and not batch_decode_enabled:
         raise AssertionError(
-            "RPU all-layers-once: batch > 1 is enabled only for the Qwen3 "
+            "device all-layers-once: batch > 1 is enabled only for the Qwen3 "
             "decoder capability"
         )
     if batch_size > 1 and seq_len != 1:
         raise AssertionError(
-            f"RPU all-layers-once: batch > 1 requires seq_len == 1 (decode); got "
+            f"device all-layers-once: batch > 1 requires seq_len == 1 (decode); got "
             f"batch={batch_size}, seq_len={seq_len}. "
             f"Run batched prefill one sequence at a time."
         )
     if batch_size > 1 and past_key_values.batch_size != batch_size:
         raise AssertionError(
-            "RPU all-layers-once: batched decode requires one KV slot per "
+            "device all-layers-once: batched decode requires one KV slot per "
             f"sequence; hidden batch={batch_size}, cache batch_size="
             f"{past_key_values.batch_size}"
         )
     if not 0 <= int(batch_slot) < int(past_key_values.batch_size):
         raise AssertionError(
-            "RPU all-layers-once: batch_slot must index the RPUCache; got "
+            "device all-layers-once: batch_slot must index the RPUCache; got "
             f"batch_slot={batch_slot}, cache batch_size="
             f"{past_key_values.batch_size}"
         )
 
-    # Must be half + contiguous + RPU device for the fused kernel
+    # Must be half + contiguous + device device for the fused kernel
     if not hidden_states.is_contiguous():
         hidden_states = hidden_states.contiguous()
     if hidden_states.dtype != torch.float16:
@@ -1289,11 +1297,13 @@ def _run_causal_decoder_forward(
                     "externally planned M-RoPE/masked prefill must pad all "
                     "semantic inputs before the shared decoder call"
                 )
+            # Mixed CPU or device cat publishes its complete fresh output; padding
+            # needs no intermediate device allocation or publication.
             hidden_states = torch.cat(
                 [hidden_states,
-                 hidden_states.new_zeros(hidden_states.shape[0],
-                                         execution_len - seq_len,
-                                         hidden_states.shape[2])],
+                 torch.zeros((hidden_states.shape[0], execution_len - seq_len,
+                              hidden_states.shape[2]),
+                             dtype=hidden_states.dtype, device="cpu")],
                 dim=1,
             ).contiguous()
 
@@ -1318,7 +1328,9 @@ def _run_causal_decoder_forward(
 
     # Call the fused all-layers-once C++ op.
     # is_causal=True is HARDCODED here. See comment block above.
-    raw = torch.ops.rpu.causal_decoder_forward(
+    forward_op = (torch.ops.rpu.causal_decoder_prefill_kv_only if _cache_only
+                  else torch.ops.rpu.causal_decoder_forward)
+    raw = forward_op(
         handle,
         hidden_states,
         past_key_values.k_caches,
@@ -1365,7 +1377,7 @@ def _run_causal_decoder_forward(
     # Slice the padded tail off before anyone sees it, and advance the cache by
     # the LOGICAL length so decode continues from the real end (and overwrites
     # the first padded KV row).
-    if execution_len > logical_seq_len:
+    if not _cache_only and execution_len > logical_seq_len:
         raw = raw[:, :logical_seq_len]
 
     # Global position advance (the fused kernel does not touch RPUCache state)
@@ -1408,12 +1420,12 @@ def _run_batched_prefill(model, handle, capture_factory, *, past_key_values,
     batch, seq_len = int(src.shape[0]), int(src.shape[1])
     if not bool(getattr(model, "_rpu_batch_decode_enabled", False)):
         raise AssertionError(
-            "RPU batched prefill is enabled only for the Qwen3 decoder "
+            "device batched prefill is enabled only for the Qwen3 decoder "
             "capability"
         )
     if int(past_key_values.batch_size) != batch:
         raise AssertionError(
-            "RPU batched prefill requires one KV slot per sequence; "
+            "device batched prefill requires one KV slot per sequence; "
             f"input batch={batch}, cache batch_size="
             f"{past_key_values.batch_size}"
         )
@@ -1430,7 +1442,7 @@ def _run_batched_prefill(model, handle, capture_factory, *, past_key_values,
             attention_mask.shape
         ) != expected_mask_shape:
             raise AssertionError(
-                "RPU batched prefill attention_mask must have shape "
+                "device batched prefill attention_mask must have shape "
                 f"{list(expected_mask_shape)} and contain only ones"
             )
         mask_check = attention_mask.detach()
@@ -1438,7 +1450,7 @@ def _run_batched_prefill(model, handle, capture_factory, *, past_key_values,
             mask_check = mask_check.to("cpu")
         if not bool(torch.all(mask_check == 1).item()):
             raise AssertionError(
-                "RPU batched prefill does not support padding: "
+                "device batched prefill does not support padding: "
                 "attention_mask must contain only ones"
             )
 
@@ -1759,8 +1771,12 @@ def install_mrope_text_decoder_for_rpu(
     topology=None,
     _kv_cache_layer_bank_size=1,
     _graph_cache_max_entries=None,
+    folded_rmsnorm=False,
+    prefill_kv_only=False,
+    prefill_kv_pair=False,
+    prefill_qk_norm_rope=False,
 ) -> int:
-    """Install RPU all-layers-once forward on a `Qwen3VLTextModel` instance.
+    """Install device all-layers-once forward on a `Qwen3VLTextModel` instance.
 
     Prerequisites (same as the Qwen3 path):
       - `text_model.to('rpu')` has been called.
@@ -1772,7 +1788,7 @@ def install_mrope_text_decoder_for_rpu(
     opt out of DeepStack via `enable_deepstack=False` or an empty layer list.
 
     Args:
-        text_model: Qwen3VLTextModel instance (already moved to RPU).
+        text_model: Qwen3VLTextModel instance (already moved to device).
         text_config: optional; defaults to `text_model.config`.
         max_seq_len: cos/sin table length; defaults to
             text_config.max_position_embeddings.
@@ -1788,6 +1804,10 @@ def install_mrope_text_decoder_for_rpu(
             projection. When provided, the decoder's 7 projection weights must
             already be int8 (swizzled dwidth=1) and the install routes to
             `causal_decoder_set_weights_w8a16`. None → fp16 (default).
+
+        topology: cold decoder ownership. Reduced budgets require the complete
+            FP16 Qwen3-VL 2B/4B/8B profile, M-RoPE [24,20,20], and DeepStack
+            consumers [0,1,2].
 
     Returns the C++ handle (also stashed at `text_model._rpu_decoder_handle`).
     """
@@ -1891,6 +1911,10 @@ def install_mrope_text_decoder_for_rpu(
             chunk_envelope_for=chunk_envelope_for,
             execution_config=execution_config,
             topology=topology,
+            folded_rmsnorm=folded_rmsnorm,
+            prefill_kv_only=prefill_kv_only,
+            prefill_kv_pair=prefill_kv_pair,
+            prefill_qk_norm_rope=prefill_qk_norm_rope,
             **({"_graph_cache_max_entries": _graph_cache_max_entries}
                if _graph_cache_max_entries is not None else {}),
         )
@@ -1929,9 +1953,11 @@ def pad_mrope_prefill_inputs(
     if pad == 0:
         return inputs_embeds, attention_mask, position_ids
 
+    # The mixed-device cat owns the single publication of its fresh output.
     inputs_embeds = torch.cat(
         [inputs_embeds,
-         inputs_embeds.new_zeros(inputs_embeds.size(0), pad, inputs_embeds.size(2))],
+         torch.zeros((inputs_embeds.size(0), pad, inputs_embeds.size(2)),
+                     dtype=inputs_embeds.dtype, device="cpu")],
         dim=1,
     )
     if attention_mask is not None and attention_mask.dim() == 2:
@@ -1942,7 +1968,8 @@ def pad_mrope_prefill_inputs(
             )
         attention_mask = torch.cat(
             [attention_mask,
-             attention_mask.new_zeros(attention_mask.size(0), pad)],
+             torch.zeros((attention_mask.size(0), pad),
+                         dtype=attention_mask.dtype, device="cpu")],
             dim=-1,
         )
     if position_ids.dim() == 3 and position_ids.size(-1) == logical_len:
@@ -1982,6 +2009,10 @@ def _install_causal_decoder_forward(
     execution_config=None,
     topology=None,
     _graph_cache_max_entries=None,
+    folded_rmsnorm=False,
+    prefill_kv_only=False,
+    prefill_kv_pair=False,
+    prefill_qk_norm_rope=False,
 ) -> int:
     """Generic CausalLM all-layers-once installer (D-06: single shared body for Qwen3 + Llama).
 
@@ -1996,7 +2027,7 @@ def _install_causal_decoder_forward(
     uncertain graph/native retirement retains both installs and fails closed.
 
     Prerequisites:
-      - model.to("rpu") must have been called (weights on RPU device)
+      - model.to("rpu") must have been called (weights on device device)
       - convert_linear_weights_inplace(model) must have been called
         (applies row/col partition swizzle to Linear weights)
 
@@ -2262,6 +2293,14 @@ def _install_causal_decoder_forward(
     deepstack_lang_layers_arg = (
         [int(x) for x in deepstack_lang_layers] if deepstack_lang_layers else []
     )
+    if type(folded_rmsnorm) is not bool or type(prefill_kv_only) is not bool:
+        raise ValueError("cold folded-rmsnorm/KV-only policy values must be bool")
+    if type(prefill_kv_pair) is not bool or (prefill_kv_pair and
+            not (folded_rmsnorm and prefill_kv_only and scale_lists is not None)):
+        raise ValueError("paired KV requires a bool and the folded W8 KV-only owner")
+    if type(prefill_qk_norm_rope) is not bool or (prefill_qk_norm_rope and
+            not (folded_rmsnorm and prefill_kv_only and scale_lists is not None)):
+        raise ValueError("QK norm/RoPE requires a bool and the folded W8 KV-only owner")
     has_w8a16_scales = scale_lists is not None
     if has_w8a16_scales:
         q_ws, k_ws, v_ws, o_ws, gate_ws, up_ws, down_ws = scale_lists
@@ -2363,7 +2402,7 @@ def _install_causal_decoder_forward(
                     )
                 )
             else:
-                # CPU → RPU prep MUST happen outside graph capture. Qwen3-VL
+                # CPU → device prep MUST happen outside graph capture. Qwen3-VL
                 # keeps semantic M-RoPE positions; batched Qwen3 validates and
                 # removes its no-op positions in the shared helper.
                 if (attention_mask is not None
@@ -2435,7 +2474,7 @@ def _install_causal_decoder_forward(
                 ))
         else:
             # Preserve the runner's precise invalid-cache/input error while
-            # keeping any CPU→RPU transfer outside capture.
+            # keeping any CPU→device transfer outside capture.
             if attention_mask is not None and attention_mask.device.type != "rpu":
                 attention_mask = attention_mask.to("rpu")
             if position_ids is not None and position_ids.device.type != "rpu":
@@ -2446,7 +2485,7 @@ def _install_causal_decoder_forward(
 
         if _batch > 1 and not bool(self._rpu_batch_decode_enabled):
             raise AssertionError(
-                "RPU batch > 1 is enabled only for the Qwen3 decoder "
+                "device batch > 1 is enabled only for the Qwen3 decoder "
                 "capability"
             )
 
@@ -2500,6 +2539,13 @@ def _install_causal_decoder_forward(
         rpu_decoder_model_forward
     )
 
+    def rpu_decoder_prefill_kv_only(self, **kwargs):
+        # This entry is consumed by an outer policy-owned GraphCache; reuse all
+        # ordinary position/DeepStack/descriptor refresh and cache accounting.
+        _raw, cache = _run_causal_decoder_forward(
+            self, self._rpu_decoder_handle, _cache_only=True, **kwargs)
+        return cache
+
     # 2. Configure and tentatively publish the replacement while retaining a
     # complete snapshot of the old Python state. The old native handle remains
     # live until every Python assignment succeeds. Publication or old-handle
@@ -2519,6 +2565,13 @@ def _install_causal_decoder_forward(
     handle_finalizer = resource.finalizer
     try:
         set_weights_op(handle, *set_weights_args)
+        if folded_rmsnorm or prefill_kv_only:
+            torch.ops.rpu.causal_decoder_set_lingbot_prefill_mode(
+                handle, folded_rmsnorm, prefill_kv_only)
+            if prefill_kv_pair:
+                torch.ops.rpu.causal_decoder_set_lingbot_prefill_kv_pair(handle, True)
+            if prefill_qk_norm_rope:
+                torch.ops.rpu.causal_decoder_set_lingbot_prefill_qk_norm_rope(handle, True)
         if topology is not None:
             native_topology = tuple(torch.ops.rpu.causal_decoder_topology(handle))
             if native_topology != topology.identity()[1:]:
@@ -2548,17 +2601,21 @@ def _install_causal_decoder_forward(
             handle,
             0 if _requested_chunk == "auto" else int(_requested_chunk),
         )
-        decode_stage_descriptor = tuple(
+        decode_stage_descriptor = () if prefill_kv_only else tuple(
             torch.ops.rpu.causal_decoder_resolve_decode_stage_descriptor(
                 handle
             )
         )
-        if not decode_stage_descriptor:
+        if not prefill_kv_only and not decode_stage_descriptor:
             raise RuntimeError(
                 "causal decoder decode planner returned an empty descriptor"
             )
 
         model._rpu_deepstack_lang_layers = deepstack_lang_layers_arg
+        import types
+        model._rpu_prefill_kv_only = (
+            types.MethodType(rpu_decoder_prefill_kv_only, model)
+            if prefill_kv_only else None)
         model._rpu_batch_decode_enabled = decoder_batch_decode_enabled
         model._rpu_decoder_graph_cache = decoder_graph_cache
         model._rpu_decoder_num_layers = decoder_num_layers

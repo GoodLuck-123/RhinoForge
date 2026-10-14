@@ -1,4 +1,4 @@
-"""Frozen Qwen3-ASR-0.6B: resident RPU audio blocks and text decoder, CPU glue.
+"""Frozen Qwen3-ASR-0.6B: resident device audio blocks and text decoder, CPU glue.
 
 Audio length and placeholder semantics follow QwenLM/Qwen3-ASR commit
 7c6daf77a2421100f5fb066495372c00129d39ff (Apache-2.0).
@@ -196,7 +196,7 @@ def _load_components(checkpoint: Path, config: dict):
 
 
 class Qwen3ASRModel:
-    """One resident RPU ASR model; requests are serial and outputs live on CPU.
+    """One resident device ASR model; requests are serial and outputs live on CPU.
 
     Use ``with Qwen3ASRModel.from_pretrained(local_checkpoint) as model:``.
     Only the frozen Qwen/Qwen3-ASR-0.6B FP16 profile is admitted. Audio must be
@@ -215,6 +215,7 @@ class Qwen3ASRModel:
         self._restore_forwards = []
         self._graph_prompt_length = None
         self._cache = None
+        self._retirement_error = None
 
     @classmethod
     def from_pretrained(cls, checkpoint, *, dtype=torch.float16) -> "Qwen3ASRModel":
@@ -230,8 +231,11 @@ class Qwen3ASRModel:
             model._audio, model._text = _load_components(path, config)
             torch.rpu.set_caching_allocator(True)
             model._install_rpu()
-        except BaseException:
-            model.close()
+        except BaseException as error:
+            try:
+                model.close()
+            except BaseException as cleanup_error:
+                error.add_note(f"ASR cleanup failed: {cleanup_error!r}")
             raise
         return model
 
@@ -251,7 +255,7 @@ class Qwen3ASRModel:
         convert_linear_weights_inplace(self._text)
         self._text.to("rpu")
         if self._embedding_weight.device.type != "cpu" or self._embedding_weight.dtype != torch.float16:
-            raise RuntimeError("ASR host embedding/head storage moved during RPU preparation")
+            raise RuntimeError("ASR host embedding/head storage moved during device preparation")
         _install_causal_decoder_forward(self._text, arch="qwen3", topology=topology,
             cos_sin=tables, chunk_envelope_for=lookup_causal_decoder,
             execution_config={"model": {"num_cores": 8}, "prefill": {"linear_acc32": True}},
@@ -275,7 +279,7 @@ class Qwen3ASRModel:
                 bias = module.bias.detach().float() if module.bias is not None else None
 
                 def convolution(owner, hidden, weight=weight, bias=bias):
-                    # CPU FP16 convolution dominates on R1; retain FP16 boundaries.
+                    # Use CPU FP32 convolution with FP16 input/output boundaries.
                     hidden = hidden.float().contiguous(memory_format=torch.channels_last)
                     return torch.nn.functional.conv2d(hidden, weight, bias,
                         owner.stride, owner.padding, owner.dilation, owner.groups).half()
@@ -296,7 +300,7 @@ class Qwen3ASRModel:
 
             def forward(owner, hidden, weight=weight, bias=bias, name=name):
                 if hidden.device.type not in ("cpu", "rpu") or hidden.dtype != torch.float16:
-                    raise ValueError("ASR audio Linear requires CPU or RPU FP16 input")
+                    raise ValueError("ASR audio Linear requires CPU or device FP16 input")
                 result = torch.ops.rpu.linear_with_core_count(hidden.contiguous().to("rpu"), weight, bias, 1, 8)
                 counters[name] += 1
                 return result.cpu() if hidden.device.type == "cpu" else result
@@ -307,7 +311,7 @@ class Qwen3ASRModel:
         from ._qwen3_asr_audio import ResidentAudioEncoder
 
         self._audio_encoder = ResidentAudioEncoder(self._audio, counters)
-        self._audio_encoder.install()
+        self._audio_encoder.install(self)
         self._restore_forwards.append((self._audio, self._audio.forward))
         self._audio.forward = self._audio_encoder.forward
 
@@ -319,6 +323,8 @@ class Qwen3ASRModel:
         try:
             if self._closed:
                 raise RuntimeError("Qwen3-ASR model is closed")
+            if self._retirement_error is not None:
+                raise RuntimeError("ASR retirement failed; restart the process") from self._retirement_error
             with torch.inference_mode():
                 inputs = _prepare_inputs(self._tokenizer, self._feature_extractor, self._prompt, waveform)
                 prompt_length = inputs["input_ids"].shape[1]
@@ -376,7 +382,7 @@ class Qwen3ASRModel:
                 ids.shape[0] != 1 or ids.numel() == 0 or
                 bool((ids < 0).any()) or bool((ids >= weight.shape[0]).any())):
             raise ValueError("ASR embedding requires one row of valid CPU token IDs")
-        # Single-token CPU lookup is faster than an immediate RPU gather launch.
+        # Use CPU embedding lookup for single-token requests.
         if features is None:
             return torch.nn.functional.embedding(ids, self._embedding_weight).to("rpu")
         positions = (ids[0] == _AUDIO_TOKEN_ID).nonzero().flatten()
@@ -393,12 +399,14 @@ class Qwen3ASRModel:
             hidden.contiguous(), self._head_weight, None, 1, 8, True).cpu()
 
     def execution_stats(self) -> dict:
-        """Counters identify explicit routes; they do not claim a speedup."""
+        """Return execution-route counters."""
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("Qwen3-ASR requests, statistics and close must be serial")
         try:
             if self._closed:
                 raise RuntimeError("Qwen3-ASR model is closed")
+            if self._retirement_error is not None:
+                raise RuntimeError("ASR retirement failed; restart the process") from self._retirement_error
             graph = self._text._rpu_decoder_graph_cache
             audio_graph = self._audio_encoder.graph
             return {"audio_linear_calls": dict(self._audio_linear_calls), "decoder_calls": self._decoder_calls,
@@ -420,12 +428,22 @@ class Qwen3ASRModel:
         try:
             if self._closed:
                 return
+            if self._retirement_error is not None:
+                raise RuntimeError("ASR retirement failed; restart the process") from self._retirement_error
             resource = getattr(self._text, "_rpu_decoder_retirement_state", None)
-            if resource is not None:
-                resource.retire()
-            if self._audio_encoder is not None:
-                self._audio_encoder.close()
-                self._audio_encoder = None
+            audio_resource = getattr(self._audio_encoder, "_resource", None)
+            try:
+                if resource is not None:
+                    resource.retire()
+                if self._audio_encoder is not None:
+                    self._audio_encoder.close()
+            except BaseException as error:
+                self._retirement_error = error
+                for installed in (resource, audio_resource):
+                    if installed is not None:
+                        installed.retain_failure(error, self)
+                raise
+            self._audio_encoder = None
             for module, forward in reversed(self._restore_forwards):
                 module.forward = forward
             self._restore_forwards.clear()

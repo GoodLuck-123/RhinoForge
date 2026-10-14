@@ -363,5 +363,5 @@ def test_qwen3_vl_prefill_planner_wiring_contract():
 
 
 # These host tests exercise padding-plan search with a fake resolver.
-# Validating the native planner requires RPU hardware and Qwen3-VL weights;
+# Validating the native planner requires device hardware and Qwen3-VL weights;
 # host-only results do not establish hardware correctness.

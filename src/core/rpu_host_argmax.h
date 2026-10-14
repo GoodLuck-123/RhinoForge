@@ -112,7 +112,7 @@ inline at::Tensor reduce_cpu_rows(const at::Tensor& logits) {
   return out.reshape(sizes);
 }
 
-// Only this CPU compatibility entry admits FP32. The RPU top1 path stays FP16.
+// Only this CPU compatibility entry admits FP32. The device top1 path stays FP16.
 inline at::Tensor argmax_lastdim_cpu(const at::Tensor& logits) {
   TORCH_CHECK(logits.device().is_cpu(), "host argmax: logits must be on CPU");
   TORCH_CHECK(logits.dim() == 2,

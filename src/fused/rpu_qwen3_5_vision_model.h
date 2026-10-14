@@ -1,8 +1,9 @@
 // rpu_qwen3_5_vision_model.h — Qwen3.5 Vision Encoder (Option 2, deepstack removed).
 //
-// ViT encoder for the supported Qwen3.5 2B/4B profile
-// (24/1024/16/4096). Shape plumbing for 0.8B/9B remains a validation candidate,
-// not production admission. HF's Qwen3.5 vision model inherits Qwen3-VL and
+// ViT encoder with exact profile admission at the Python/native boundaries.
+// The large dense tower is 27/1152/16/4304, with merger output 4096 for 9B
+// and 5120 for official 27B. Shape admission does not certify board numerics.
+// HF's Qwen3.5 vision model inherits Qwen3-VL and
 // explicitly removes DeepStack; this subsystem therefore implements the shared
 // encoder body plus one final patch merger, with no deepstack outputs or
 // text-layer injections.
@@ -42,9 +43,10 @@ struct SpmDense2DSpec;
 class Qwen3_5VisionModel : public FusedModelBase {
 public:
     struct LayerWeights {
-        // All [out, in] fp16 DDR, swizzled per partition (Python adapter handles).
+        // [out, in] FP16 or exact G05 INT8 DDR, swizzled by the Python adapter.
         at::Tensor q_w, k_w, v_w, o_w;       // attention (col/col/col/row partition)
         at::Tensor fc1_w, fc2_w;              // MLP (col/row partition)
+        at::Tensor q_ws, k_ws, v_ws, o_ws, fc1_ws, fc2_ws; // optional FP16 [N]
     };
 
     struct LayerBiasNorm {
@@ -61,10 +63,13 @@ public:
     std::vector<int64_t> execution_topology() const;
 
     // Cold precision policy: public explicit ACC32 may pair with ultra ERF;
-    // default ACC16 and independently selected ACC32 retain standard ERF.
+    // default ACC16 and the existing G0.5 ACC32 profile keep standard ERF.
     // Both choices must be bound before set_weights().
     void set_linear_acc32(bool enabled);
     void set_gelu_erf_ultra(bool enabled);
+    // Exact G05 K1 arithmetic policy. Formula and Linear accumulation are
+    // independent; bind once before weights, and retain FP16 activations.
+    void set_high_precision(bool enabled);
     // The verified 35B-A3B bridge selects both independent cold choices.
     void set_moe_precision(bool linear_acc32, bool gelu_erf_ultra);
 
@@ -85,12 +90,33 @@ public:
         int64_t hidden_size, int64_t intermediate_size,
         double eps);
 
+    // Exact G05 W8 block projections; patch/merger and activations stay FP16.
+    // Installed only after set_weights and before the first planned forward.
+    void set_weight_scales(
+        at::TensorList q, at::TensorList k, at::TensorList v,
+        at::TensorList o, at::TensorList fc1, at::TensorList fc2);
+
     // set_rope_tables — register FreqCos / FreqSin static tables [max_hw, head_dim/4]
     // FP16 DDR (indexed by BOTH row_idx and col_idx) + pre-alloc the position_idx
     // keepalive [MAX_KEEPALIVE_SEQ, 2] int16.
     void set_rope_tables(const at::Tensor& freq_cos, const at::Tensor& freq_sin);
 
-
+    // set_patch_embed — opt into in-graph STEP 0 (patch_embed + pos_embed).
+    //
+    // Calling this switches forward()'s input contract from pre-embedded hidden
+    // [1, N, hidden] to raw folded patches [1, N, patch_dim] (patch_dim =
+    // in_channels * temporal_patch_size * patch_size^2 = 1536 for Qwen3.5), and
+    // makes the tower emit STEP 0 itself instead of the Python adapter doing it
+    // on the CPU. If never called, the old CPU path is used unchanged.
+    //
+    //   pe_w      [hidden, patch_dim] fp16, COL-swizzled (transform_linear_weight
+    //             partition=1) — patch_embed is column-parallel, matching rhino
+    //             (qwen3_vl_vision_sisc_graph.cc:401 is_col_parallel=true).
+    //   pe_b      [hidden] fp16 — the launcher scatters hidden/tp per core, which
+    //             is the COL-parallel bias convention (ParallelLinearGenerator.py
+    //             :399 splits the bias). NOT the row-parallel fill+broadcast one.
+    // Position embeddings are computed by the adapter with HF's implementation
+    // and supplied to forward() as a mutable-DMA source.
     void set_patch_embed(const at::Tensor& pe_w, const at::Tensor& pe_b);
 
     // set_merger — opt into the in-graph patch merger (runs as a post_layers_fn,
@@ -117,7 +143,8 @@ public:
                     const at::Tensor& norm_w, const at::Tensor& norm_b,
                     int64_t out_hidden_size);
 
-    // Reserved compatibility entry point; unsupported in the public runtime.
+    // G0.5 factorized temporal profile. The runtime remains spatial-only unless
+    // forward() is called with this exact num_frames.
     void set_temporal(const at::Tensor& temporal_pe,
                       int64_t num_frames,
                       int64_t patches_per_frame);
@@ -169,9 +196,9 @@ public:
         return dbg_q_;
     }
 
-    // forward — drive the configured encoder depth. Input is fp16 RPU
-    // [1, num_patches, patch_dim] with STEP0; without STEP0 it is
-    // [1, num_patches, hidden]. STEP0 adds
+    // forward — drive the configured encoder depth. Input is fp16 device
+    // [1, num_patches, patch_dim] with STEP0, or canonical G0.5 compact
+    // [1,18,3,256,256]; without STEP0 it is [1,num_patches,hidden]. STEP0 adds
     // the supplied position tensor and the optional merger runs in the same
     // graph; output is [1, num_patches, hidden].
     at::Tensor forward(
@@ -215,15 +242,22 @@ public:
         uint64_t epoch,
         uint64_t plan_hash);
 
+    bool g05_k1_b3_available() const;
+    bool g05_k1_camera_group_available(int64_t cameras) const;
+
 protected:
     DecoderExecutionTopology resolve_model_execution_topology(
         int64_t q, int64_t kv, int64_t d, int64_t h,
         int64_t intermediate) const override;
     int64_t subclass_layout_hash() const override;
 
+    bool graph_scoped_ddr_buffers() const override { return true; }
+
     KvCostLayoutScope capture_kvinsert_cost_layout_scope() override {
         return capture_kvinsert_cost_layout_fields(
-            current_camera_batch_count_, current_output_patches_, chunk_size_cap_);
+            current_temporal_num_frames_, current_camera_batch_count_,
+            current_output_patches_, chunk_size_cap_,
+            current_compact_step0_);
     }
 
     // Graph-plan hooks + SPM layout + per-layer build (framework calls these).
@@ -258,8 +292,25 @@ protected:
     void      emit_preload_weights();
     void      emit_kv_first_body(int layer_idx, const ChunkInfo& chunk);   // Phase 1
     ChunkPlan plan_kv_first_chunks(const ChunkPlan& compute_plan);
+    void      emit_temporal_layer(int layer_idx);
+    void      emit_spatial_group(int first_layer_idx, int last_layer_idx,
+                                 int64_t offset,
+                                 bool staged_qkv,
+                                 int64_t staged_row_offset = 0);
 
-
+    // emit_step0 — pre_layers_fn (EXT-Pi05 hook): pixel → hidden, ONCE per
+    // forward, before the layer loop, inside the same graph scope. Mirrors
+    // rhino's STEP 0 (qwen3_vl_vision_sisc_graph.cc:394-407):
+    //   broadcast pixel → col-parallel patch_embed → all_gather(axis=1)
+    //   → add uploaded HF position embeddings → scatter to hidden_buf_.
+    // Only registered when set_patch_embed() was called.
+    //
+    // Chunks over rows ITSELF: the framework's chunk planner is nested inside
+    // the layer loop, and pre_layers_fn takes no ChunkInfo. Chunking is not
+    // optional — pixel is broadcast full-width to every core (col-parallel does
+    // not split K), so a whole 2640-row sequence would need 7.7MB of the 8MB
+    // SPM before counting anything else. The row offset selects the matching
+    // pixel and position slices for each mutable DMA.
     void emit_step0();
 
     // emit_merger — post_layers_fn (EXT-Pi05 hook): patch merger, ONCE per
@@ -272,6 +323,42 @@ protected:
     void emit_merger();
 
 private:
+    std::vector<int64_t> g05_high_precision_encoder_arguments(int64_t rows) const;
+    std::vector<int64_t> g05_high_precision_merger_arguments(int64_t rows) const;
+    void consume_g05_high_precision_encoder_activation(int64_t rows, int64_t invocation);
+    void consume_g05_high_precision_merger_activation(int64_t rows, int64_t invocation);
+    bool is_g05_k1_fast_replay_profile() const;
+    bool is_g05_k1_b3_profile() const;
+    bool g05_k1_b3_schedule(const FmbThreeStageChunkPlan&) const;
+    std::vector<int64_t> g05_k1_b3_arguments() const;
+    void append_g05_k1_b3_routes(FmbPhysicalExecutionManifest&) const;
+    void consume_g05_k1_b3_schedule(const ChunkInfo&,bool compute);
+    void emit_g05_k1_b3_layer(int layer,const ChunkInfo&);
+    bool g05_k1_b3_available_ = false;
+    std::array<bool,2> g05_k1_generated_group_available_{{false,false}};
+    bool is_g05_k1_camera_group_profile() const;
+    bool g05_k1_camera_group_schedule(const FmbThreeStageChunkPlan&) const;
+    std::vector<int64_t> g05_k1_camera_group_arguments() const;
+    void append_g05_k1_camera_group_routes(FmbPhysicalExecutionManifest&) const;
+    void consume_g05_k1_camera_group_schedule(const ChunkInfo&,bool compute);
+    void emit_g05_k1_camera_group_layer(int layer,const ChunkInfo&);
+    void prepare_g05_owner_ln();
+    bool use_g05_owner_ln(int64_t rows) const;
+    std::vector<int64_t> g05_owner_ln_arguments() const;
+    void launch_g05_owner_ln(int layer, const ChunkInfo& chunk);
+    void launch_g05_compact_residual(const ChunkInfo& chunk);
+    bool g05_owner_ln_available_ = false;
+    bool g05_qkv_spm_available_ = false;
+    bool g05_qkv_linear_available_ = false;
+    bool g05_w8a16_ = false;
+    bool is_g05_qkv_spm_profile() const;
+    bool use_g05_qkv_spm_layout(const LayoutContext& layout) const;
+    bool g05_qkv_spm_schedule(const FmbThreeStageChunkPlan& plan) const;
+    std::vector<int64_t> g05_qkv_spm_arguments() const;
+    bool consume_g05_qkv_spm_transport(const ChunkInfo& chunk, bool compute);
+    std::vector<int64_t> g05_qkv_linear_arguments() const;
+    bool consume_g05_qkv_linear(const ChunkInfo& chunk, bool carry_qkv);
+
     struct VisionExecutionPlan {
         int64_t input_chunk_size = 0;
         int64_t qkv_chunk_size = 0;
@@ -315,12 +402,23 @@ private:
         append_kvinsert_cost_scalar_identity(identity, eps_);
         identity.insert(identity.end(), {
             static_cast<int64_t>(has_rope_),
-            0,  // Reserved compatibility identity field.
+            static_cast<int64_t>(has_temporal_),
             static_cast<int64_t>(has_step0_),
             static_cast<int64_t>(has_merger_),
             static_cast<int64_t>(linear_acc32_),
             static_cast<int64_t>(gelu_erf_ultra_)});
         if (moe_precision_) identity.insert(identity.end(), {3, 1});
+        if (high_precision_) identity.insert(identity.end(), {13, 1});
+        if (is_g05_k1_fast_replay_profile()) {
+            identity.insert(identity.end(), {4, 1});
+        }
+        if (g05_owner_ln_available_) identity.insert(identity.end(), {5, 1});
+        if (g05_qkv_spm_available_) identity.insert(identity.end(), {6, 1});
+        if (g05_qkv_linear_available_) identity.insert(identity.end(), {7, 1});
+        if (g05_w8a16_) identity.insert(identity.end(), {9, 8});
+        identity.insert(identity.end(),{10,static_cast<int64_t>(g05_k1_b3_available_)});
+        identity.insert(identity.end(),{11,static_cast<int64_t>(g05_k1_camera_group_available(2)),
+            static_cast<int64_t>(g05_k1_camera_group_available(3))});
         if (num_cores() != 8) {
             identity.insert(identity.end(),
                             {2, num_cores(), attn_tp(), mlp_tp(), 8});
@@ -331,6 +429,12 @@ private:
                     &weights.q_w, &weights.k_w, &weights.v_w, &weights.o_w,
                     &weights.fc1_w, &weights.fc2_w}) {
                 append_kvinsert_cost_tensor_identity(identity, *tensor);
+            }
+            if (weights.q_ws.defined()) {
+                identity.insert(identity.end(), {8, 1}); // W8 per-channel scale owners.
+                for (const auto* scale : {&weights.q_ws,&weights.k_ws,&weights.v_ws,
+                        &weights.o_ws,&weights.fc1_ws,&weights.fc2_ws})
+                    append_kvinsert_cost_tensor_identity(identity, *scale);
             }
         }
         identity.push_back(static_cast<int64_t>(layer_bias_norm_.size()));
@@ -364,6 +468,17 @@ private:
     int64_t current_camera_batch_count_ = 1;
     at::Tensor q_ddr_buf_;   // KV_FIRST Phase1→Phase2 的 rope 后 Q（DDR 暂存）
 
+    // G0.5 K=6 factorized temporal attention. Only the temporal SDPA caches
+    // live in DDR; Q/K/attention-output staging stays in SPM per camera.
+    at::Tensor temporal_pe_;
+    at::Tensor temporal_k_cache_;
+    at::Tensor temporal_v_cache_;
+    int64_t temporal_num_frames_ = 0;
+    int64_t temporal_patches_per_frame_ = 0;
+    int64_t current_temporal_num_frames_ = 1;
+    bool current_compact_step0_ = false;
+    bool has_temporal_ = false;
+
     // ── STEP 0 state (set_patch_embed / emit_step0) ─────────────────────────────
     at::Tensor pe_w_;                    // [hidden, patch_dim] fp16, col-swizzled
     at::Tensor pe_b_;                    // [hidden] fp16
@@ -378,7 +493,7 @@ private:
     // make a replayed small graph write to a freed address.
     at::Tensor hidden_buf_;              // [1, MAX_KEEPALIVE_SEQ, hidden]
 
-    // pixel_src_base_ — the caller's per-forward pixel tensor, as a live RPU dev
+    // pixel_src_base_ — the caller's per-forward pixel tensor, as a live device dev
     // addr. emit_step0 hands the mutable-DMA wrapper `&pixel_src_base_`, which
     // the graph registry keeps; REPLAY end() dereferences it and patches each
     // chunk DMA's src via Queue_t::update_dma_kernel. So this member's ADDRESS
@@ -411,7 +526,7 @@ private:
     // the current text hidden tensor's one or three image-token runs.
     at::Tensor merged_buf_;     // [1, MAX_KEEPALIVE_SEQ/4, out_hidden]
     at::Tensor merger_dst_ref_; // keeps a per-forward fusion target alive until sync completion
-    std::array<uint64_t, 1> merger_dst_bases_{};
+    std::array<uint64_t, 3> merger_dst_bases_{};
     bool merger_wrote_fusion_target_ = false;
 
     // Physical row-slice canary state.  The coordinator owns the lease; the
@@ -433,6 +548,8 @@ private:
     bool linear_acc32_ = false;
     bool gelu_erf_ultra_ = false;
     bool moe_precision_ = false;
+    bool high_precision_ = false;
+    bool high_precision_bound_ = false;
 
     // MR-C / T34 — the vision chunk cap is PER HANDLE and installed cold.
     //

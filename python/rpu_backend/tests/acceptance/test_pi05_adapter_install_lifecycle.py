@@ -471,6 +471,8 @@ def test_marker_without_complete_runtime_is_rejected_before_claim(
 def test_pre_swizzle_base_exception_releases_owner_and_poisons_retry(
     monkeypatch,
 ):
+    from rpu_backend.graph import GraphRuntimePolicy
+    monkeypatch.setattr(GraphRuntimePolicy, "prepare_arenas", lambda _: True)
     class InstallInterrupted(BaseException):
         pass
 

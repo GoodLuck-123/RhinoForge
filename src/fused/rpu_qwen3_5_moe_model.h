@@ -27,6 +27,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace v3 {
@@ -48,6 +49,11 @@ public:
         at::Tensor router_w;
         at::Tensor routed_gate_w, routed_up_w, routed_down_w;
         at::Tensor routed_gate_scale, routed_up_scale, routed_down_scale;
+        // UINT4 consumes plain [E,K/group_size,N] scales and negative zeros.
+        // The constant zero=8 tables are shared across all layers, owned here
+        // alongside the weights so retained Graph operands cannot outlive them.
+        at::Tensor routed_gate_negative_zero, routed_down_negative_zero;
+        int64_t routed_group_size = 0, routed_down_group_size = 0;
         int64_t routed_weight_mode = -1;
         at::Tensor shared_gate_w, shared_up_w, shared_down_w;
         // [16*shared_tp,H]: each core owns 16 repeated rows and selects lane 0.
@@ -134,7 +140,7 @@ public:
     // interleaved M-RoPE table built from THIS forward's 3D position_ids (image/
     // text layout ⇒ input-dependent, can't be a static weight-time table). The
     // adapter rebuilds cos/sin each forward and calls this before the forward op.
-    // Tables are [N, rotary_dim/2] fp16 on RPU, indexed by absolute position
+    // Tables are [N, rotary_dim/2] fp16 on device, indexed by absolute position
     // (kernel reads [pos_offset + token]). Text-only degenerates to arange.
     void set_prefill_rope(const at::Tensor& cos, const at::Tensor& sin);
 
@@ -221,6 +227,7 @@ private:
     std::vector<int64_t> cold_topology_arguments() const;
     std::vector<int64_t> exact_profile_arguments() const;
 
+    at::Tensor prepare_decode_cpu_input(const at::Tensor& hidden_states);
     at::Tensor forward_impl(
         const at::Tensor& hidden_states,
         std::vector<at::Tensor>& k_caches,
@@ -243,7 +250,9 @@ private:
         uint32_t m_sizes, const at::Tensor& scale,
         uint32_t output, int64_t n, int64_t k,
         int64_t num_experts, bool is_col_parallel,
-        int num_cores, int64_t weight_mode);
+        int num_cores, int64_t weight_mode,
+        const at::Tensor& negative_zero = at::Tensor(),
+        int64_t group_size = 0, int64_t m_total = 0);
     FmbLinearRouteSelector linear_route_selector(
         const at::Tensor& weight, int64_t rows) const;
     static int64_t linear_invocation(
@@ -305,7 +314,7 @@ private:
         at::Tensor attn_gate_scale;
         at::Tensor input_norm_w, post_norm_w;
         // GDN mixer weights (linear_attention layers only). in_proj_* / out_proj
-        // are col/row-swizzled for rpu GEMM; conv_w is the DDR-repacked
+        // are col/row-swizzled for device GEMM; conv_w is the DDR-repacked
         // [gdn_tp, Kc, ld_pad] conv1d weight; A_log/dt_bias/norm_w are plain.
         // The conv_dim channel order is reordered so each core's contiguous slice
         // holds [2 q-heads | 2 k-heads | 2 v-heads] (see adapter weight prep).
@@ -326,10 +335,34 @@ private:
     at::Tensor                   router_bridge_;
     std::vector<uint8_t>       layer_is_full_;
     at::Tensor                 cos_, sin_, final_norm_w_;
+    // One private decode input. Published owners are never written again;
+    // changed bytes/generation get a fresh owner, while Graph owns old leases.
+    at::Tensor                 decode_cpu_input_owner_;
+    std::vector<uint8_t>       decode_cpu_input_bytes_;
+    uint64_t                   decode_cpu_input_generation_ = 0;
+    bool                       decode_cpu_input_published_ = false;
+    std::mutex                 decode_cpu_input_mutex_;
     // PREFILL interleaved M-RoPE tables (B channel; set per-forward via
     // set_prefill_rope). Empty until set → build_full_attention falls back to
     // cos_/sin_ (correct for text-only, where interleaved == arange).
     at::Tensor                 prefill_cos_, prefill_sin_;
+    // CPU copies allocate private aligned owners. An aligned device input may be
+    // retained as a caller alias, so only a successfully published CPU pair
+    // can skip a later identical CPU copy. Device RoPE kernels only read it.
+    struct PrefillRopeCpuSpan {
+        const void* storage = nullptr;
+        uintptr_t base = 0, data = 0;
+        size_t storage_bytes = 0, bytes = 0;
+        bool operator==(const PrefillRopeCpuSpan& other) const {
+            return storage == other.storage && base == other.base &&
+                data == other.data && storage_bytes == other.storage_bytes &&
+                bytes == other.bytes;
+        }
+    };
+    std::array<PrefillRopeCpuSpan, 2> prefill_rope_cpu_owners_{};
+    uint64_t                   prefill_rope_cpu_generation_ = 0;
+    bool                       prefill_rope_cpu_owned_ = false;
+    bool                       prefill_rope_cpu_published_ = false;
     int64_t                    valid_prefill_len_ = -1;
     int64_t                    mrope_pos_delta_ = 0;
     int64_t                    last_prefill_chunk_size_ = 0;

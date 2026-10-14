@@ -14,6 +14,7 @@
 #include "graph/execution_coordinator.h"
 #include "graph/graph_infra.h"
 #include "rpu_dma_endpoint.h"
+#include <rhino_launch_batch_snapshot.h>
 
 #include <ATen/core/dispatch/OperatorEntry.h>
 #include <ATen/core/stack.h>
@@ -40,7 +41,7 @@ struct GraphKernelRegisterPolicy;
 // Fully defined (rather than an open-ended friend forward declaration) so no
 // downstream translation unit can widen this board-free test seam with new
 // private Graph mutations.  The non-mutating validation helpers exercise the
-// typed-register contract without constructing an RPU tensor or touching the
+// typed-register contract without constructing a device tensor or touching the
 // device.
 class RpuKernelGraphContractTestAccess final {
 public:
@@ -293,6 +294,12 @@ enum class GraphDdrRegisterRole : uint8_t {
     // Full-K INT8 accumulation kernels consume exact FP32 scale owners.
     // Distinct from the FP16 role; append-only for existing policy digests.
     Fp32PerChannelScale = 11,
+    // Grouped UINT4 has unsigned nibbles and separate controller-striped
+    // FP16 scale / negative-zero Q4/N64 tables (rhino-ops 135b93fc).
+    // Append-only: existing policy role bytes are stable.
+    PackedUint4ModelWeight = 12,
+    PerGroupScale = 13,
+    NegativeZeroPoint = 14,
 };
 
 enum class GraphDdrRegisterAccess : uint8_t {
@@ -850,7 +857,7 @@ struct BranchNodeData {
 //   登记 output dev_addrs。
 // REPLAYING op stream dispatch 期:capture_host_callback_replay_args 绑定本轮
 //   live tensor + 合成 .out/in-place return + 推进 cursor (不立刻执行 CPU op,
-//   因为前序 RPU kernel 还没 launch)。
+//   因为前序 device kernel 还没 launch)。
 // REPLAYING executor 期(到达节点时):重建 stack + run_cpu_fallback_zerocopy
 //   redispatch CPU + 校验 output dev_addr 稳定性。
 //
@@ -880,7 +887,7 @@ struct HostCallbackNodeData {
     // graph-owned 稳定 output buffer(Tier 1 + Tier 2 共用)。RECORDING 期
     // adopt_returns 把 CPU op 跑出的 fresh tensor copy 到 stable buffer,
     // 替换 stack slot;REPLAYING/oneshot executor 同样 copy_+替换,确保下游
-    // RPU op 永远看到 stable dev_addr。
+    // device op 永远看到 stable dev_addr。
     //
     // - cache eviction / invalidate 时由 nodes_.clear() 自动释放。
     // - RpuGraphCache 不能保存用户输入 tensor / 临时返回的例外:这些 buffer 是
@@ -902,7 +909,7 @@ struct HostCallbackNodeData {
 //
 // RNG / data-dependent shape 等不能完全重放的 op 会录成节点级 oneshot:
 // RECORDING 期记录 op、参数骨架、输入/输出依赖;REPLAYING executor 走到该节点时
-// 真跑 CPU op 并把结果写入 graph-managed transient buffer,周围 RPU 段继续 replay。
+// 真跑 CPU op 并把结果写入 graph-managed transient buffer,周围 device 段继续 replay。
 //
 struct Tier3OneshotNodeData {
     // op 元数据(replay 期重新 dispatch)。同 HostCallbackNodeData 用 optional
@@ -918,7 +925,7 @@ struct Tier3OneshotNodeData {
     std::vector<size_t> tensor_arg_indices;   // args_template 里 Tensor slot 下标
 
     // 输入依赖:对哪些前置节点的 stable buffer 有读依赖。RECORDING 期由 op args
-    // 里的 RPU tensor 反查最近 writer,REPLAYING 期用于 flush / 执行排序。
+    // 里的 device tensor 反查最近 writer,REPLAYING 期用于 flush / 执行排序。
     std::vector<int> input_dep_node_ids;
 
     // 输出依赖:后续哪些节点读它的 transient output。
@@ -1092,6 +1099,29 @@ struct Segment {
     // values never prove current allocation lifetime: every replay still
     // checks actual nodes and reacquires allocator authority and a lease.
     std::shared_ptr<const PreparedFixedDmaTable> fixed_dma_table;
+
+    // Sealed single-Queue snapshots own no extra SDK Queue or device arena.
+    // Tokens describe the successfully captured image, not a later submit.
+    struct BatchSnapshotDmaSlot {
+        size_t node_idx;
+        DmaNodeData::Variant variant;
+        size_t bytes;
+        uint8_t channel;
+    };
+    struct PreparedBatchSnapshot {
+        std::shared_ptr<const ::rhino_lkn::detail::BatchSnapshot> image;
+        std::shared_ptr<const PreparedFixedDmaTable> fixed_dma_table;
+        std::vector<std::pair<size_t, uint64_t>> kernel_register_tokens;
+        std::vector<BatchSnapshotDmaSlot> dmas;
+        std::vector<uint8_t> core_ids;
+        uint64_t graph_lifetime_id = 0;
+        uint64_t build_generation = 0;
+        size_t start_idx = 0;
+        size_t end_idx = 0;
+        bool broadcast_mode = false;
+        bool flush_icache = false;
+    };
+    std::shared_ptr<const PreparedBatchSnapshot> batch_snapshot;
 };
 
 struct ReplayPlan {
@@ -1113,6 +1143,10 @@ struct ReplayPlan {
 uint64_t rpu_get_hwperf_evidence_failure_total();
 
 struct GraphStats {
+    std::string batch_snapshot_mode;
+    bool batch_snapshot_available = false;
+    uint32_t batch_snapshot_effective_contracts = 0;
+    std::string batch_snapshot_fallback_reason;
     uint64_t graph_lifetime_id = 0;
     uint64_t build_generation = 0;
     uint64_t execution_ordinal = 0;
@@ -1145,22 +1179,15 @@ struct GraphStats {
     // HostCallback tier=Tier3 计数只保留兼容语义。
     size_t tier3_oneshot_count = 0;
 
-    // launch_segment_for_replay 累计计数器。**不在 execute_graph_for_replaying
-    // / replay_stats_refresh 里 reset**,跨整个 graph 生命周期累积,反映 Queue_t
-    // 复用效率 (QueueCache::get 命中率)。
-    //
-    // P8.0 修复后语义 (Queue_t 改为按 core_num 全局缓存):
-    //   prepared_segment_hit_total : QueueCache.get(core_num) 命中已缓存 Queue_t
-    //                                的次数 (segments_launched_via_cached_queue)
-    //   prepared_segment_miss_total: QueueCache.get(core_num) 触发 new Queue_t
-    //                                的次数 (= 实际 BufferPool::AcquireBuffer 次数)
-    //                                进程生命周期内最多 8 (每个 core_num 一次)
-    //
-    // 稳定 replay 期预期: miss_total 维持在 [1..8] (取决于 graph 涉及多少
-    // 不同的 core_num),hit_total ≈ segment_count × replay_count。
-    // miss_total > 8 (单进程) 说明 QueueCache 被 clear 过(异常)。
-    //
-    // RECORDING 期的 launch 不计入;这两个计数只反映 REPLAYING 路径。
+    // Cumulative launch_segment_for_replay counters for this Graph lifetime;
+    // recording launches are excluded. A hit submits an already prepared
+    // private queue after validating/updating its packets. A miss successfully
+    // rebuilds and submits that queue; it is not a Graph capture or allocation
+    // count. With the current zero extra-queue budget, multi-segment Graphs
+    // rotate through slot 0 and can miss on every segment while retaining the
+    // same Graph lifetime/build generation and advancing normal REPLAY.
+    // Treat these as queue preparation diagnostics, not a zero-miss correctness
+    // gate. Actual Graph execution/lifetime and DMA safety checks are separate.
     size_t prepared_segment_hit_total = 0;
     size_t prepared_segment_miss_total = 0;
 
@@ -1482,7 +1509,7 @@ public:
     // ==================== HostCallback REPLAYING dispatch ====================
 
     // REPLAYING op stream 期 custom_cpu_fallback 走到 HostCallback op 时调用。
-    // 不真跑 CPU op (前序 RPU kernel 还在 prepared queue 里没 launch);只:
+    // 不真跑 CPU op (前序 device kernel 还在 prepared queue 里没 launch);只:
     //   1. 校验 cursor 对应已录的 HostCallback 节点
     //   2. 校验 op_handle 一致 + 非 tensor IValue scalar 不漂移
     //   3. 用本轮 stack tensors 覆写节点的 live_tensor_args
@@ -1526,6 +1553,11 @@ public:
     // (4096-token prefill = 32 MB cache walk),又给设备刚写过的 staging buffer
     // (wall_oss / pi05 的 emb_stage_)引入一条本不需要的 clean-back 依赖。
     void keep_alive(const at::Tensor& t);
+
+    // A weak witness for fixed-DMA buffers owned by an external registry.
+    // Survives end()/REPLAY; expires after invalidate/abort/destruction or a
+    // fresh recording. Unlike keep_alive(), this covers the cached graph.
+    std::weak_ptr<const uint8_t> ddr_buffer_lifetime();
 
     // ==================== 查询 ====================
 
@@ -1594,6 +1626,12 @@ public:
         result.graph_lifetime_id = graph_lifetime_id_;
         result.build_generation = build_generation_;
         result.execution_ordinal = execution_ordinal_;
+        result.batch_snapshot_mode =
+            runtime_policy_.batch_snapshot_mode == GraphBatchSnapshotMode::Off
+                ? "off" : "auto";
+        result.batch_snapshot_available = batch_snapshot_available_;
+        result.batch_snapshot_effective_contracts = batch_snapshot_contracts_;
+        result.batch_snapshot_fallback_reason = batch_snapshot_fallback_reason_;
         return result;
     }
     ReplayPlan replay_plan() const { return ReplayPlan{&nodes_, &segments_}; }
@@ -1602,6 +1640,10 @@ public:
     // and raw allocation addresses are outside the public diagnostic surface.
     std::string dump_replay_plan() const;
     std::string dump_tree() const;
+    std::string dump_resources() const;
+    std::string dump_nodes_jsonl() const;
+    std::string dump_kernel_args_jsonl() const;
+    std::string dump_segments_jsonl() const;
 
     // Op 端通过 active().local_spm_pool() 拿到 graph-managed SPM 池:
     //   RECORDING : pool.acquire_recording(...) 创建 LocalSPM_t 并记 ptr_to_slot_
@@ -1676,13 +1718,13 @@ public:
     // ==================== Tier3 transient buffer owner tree =====
     //
     // Tier3OneshotNode 真跑出来的 fresh return tensor 跨 replay dev_addr 漂(每
-    // 步 RNG 都新 alloc),下游 RPU kernel 在 RECORDING 期 set_regs 写的是漂的
+    // 步 RNG 都新 alloc),下游 device kernel 在 RECORDING 期 set_regs 写的是漂的
     // dev_addr → REPLAYING 会读旧地址。每个 Tensor return 对应一只
     // graph-managed transient buffer,跨 replay dev_addr 稳定;内容由
     // REPLAYING 期 op 真跑后 copy_ 进去(每步 RNG 不同)。
     //
     // 跟 host_callback_persistent_owners_ 同模式 — owner tree 描述符 + 实际
-    // RPU tensor 引用(防 GC)。两个 vector 同索引一一对应。
+    // device tensor 引用(防 GC)。两个 vector 同索引一一对应。
     //
     // lifecycle:begin (PASSTHROUGH→RECORDING) / abort / invalidate 全清(跨
     // capture 不复用 buffer,因为新一轮 capture 可能 op shape / dtype 不同)。
@@ -1692,7 +1734,7 @@ public:
     size_t register_tier3_transient_buffer(int owner_node_id,
                                             const at::Tensor& buffer,
                                             uint64_t dev_addr);
-    // 反查:transient_resource_id → RPU tensor 引用。Tier3Oneshot executor 用它
+    // 反查:transient_resource_id → device tensor 引用。Tier3Oneshot executor 用它
     // 把 fresh return copy_ 进去并替换 stack slot。
     const at::Tensor& tier3_transient_tensor_at(size_t idx) const;
 
@@ -1902,6 +1944,11 @@ private:
     bool capture_segment_kernel_register_tokens(
         const Segment& seg,
         std::vector<std::pair<size_t, uint64_t>>& tokens) const;
+    bool batch_snapshot_enabled() const;
+    void bind_batch_snapshot_admission();
+    void invalidate_batch_snapshots() noexcept;
+    void capture_segment_batch_snapshot(
+        Segment& seg, PreparedQueueSlot& slot, bool hw_perf_enabled) noexcept;
     uint32_t launch_segment_sync_only(
         Segment& seg, PreparedQueueSlot& slot);
     ::rhino_lkn::Queue_t* ensure_private_queue(size_t queue_slot_idx,
@@ -1951,6 +1998,9 @@ private:
         uint64_t lifetime_id = 0;
     };
     LifetimeRetirementSentinel lifetime_retirement_;
+
+    // Declared before recorded resources so destruction retires this last.
+    std::shared_ptr<const uint8_t> ddr_buffer_lifetime_;
 
     State state_ = State::PASSTHROUGH;
     bool replayable_ = true;
@@ -2357,6 +2407,10 @@ private:
     std::vector<std::unique_ptr<::rhino_lkn::Kernel_t>> kernels_;
     std::vector<GraphNode> nodes_;
     std::vector<Segment> segments_;
+    bool batch_snapshot_admission_bound_ = false;
+    bool batch_snapshot_available_ = false;
+    uint32_t batch_snapshot_contracts_ = 0;
+    std::string batch_snapshot_fallback_reason_ = "not_prepared";
     std::vector<at::Tensor> tensor_refs_;
 
     // Op 代码调 rpu_ddr_flush(ptr) 时,RECORDING/REPLAYING 期登记于此,
@@ -2382,6 +2436,7 @@ private:
     struct PreparedQueueSlot {
         std::unique_ptr<::rhino_lkn::Queue_t> queue;
         uint8_t core_num = 0;
+        bool batch_snapshot_configured = false;
         ssize_t built_segment_idx = -1;
         bool hw_perf_enabled_at_build = false;
         std::shared_ptr<const Segment::PreparedFixedDmaTable> fixed_dma_table;
@@ -2469,7 +2524,7 @@ private:
     // Tier3OneshotNode transient buffer owner tree。
     // tier3_oneshot_transient_owners_ 是 owner tree 描述符
     // (kind=TransientTier3Buffer);tier3_oneshot_transient_tensors_ 同索引持
-    // RPU tensor 引用(防 GC,buffer 跨 replay 复用必须保活)。两个 vector 长度
+    // device tensor 引用(防 GC,buffer 跨 replay 复用必须保活)。两个 vector 长度
     // 严格等长,size_t 索引 = Tier3OneshotNodeData::transient_resource_ids 元素。
     std::vector<GraphOwnedResource> tier3_oneshot_transient_owners_;
     std::vector<at::Tensor>          tier3_oneshot_transient_tensors_;
@@ -2711,7 +2766,7 @@ private:
 //
 //   {
 //       HostCallbackCapture guard(g, op, *stack, tier);   // 录 input 骨架 + push 节点
-//       // (此时 stack 仍是 RPU tensors,准备给 run_cpu_fallback_zerocopy)
+//       // (此时 stack 仍是 device tensors,准备给 run_cpu_fallback_zerocopy)
 //       run_cpu_fallback_zerocopy(op, stack, /*alias_output_args=*/false);
 //
 //       if (tier == Tier1 || tier == Tier2) guard.adopt_returns(*stack);
@@ -2735,7 +2790,7 @@ public:
     size_t node_idx() const { return node_idx_; }
 
     // Tier 1+2 共用:CPU op 跑完后调,把 stack returns 的 tensor 数据 copy 到
-    // graph-owned 稳定 RPU buffer + 替换 stack slot。output_pool /
+    // graph-owned 稳定 device buffer + 替换 stack slot。output_pool /
     // output_pool_dev_addrs / output_pool_bytes 在这里填。
     void adopt_returns(torch::jit::Stack& stack);
 

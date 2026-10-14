@@ -98,15 +98,15 @@ void LingbotDenoiseModel::set_action_weights(
     TORCH_CHECK(mo_bias.dim() == 1 && mo_bias.size(0) == h
              && mo_bias.scalar_type() == at::kHalf
              && mo_bias.device().type() == at::kPrivateUse1,
-        "mo_bias must be [hidden] fp16 RPU");
+        "mo_bias must be [hidden] fp16 device");
     TORCH_CHECK(op_bias.dim() == 1 && op_bias.size(0) == action_dim_pad_
              && op_bias.scalar_type() == at::kHalf
              && op_bias.device().type() == at::kPrivateUse1,
-        "op_bias must be [action_dim_pad] fp16 RPU");
+        "op_bias must be [action_dim_pad] fp16 device");
     TORCH_CHECK(time_all.dim() == 2 && time_all.size(0) == num_steps && time_all.size(1) == h
              && time_all.scalar_type() == at::kHalf && time_all.is_contiguous()
              && time_all.device().type() == at::kPrivateUse1,
-        "time_all must be [num_steps, hidden] fp16 contig RPU");
+        "time_all must be [num_steps, hidden] fp16 contig device");
     wc_ = wc; mo_ = mo; mo_bias_ = mo_bias;
     op_ = op; op_bias_ = op_bias; time_all_ = time_all;
     num_steps_ = num_steps;
@@ -337,14 +337,14 @@ void LingbotDenoiseModel::unroll_forward(
     TORCH_CHECK(x0_rpu.dim() == 3 && x0_rpu.size(0) == 1 && x0_rpu.size(1) == cs
         && x0_rpu.size(2) == kp && x0_rpu.scalar_type() == at::kHalf
         && x0_rpu.is_contiguous() && x0_rpu.device().type() == at::kPrivateUse1,
-        "x0_rpu must be [1,", cs, ",", kp, "] fp16 contig RPU");
+        "x0_rpu must be [1,", cs, ",", kp, "] fp16 contig device");
     TORCH_CHECK(x_traj.dim() == 3 && x_traj.size(0) == num_steps && x_traj.size(1) == cs
         && x_traj.size(2) == kp && x_traj.scalar_type() == at::kHalf
         && x_traj.is_contiguous() && x_traj.device().type() == at::kPrivateUse1,
-        "x_traj must be [", num_steps, ",", cs, ",", kp, "] fp16 contig RPU");
+        "x_traj must be [", num_steps, ",", cs, ",", kp, "] fp16 contig device");
     TORCH_CHECK(state_emb.dim() == 1 && state_emb.size(0) == h
         && state_emb.scalar_type() == at::kHalf && state_emb.device().type() == at::kPrivateUse1,
-        "state_emb must be [hidden] fp16 RPU");
+        "state_emb must be [hidden] fp16 device");
 
     // dt is the SIGNED Euler coefficient baked into the in-graph Euler at BUILD (x += dt·v);
     // identical across the N unrolled iterations. LingBot's flow runs t: 1→0 so dt = -1/N < 0.
@@ -469,7 +469,7 @@ void rpu_lingbot_denoise_set_weights(
     // deny-by-default certified-envelope gate too. The fixed 51-row action
     // suffix requires one ceil16-aligned chunk, so both auto and exact requests
     // share the admitted positive ceiling 64.
-    // See docs/roadmap/chunk_certified_envelope.md.
+    // See docs/runtime_config.md.
     m->set_chunk_envelope(/*max_kv_len=*/8192, /*chunk=*/64);
     m->set_action_weights(wc, mo, mo_bias, op, op_bias, time_all,
                           action_dim, k_comb_pad, num_steps, chunk_size);

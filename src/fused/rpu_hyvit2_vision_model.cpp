@@ -35,6 +35,7 @@
 #include "rpu_eltwise.h"
 #include "rpu_helpers.h"
 #include "rpu_spm_allocator.h"
+#include "hyvit2_owner_layernorm.h"
 #include <ATen/record_function.h>
 #include <c10/util/Half.h>
 #include <c10/util/ScopeExit.h>
@@ -117,7 +118,7 @@ struct HYViT2ColdConfig {
 // stable per-image live-base slot for the mutable input DMA: the SigLIP-batch
 // path packs N images through ONE captured graph, so a single shared live-base
 // would make every image read the LAST image's pixels on REPLAY (mutable-DMA
-// trap — CLAUDE.md "Fixed DMA trap"). The output/pos_emb live-bases stay shared
+// trap — docs/pitfalls.md). The output/pos_emb live-bases stay shared
 // (same packed-tensor base / same registered pos_emb across all N images).
 //
 // `offsets` are the 6 SPM temp-buffer offsets, allocated ONCE by the caller and
@@ -129,9 +130,9 @@ struct HYViT2ColdConfig {
 // gemm_out). reset_temporary between images clears that tracking → async DMA
 // vs GEMM race → non-deterministic REPLAY.
 static void fused_patch_embedding(
-    const at::Tensor& input_nchw,    // [1, cin_orig, H, W] fp16 RPU DDR
-    const at::Tensor& weight,        // [cout, K] fp16 RPU DDR, col-swizzled (1 core)
-    const at::Tensor& pos_emb_fused, // [1, num_patches, cout] fp16 RPU DDR
+    const at::Tensor& input_nchw,    // [1, cin_orig, H, W] fp16 device DDR
+    const at::Tensor& weight,        // [cout, K] fp16 device DDR, col-swizzled (1 core)
+    const at::Tensor& pos_emb_fused, // [1, num_patches, cout] fp16 device DDR
     int64_t kh, int64_t kw,
     int64_t cin_orig, int64_t cin_padded, int64_t cout,
     int64_t strideh, int64_t stridew,
@@ -173,11 +174,8 @@ static void fused_patch_embedding(
     // Fixed variant would bake BUILD-time addr that sync-only fast-path can't
     // rewrite.
     //
-    // NOTE: input_nchw MUST already be DDR-coherent here. The driver
-    // (run_packed_patch_embed_core's per-image loop) flushes each image before
-    // this call — the flush lives at the batch driver, explicit, rather than
-    // buried per-helper. See the rpu_ddr_flush_force there for the why (a
-    // torch.cat / CPU-fallback input is left un-flushed → stale DDR).
+    // The batch driver publishes public inputs, which may have mutable CPU
+    // aliases. Adapter-owned uploads can explicitly promise prior publication.
     // Per-image live-base slot (see fn doc): each packed image bakes a distinct
     // &slot so REPLAY rewrites the correct per-image source addr.
     TORCH_CHECK(img_slot >= 0 && img_slot < kMaxPackedImages,
@@ -355,7 +353,7 @@ static void check_hyvit2_w8a16_scale_lists(
             const at::Tensor& w = weights[i];
             TORCH_CHECK(w.device().type() == at::kPrivateUse1 && w.is_contiguous(),
                         "hyvit2_set_weights: ", name, "[", i,
-                        "] must be contiguous RPU tensor");
+                        "] must be contiguous device tensor");
             TORCH_CHECK(w.scalar_type() == at::kHalf || w.scalar_type() == at::kChar,
                         "hyvit2_set_weights: ", name, "[", i,
                         "] must be fp16 or int8, got ", w.scalar_type());
@@ -369,7 +367,7 @@ static void check_hyvit2_w8a16_scale_lists(
                             && scale.device().type() == at::kPrivateUse1
                             && scale.is_contiguous(),
                             "hyvit2_set_weights: ", name, "_scale[", i,
-                            "] must be 1D contiguous fp16 RPU tensor");
+                            "] must be 1D contiguous fp16 device tensor");
                 TORCH_CHECK(scale.numel() == w.size(0),
                             "hyvit2_set_weights: ", name, "_scale[", i,
                             "].numel()=", scale.numel(),
@@ -403,6 +401,7 @@ namespace v3 {
 constexpr int64_t HYVIT2_PACKED_ATTN_SITE = 5767182756843666109LL;
 constexpr int64_t HYVIT2_SINGLE_ATTN_SITE = 9203248630619952644LL;
 constexpr int64_t HYVIT2_PACKED_RAW_SPM_ATTN_SITE = 2830105912667431460LL;
+constexpr int64_t HYVIT2_PER_IMAGE_RAW_SPM_ATTN_SITE = 623508127183406940LL;
 constexpr int64_t HYVIT2_SINGLE_RAW_SPM_ATTN_SITE = 2565594785490903973LL;
 constexpr int64_t HYVIT2_KV_SITE = 3316688202874054057LL;
 constexpr int64_t HYVIT2_GRAPH_SCHEDULE_SITE = 3923102957416140944LL;
@@ -421,6 +420,8 @@ constexpr int64_t HYVIT2_ATTN_ALL_REDUCE_SITE = 7296386757428037628LL;
 constexpr int64_t HYVIT2_FC1_LINEAR_SITE = 816252863600784417LL;
 constexpr int64_t HYVIT2_FC2_LINEAR_SITE = 2679807282578599669LL;
 constexpr int64_t HYVIT2_MLP_ALL_REDUCE_SITE = 7190094110879491471LL;
+constexpr int64_t HYVIT2_OWNER_LAYERNORM_SITE = 623508127183407200LL;
+constexpr int64_t HYVIT2_COMPACT_RESIDUAL_SITE = 623508127183407210LL;
 constexpr int64_t HYVIT2_TAIL_SLOT_DMA_SITE = 3131457000840871027LL;
 constexpr int64_t HYVIT2_TAIL_OUTPUT_DMA_SITE = 6474014664636894258LL;
 constexpr int64_t HYVIT2_PROJECTOR_LINEAR_SITE = 7630442159474739795LL;
@@ -428,6 +429,7 @@ constexpr uint32_t HYVIT2_KV_CAPABILITIES =
     KV_INSERT_CAP_V2 | KV_INSERT_CAP_V16 | KV_INSERT_CAP_PAD16 |
     KV_INSERT_CAP_HYBRID2;
 constexpr int64_t HYVIT2_KV_FLAG_DDR_MIRROR = 1;
+constexpr int64_t HYVIT2_KV_FLAG_RAW_SPM_ONLY = 2;
 constexpr int64_t HYVIT2_ATTN_CAPABILITY_FALLBACK_DDR_REQUIRED = 1LL << 0;
 
 enum class HyViT2GraphScheduleRoute : int64_t {
@@ -474,7 +476,8 @@ public:
         at::Tensor fc1_b, fc2_b;                       // MLP biases
     };
 
-    HYViT2VisionModel() = default;
+    explicit HYViT2VisionModel(bool kv_spm_only = false)
+        : cold_kv_spm_only_(kv_spm_only) {}
 
     void set_runtime_config(
         bool fast_replay, bool fast_replay_preload, bool mask_once,
@@ -485,6 +488,19 @@ public:
             "set_weights");
         cold_config_ = {
             fast_replay, fast_replay_preload, mask_once, kvpad16, q_inplace};
+        cold_per_image_attention_ = cold_kv_spm_only_ &&
+            KernelCache::instance().get_kernel("hyvit2_per_image_raw_spm_s196") != nullptr;
+        TORCH_CHECK(!cold_per_image_attention_ ||
+                        (KernelCache::instance().get_program(
+                            "llm_fp16_32b_prefill_trans_prjv_dp_vctxlen") != nullptr &&
+                         KernelCache::instance().get_program(
+                            "llm_fp16_16b_prefill_flash_attn_by_mha_univ_vctxlen") != nullptr),
+                    "HYViT2 per-image attention requires both raw-SPM payloads");
+        // A private REF is the cold opt-in. Both phases must exist together;
+        // old or partial REFs retain the full residual and ordinary LayerNorm.
+        cold_owner_layernorm_ = cold_kv_spm_only_ &&
+            KernelCache::instance().get_kernel("hyvit2_vision_owner_reduce_layernorm_m392n1152") != nullptr &&
+            KernelCache::instance().get_kernel("hyvit2_vision_xor3_compact_residual_raw_full_m392n1152") != nullptr;
         cold_config_bound_ = true;
         invalidate_model_state();
     }
@@ -562,7 +578,7 @@ public:
                         && t.device().type() == at::kPrivateUse1
                         && t.is_contiguous(),
                         "hyvit2_set_weights: ", name,
-                        " must be fp16 contiguous RPU tensor, got dtype=",
+                        " must be fp16 contiguous device tensor, got dtype=",
                         t.scalar_type(), " device=", t.device().type(),
                         " contiguous=", t.is_contiguous());
         };
@@ -588,7 +604,7 @@ public:
                                 && list[i].device().type() == at::kPrivateUse1
                                 && list[i].is_contiguous(),
                                 "hyvit2_set_weights: ", name, "[", i,
-                                "] must be fp16 contiguous RPU tensor, got dtype=",
+                                "] must be fp16 contiguous device tensor, got dtype=",
                                 list[i].scalar_type(), " device=",
                                 list[i].device().type(), " contiguous=",
                                 list[i].is_contiguous());
@@ -688,7 +704,7 @@ public:
                         weight.scalar_type() == at::kHalf &&
                         weight.device().type() == at::kPrivateUse1 &&
                         weight.is_contiguous(),
-                    "hyvit2_set_patch_emb: weight must be nonempty contiguous FP16 RPU [cout,K]");
+                    "hyvit2_set_patch_emb: weight must be nonempty contiguous FP16 device [cout,K]");
         TORCH_CHECK(kernel_size <= weight.size(1) / kernel_size,
                     "hyvit2_set_patch_emb: kernel area exceeds weight K");
         const int64_t kernel_area = kernel_size * kernel_size;
@@ -702,7 +718,7 @@ public:
                         pos_emb.device().type() == at::kPrivateUse1 &&
                         pos_emb.is_contiguous() &&
                         pos_emb.numel() % weight.size(0) == 0,
-                    "hyvit2_set_patch_emb: pos_emb must contain contiguous FP16 RPU rows of cout elements");
+                    "hyvit2_set_patch_emb: pos_emb must contain contiguous FP16 device rows of cout elements");
 
         patch_emb_weight_ = weight;
         patch_emb_pos_emb_ = pos_emb;
@@ -733,7 +749,7 @@ public:
         TORCH_CHECK(num_layers() > 0,
                     "HYViT2VisionModel::forward called before set_weights");
         TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                    "HYViT2VisionModel::forward: input must be on RPU device");
+                    "HYViT2VisionModel::forward: input must be on device");
         TORCH_CHECK(input.is_contiguous(),
                     "HYViT2VisionModel::forward: input must be contiguous");
         TORCH_CHECK(input.dim() == 3 || input.dim() == 4,
@@ -763,6 +779,9 @@ public:
                 "stage descriptor");
             const auto prepared_planned = prepare_stage_candidate(planned_stage_descriptor);
             const auto& planned = prepared_planned->candidate();
+            // Planning restores its temporary shape. Bind the already-validated
+            // request before owner checks in the external patch prologue.
+            image_batch_count_ = input.size(0);
             begin_external_physical_manifest_prologue(
                 planned.physical_manifest, patch_rows, /*position=*/0);
             auto cancel_patch_prologue = c10::make_scope_exit(
@@ -784,7 +803,7 @@ public:
     }
 
     // ========================================================================
-    // forward_multi — all-RPU SigLIP-batch entry. Takes the N camera images as
+    // forward_multi — all-device SigLIP-batch entry. Takes the N camera images as
     // a LIST of [1,C,H,W] tensors (no torch.cat upstream), packs them into one
     // [1, N*256, hidden] hidden via run_packed_patch_embed_list, then runs the
     // identical encoder + projector tail as forward(). image_batch_count_ = N
@@ -796,7 +815,7 @@ public:
         at::TensorList images,
         std::vector<at::Tensor>& k_caches,
         std::vector<at::Tensor>& v_caches,
-        at::IntArrayRef planned_stage_descriptor = {})
+        at::IntArrayRef planned_stage_descriptor = {}, bool inputs_published = false)
     {
         TORCH_CHECK(num_layers() > 0,
                     "HYViT2VisionModel::forward_multi called before set_weights");
@@ -812,12 +831,15 @@ public:
             "descriptor");
         const auto prepared_planned = prepare_stage_candidate(planned_stage_descriptor);
         const auto& planned = prepared_planned->candidate();
+        // Each validated list element is one camera; the packer sets the same
+        // value later, after this descriptor/owner admission boundary.
+        image_batch_count_ = static_cast<int64_t>(images.size());
         begin_external_physical_manifest_prologue(
             planned.physical_manifest, patch_rows, /*position=*/0);
         auto cancel_patch_prologue = c10::make_scope_exit(
             [&] { cancel_external_physical_manifest_prologue(); });
         at::Tensor hidden_states = run_packed_patch_embed_list(
-            images, /*consume_external_prologue=*/true);
+            images, /*consume_external_prologue=*/true, inputs_published);
         at::Tensor result = forward_packed(
             hidden_states, image_batch_count_, k_caches, v_caches,
             planned_stage_descriptor);
@@ -825,16 +847,16 @@ public:
         return result;
     }
 
-    at::Tensor patch_embed(const at::Tensor& input) {
+    at::Tensor patch_embed(const at::Tensor& input, bool inputs_published = false) {
         validate_patch_inputs({input}, /*allow_batched_tensor=*/true);
         return run_packed_patch_embed(
-            input, /*consume_external_prologue=*/false);
+            input, /*consume_external_prologue=*/false, inputs_published);
     }
 
-    at::Tensor patch_embed_multi(at::TensorList images) {
+    at::Tensor patch_embed_multi(at::TensorList images, bool inputs_published = false) {
         validate_patch_inputs(images, /*allow_batched_tensor=*/false);
         return run_packed_patch_embed_list(
-            images, /*consume_external_prologue=*/false);
+            images, /*consume_external_prologue=*/false, inputs_published);
     }
 
     at::Tensor forward_packed(
@@ -848,7 +870,7 @@ public:
                     "HYViT2VisionModel::forward_packed: hidden input must be 3D, got ",
                     hidden_states.dim(), "D");
         TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1,
-                    "HYViT2VisionModel::forward_packed: hidden input must be on RPU");
+                    "HYViT2VisionModel::forward_packed: hidden input must be on device");
         TORCH_CHECK(hidden_states.is_contiguous(),
                     "HYViT2VisionModel::forward_packed: hidden input must be contiguous");
         TORCH_CHECK(packed_image_count > 0,
@@ -940,7 +962,7 @@ public:
         // GUARD (design note §2 三件套 ①): host-side per-chunk SPM budget
         // pre-check BEFORE dispatch. The probe note proved a naive single-chunk
         // 1564-token forward exhausts the 8 MB SPM block and enters an infinite
-        // allocator retry that POISONS the whole RPU board (run-queue wedged
+        // allocator retry that POISONS the whole device board (run-queue wedged
         // until reboot). The framework's auto chunk-size scan
         // (compute_chunks_impl) already rejects an over-budget seq with a clear
         // TORCH_CHECK on the AUTO path we now take (set_chunk_size_override is
@@ -961,7 +983,7 @@ public:
                         "HYViT2VisionModel::forward_packed: even the minimum chunk "
                         "(cs=16) per-chunk SPM peak (", peak, " B) exceeds the "
                         "usable SPM budget (", usable, " B). Refusing to dispatch "
-                        "— a naive oversize forward would wedge the RPU board. "
+                        "— a naive oversize forward would wedge the device board. "
                         "seq_len=", seq_len, ", hidden=", hidden_size(), ".");
         }
 
@@ -1161,6 +1183,95 @@ protected:
         return cfg;
     }
 
+    bool owner_layernorm_enabled(int64_t rows) const {
+        if (!cold_owner_layernorm_ || !cold_kv_spm_only_ || cold_per_image_attention_ ||
+            rows != 392 || image_batch_count_ != 2 || num_layers() != 27 ||
+            layer_weights_.size() != 27 || layer_bias_norm_.size() != 27 ||
+            hidden_size() != 1152 || intermediate_size() != 4352 ||
+            num_q_heads() != 16 || num_kv_heads() != 16 || head_dim() != 80 ||
+            orig_head_dim_ != 72 || eps_ != 1e-6) return false;
+        if (!layer_weights_.front().q_w.defined()) return false;
+        const auto dtype = layer_weights_.front().q_w.scalar_type();
+        if (dtype != at::kHalf && dtype != at::kChar) return false;
+        for (const auto& w : layer_weights_) {
+            for (const auto* t : {&w.q_w, &w.k_w, &w.v_w, &w.o_w, &w.fc1_w, &w.fc2_w})
+                if (!t->defined() || t->scalar_type() != dtype) return false;
+            for (const auto* t : {&w.q_ws, &w.k_ws, &w.v_ws, &w.o_ws, &w.fc1_ws, &w.fc2_ws})
+                if (dtype == at::kChar ? (!t->defined() || t->scalar_type() != at::kHalf)
+                                      : t->defined()) return false;
+        }
+        return true;
+    }
+
+    std::vector<int64_t> owner_layernorm_arguments(bool compact) const {
+        // ABI1: role, full shape, TP, owner rows, ring rounds/elements,
+        // compact/full bytes, epsilon denominator, affine/alias, epoch seed,
+        // ring grid, active norm warps/tail, LN parameter shift, epoch GP,
+        // unchanged complete-root allocation. Both phases use FP16 retirement.
+        return {1, compact ? 1 : 0, 392, 1152, 8, 49, 1, 63488,
+                112896, 903168, 1000000, compact ? 0 : 1, compact ? 0 : 1,
+                0, 8, 4, 1, 8, 42, 1};
+    }
+
+    void validate_owner_layernorm_manifest(const FmbPhysicalExecutionManifest& manifest) const {
+        const bool enabled = owner_layernorm_enabled(manifest.physical_length);
+        size_t owner = 0, compact = 0, attention = 0;
+        for (const auto& route : manifest.routes) {
+            const bool first = route.site_id == HYVIT2_OWNER_LAYERNORM_SITE;
+            const bool second = route.site_id == HYVIT2_COMPACT_RESIDUAL_SITE;
+            if (first || second) {
+                first ? ++owner : ++compact;
+                TORCH_CHECK(enabled && route.family == FmbRouteFamily::ALL_REDUCE &&
+                                route.selector == 1 && route.flags == 0 && route.invocation == 0 &&
+                                route.arguments == owner_layernorm_arguments(second),
+                            "HYViT2 owner LayerNorm descriptor/owner ABI mismatch");
+            }
+            if (!enabled) continue;
+            TORCH_CHECK(route.site_id != HYVIT2_ATTN_ALL_REDUCE_SITE &&
+                            route.site_id != HYVIT2_MLP_ALL_REDUCE_SITE,
+                        "HYViT2 owner LayerNorm rejects mixed full/compact residual routes");
+            if (route.family == FmbRouteFamily::ATTENTION) {
+                ++attention;
+                const std::vector<int64_t> expected{2, 392, 392, 16, 80, 72, 8};
+                TORCH_CHECK(route.site_id == HYVIT2_PACKED_RAW_SPM_ATTN_SITE &&
+                                route.selector == static_cast<int64_t>(AttentionExecutionPolicy::SPM_KV_BY_MHA) &&
+                                route.flags == 0 && route.invocation == 0 && route.arguments == expected,
+                            "HYViT2 owner LayerNorm requires one complete raw-SPM attention chunk");
+            }
+        }
+        if (!enabled) return;
+        TORCH_CHECK(manifest.state == FmbPhysicalManifestState::COMPLETE &&
+                        manifest.logical_length == 392 && manifest.physical_length == 392 &&
+                        manifest.execution_padding_rows == 0 && manifest.kv_logical_length == 392 &&
+                        manifest.kv_insert_physical_rows == (cold_config_.kvpad16 ? 400 : 392) &&
+                        manifest.graph_lifecycle == FmbGraphLifecycle::COMPOSITE_CHILD &&
+                        manifest.linear_accumulation == FmbLinearAccumulationPolicy::ACC16 &&
+                        owner == 1 && compact == 1 && attention == 1,
+                    "HYViT2 owner LayerNorm requires COMPLETE exact M392 and both dependent phases");
+    }
+
+    void consume_owner_layernorm_route(bool compact, const ChunkInfo& chunk, int layer) {
+        TORCH_CHECK(owner_layernorm_enabled(chunk.len) && ctx().has_complete_physical_manifest() &&
+                        ctx().attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA &&
+                        ctx().position == 0 && ctx().batch_size == 1 && !ctx().is_causal &&
+                        !ctx().attention_mask.has_value() && chunk.idx == 0 && chunk.offset == 0 &&
+                        chunk.len == 392 && chunk.kv_seq_len == 392 &&
+                        ctx().stage_plan.compute.chunks.size() == 1 &&
+                        ctx().stage_plan.qkv.chunks.size() == 1 &&
+                        (layer == 0 || ctx().input_in_spm) &&
+                        (layer == num_layers() - 1 || ctx().output_to_spm),
+                    "HYViT2 owner LayerNorm lost its complete SPM-resident lifetime");
+        if (compact) {
+            ctx().consume_physical_route(FmbRouteFamily::ALL_REDUCE,
+                HYVIT2_COMPACT_RESIDUAL_SITE, 1, 0,
+                owner_layernorm_arguments(true), chunk.idx);
+        } else {
+            ctx().consume_physical_route(FmbRouteFamily::ALL_REDUCE,
+                HYVIT2_OWNER_LAYERNORM_SITE, 1, 0,
+                owner_layernorm_arguments(false), chunk.idx);
+        }
+    }
+
     FmbPhysicalExecutionManifest physical_manifest_for_candidate(
         const FmbThreeStageChunkPlan& plan,
         const LayoutContext& layout,
@@ -1187,6 +1298,8 @@ protected:
             !raw_spm || raw_spm_eligible,
             "RPU_PLANNER_REJECT:CAPABILITY: HYViT2 raw-SPM attention was "
             "selected without one full 196-row/image schedule");
+        TORCH_CHECK(!cold_kv_spm_only_ || raw_spm,
+                    "HYViT2 KV-SPM-only owner requires full raw-SPM attention");
 
         const int64_t h = hidden_size();
         const int64_t nq = num_q_heads();
@@ -1271,7 +1384,8 @@ protected:
                 FmbRouteFamily::KV_INSERT, HYVIT2_KV_SITE,
                 static_cast<int64_t>(kv_plan.route()),
                 std::vector<int64_t>(kv_arguments.begin(), kv_arguments.end()),
-                HYVIT2_KV_FLAG_DDR_MIRROR, invocation);
+                cold_kv_spm_only_ ? HYVIT2_KV_FLAG_RAW_SPM_ONLY
+                                  : HYVIT2_KV_FLAG_DDR_MIRROR, invocation);
             append(
                 FmbRouteFamily::MUTABLE_DMA, HYVIT2_Q_SAVE_DMA_SITE,
                 static_cast<int64_t>(
@@ -1296,7 +1410,8 @@ protected:
                  physical_len * local_q_dim * DWIDTH, tp},
                 /*flags=*/0, invocation);
 
-            const int64_t attention_site = raw_spm
+            const int64_t attention_site = cold_per_image_attention_
+                ? HYVIT2_PER_IMAGE_RAW_SPM_ATTN_SITE : raw_spm
                 ? (image_batch_count_ > 1
                        ? HYVIT2_PACKED_RAW_SPM_ATTN_SITE
                        : HYVIT2_SINGLE_RAW_SPM_ATTN_SITE)
@@ -1308,12 +1423,15 @@ protected:
                 static_cast<int64_t>(
                     raw_spm ? AttentionExecutionPolicy::SPM_KV_BY_MHA
                             : AttentionExecutionPolicy::DDR_KV),
-                {image_batch_count_, chunk.len, physical_len, nq, hd,
-                 orig_head_dim_, tp},
+                cold_per_image_attention_
+                    ? std::vector<int64_t>{image_batch_count_, 196, chunk.len,
+                        physical_len, nq, hd, orig_head_dim_, tp, 208}
+                    : std::vector<int64_t>{image_batch_count_, chunk.len, physical_len,
+                        nq, hd, orig_head_dim_, tp},
                 raw_spm || raw_spm_eligible
                     ? 0 : HYVIT2_ATTN_CAPABILITY_FALLBACK_DDR_REQUIRED,
                 invocation);
-            if (image_batch_count_ > 1) {
+            if (image_batch_count_ > 1 && !cold_per_image_attention_) {
                 append(
                     FmbRouteFamily::GRAPH_SCHEDULE,
                     HYVIT2_MASK_SCHEDULE_SITE,
@@ -1328,24 +1446,40 @@ protected:
             append_linear(
                 HYVIT2_O_LINEAR_SITE,
                 {chunk.len, h, nq * hd, 0, tp}, invocation);
+            if (owner_layernorm_enabled(chunk.len)) {
+                TORCH_CHECK(raw_spm && physical_len == 392 && logical_len == 392 && position == 0,
+                            "HYViT2 owner LayerNorm requires exact raw-SPM candidate");
+                append(FmbRouteFamily::ALL_REDUCE,
+                       HYVIT2_OWNER_LAYERNORM_SITE, 1,
+                       owner_layernorm_arguments(false), 0, invocation);
+            } else {
             append(
                 FmbRouteFamily::ALL_REDUCE,
                 HYVIT2_ATTN_ALL_REDUCE_SITE,
                 fmb_ring_all_reduce_route_selector(chunk.len, h),
                 {chunk.len, h, tp, NUM_CORES},
                 /*flags=*/0, invocation);
+            }
             append_linear(
                 HYVIT2_FC1_LINEAR_SITE,
                 {chunk.len, inter, h, 1, tp}, invocation);
             append_linear(
                 HYVIT2_FC2_LINEAR_SITE,
                 {chunk.len, h, inter, 0, tp}, invocation);
+            if (owner_layernorm_enabled(chunk.len)) {
+                TORCH_CHECK(raw_spm && physical_len == 392 && logical_len == 392 && position == 0,
+                            "HYViT2 owner LayerNorm requires exact raw-SPM candidate");
+                append(FmbRouteFamily::ALL_REDUCE,
+                       HYVIT2_COMPACT_RESIDUAL_SITE, 1,
+                       owner_layernorm_arguments(true), 0, invocation);
+            } else {
             append(
                 FmbRouteFamily::ALL_REDUCE,
                 HYVIT2_MLP_ALL_REDUCE_SITE,
                 fmb_ring_all_reduce_route_selector(chunk.len, h),
                 {chunk.len, h, tp, NUM_CORES},
                 /*flags=*/0, invocation);
+            }
 
             const auto append_merger_permute = [&](int64_t site_id) {
                 append(
@@ -1455,9 +1589,11 @@ protected:
         int64_t position) const override {
         LayoutContext ddr_layout = layout;
         ddr_layout.attention_policy = AttentionExecutionPolicy::DDR_KV;
-        std::vector<FmbPhysicalExecutionManifest> domain{
-            physical_manifest_for_candidate(
-                plan, ddr_layout, physical_len, logical_len, position)};
+        std::vector<FmbPhysicalExecutionManifest> domain;
+        if (!cold_kv_spm_only_) {
+            domain.push_back(physical_manifest_for_candidate(
+                plan, ddr_layout, physical_len, logical_len, position));
+        }
         LayoutContext spm_layout = layout;
         spm_layout.attention_policy =
             AttentionExecutionPolicy::SPM_KV_BY_MHA;
@@ -1471,7 +1607,33 @@ protected:
 
     FmbPhysicalManifestForwardCapability
     physical_manifest_forward_capability(
-        const FmbPhysicalExecutionManifest& /*manifest*/) const override {
+        const FmbPhysicalExecutionManifest& manifest) const override {
+        validate_owner_layernorm_manifest(manifest);
+        size_t kv_routes = 0, raw_attention_routes = 0;
+        for (const auto& route : manifest.routes) {
+            if (route.site_id == HYVIT2_KV_SITE) {
+                ++kv_routes;
+                TORCH_CHECK(route.family == FmbRouteFamily::KV_INSERT &&
+                                route.flags == (cold_kv_spm_only_
+                                    ? HYVIT2_KV_FLAG_RAW_SPM_ONLY
+                                    : HYVIT2_KV_FLAG_DDR_MIRROR),
+                            "HYViT2 KV storage descriptor/owner mismatch");
+            }
+            if (cold_kv_spm_only_ && route.family == FmbRouteFamily::ATTENTION) {
+                const bool site_matches = cold_per_image_attention_
+                    ? route.site_id == HYVIT2_PER_IMAGE_RAW_SPM_ATTN_SITE
+                    : (route.site_id == HYVIT2_PACKED_RAW_SPM_ATTN_SITE ||
+                       route.site_id == HYVIT2_SINGLE_RAW_SPM_ATTN_SITE);
+                TORCH_CHECK(site_matches &&
+                                route.selector == static_cast<int64_t>(
+                                    AttentionExecutionPolicy::SPM_KV_BY_MHA),
+                            "HYViT2 KV-SPM-only cannot consume a DDR attention route");
+                ++raw_attention_routes;
+            }
+        }
+        TORCH_CHECK(!cold_kv_spm_only_ ||
+                        (kv_routes == 1 && raw_attention_routes == 1),
+                    "HYViT2 KV-SPM-only requires one complete QKV/attention chunk");
         return {true, FmbGraphLifecycle::COMPOSITE_CHILD};
     }
 
@@ -1510,14 +1672,30 @@ protected:
                 return false;
             }
         }
+        if (cold_per_image_attention_) {
+            if (!cold_kv_spm_only_ || image_batch_count_ != 3) return false;
+            for (const auto& w : layer_weights_) {
+                for (const auto* t : {&w.q_w, &w.k_w, &w.v_w, &w.o_w,
+                                     &w.fc1_w, &w.fc2_w}) {
+                    if (!t->defined() || t->scalar_type() != at::kHalf) return false;
+                }
+                for (const auto* t : {&w.q_ws, &w.k_ws, &w.v_ws, &w.o_ws,
+                                     &w.fc1_ws, &w.fc2_ws}) {
+                    if (t->defined()) return false;
+                }
+            }
+        }
         const int mask_type = image_batch_count_ > 1 ? 4 : 0;
+        const bool attention_valid = cold_per_image_attention_
+            ? sdpa_by_mha_spm_is_valid(1, 196, 196, num_q_heads(),
+                num_kv_heads(), head_dim(), NUM_CORES, 0)
+            : sdpa_by_mha_spm_is_valid(
+                /*batch=*/1, seq, seq, num_q_heads(), num_kv_heads(),
+                head_dim(), NUM_CORES, mask_type);
         return num_layers() == 27 && layer_weights_.size() == 27 &&
             hidden_size() == 1152 && intermediate_size() == 4352 &&
             num_q_heads() == 16 && num_kv_heads() == 16 &&
-            head_dim() == 80 && orig_head_dim_ == 72 &&
-            sdpa_by_mha_spm_is_valid(
-                /*batch=*/1, seq, seq, num_q_heads(), num_kv_heads(),
-                head_dim(), NUM_CORES, mask_type);
+            head_dim() == 80 && orig_head_dim_ == 72 && attention_valid;
     }
 
     // ========================================================================
@@ -1561,8 +1739,13 @@ protected:
         // dumps it to q_ddr_buf_, never reads it again — Phase 2 reloads from
         // DDR into q_comp).
         int64_t qkv  = A(kv_cs   * local_q_dim * DWIDTH);
+        // Each B1/S196 call validates a 208-row K extent. The last image
+        // starts at row 392, so retain 600 rows (608 aligned), not just 592.
+        // Those tail K lanes are excluded by the kernel's logical seq_k=196.
         const int64_t raw_kv_rows = raw_spm
-            ? Align(kv_cs, int64_t{16}) : kv_cs;
+            ? Align(cold_per_image_attention_
+                ? std::max(kv_cs, image_batch_count_ * 196 + 12) : kv_cs,
+                int64_t{16}) : kv_cs;
         const int64_t raw_kv = A(raw_kv_rows * local_q_dim * DWIDTH);
         // Compute: Phase-2 working buffers → sized at comp_cs.
         int64_t q_comp = A(comp_cs * local_q_dim * DWIDTH);
@@ -1647,7 +1830,7 @@ protected:
         // sdpa_tmp 混叠）。尺寸公式同基类 rpu_qwen3_model.h:1177。
         // MASK_ONCE 打开时改成 LayerWide + 撑满相位（见文件头），这样它才既不被
         // Phase-2 的 fc1 压、也不被下一层 Phase-1 的 q_kv/k/v 压。
-        if (image_batch_count_ > 1) {
+        if (image_batch_count_ > 1 && !cold_per_image_attention_) {
             const bool once = cold_config_.mask_once;
             decls.push_back({"sdpa_mask",
                              A(comp_cs * CeilDiv(seq_len_, (int64_t)16) * 32),
@@ -1778,6 +1961,10 @@ protected:
         TORCH_CHECK(
             ctx().has_complete_physical_manifest(),
             "HYViT2VisionModel requires a COMPLETE physical descriptor");
+        TORCH_CHECK(!cold_kv_spm_only_ ||
+                        (ctx().attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA &&
+                         chunk.offset == 0 && chunk.len == seq_len_),
+                    "HYViT2 KV-SPM-only runtime geometry drift");
         const auto& lw = layer_weights_[layer_idx];
         int64_t seq_len = chunk.len;
         int64_t kv_pos  = ctx().position + chunk.offset;  // absolute KV row
@@ -1850,8 +2037,6 @@ protected:
 
         // KV cache insert at absolute position chunk.offset.
         // Pitfall 3 structural fix: takes SPM offsets via addr_offset(name).value.
-        auto& k_cache = (*ctx().k_caches)[layer_idx];
-        auto& v_cache = (*ctx().v_caches)[layer_idx];
         const int64_t kv_physical_rows = cold_config_.kvpad16 && kv_pos % 16 == 0
             ? Align(seq_len, int64_t{16}) : seq_len;
         ctx().consume_physical_route(
@@ -1878,15 +2063,20 @@ protected:
         ctx().consume_physical_route(
             FmbRouteFamily::KV_INSERT, HYVIT2_KV_SITE,
             static_cast<int64_t>(kv_plan.route()),
-            HYVIT2_KV_FLAG_DDR_MIRROR,
+            cold_kv_spm_only_ ? HYVIT2_KV_FLAG_RAW_SPM_ONLY
+                              : HYVIT2_KV_FLAG_DDR_MIRROR,
             route.arguments, chunk.idx);
-        rpu_launch_insert_kvcache_spm_unified_with_plan(
-            k_cache, v_cache,
-            addr_offset("k").value, addr_offset("v").value,
-            nq, hd, NUM_CORES,
-            /*k_cache_batch_offset_elems=*/0,
-            /*v_cache_batch_offset_elems=*/0,
-            kv_pad_rows_, kv_plan);
+        if (!cold_kv_spm_only_) {
+            auto& k_cache = (*ctx().k_caches)[layer_idx];
+            auto& v_cache = (*ctx().v_caches)[layer_idx];
+            rpu_launch_insert_kvcache_spm_unified_with_plan(
+                k_cache, v_cache,
+                addr_offset("k").value, addr_offset("v").value,
+                nq, hd, NUM_CORES,
+                /*k_cache_batch_offset_elems=*/0,
+                /*v_cache_batch_offset_elems=*/0,
+                kv_pad_rows_, kv_plan);
+        }
 
         // Save Q to the per-seq Q staging slot via spm_scatter_ddr_dma
         // (position-indexed by chunk.offset). The slot (keyed by seq_len_) is
@@ -2022,7 +2212,30 @@ protected:
                     " == seq_len_=", seq_len_, "); plan_kv_first_chunks must "
                     "force ChunkPlan{seq_len_,1} for N>1.");
 
-        if (image_batch_count_ > 1) {
+        if (cold_per_image_attention_) {
+            TORCH_CHECK(cold_kv_spm_only_ && image_batch_count_ == 3 &&
+                            ctx().attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA &&
+                            chunk.offset == 0 && chunk.len == 588 && seq_len_ == 588,
+                        "HYViT2 per-image raw attention requires one complete 3x196 chunk");
+            ctx().consume_physical_route(
+                FmbRouteFamily::ATTENTION, HYVIT2_PER_IMAGE_RAW_SPM_ATTN_SITE,
+                static_cast<int64_t>(AttentionExecutionPolicy::SPM_KV_BY_MHA), 0,
+                {image_batch_count_, 196, seq_len, seq_len_, nq, hd,
+                 orig_head_dim_, NUM_CORES, 208}, chunk.idx);
+            // Linear weights are still reused across the full packed input.
+            // Slice only attention: each image sees exactly its own 196 keys.
+            // Reuse the disjoint V-transpose scratch sequentially in this graph.
+            for (int64_t image = 0; image < image_batch_count_; ++image) {
+                const uint32_t offset = image * 196 * (nq / NUM_CORES) * hd * DWIDTH;
+                rpu_launch_v_transpose_spm(
+                    addr(0, "v") + offset, addr(0, "sdpa_tmp"),
+                    1, 196, nq, hd, NUM_CORES);
+                rpu_launch_sdpa_by_mha_spm(
+                    addr(0, "q_comp") + offset, addr(0, "k") + offset,
+                    addr(0, "sdpa_tmp"), addr(0, "sdpa_out") + offset,
+                    0, 0, attn_scale, 1, 196, 196, nq, nq, hd, NUM_CORES);
+            }
+        } else if (image_batch_count_ > 1) {
             // SigLIP-batch: N images packed into seq_len_. Per-image attention
             // isolation via the minibatch kernel — image i attends ONLY its own
             // per_image_ctx tokens. K/V were inserted contiguously at position 0
@@ -2174,6 +2387,13 @@ protected:
             addr(0, "sdpa_out"), lw.o_w, addr(0, "oproj"),
             seq_len, h, nq * hd, 0, NUM_CORES,
             layer_addr(layer_idx, 0, "o_bias"), lw.o_ws);
+        if (owner_layernorm_enabled(seq_len)) {
+            consume_owner_layernorm_route(false, chunk, layer_idx);
+            launch_hyvit2_vision_owner_layernorm_spm(
+                addr(0, "oproj"), addr(0, "residual1"), addr(0, "input_norm"), addr(0, "oproj"),
+                layer_addr(layer_idx, 0, "ln2_gamma"), layer_addr(layer_idx, 0, "ln2_beta"),
+                eps_, seq_len);
+        } else {
         if (ctx().has_complete_physical_manifest()) {
             ctx().consume_physical_route(
                 FmbRouteFamily::ALL_REDUCE,
@@ -2191,6 +2411,7 @@ protected:
             addr(0, "input_norm"), addr(0, "oproj"),
             layer_addr(layer_idx, 0, "ln2_gamma"), layer_addr(layer_idx, 0, "ln2_beta"),
             seq_len, h, eps_, false, 0, NUM_CORES);
+        }
         if (ctx().has_complete_physical_manifest()) {
             ctx().consume_physical_route(
                 FmbRouteFamily::LINEAR, HYVIT2_FC1_LINEAR_SITE,
@@ -2223,6 +2444,11 @@ protected:
             addr(0, "fc1"), lw.fc2_w, addr(0, "oproj"),
             seq_len, h, is_, 0, NUM_CORES,
             layer_addr(layer_idx, 0, "fc2_bias"), lw.fc2_ws);
+        if (owner_layernorm_enabled(seq_len)) {
+            consume_owner_layernorm_route(true, chunk, layer_idx);
+            launch_hyvit2_vision_compact_residual_spm(
+                addr(0, "oproj"), addr(0, "input_norm"), addr(0, "residual1"), seq_len);
+        } else {
         if (ctx().has_complete_physical_manifest()) {
             ctx().consume_physical_route(
                 FmbRouteFamily::ALL_REDUCE,
@@ -2234,6 +2460,7 @@ protected:
         rpu_launch_all_reduce_sum_residual_kernel(
             addr(0, "oproj"), addr(0, "input_norm"), addr(0, "residual1"),
             seq_len, h, NUM_CORES, NUM_CORES);
+        }
 
         // ----------------------------------------------------------------
         // SPM→DDR output DMA or post-LN+projector (last layer)
@@ -2567,7 +2794,7 @@ protected:
                             im.scalar_type() == at::kHalf &&
                             im.device().type() == at::kPrivateUse1 &&
                             im.is_contiguous(),
-                        "HYViT2 patch embedding requires contiguous FP16 RPU [B,3,H,W]");
+                        "HYViT2 patch embedding requires contiguous FP16 device [B,3,H,W]");
             TORCH_CHECK(im.size(0) > 0 && im.size(0) <= kMaxPackedImages &&
                             (allow_batched_tensor || im.size(0) == 1) &&
                             im.size(1) == pe_cin_orig_,
@@ -2617,15 +2844,18 @@ protected:
     // the graph's SPM read/write dependency tracking intact so image i+1's GEMM
     // serializes after image i's output DMA, and bounds SPM to a single image's
     // footprint (3× would OOM). One reset_temporary AFTER the loop frees the
-    // patch_emb temp before the encoder. Sets image_batch_count_ = N.
+    // patch_emb temp before the encoder. The exact COMPLETE two/three-camera
+    // profile drains device streams before reusing the arena, without ending
+    // the prepared queue. Other entries retain the original segment boundary.
+    // Sets image_batch_count_ = N.
     //
     // Shared by both the single-tensor 4D forward (run_packed_patch_embed, which
-    // slices [N,C,H,W] into the vector) and the all-RPU list path (forward_multi
+    // slices [N,C,H,W] into the vector) and the all-device list path (forward_multi
     // via run_packed_patch_embed_list, which receives N distinct image tensors).
     // ========================================================================
     at::Tensor run_packed_patch_embed_core(
         const std::vector<at::Tensor>& images,
-        bool consume_external_prologue) {
+        bool consume_external_prologue, bool inputs_published = false) {
         if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
         int64_t N = static_cast<int64_t>(images.size());
         TORCH_CHECK(N > 0, "run_packed_patch_embed: empty image list");
@@ -2670,16 +2900,9 @@ protected:
         at::Tensor hidden = at::empty({1, N * npp, cout}, opts);
 
         for (int64_t i = 0; i < N; ++i) {
-            // ② Flush each image at the batch driver, before its mutable input
-            // DMA reads it (fused_patch_embedding step ①). A batched caller's
-            // image may be a torch.cat / CPU-fallback result that PyTorch left
-            // un-flushed to device DDR → the DMA would read stale bytes →
-            // non-deterministic output. Idempotent for already-coherent inputs
-            // (e.g. the 4D single-image .to('rpu') path), so N=1 stays
-            // byte-identical. (CLAUDE.md "mutable DMA reading a torch.cat result
-            // MUST be fed a flushed tensor"; memory rpu-adapter-pitfalls #5.)
-            rpu_ddr_flush_force(
-                const_cast<c10::Half*>(images[i].data_ptr<c10::Half>()));
+            if (!inputs_published) {
+                rpu_ddr_flush_force(images[i].data_ptr<c10::Half>());
+            }
             fused_patch_embedding(
                 images[i], patch_emb_weight_, patch_emb_pos_emb_,
                 pe_kh_, pe_kw_, pe_cin_orig_, pe_cin_padded_, pe_cout_,
@@ -2687,18 +2910,69 @@ protected:
                 hidden, /*seq_off=*/i * npp, /*img_slot=*/(int)i, offsets, nc,
                 consume_external_prologue ? &ctx() : nullptr);
         }
+        retire_patch_temporaries(consume_external_prologue, N, H, W, npp);
+        image_batch_count_ = N;
+        return hidden;
+    }
+
+    bool patch_encoder_device_fence_eligible(
+        int64_t image_count, int64_t height, int64_t width,
+        int64_t patches_per_image) const {
+        if (!ctx().has_complete_physical_manifest() ||
+            (image_count != 2 && image_count != 3) ||
+            height != 224 || width != 224 || patches_per_image != 196 ||
+            !has_patch_emb_ || patch_embed_cores_ != NUM_CORES ||
+            pe_cin_orig_ != 3 || pe_cin_padded_ != 16 || pe_cout_ != 1152 ||
+            pe_kh_ != 16 || pe_kw_ != 16 ||
+            pe_strideh_ != 16 || pe_stridew_ != 16 ||
+            num_layers() != 27 || layer_weights_.size() != 27 ||
+            hidden_size() != 1152 || intermediate_size() != 4352 ||
+            num_q_heads() != 16 || num_kv_heads() != 16 ||
+            head_dim() != 80 || orig_head_dim_ != 72) {
+            return false;
+        }
+        // begin_external_physical_manifest_prologue validated this manifest;
+        // each image has already consumed its input/Linear/gather/position/
+        // output receipts. A standalone patch call never grants this proof.
+        const auto& manifest = ctx().physical_manifest();
+        const int64_t rows = image_count * patches_per_image;
+        return manifest.state == FmbPhysicalManifestState::COMPLETE &&
+            manifest.graph_lifecycle == FmbGraphLifecycle::COMPOSITE_CHILD &&
+            manifest.linear_accumulation == FmbLinearAccumulationPolicy::ACC16 &&
+            manifest.logical_length == rows &&
+            manifest.physical_length == rows &&
+            manifest.execution_padding_rows == 0 &&
+            manifest.kv_logical_length == rows;
+    }
+
+    void retire_patch_temporaries(
+        bool consume_external_prologue, int64_t image_count,
+        int64_t height, int64_t width, int64_t patches_per_image) {
         auto& graph = RpuKernelGraph::active();
         const auto graph_state = graph.state();
         if (graph_state == RpuKernelGraph::State::RECORDING ||
             graph_state == RpuKernelGraph::State::REPLAYING) {
-            graph.record_branch(
-                0x5349474c49505f52ull,  // "SIGLIP_R"
-                GraphSignature{},
-                "hyvit2_patch_embed_spm_reset");
+            if (consume_external_prologue && patch_encoder_device_fence_eligible(
+                    image_count, height, width, patches_per_image)) {
+                // SDK SYNC(offset=0) waits for all preceding STARTs on the
+                // target stream. Compute and the packed-output DMA use stream
+                // 0; DMA channels 1..7 use 2..14. Drain all eight before any
+                // encoder operation can reuse patch SPM or read packed DDR.
+                // Subsequent multichannel transfers keep their existing
+                // pre/post barriers. These real device fences stay within the
+                // queue; allocator generation and resource budgets are unchanged.
+                for (uint8_t channel = 0; channel < NUM_CORES; ++channel) {
+                    graph.record_barrier(/*self_stream=*/0,
+                                         /*target_stream=*/channel * 2);
+                }
+            } else {
+                graph.record_branch(
+                    0x5349474c49505f52ull,  // "SIGLIP_R"
+                    GraphSignature{},
+                    "hyvit2_patch_embed_spm_reset");
+            }
         }
-        SPM_ALLOC.reset_temporary();  // free patch_emb temp before the encoder
-        image_batch_count_ = N;
-        return hidden;
+        SPM_ALLOC.reset_temporary();  // retain the original arena/generation reset
     }
 
     // 4D [N,C,H,W] single-tensor path (forward auto-detect): slice into N
@@ -2706,7 +2980,7 @@ protected:
     // of a contiguous [N,C,H,W] is already contiguous, so .contiguous() is a
     // metadata no-op (no kernel/copy). N=1 stays byte-identical to before.
     at::Tensor run_packed_patch_embed(
-        const at::Tensor& input, bool consume_external_prologue) {
+        const at::Tensor& input, bool consume_external_prologue, bool inputs_published = false) {
         int64_t N = input.size(0);
         std::vector<at::Tensor> images;
         images.reserve(N);
@@ -2714,16 +2988,16 @@ protected:
             images.push_back(input.slice(0, i, i + 1).contiguous());
         }
         return run_packed_patch_embed_core(
-            images, consume_external_prologue);
+            images, consume_external_prologue, inputs_published);
     }
 
-    // All-RPU list path (forward_multi): the N camera images arrive as distinct
+    // All-device list path (forward_multi): the N camera images arrive as distinct
     // [1,C,H,W] tensors — no torch.cat upstream, no slice here.
     at::Tensor run_packed_patch_embed_list(
-        at::TensorList images, bool consume_external_prologue) {
+        at::TensorList images, bool consume_external_prologue, bool inputs_published = false) {
         std::vector<at::Tensor> imgs(images.begin(), images.end());
         return run_packed_patch_embed_core(
-            imgs, consume_external_prologue);
+            imgs, consume_external_prologue, inputs_published);
     }
 
 private:
@@ -2764,6 +3038,9 @@ private:
     }
 
     // ----- Model state -----
+    const bool cold_kv_spm_only_;
+    bool cold_per_image_attention_ = false;
+    bool cold_owner_layernorm_ = false;
     HYViT2ColdConfig cold_config_;
     bool cold_config_bound_ = false;
     std::vector<int64_t> kvinsert_cost_weight_identity() const override {
@@ -2771,6 +3048,9 @@ private:
         std::vector<int64_t> identity{1};
         append_kvinsert_cost_scalar_identity(identity, eps_);
         identity.insert(identity.end(), {
+            static_cast<int64_t>(cold_kv_spm_only_),
+            static_cast<int64_t>(cold_per_image_attention_),
+            static_cast<int64_t>(cold_owner_layernorm_),
             static_cast<int64_t>(merger_member_major_),
             static_cast<int64_t>(proj1_in_merger_),
             static_cast<int64_t>(cold_config_.fast_replay),
@@ -2937,6 +3217,10 @@ int64_t rpu_hyvit2_create() {
     return HYViT2Registry::create();
 }
 
+int64_t rpu_hyvit2_create_kv_spm_only() {
+    return HYViT2Registry::create(true);
+}
+
 void rpu_hyvit2_set_runtime_config(
     int64_t handle,
     bool fast_replay, bool fast_replay_preload, bool mask_once,
@@ -3032,16 +3316,16 @@ void rpu_hyvit2_model_set_patch_emb(
 
 at::Tensor rpu_hyvit2_patch_embed(
     int64_t handle,
-    const at::Tensor& input)
+    const at::Tensor& input, bool inputs_published)
 {
-    return HYViT2Registry::get(handle, "rpu_hyvit2")->patch_embed(input);
+    return HYViT2Registry::get(handle, "rpu_hyvit2")->patch_embed(input, inputs_published);
 }
 
 at::Tensor rpu_hyvit2_patch_embed_multi(
     int64_t handle,
-    at::TensorList images)
+    at::TensorList images, bool inputs_published)
 {
-    return HYViT2Registry::get(handle, "rpu_hyvit2")->patch_embed_multi(images);
+    return HYViT2Registry::get(handle, "rpu_hyvit2")->patch_embed_multi(images, inputs_published);
 }
 
 at::Tensor rpu_hyvit2_forward(
@@ -3077,12 +3361,12 @@ at::Tensor rpu_hyvit2_forward_multi(
     at::TensorList images,
     at::TensorList k_caches_list,
     at::TensorList v_caches_list,
-    at::IntArrayRef planned_stage_descriptor)
+    at::IntArrayRef planned_stage_descriptor, bool inputs_published)
 {
     std::vector<at::Tensor> k_caches(k_caches_list.begin(), k_caches_list.end());
     std::vector<at::Tensor> v_caches(v_caches_list.begin(), v_caches_list.end());
     return HYViT2Registry::get(handle, "rpu_hyvit2")->forward_multi(
-        images, k_caches, v_caches, planned_stage_descriptor);
+        images, k_caches, v_caches, planned_stage_descriptor, inputs_published);
 }
 
 std::vector<int64_t> rpu_hyvit2_resolve_stage_domain(

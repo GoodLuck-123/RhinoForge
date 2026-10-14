@@ -1,8 +1,8 @@
 """Wall-OSS-0.5 (Qwen2.5-VL VLA) → rpu_backend adapter package.
 
-P1: text-only Qwen2.5 decoder (expert-0) prefill on RPU.
+P1: text-only Qwen2.5 decoder (expert-0) prefill on device.
 P2: action expert (expert-1) flow-matching denoise (10-step Euler) sharing P1's prefix KV.
-P3: Qwen2.5-VL ViT vision tower (window attention) on RPU.
+P3: Qwen2.5-VL ViT vision tower (window attention) on device.
 """
 from __future__ import annotations
 

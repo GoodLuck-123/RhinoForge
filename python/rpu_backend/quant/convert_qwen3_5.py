@@ -1,18 +1,19 @@
 """Offline W8A16/W4A16 quantization for Qwen3.5 HF checkpoints.
 
 Quantizes the text-backbone projections listed by
-``adapters.qwen3_5.quant_scope`` to int8 with a per-output-channel fp16 scale;
-every other floating tensor is stored as fp16. Vision, MTP, embeddings, lm_head,
-norms and the GDN conv1d are left alone.
+``adapters.qwen3_5.quant_scope`` with per-output-channel W8 or group-wise W4
+scales. Other floating tensors, including Vision, MTP, embeddings, lm_head,
+norms and the GDN conv1d, are stored as fp16 without integer quantization.
 
 Deliberately separate from ``convert_qwen3.py``: Qwen3.5 quantizes the GDN
 ``linear_attn.in_proj_*`` projections, which the Qwen3 suffix list does not
 cover, and its scope is driven by ``text_config.layer_types``.
 
-The fp16 cast before quantization is load-bearing: the retired in-place
-prototype quantized after ``model.half()``, so quantizing the bf16 source
-directly would produce different int8 values and break bit-identity with the
-recorded pre-refactor parity hash.
+Floating tensors are cast from their actual stored dtype directly to fp16,
+including the inputs to the quantizers. Do not round FP32/FP16 sources through
+BF16 to reproduce a historical loader: that loses precision before either
+quantization or inference. Existing converted checkpoints must be regenerated
+from their source to benefit from this correction.
 """
 from __future__ import annotations
 
@@ -56,23 +57,15 @@ except ImportError:  # standalone: bypass any unrelated editable package install
 ARCHITECTURE = "Qwen3_5ForConditionalGeneration"
 FORMAT_VERSION = 1
 METHODS = ("w8a16", "w4a16_pgrp")
-PROFILES = ("w4_main_w8_gdn", "w8_main_w8_gdn", LEGACY_W8A16_PROFILE)
+PROFILES = ("w4_main_w8_gdn", "w8_main_w8_gdn", "w4_mlp_only",
+            "w4_mlp_w8_attn_gdn", LEGACY_W8A16_PROFILE)
 DEFAULT_GROUP_SIZE = 32
 SKIP_MODULES = ["lm_head", "embed_tokens", "visual", "mtp", "conv1d"]
 
 
-def _as_runtime_fp16(tensor: torch.Tensor) -> torch.Tensor:
-    """Cast the way the runtime FP16 load does: bf16-pinned, then fp16.
-
-    ``text_config.dtype`` is bfloat16, so ``from_pretrained`` materializes every
-    floating tensor as bf16 before the adapter's ``.half()``. That is a no-op for
-    the bf16 bulk of the checkpoint, but the 48 GDN ``A_log`` / ``norm.weight``
-    tensors are stored fp32 — casting them straight to fp16 keeps precision the
-    runtime never had and shifts the parity hash by one bf16 ulp. Reproduce the
-    runtime route so an offline checkpoint and a live FP16 load agree bit-for-bit
-    outside the quantized projections.
-    """
-    return tensor.to(torch.bfloat16).to(torch.float16)
+def _as_fp16(tensor: torch.Tensor) -> torch.Tensor:
+    """Use the tensor's stored precision, without a lossy BF16 intermediate."""
+    return tensor.to(torch.float16)
 
 
 def _layer_types(config: dict) -> list[str]:
@@ -142,13 +135,21 @@ def _quant_config(is_full, method: str | None, group_size: int,
                 f"profile={profile} requires the default --group-size="
                 f"{DEFAULT_GROUP_SIZE}, got {group_size}"
             )
-        default = ({"method": W4A16_PGRP, "group_size": group_size}
-                   if profile == "w4_main_w8_gdn"
-                   else {"method": W8A16})
-        overrides = {
-            "linear_attn.in_proj_b": {"method": FP16},
-            "linear_attn.in_proj_a": {"method": FP16},
-        }
+        if profile in ("w4_mlp_only", "w4_mlp_w8_attn_gdn"):
+            # Existing v2 roles apply to every layer, including layer zero.
+            default = {"method": FP16 if profile == "w4_mlp_only" else W8A16}
+            overrides = {
+                f"mlp.{role}": {"method": W4A16_PGRP, "group_size": group_size}
+                for role in ("gate_proj", "up_proj", "down_proj")
+            }
+        else:
+            default = ({"method": W4A16_PGRP, "group_size": group_size}
+                       if profile == "w4_main_w8_gdn"
+                       else {"method": W8A16})
+            overrides = {
+                "linear_attn.in_proj_b": {"method": FP16},
+                "linear_attn.in_proj_a": {"method": FP16},
+            }
         if profile == "w4_main_w8_gdn":
             overrides.update({
                 "linear_attn.in_proj_qkv": {"method": W8A16},
@@ -266,7 +267,7 @@ def convert_checkpoint(src: str | Path, dst: str | Path, *,
                     seen_projections.add(name)
                     stats["projection_counts"][spec.method] += 1
                     if spec.method == FP16:
-                        converted = _as_runtime_fp16(tensor)
+                        converted = _as_fp16(tensor)
                         out[name] = converted
                         stats["n_copied"] += 1
                         stats["bytes_out"] += (
@@ -274,7 +275,7 @@ def convert_checkpoint(src: str | Path, dst: str | Path, *,
                         continue
 
                     # fp16 FIRST — see the module docstring.
-                    src_fp16 = _as_runtime_fp16(tensor)
+                    src_fp16 = _as_fp16(tensor)
                     if spec.method == W4A16_PGRP:
                         w_int8, scale, _ = quantize_int4_group_wise(
                             src_fp16, group_size=spec.group_size)
@@ -290,7 +291,7 @@ def convert_checkpoint(src: str | Path, dst: str | Path, *,
                         new_weight_map[scale_key(name)] = shard
                     continue
 
-                converted = (_as_runtime_fp16(tensor)
+                converted = (_as_fp16(tensor)
                              if tensor.is_floating_point() else tensor)
                 out[name] = converted
                 stats["n_copied"] += 1
@@ -359,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  shards    : {stats['n_shards']}")
     selected = (f"profile={args.profile}" if args.profile
                 else f"method={args.method or W8A16}")
-    uses_w4 = (args.profile == "w4_main_w8_gdn"
+    uses_w4 = (args.profile in ("w4_main_w8_gdn", "w4_mlp_only", "w4_mlp_w8_attn_gdn")
                or args.method == W4A16_PGRP)
     print(f"  precision : {selected}"
           + (f" (group_size={args.group_size})" if uses_w4 else ""))

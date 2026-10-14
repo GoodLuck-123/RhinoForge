@@ -20,7 +20,7 @@ struct Pi05Nvfp4Tables {
             TORCH_CHECK(table.defined() && table.scalar_type() == at::kFloat &&
                             table.device().type() == at::kPrivateUse1 && table.is_contiguous() &&
                             table.dim() == 1 && table.numel() == 24,
-                        "Pi05 NVFP4 tensor scales must be contiguous FP32 RPU [24]");
+                        "Pi05 NVFP4 tensor scales must be contiguous FP32 device [24]");
             auto cpu = table.cpu();
             const float* p = cpu.data_ptr<float>();
             for (int i = 0; i < layers; ++i)

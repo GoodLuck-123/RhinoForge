@@ -1,4 +1,4 @@
-"""Fail-closed policy shared by controlled InternVLA-N1 RPU paths."""
+"""Fail-closed policy shared by controlled InternVLA-N1 device paths."""
 from __future__ import annotations
 
 import hashlib
@@ -19,7 +19,7 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 def require_numeric_blocked_opt_in() -> None:
     if os.environ.get(NUMERIC_BLOCKED_ENV) != "1":
         raise UnsupportedModelError(
-            "InternVLA-N1 RPU is a controlled numeric-blocked evaluation; "
+            "InternVLA-N1 device is a controlled numeric-blocked evaluation; "
             "full-hidden metrics are record-only and final-action gates remain "
             f"authoritative. Use exact {NUMERIC_BLOCKED_ENV}=1."
         )
@@ -31,7 +31,7 @@ def require_numeric_blocked_opt_in() -> None:
             )
         raise UnsupportedModelError(
             f"{S2_SDPA_BF16_ENV}=1 is unavailable with the current latest "
-            "RPU op-library: its BF16 flash-attention kernel was removed. "
+            "device op-library: its BF16 flash-attention kernel was removed. "
             "Do not side-load a retired operator library; leave the variable "
             "unset for the controlled FP16-SDPA evaluation."
         )
@@ -63,7 +63,7 @@ def verify_asset_hashes(
     required_assets: Sequence[str | Path],
     asset_manifest: Mapping[str | Path, str] | None,
 ) -> None:
-    """Verify caller-supplied SHA-256 values without changing RPU policy."""
+    """Verify caller-supplied SHA-256 values without changing device policy."""
     if not asset_manifest:
         raise UnsupportedModelError(
             "InternVLA-N1 exact assets require a caller-supplied asset_manifest."
@@ -108,6 +108,6 @@ def verify_asset_manifest(
     required_assets: Sequence[str | Path],
     asset_manifest: Mapping[str | Path, str] | None,
 ) -> None:
-    """Verify controlled-RPU policy and caller-supplied asset SHA-256 values."""
+    """Verify controlled-device policy and caller-supplied asset SHA-256 values."""
     require_controlled_evaluation(asset_manifest)
     verify_asset_hashes(required_assets, asset_manifest)

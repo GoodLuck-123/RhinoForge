@@ -33,10 +33,10 @@ inline bool log_at(int level) {
     return g_rpu_debug_level.load(std::memory_order_relaxed) >= level;
 }
 extern bool g_rpu_profile_enabled;  // 控制性能分析输出 (kernel timing 等)
-extern bool g_rpu_ddr_flush_enabled; // 控制是否执行 intra-RPU DDR flush (默认关闭,
+extern bool g_rpu_ddr_flush_enabled; // 控制是否执行 intra-device DDR flush (默认关闭,
                                      // 见 rpu_backend.cpp 定义处; 这是性能开关,
-                                     // 不是 CPU<->RPU 边界正确性开关)
-extern bool g_rpu_ddr_flush_force_enabled; // 控制 CPU<->RPU 边界 force flush (默认开启，保证正确性)
+                                     // 不是 CPU<->device 边界正确性开关)
+extern bool g_rpu_ddr_flush_force_enabled; // 控制 CPU<->device 边界 force flush (默认开启，保证正确性)
 
 // =============================================================================
 // Profile Data Structures
@@ -204,7 +204,7 @@ bool rpu_get_ddr_flush_force();
 void rpu_reset_profile_accumulators();
 
 // =============================================================================
-// HW perf trace — RPU cycle-precision kernel/DMA timestamp dump (Chrome JSON).
+// HW perf trace — device cycle-precision kernel/DMA timestamp dump (Chrome JSON).
 //
 // Snapshot pattern: setter takes mutex and stamps all fields + bumps dump
 // budget; hot-path callers read via rpu_hw_perf_snapshot() (one mutex op per
@@ -220,7 +220,7 @@ void rpu_reset_profile_accumulators();
 // =============================================================================
 struct HwPerfConfig {
     bool enabled = false;
-    std::string output_dir = ".rpu-hw-perf";
+    std::string output_dir = ".";
     int64_t max_dumps = 32;
 };
 
@@ -242,7 +242,7 @@ bool rpu_hw_perf_try_consume_dump();
 uint64_t rpu_hw_perf_next_dump_seq();
 
 // Conditional DDR flush macro - only executes if g_rpu_ddr_flush_enabled is true.
-// Use this for intra-RPU kernel-to-kernel sync points that are redundant when the
+// Use this for intra-device kernel-to-kernel sync points that are redundant when the
 // data never leaves DDR/SPM. set_ddr_flush(False) turns these into no-ops for perf.
 #define rpu_ddr_flush(ptr) do { \
     if (g_rpu_ddr_flush_enabled) { \
@@ -250,9 +250,9 @@ uint64_t rpu_hw_perf_next_dump_seq();
     } \
 } while(0)
 
-// Boundary DDR flush - CPU<->RPU 边界一致性 flush。默认开启 (g_rpu_ddr_flush_force_enabled=true)
+// Boundary DDR flush - CPU<->device 边界一致性 flush。默认开启 (g_rpu_ddr_flush_force_enabled=true)
 // 以保证正确性; 可通过 set_ddr_flush_force(False) 关闭以量化 flush 对性能的影响 (decode 场景
-// 可能显著)，但关闭后 CPU cache 脏行不会回写共享 DDR，下一 RPU kernel 可能读到旧值。
+// 可能显著)，但关闭后 CPU cache 脏行不会回写共享 DDR，下一 device kernel 可能读到旧值。
 // 与 rpu_ddr_flush 的区别：此宏独立开关，不受 set_ddr_flush 影响,绕过 graph capture。
 #define rpu_ddr_flush_force(ptr) do { \
     if (g_rpu_ddr_flush_force_enabled) { \

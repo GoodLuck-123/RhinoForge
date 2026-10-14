@@ -1339,7 +1339,7 @@ def plan_prefill(
     """Jointly search execution length and the native three-stage domain.
 
     Production callers supply ``resolve_stage_domain``.  The callback returns
-    the domain-v1 ``int[]`` returned by the RPU ops, including each candidate's
+    the domain-v1 ``int[]`` returned by the device ops, including each candidate's
     complete input/QKV/compute schedules, spans, and boundary policies.  Tests
     may also supply structured :class:`StageTuple` rows.  This proves exact
     enumeration only for the three-stage chunk domain:
@@ -1407,7 +1407,7 @@ def plan_prefill(
         max_lengths=MAX_EXECUTION_LENGTH_CANDIDATES,
     )
 
-    # Materialise the full search once. A cost-bound winner from an earlier
+    # Materialise the full search once. A native winner from an earlier
     # length is re-admitted after selection, without changing the search, so
     # the native latest-oracle proof describes the candidate being dispatched.
     domain: dict[int, tuple[tuple[int, int, int], ...]] = {}
@@ -1629,7 +1629,12 @@ def plan_prefill(
         candidate = matches[0]
     else:
         candidate = result.selected
-    if cost_scope is not None and candidate.execution_len != lengths[-1]:
+    if (candidate.stage_tuple.physical_descriptor or cost_scope is not None) and (
+        candidate.execution_len != lengths[-1]
+    ):
+        # Native admission is stateful even without a cost certificate. A later
+        # padding probe (including a rejection) replaces the owner's latest
+        # oracle; restore the selected length before its descriptor is consumed.
         current = read_domain(candidate.execution_len, MAX_A6_PAIRS)
         if current != raw_domain[candidate.execution_len]:
             raise ValueError("selected native domain changed during actual re-admission")

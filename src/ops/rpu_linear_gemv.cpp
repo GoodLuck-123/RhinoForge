@@ -46,7 +46,7 @@ void validate_weight(
       weight.device().type() == c10::DeviceType::PrivateUse1 &&
           weight.is_contiguous() && weight.dim() == 2 &&
           weight.size(0) == n && weight.size(1) == k,
-      "GEMV weight must be a contiguous RPU tensor [N,K]=[", n, ",", k,
+      "GEMV weight must be a contiguous device tensor [N,K]=[", n, ",", k,
       "], got ", weight.sizes(), " on ", weight.device());
 }
 
@@ -77,7 +77,7 @@ void rpu_launch_qwen3vl_4b_decode_o_ring_norm_spm_kernel(
                     tensor.scalar_type() == (is_scale ? at::kHalf : at::kChar) &&
                     tensor.is_contiguous() && tensor.dim() == (is_scale ? 1 : 2) &&
                     tensor.size(0) == kH && (is_scale || tensor.size(1) == kK),
-                "Qwen3-VL 4B decode O/ring/Norm requires contiguous RPU "
+                "Qwen3-VL 4B decode O/ring/Norm requires contiguous device "
                 "int8 [2560,4096] weight and fp16 [2560] scale");
     const uint64_t element_bytes = is_scale ? sizeof(c10::Half) : 1;
     const uint64_t required_bytes = is_scale ? kScaleBytes : kWeightBytes;
@@ -205,7 +205,7 @@ void rpu_launch_qwen3vl_4b_decode_gate_up_swiglu_w8a16_spm_kernel(
                     tensor.scalar_type() == (scale ? at::kHalf : at::kChar) &&
                     tensor.is_contiguous() && tensor.dim() == (scale ? 1 : 2) &&
                     tensor.size(0) == kN && (scale || tensor.size(1) == kK),
-                "Qwen3-VL 4B decode fused Gate/Up requires contiguous RPU "
+                "Qwen3-VL 4B decode fused Gate/Up requires contiguous device "
                 "int8 [9728,2560] weights and fp16 [9728] scales");
     // The unchanged payload reads 256 scales for the final 96-channel warp.
     // Check the underlying storage, not merely the logical view size.
@@ -341,7 +341,7 @@ void rpu_launch_gemv_spm_to_spm_kernel(
         scale.device().type() == c10::DeviceType::PrivateUse1 &&
             scale.scalar_type() == at::kHalf && scale.is_contiguous() &&
             scale.dim() == 1 && scale.size(0) == n,
-        "GEMV W8A16 scale must be contiguous RPU fp16 [N]=[", n,
+        "GEMV W8A16 scale must be contiguous device fp16 [N]=[", n,
         "], got ", scale.sizes(), " on ", scale.device());
     TORCH_CHECK(local_k % 32 == 0,
                 "GEMV W8A16 local_k=", local_k,

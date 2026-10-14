@@ -1,4 +1,4 @@
-// rpu_pad.cpp — Pad kernel launch wrapper for RPU.
+// rpu_pad.cpp — Pad kernel launch wrapper for device.
 //
 // Pads a tensor's channel dimension with a constant value in SPM.
 // Uses pad_const_NxC_NxCP kernel (normal variant).

@@ -5,6 +5,7 @@
 #include <ATen/record_function.h>
 
 #include <cstdint>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -104,6 +105,141 @@ ScatterAddParams make_scatter_add_params(int64_t data_rows,
 }
 
 }  // namespace
+
+void rpu_launch_lingbot2_combine_t51_r204_h768_scan_spm_kernel(
+    uint32_t updates_spm_addr, uint32_t token_ids_spm_addr,
+    uint32_t output_spm_addr) {
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "lingbot2_combine_scan: SPM allocator is not initialized");
+    const uint32_t base = SPM_ALLOC.addr(0, 0);
+    // The 48-index tile loads 240 U16 entries; the declared route region is
+    // 256 entries. Only the first 204 are tasks. Validate the complete region,
+    // including padding, before looking up a kernel or submitting any work.
+    const std::array<std::pair<uint32_t, uint32_t>, 3> ranges{{
+        {updates_spm_addr, 204 * 768 * 2},
+        {token_ids_spm_addr, 256 * 2},
+        {output_spm_addr, 51 * 768 * 2},
+    }};
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const auto [address, bytes] = ranges[i];
+        TORCH_CHECK(address >= base && address % 32 == 0 &&
+                        uint64_t(address) - base <=
+                            uint64_t(SpmAllocator::SPM_USABLE) - bytes,
+                    "lingbot2_combine_scan: invalid 32-byte-aligned "
+                    "absolute core-0 SPM interval");
+        for (size_t j = 0; j < i; ++j) {
+            TORCH_CHECK(uint64_t(address) + bytes <= ranges[j].first ||
+                            uint64_t(ranges[j].first) + ranges[j].second <= address,
+                        "lingbot2_combine_scan: all SPM operands must be disjoint");
+        }
+    }
+    auto* kernel = GET_KERNEL(KernelId::LINGBOT2_COMBINE_T51_R204_H768_SCAN);
+    TORCH_CHECK(kernel != nullptr,
+                "lingbot2_combine_scan: optional payload is absent from the active oplib");
+    kernel->reset_regs();
+    // This uses the original scatter's core-local byte-offset ABI, not the
+    // absolute byte-address ABI of the unrelated route compactor.
+    set_reg_u32(kernel, 6, output_spm_addr - base);
+    set_reg_u32(kernel, 8, token_ids_spm_addr - base);
+    set_reg_u32(kernel, 10, updates_spm_addr - base);
+    kernel->set_regs(64, static_cast<uint16_t>(51));
+    kernel->set_regs(65, static_cast<uint16_t>(1));
+    kernel->set_regs(66, static_cast<uint16_t>(1));
+    auto* queue = GET_QUEUE(8);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {51, 1, 1}, {0,1,2,3,4,5,6,7});
+}
+
+void rpu_launch_lingbot2_combine_t51_r204_h768_inverse_spm_kernel(
+    uint32_t updates_spm_addr, uint32_t inverse_spm_addr,
+    uint32_t output_spm_addr) {
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "lingbot2_combine_inverse: SPM allocator is not initialized");
+    const uint32_t base = SPM_ALLOC.addr(0, 0);
+    // The producer supplies a zero-padded inverse[64,32] of raw U16 task+1.
+    // Validate the full backing before lookup or submission; only rows0..50
+    // are consumed, in ascending expert order.
+    const std::array<std::pair<uint32_t, uint32_t>, 3> ranges{{
+        {updates_spm_addr, 204 * 768 * 2},
+        {inverse_spm_addr, 64 * 32 * 2},
+        {output_spm_addr, 51 * 768 * 2},
+    }};
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const auto [address, bytes] = ranges[i];
+        TORCH_CHECK(address >= base && address % 32 == 0 &&
+                        uint64_t(address) - base <=
+                            uint64_t(SpmAllocator::SPM_USABLE) - bytes,
+                    "lingbot2_combine_inverse: invalid 32-byte-aligned "
+                    "absolute core-0 SPM interval");
+        for (size_t j = 0; j < i; ++j) {
+            TORCH_CHECK(uint64_t(address) + bytes <= ranges[j].first ||
+                            uint64_t(ranges[j].first) + ranges[j].second <= address,
+                        "lingbot2_combine_inverse: all SPM operands must be disjoint");
+        }
+    }
+    auto* kernel = GET_KERNEL(KernelId::LINGBOT2_COMBINE_T51_R204_H768_INVERSE);
+    TORCH_CHECK(kernel != nullptr,
+                "lingbot2_combine_inverse: optional payload is absent from the active oplib");
+    kernel->reset_regs();
+    // This uses the original scatter's core-local byte-offset ABI, not the
+    // absolute byte-address ABI of the unrelated route compactor.
+    set_reg_u32(kernel, 6, output_spm_addr - base);
+    set_reg_u32(kernel, 8, inverse_spm_addr - base);
+    set_reg_u32(kernel, 10, updates_spm_addr - base);
+    kernel->set_regs(64, static_cast<uint16_t>(51));
+    kernel->set_regs(65, static_cast<uint16_t>(1));
+    kernel->set_regs(66, static_cast<uint16_t>(1));
+    auto* queue = GET_QUEUE(8);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {51, 1, 1}, {0,1,2,3,4,5,6,7});
+}
+
+void rpu_launch_lingbot2_combine_shared_t51_r204_h768_inverse_spm_kernel(
+    uint32_t updates_spm_addr, uint32_t inverse_spm_addr,
+    uint32_t shared_spm_addr, uint32_t output_spm_addr) {
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "lingbot2_combine_shared_inverse: SPM allocator is not initialized");
+    const uint32_t base = SPM_ALLOC.addr(0, 0);
+    // The producer supplies a zero-padded inverse[64,32] of raw U16 task+1.
+    // Validate the full backing before lookup or submission; only rows0..50
+    // are consumed, in ascending expert order. Shared is read after the four
+    // routed FP16 ADDs; no operand may alias another complete input/output.
+    const std::array<std::pair<uint32_t, uint32_t>, 4> ranges{{
+        {updates_spm_addr, 204 * 768 * 2},
+        {inverse_spm_addr, 64 * 32 * 2},
+        {shared_spm_addr, 51 * 768 * 2},
+        {output_spm_addr, 51 * 768 * 2},
+    }};
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const auto [address, bytes] = ranges[i];
+        TORCH_CHECK(address >= base && address % 32 == 0 &&
+                        uint64_t(address) - base <=
+                            uint64_t(SpmAllocator::SPM_USABLE) - bytes,
+                    "lingbot2_combine_shared_inverse: invalid 32-byte-aligned "
+                    "absolute core-0 SPM interval");
+        for (size_t j = 0; j < i; ++j) {
+            TORCH_CHECK(uint64_t(address) + bytes <= ranges[j].first ||
+                            uint64_t(ranges[j].first) + ranges[j].second <= address,
+                        "lingbot2_combine_shared_inverse: all SPM operands must be disjoint");
+        }
+    }
+    auto* kernel = GET_KERNEL(KernelId::LINGBOT2_COMBINE_SHARED_T51_R204_H768_INVERSE);
+    TORCH_CHECK(kernel != nullptr,
+                "lingbot2_combine_shared_inverse: optional payload is absent from the active oplib");
+    kernel->reset_regs();
+    // This uses the original scatter's core-local byte-offset ABI, not the
+    // absolute byte-address ABI of the unrelated route compactor.
+    set_reg_u32(kernel, 6, output_spm_addr - base);
+    set_reg_u32(kernel, 8, inverse_spm_addr - base);
+    set_reg_u32(kernel, 10, updates_spm_addr - base);
+    set_reg_u32(kernel, 12, shared_spm_addr - base);
+    kernel->set_regs(64, static_cast<uint16_t>(51));
+    kernel->set_regs(65, static_cast<uint16_t>(1));
+    kernel->set_regs(66, static_cast<uint16_t>(1));
+    auto* queue = GET_QUEUE(8);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {51, 1, 1}, {0,1,2,3,4,5,6,7});
+}
 
 void rpu_launch_scatternd_add_u16_fp16_spm_kernel(
     uint32_t data_spm_addr,

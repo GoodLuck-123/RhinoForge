@@ -1,8 +1,8 @@
-"""Controlled InternVLA-N1 System-2 Qwen2.5-VL-7B RPU evaluator.
+"""Controlled InternVLA-N1 System-2 Qwen2.5-VL-7B device evaluator.
 
 System-2 produces `vlm_tokens = hidden_states[-1][:, -4:, :]` = [1,4,3584] (the final-layer
 hidden at the 4 latent-query positions) consumed by NavDP System-1. This adapter runs the
-28-layer text decoder on RPU through the generic `causal_decoder_*` op family — the SAME fused
+28-layer text decoder on device through the generic `causal_decoder_*` op family — the SAME fused
 subsystem Wall-OSS reuses (`src/fused/rpu_qwen3_model.{cpp,h}`); NO new C++.
 
 Delta vs `adapters/wall_oss/llm.py`:
@@ -59,6 +59,8 @@ _MROPE_SECTION = [16, 24, 24]
 _MAX_SEQ_LEN = 4096
 _CERTIFIED_MAX_KV_LEN = 1936
 _CERTIFIED_CHUNK_SIZE = 176
+_DEFAULT_LOGICAL_PREFILL = 1904
+_DEFAULT_EXECUTION_PREFILL = 1936
 
 
 def _expected_checkpoint_profile() -> dict[str, tuple[tuple[int, ...], str]]:
@@ -114,12 +116,12 @@ def _validate_checkpoint_profile(store: _SafeTensorStore) -> None:
 
 
 class Qwen25VLBackbone:
-    """Stock Qwen2.5-VL-7B text decoder on RPU (System-2 prefill).
+    """Stock Qwen2.5-VL-7B text decoder on device (System-2 prefill).
 
     Construct via :func:`build_qwen25vl_backbone`. Call :meth:`forward_embeds` with
     pre-assembled `inputs_embeds` [1, seq, 3584] (vision scattered into image-token
     positions + latent queries appended) and real 3D M-RoPE `position_ids` [seq, 3];
-    returns the final-normed `last_hidden` [1, seq, 3584] on RPU. Slice `[:, -4:, :]`
+    returns the final-normed `last_hidden` [1, seq, 3584] on device. Slice `[:, -4:, :]`
     for the vlm_tokens.
     """
 
@@ -207,15 +209,19 @@ class Qwen25VLBackbone:
             self, "_rpu_execution", {"prefill": {"chunk_size": "auto"}}
         ).get("prefill", {})
         generation = int(getattr(self, "_fmb_execution_generation", 0))
+        default_prefill = logical_seq == _DEFAULT_LOGICAL_PREFILL
         exact_chunk = stage.get("chunk_size", "auto")
         requested_chunk = (
             int(exact_chunk)
             if isinstance(exact_chunk, int)
-            else 0
+            else (_CERTIFIED_CHUNK_SIZE if default_prefill else 0)
         )
         padding_rows = stage.get("padding_rows")
         if padding_rows is None:
-            padding_rows = 0
+            padding_rows = (
+                _DEFAULT_EXECUTION_PREFILL - logical_seq
+                if default_prefill else "auto"
+            )
         padding_budget = int(stage.get(
             "padding_budget", 0 if isinstance(padding_rows, int) else 64
         ))
@@ -335,7 +341,7 @@ def build_qwen25vl_backbone(
     asset_manifest: Mapping[str | Path, str] | None = None,
     rpu_execution=None,
 ) -> Qwen25VLBackbone:
-    """Load the stock Qwen2.5-VL-7B text decoder and install it on RPU.
+    """Load the stock Qwen2.5-VL-7B text decoder and install it on device.
 
     Args:
         ckpt_dir: dir with config.json + model.safetensors(.index.json) (stock keys).

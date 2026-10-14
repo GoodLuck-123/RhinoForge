@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -30,6 +31,7 @@ using namespace at;
 // Implemented by graph_spm_reset_guard.cpp. Keep graph runtime details out of
 // this storage bridge fragment.
 bool graph_aware_rpu_to_cpu_zerocopy_sync();
+void graph_require_vision_input_copy_passthrough(const char* operation);
 
 // ------------------------ RPUAllocator ------------------------
 // The process policy is frozen atomically by the first non-empty allocation,
@@ -66,7 +68,7 @@ struct RPUAllocator final : public c10::Allocator {
 
     TORCH_CHECK(
         rpu_device_nodes_accessible(),
-        "RPU device is unavailable to this process: require read/write access "
+        "device is unavailable to this process: require read/write access "
         "to /dev/rpu and /dev/mem");
 
     return rpu_tensor_ddr_lifecycle().run_allocation([&]() -> at::DataPtr {
@@ -191,7 +193,7 @@ at::Tensor rpu_empty(c10::IntArrayRef size,
 // ------------------------ view (zero-copy) ------------------------
 at::Tensor rpu_view(const at::Tensor &self, at::IntArrayRef new_sizes) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_view: self must be on rpu");
+              "rpu_view: self must be on device");
   // validate numel matches
   int64_t old_numel = self.numel();
   int64_t new_numel = 1;
@@ -242,7 +244,7 @@ at::Tensor rpu_transpose(const at::Tensor &self, int64_t dim0, int64_t dim1) {
 // ------------------------ expand (view operation) ------------------------
 at::Tensor rpu_expand(const at::Tensor &self, at::IntArrayRef size, bool implicit) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_expand: self must be on rpu");
+              "rpu_expand: self must be on device");
 
   auto self_sizes = self.sizes();
   auto self_strides = self.strides();
@@ -300,7 +302,7 @@ at::Tensor rpu_expand(const at::Tensor &self, at::IntArrayRef size, bool implici
 // ------------------------ unsqueeze (view operation) ------------------------
 at::Tensor rpu_unsqueeze(const at::Tensor &self, int64_t dim) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_unsqueeze: self must be on rpu");
+              "rpu_unsqueeze: self must be on device");
 
   int64_t ndim = self.dim();
   // Normalize dim: allow negative indexing
@@ -347,7 +349,7 @@ at::Tensor rpu_arange(const c10::Scalar &end,
                       c10::optional<c10::Layout> layout,
                       c10::optional<c10::Device> device,
                       c10::optional<bool> pin_memory) {
-  // Generate on CPU then move to RPU
+  // Generate on CPU then move to device
   // Note: we force device to CPU to avoid infinite recursion
   auto cpu_result = at::arange(end,
                                 dtype.value_or(at::kLong),
@@ -363,7 +365,7 @@ at::Tensor rpu_arange_start(const c10::Scalar &start,
                             c10::optional<c10::Layout> layout,
                             c10::optional<c10::Device> device,
                             c10::optional<bool> pin_memory) {
-  // Generate on CPU then move to RPU
+  // Generate on CPU then move to device
   auto cpu_result = at::arange(start, end,
                                 dtype.value_or(at::kLong),
                                 layout.value_or(at::kStrided),
@@ -379,7 +381,7 @@ at::Tensor rpu_arange_start_step(const c10::Scalar &start,
                                  c10::optional<c10::Layout> layout,
                                  c10::optional<c10::Device> device,
                                  c10::optional<bool> pin_memory) {
-  // Generate on CPU then move to RPU
+  // Generate on CPU then move to device
   auto cpu_result = at::arange(start, end, step,
                                 dtype.value_or(at::kLong),
                                 layout.value_or(at::kStrided),
@@ -389,23 +391,23 @@ at::Tensor rpu_arange_start_step(const c10::Scalar &start,
 }
 
 // ======================== Zero-Copy Device Conversion ========================
-// 由于 CPU 和 RPU 共享 DDR，可以在不复制数据的情况下转换设备类型
+// 由于 CPU 和 device 共享 DDR，可以在不复制数据的情况下转换设备类型
 // 这些函数创建一个新的 tensor，使用相同的存储但不同的 device 类型
 
-// RPU tensor -> CPU tensor (零拷贝)
-// 注意: 返回的 CPU tensor 与原 RPU tensor 共享存储，修改一个会影响另一个
+// device tensor -> CPU tensor (零拷贝)
+// 注意: 返回的 CPU tensor 与原 device tensor 共享存储，修改一个会影响另一个
 // 通过持有原始 Storage 的副本来保证生命周期安全（Storage 内部使用引用计数）
 static at::Tensor rpu_to_cpu_zerocopy_impl(const at::Tensor &rpu_tensor,
                                            bool flush,
                                            bool graph_sync) {
   TORCH_CHECK(rpu_tensor.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_to_cpu_zerocopy: input must be on RPU device");
+              "rpu_to_cpu_zerocopy: input must be on device");
   // Q2 (task #63):defensive sync — 内部直接调本函数的 op (e.g.
   // rpu_linear CPU fallback / rpu_eltwise_binary CPU fallback) 期望立即拿到
   // 有效 DDR data。RECORDING + pending nodes 时 sync_point() 把已录前缀 oneshot
   // 落地。注意:PyTorch `tensor.to('cpu')` 的 Composite 分解走 CPU side memcpy
   // 完全不经过本函数;那条主路径靠 spm_alloc_reset_temporary 的 sync hook 覆盖
-  // (Pi0.5 adapter 子系统出口模式)。本钩子是兜底,捕获 op-internal RPU→CPU。
+  // (Pi0.5 adapter 子系统出口模式)。本钩子是兜底,捕获 op-internal device→CPU。
   if (graph_sync) {
     graph_aware_rpu_to_cpu_zerocopy_sync();
   }
@@ -414,7 +416,7 @@ static at::Tensor rpu_to_cpu_zerocopy_impl(const at::Tensor &rpu_tensor,
   auto original_storage = rpu_tensor.storage();
   void* data_ptr = original_storage.data_ptr().get();
 
-  // Cache 一致性: RPU(DDR) → CPU 读之前,必须 flush,确保 CPU 读到的是 RPU
+  // Cache 一致性: device(DDR) → CPU 读之前,必须 flush,确保 CPU 读到的是 device
   // kernel 最新写入的数据。集中在边界处理,op 内部不再各自 flush。
   if (flush) {
     rpu_ddr_flush_force_sized(data_ptr, original_storage.nbytes());
@@ -461,7 +463,126 @@ at::Tensor rpu_to_cpu_zerocopy_no_graph_sync(
   return rpu_to_cpu_zerocopy_impl(rpu_tensor, flush, /*graph_sync=*/false);
 }
 
-// CPU tensor -> RPU tensor (零拷贝)
+namespace {
+constexpr int64_t kVisionInputRows = 768;
+constexpr int64_t kVisionInputColumns = 1536;
+constexpr const char* kVisionInputCopyOperation =
+    "vision_input_fp32_to_fp16_into";
+
+size_t vision_input_checked_bytes(int64_t elements, size_t element_bytes) {
+  TORCH_CHECK(elements > 0 &&
+                  static_cast<uint64_t>(elements) <=
+                      std::numeric_limits<size_t>::max() / element_bytes,
+              kVisionInputCopyOperation, ": invalid or overflowing element span");
+  return static_cast<size_t>(elements) * element_bytes;
+}
+
+uintptr_t vision_input_checked_end(const void* pointer, size_t bytes) {
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(pointer);
+  TORCH_CHECK(pointer != nullptr && bytes > 0 &&
+                  bytes <= std::numeric_limits<uintptr_t>::max() - begin,
+              kVisionInputCopyOperation,
+              ": null or overflowing CPU address span");
+  return begin + bytes;
+}
+} // namespace
+
+at::Tensor rpu_vision_input_fp32_to_fp16_into(
+    const at::Tensor& destination, const at::Tensor& source) {
+  // The no-sync view is used only outside Graph and physical-arena execution.
+  RpuExecutionCoordinator::check_current_thread_execution_allowed(
+      kVisionInputCopyOperation);
+  RpuExecutionCoordinator::require_graph_quiescent(kVisionInputCopyOperation);
+  RpuExecutionCoordinator::require_no_physical_claim(kVisionInputCopyOperation);
+  graph_require_vision_input_copy_passthrough(kVisionInputCopyOperation);
+  TORCH_CHECK(source.defined() && destination.defined(),
+              kVisionInputCopyOperation, ": undefined operand");
+  const bool exact_shape =
+      (source.dim() == 2 && source.size(0) == kVisionInputRows &&
+       source.size(1) == kVisionInputColumns) ||
+      (source.dim() == 3 && source.size(0) == 3 && source.size(1) == 256 &&
+       source.size(2) == kVisionInputColumns);
+  TORCH_CHECK(
+      source.device().is_cpu() && source.scalar_type() == at::kFloat &&
+          destination.device().type() == at::kPrivateUse1 &&
+          destination.scalar_type() == at::kHalf &&
+          source.layout() == at::kStrided && destination.layout() == at::kStrided &&
+          source.is_contiguous() && destination.is_contiguous() && exact_shape &&
+          source.sizes() == destination.sizes(),
+      kVisionInputCopyOperation,
+      ": requires contiguous CPU Float [768,1536] or [3,256,1536] and matching device Half");
+  const size_t source_bytes =
+      vision_input_checked_bytes(source.numel(), sizeof(float));
+  const size_t destination_bytes =
+      vision_input_checked_bytes(destination.numel(), sizeof(c10::Half));
+  TORCH_CHECK(source.nbytes() == source_bytes &&
+                  destination.nbytes() == destination_bytes,
+              kVisionInputCopyOperation,
+              ": tensor byte counts disagree with the exact shape");
+
+  // The lease retires before both strong view/storage anchors on every exit.
+  auto storage_holder = destination.storage();
+  at::Tensor cpu_view;
+  TORCH_CHECK(destination.storage_offset() == 0 &&
+                  storage_holder.nbytes() == destination_bytes &&
+                  storage_holder.data_ptr().get() == destination.data_ptr(),
+              kVisionInputCopyOperation,
+              ": destination must be the complete zero-offset logical storage");
+  const uintptr_t source_begin =
+      reinterpret_cast<uintptr_t>(source.data_ptr());
+  const uintptr_t destination_begin =
+      reinterpret_cast<uintptr_t>(destination.data_ptr());
+  const uintptr_t source_end =
+      vision_input_checked_end(source.data_ptr(), source_bytes);
+  const uintptr_t destination_end =
+      vision_input_checked_end(destination.data_ptr(), destination_bytes);
+  TORCH_CHECK(source_end <= destination_begin || destination_end <= source_begin,
+              kVisionInputCopyOperation,
+              ": Float source and Half destination byte spans alias");
+
+  const RpuCpuDmaEndpointRequest request{
+      destination.data_ptr(), destination_bytes, kVisionInputCopyOperation};
+  RpuDmaEndpoint endpoint;
+  auto lease = rpu_resolve_cpu_dma_endpoints(&request, 1, &endpoint);
+  TORCH_CHECK(endpoint.owner != nullptr && endpoint.allocation_id != 0 &&
+                  endpoint.owner->get_memory_type() == rhino_lkn::rpu_ddr_memory,
+              kVisionInputCopyOperation,
+              ": destination has no fresh registered DDR allocation");
+  const size_t owner_bytes = endpoint.owner->get_memory_size();
+  const uintptr_t owner_begin =
+      reinterpret_cast<uintptr_t>(endpoint.owner->get_cpu_ptr());
+  TORCH_CHECK(endpoint.offset <= owner_bytes &&
+                  destination_bytes <= owner_bytes - endpoint.offset &&
+                  destination_begin >= owner_begin &&
+                  destination_begin - owner_begin == endpoint.offset,
+              kVisionInputCopyOperation,
+              ": destination does not fit its fresh HostDDR owner");
+  const uint64_t owner_device = endpoint.owner->get_rpu_addr();
+  const uint64_t limit = UINT64_C(1) << 40;
+  TORCH_CHECK(owner_device < limit && endpoint.offset <= limit - owner_device &&
+                  owner_device + endpoint.offset < limit &&
+                  destination_bytes <= limit - owner_device - endpoint.offset &&
+                  rhino_lkn::RpuGetDevAddr(destination.data_ptr()) ==
+                      owner_device + endpoint.offset,
+              kVisionInputCopyOperation,
+              ": destination device interval or mapping is invalid");
+
+  cpu_view = rpu_to_cpu_zerocopy_no_graph_sync(destination, false);
+  TORCH_CHECK(cpu_view.device().is_cpu() && cpu_view.scalar_type() == at::kHalf &&
+                  cpu_view.is_contiguous() &&
+                  cpu_view.sizes() == destination.sizes() &&
+                  cpu_view.storage_offset() == 0 &&
+                  cpu_view.nbytes() == destination_bytes &&
+                  cpu_view.data_ptr() == destination.data_ptr(),
+              kVisionInputCopyOperation,
+              ": exported CPU view differs from the full destination");
+  // Preserve ATen's CPU Float->Half conversion and the original single flush.
+  cpu_view.copy_(source, false);
+  rpu_ddr_flush_force_sized(destination.data_ptr(), destination_bytes);
+  return destination;
+}
+
+// CPU tensor -> device tensor (零拷贝)
 // 注意: 仅适用于通过 RpuDdrAlloc 分配的内存（即原本就在共享 DDR 上的数据）
 // 通过持有原始 Storage 的副本来保证生命周期安全（Storage 内部使用引用计数）
 at::Tensor cpu_to_rpu_zerocopy(const at::Tensor &cpu_tensor) {
@@ -483,7 +604,7 @@ at::Tensor cpu_to_rpu_zerocopy(const at::Tensor &cpu_tensor) {
     }
   };
 
-  // 创建一个 RPU storage，共享同一块内存
+  // 创建一个 device storage，共享同一块内存
   auto rpu_storage = c10::Storage(
       c10::Storage::use_byte_size_t(),
       original_storage.nbytes(),
@@ -492,7 +613,7 @@ at::Tensor cpu_to_rpu_zerocopy(const at::Tensor &cpu_tensor) {
       false
   );
 
-  // 创建 RPU TensorImpl
+  // 创建 device TensorImpl
   auto tensor_impl = c10::make_intrusive<at::TensorImpl>(
       std::move(rpu_storage),
       c10::DispatchKeySet{c10::DispatchKey::PrivateUse1},
@@ -505,11 +626,11 @@ at::Tensor cpu_to_rpu_zerocopy(const at::Tensor &cpu_tensor) {
 }
 
 // 便捷宏：用于 CPU fallback 场景
-// 将 RPU tensors 零拷贝转换为 CPU，执行 CPU 操作，再将结果零拷贝转回 RPU
+// 将 device tensors 零拷贝转换为 CPU，执行 CPU 操作，再将结果零拷贝转回 device
 #define RPU_TO_CPU_ZEROCOPY(tensor) rpu_to_cpu_zerocopy(tensor)
 #define CPU_TO_RPU_ZEROCOPY(tensor) cpu_to_rpu_zerocopy(tensor)
 
-// ------------------------ copy_ (CPU <-> RPU, RPU <-> RPU)
+// ------------------------ copy_ (CPU <-> device, device <-> device)
 // ------------------------
 
 // Helper: compute element offset given multi-index and strides (element units)
@@ -654,7 +775,7 @@ static void rpu_elementwise_copy_impl(const Tensor &dst, const Tensor &src) {
       [&] { optimized_strided_copy<scalar_t>(dst, src); });
 }
 
-// Helper: Cross-device elementwise copy (RPU -> CPU or CPU -> RPU)
+// Helper: Cross-device elementwise copy (device -> CPU or CPU -> device)
 // Avoids creating temporary contiguous tensor on source device
 template <typename SrcT, typename DstT>
 static void cross_device_elementwise_copy(const Tensor &dst, const Tensor &src) {
@@ -689,7 +810,7 @@ static void cross_device_elementwise_copy(const Tensor &dst, const Tensor &src) 
 }
 
 // Unified copy implementation that supports:
-// 1. Cross-device copy (CPU <-> RPU, RPU <-> RPU)
+// 1. Cross-device copy (CPU <-> device, device <-> device)
 // 2. Cross-dtype copy (via CPU intermediate conversion)
 // 3. Contiguous handling (optimized to avoid temporary allocations)
 at::Tensor &rpu_copy_impl(at::Tensor &self, const at::Tensor &src,
@@ -716,7 +837,7 @@ at::Tensor &rpu_copy_impl(at::Tensor &self, const at::Tensor &src,
     const bool is_rpu = (src.device().type() == c10::DeviceType::PrivateUse1);
 
     if (is_rpu) {
-      // RPU -> RPU
+      // device -> device
       if (self.is_contiguous() && src.is_contiguous()) {
         rpu_ddr_flush_force_sized(src.data_ptr(), src.nbytes());
         std::memcpy(self.data_ptr(), src.data_ptr(), src.nbytes());
@@ -751,7 +872,7 @@ at::Tensor &rpu_copy_impl(at::Tensor &self, const at::Tensor &src,
       // Already on CPU
       src_cpu = src.is_contiguous() ? src : src.contiguous();
     } else {
-      // RPU -> CPU: Optimize for non-contiguous case
+      // device -> CPU: Optimize for non-contiguous case
       src_cpu = at::empty(src.sizes(),
                           at::TensorOptions()
                               .dtype(src.dtype())
@@ -762,7 +883,7 @@ at::Tensor &rpu_copy_impl(at::Tensor &self, const at::Tensor &src,
         rpu_ddr_flush_force_sized(src.data_ptr(), src.nbytes());
         std::memcpy(src_cpu.data_ptr(), src.data_ptr(), src.nbytes());
       } else {
-        // Optimized: cross-device elementwise copy (avoids RPU temp allocation)
+        // Optimized: cross-device elementwise copy (avoids device temp allocation)
         const auto storage = src.storage();
         rpu_ddr_flush_force_sized(
             storage.data_ptr().get(), storage.nbytes());
@@ -786,9 +907,9 @@ at::Tensor &rpu_copy_impl(at::Tensor &self, const at::Tensor &src,
         self.copy_(converted_cpu);
       }
     } else {
-      // CPU -> RPU
+      // CPU -> device
       TORCH_CHECK(self.is_contiguous(),
-                  "rpu_copy: dst must be contiguous for CPU->RPU dtype conversion");
+                  "rpu_copy: dst must be contiguous for CPU->device dtype conversion");
       std::memcpy(self.data_ptr(), converted_cpu.data_ptr(), converted_cpu.nbytes());
       rpu_ddr_flush_force_sized(self.data_ptr(), self.nbytes());
     }
@@ -839,7 +960,7 @@ Tensor &rpu_copy_(Tensor &self, const Tensor &src, bool non_blocking = false) {
   return rpu_copy_impl(self, src, non_blocking);
 }
 
-// contiguous implementation for rpu
+// Device contiguous implementation
 Tensor rpu_contiguous(const Tensor &self, c10::MemoryFormat memory_format) {
   // 如果已经是 contiguous（按照给定 memory_format），直接返回 self
   if (self.is_contiguous(memory_format)) {
@@ -859,7 +980,7 @@ Tensor rpu_contiguous(const Tensor &self, c10::MemoryFormat memory_format) {
   //     return self;
   //   }
 
-  //   // 预分配连续的 RPU tensor
+  //   // 预分配连续的 device tensor
   //   Tensor out = at::empty(self.sizes(), self.options().memory_format(memory_format));
 
   //   // 零拷贝：让 CPU 来做 strided copy（更高效）
@@ -871,8 +992,8 @@ Tensor rpu_contiguous(const Tensor &self, c10::MemoryFormat memory_format) {
   // }
 
 // ------------------------ _to_copy (dtype conversion support) ------------------------
-// 仅对 RPU -> CPU 启用零拷贝（RPU 内存一定在共享 DDR 上）
-// CPU -> RPU 不能零拷贝，因为普通 CPU tensor 的内存可能不在共享 DDR 上
+// 仅对 device -> CPU 启用零拷贝（device 内存一定在共享 DDR 上）
+// CPU -> device 不能零拷贝，因为普通 CPU tensor 的内存可能不在共享 DDR 上
 Tensor rpu_to_copy(const Tensor &self,
                    c10::optional<c10::ScalarType> dtype,
                    c10::optional<c10::Layout> layout,
@@ -889,10 +1010,10 @@ Tensor rpu_to_copy(const Tensor &self,
   const bool is_dst_cpu = target_device.is_cpu();
   const bool same_dtype = (target_dtype == self.scalar_type());
 
-  // Zero-copy optimization: 仅 RPU -> CPU 且 dtype 相同
-  // RPU 内存一定在共享 DDR 上，所以这是安全的
+  // Zero-copy optimization: 仅 device -> CPU 且 dtype 相同
+  // device 内存一定在共享 DDR 上，所以这是安全的
   //
-  // Q2 (task #63):graph RECORDING 期 zero-copy 不安全 — 此刻 RPU kernels 还在
+  // Q2 (task #63):graph RECORDING 期 zero-copy 不安全 — 此刻 device kernels 还在
   // nodes_ 没跑,直接返回 DDR view 让 CPU 读到 stale 数据。Pi0.5 denoise loop
   // 内 adapters/pi05/adarms.py:399 触发本路径 → action_out_proj CPU fp32 读
   // stale fp16 → Euler `x_t += dt*v_t` 累积放大成 0.6 量级偏差。
@@ -906,7 +1027,7 @@ Tensor rpu_to_copy(const Tensor &self,
   // Create result tensor with target dtype/device/layout
   Tensor result;
   if (target_device.type() == c10::DeviceType::PrivateUse1) {
-    // Target is RPU
+    // Target is device
     result = rpu_empty_strided(self.sizes(),
                               compute_contiguous_strides(self.sizes()),
                               target_dtype,
@@ -935,7 +1056,7 @@ at::Tensor rpu__copy_from_and_resize(const at::Tensor &self,
   auto tmp = rpu_empty_strided(src.sizes(), src.strides(), src.scalar_type(),
                                src.layout(), src.device(), false);
 
-  // copy src -> tmp (handles CPU->RPU or RPU->RPU)
+  // copy src -> tmp (handles CPU->device or device->device)
   return rpu_copy_(tmp, src, /*non_blocking=*/false);
 }
 
@@ -944,9 +1065,9 @@ at::Tensor rpu__copy_from_and_resize(const at::Tensor &self,
 // ------------------------ silu ------------------------
 at::Tensor rpu_silu(const at::Tensor &self) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_silu: self must be on RPU");
+              "rpu_silu: self must be on device");
 
-  // Only Half is supported by RPU kernel - 零拷贝优化
+  // Only Half is supported by device kernel - 零拷贝优化
   if (self.scalar_type() != at::kHalf) {
     auto cpu_self = rpu_to_cpu_zerocopy(self);
     auto result = at::empty_like(self);
@@ -967,7 +1088,7 @@ at::Tensor rpu_silu(const at::Tensor &self) {
 // ------------------------ sqrt ------------------------
 at::Tensor rpu_sqrt(const at::Tensor &self) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_sqrt: self must be on RPU");
+              "rpu_sqrt: self must be on device");
 
   if (self.scalar_type() != at::kHalf) {
     auto cpu_self = rpu_to_cpu_zerocopy(self);
@@ -989,7 +1110,7 @@ at::Tensor rpu_sqrt(const at::Tensor &self) {
 // ------------------------ exp ------------------------
 at::Tensor rpu_exp(const at::Tensor &self) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_exp: self must be on RPU");
+              "rpu_exp: self must be on device");
 
   if (self.scalar_type() != at::kHalf) {
     auto cpu_self = rpu_to_cpu_zerocopy(self);
@@ -1011,7 +1132,7 @@ at::Tensor rpu_exp(const at::Tensor &self) {
 // ------------------------ log ------------------------
 at::Tensor rpu_log(const at::Tensor &self) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_log: self must be on RPU");
+              "rpu_log: self must be on device");
 
   if (self.scalar_type() != at::kHalf) {
     auto cpu_self = rpu_to_cpu_zerocopy(self);
@@ -1033,7 +1154,7 @@ at::Tensor rpu_log(const at::Tensor &self) {
 // ------------------------ sin ------------------------
 at::Tensor rpu_sin(const at::Tensor &self) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_sin: self must be on RPU");
+              "rpu_sin: self must be on device");
 
   if (self.scalar_type() != at::kHalf) {
     auto cpu_self = rpu_to_cpu_zerocopy(self);
@@ -1056,7 +1177,7 @@ at::Tensor rpu_sin(const at::Tensor &self) {
 // ------------------------ cos ------------------------
 at::Tensor rpu_cos(const at::Tensor &self) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_cos: self must be on RPU");
+              "rpu_cos: self must be on device");
 
   if (self.scalar_type() != at::kHalf) {
     auto cpu_self = rpu_to_cpu_zerocopy(self);
@@ -1079,9 +1200,9 @@ at::Tensor rpu_cos(const at::Tensor &self) {
 // ------------------------ rsqrt ------------------------
 at::Tensor rpu_rsqrt(const at::Tensor &self) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_rsqrt: self must be on RPU");
+              "rpu_rsqrt: self must be on device");
 
-  // Only Half is supported by RPU kernel - 零拷贝优化
+  // Only Half is supported by device kernel - 零拷贝优化
   if (self.scalar_type() != at::kHalf) {
     auto cpu_self = rpu_to_cpu_zerocopy(self);
     auto result = at::empty_like(self);
@@ -1104,9 +1225,9 @@ at::Tensor rpu_rsqrt(const at::Tensor &self) {
 //                             const c10::Scalar &alpha)
 // {
 //   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-//               "a not on RPU");
+//               "a not on device");
 //   TORCH_CHECK(other.device().type() == c10::DeviceType::PrivateUse1,
-//               "b not on RPU");
+//               "b not on device");
 //   TORCH_CHECK(self.sizes() == other.sizes(), "size mismatch");
 
 //   const c10::Half alpha_f = alpha.to<c10::Half>();
@@ -1121,9 +1242,9 @@ at::Tensor rpu_rsqrt(const at::Tensor &self) {
 //     const at::Tensor& b,
 //     const c10::Scalar& alpha) {
 //   TORCH_CHECK(
-//       a.device().type() == c10::DeviceType::PrivateUse1, "a not on RPU");
+//       a.device().type() == c10::DeviceType::PrivateUse1, "a not on device");
 //   TORCH_CHECK(
-//       b.device().type() == c10::DeviceType::PrivateUse1, "b not on RPU");
+//       b.device().type() == c10::DeviceType::PrivateUse1, "b not on device");
 //   TORCH_CHECK(a.sizes() == b.sizes(), "size mismatch");
 
 //   auto result = rpu_empty_strided(
@@ -1142,7 +1263,7 @@ at::Tensor rpu_rsqrt(const at::Tensor &self) {
 
 at::Tensor rpu_tanh(const Tensor &self) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "self not on RPU");
+              "self not on device");
   auto result =
       rpu_empty_strided(self.sizes(), self.strides(), self.scalar_type(),
                         self.layout(), self.device(), false);
@@ -1168,7 +1289,7 @@ Tensor rpu_matmul(const Tensor &tensor1, const Tensor &tensor2) {
   auto cpu_tensor2 = rpu_to_cpu_zerocopy(tensor2);
   // matmul 输出形状可能变化，先计算 CPU 结果
   auto cpu_result = at::matmul(cpu_tensor1, cpu_tensor2);
-  // 分配 RPU 输出并复制
+  // 分配 device 输出并复制
   auto result = rpu_empty_strided(cpu_result.sizes(), cpu_result.strides(),
                                   cpu_result.scalar_type(), cpu_result.layout(),
                                   tensor1.device(), false);
@@ -1193,7 +1314,7 @@ at::Tensor rpu_bmm_fallback(const at::Tensor &self, const at::Tensor &mat2) {
 at::Tensor rpu_softmax(const at::Tensor &self, int64_t dim,
                        c10::optional<at::ScalarType> dtype_opt) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "rpu_softmax: tensor must be on rpu");
+              "rpu_softmax: tensor must be on device");
 
   // The native kernel is a narrow [1,N,C] FP16 fast path. It ignores B, uses
   // 16-element DMA blocks, and allocates both input and output in core-0 SPM;
@@ -1234,9 +1355,9 @@ at::Tensor rpu_softmax(const at::Tensor &self, int64_t dim,
 
 at::Tensor rpu_bmm(const at::Tensor &self, const at::Tensor &mat2) {
   TORCH_CHECK(self.device().type() == c10::DeviceType::PrivateUse1,
-              "self must be on rpu");
+              "self must be on device");
   TORCH_CHECK(mat2.device().type() == c10::DeviceType::PrivateUse1,
-              "mat2 must be on rpu");
+              "mat2 must be on device");
   TORCH_CHECK(self.dim() == 3 && mat2.dim() == 3,
               "rpu_bmm: bmm expects 3D tensors");
   TORCH_CHECK(self.options().dtype() == at::kHalf,
@@ -1428,9 +1549,9 @@ std::vector<at::Tensor> rpu_broadcast(c10::ArrayRef<at::Tensor> tensors) {
 //   // return out_cpu.to(input.device());
 
 //   TORCH_CHECK(input.device().type() == c10::DeviceType::PrivateUse1,
-//               "input must be on rpu");
+//               "input must be on device");
 //   TORCH_CHECK(weight.device().type() == c10::DeviceType::PrivateUse1,
-//               "weight must be on rpu");
+//               "weight must be on device");
 //   TORCH_CHECK(input.options().dtype() == at::kHalf,
 //               "rpu_linear: only half supported");
 //   std::cout << input.sizes() << std::endl;

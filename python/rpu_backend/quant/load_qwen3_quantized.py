@@ -103,7 +103,7 @@ def stage_qwen3_w4a16_for_rpu(
     config, ckpt_dir: str, *, quantization: str,
     dtype: torch.dtype = torch.float16, **resolve_kwargs,
 ):
-    """Return an unmaterialized, identity-bound 32B source for one-step RPU load."""
+    """Return an unmaterialized, identity-bound 32B source for one-step device load."""
     _source_profile(config, quantization)
     if dtype is not torch.float16:
         raise TypeError("Qwen3 staged W4 requires FP16 activations")
@@ -201,7 +201,7 @@ def _move_packed_layer(model, index):
 
 @torch.inference_mode(False)
 def materialize_staged_qwen3_w4a16_for_rpu(model, *, quantization: str) -> None:
-    """Consume the plan into final RPU layouts after adapter claim and poison."""
+    """Consume the plan into final device layouts after adapter claim and poison."""
     from rpu_backend.runtime.weights import (
         _release_cpu_weight_pages, transform_linear_weight,
     )

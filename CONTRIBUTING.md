@@ -7,7 +7,7 @@ agreed first.
 
 ## Development setup
 
-Use a preconfigured RPU board environment and install the exact Rhino Launch
+Use a preconfigured device board environment and install the exact Rhino Launch
 1.0.0 development package. If its CMake package is outside the system search
 path, add its prefix to `CMAKE_PREFIX_PATH`, then install from the repository
 root:
@@ -16,7 +16,7 @@ root:
 python -m pip install -e '.[dev]' --no-build-isolation
 ```
 
-Set `RPU_KERNEL_LIB_PATH` to the release-matched combined operator asset for
+Set `RPU_KERNEL_LIB_PATH` to the release-matched main and expansion operator assets for
 board execution. Restricted packages and assets must stay outside the
 repository.
 
@@ -30,12 +30,12 @@ repository.
 - Reuse public operators and the adapter template before adding a fused C++
   subsystem. Follow [`docs/model_porting.md`](docs/model_porting.md).
 - Add the smallest board-free test that protects new validation or planning
-  logic. Model execution changes also require CPU-reference versus RPU evidence
+  logic. Model execution changes also require CPU-reference versus device evidence
   on the affected profile.
 - Update the model, asset, API, runtime-configuration, or quantization document
   whenever a public contract changes.
 
-Do not commit device assembly, ISA or opcode semantics, instruction streams,
+Do not commit restricted device implementation details, internal program formats,
 operator-asset format parsers, disassemblers, generator sources, restricted
 binaries or assets, credentials, private paths, private infrastructure details,
 or customer-confidential material. Host-side operator wrappers, SPM planning,

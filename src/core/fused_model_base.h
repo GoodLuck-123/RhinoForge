@@ -32,6 +32,7 @@
 #include <vector>
 #include "ops/rpu_kvinsert_segment_plan.h"
 #include "execution_topology.h"
+#include "rpu_wall_sorting_config.h"
 #include "rpu_math_precision.h"
 
 class RpuKernelGraph;
@@ -218,7 +219,7 @@ struct LayoutContext {
     int64_t max_kv_seq_len = 0;
     int64_t num_layers = 0;
     bool    use_attn_mask = false;
-    // the attention layout mode (causal vs bidirectional-
+    // MR!21 finding-5 fix: the attention layout mode (causal vs bidirectional-
     // no-mask) drives subclass declare_buffers layout (KV_FIRST q_kv split, k/v
     // sizing, buffer scopes, sdpa_tmp mask — see CausalDecoderModel). It MUST be
     // part of the allocation identity (compute_params_hash_impl) so a handle that
@@ -466,6 +467,14 @@ enum class FmbLinearRouteSelector : int {
     ROW_WEIGHT_REUSE = 5,
     PI05_NVFP4_V2_ACC32 = 6,
     PI05_NVFP4_V2_ACC16 = 7,
+    G05_NVFP4_V2_ACC16 = 8,
+    G05_NVFP4_PAIRED_ACC16 = 9,
+    G05_NVFP4_RESIDENT_ACC16 = 10,
+    G05_NVFP4_SWIGLU_ACC16 = 11,
+    G05_NVFP4_V2_ACC32 = 12,
+    G05_NVFP4_PAIRED_ACC32 = 13,
+    G05_NVFP4_RESIDENT_ACC32 = 14,
+    G05_NVFP4_SWIGLU_ACC32 = 15,
 };
 
 // Shared FusedModelBase emitters are native physical sites in their own
@@ -1216,14 +1225,15 @@ public:
     // preload/DMA, Graph, plan selection, or forward receipt is produced.
     void prepare_persistent_spm(int64_t execution_len, int64_t position,
                                 bool is_causal, int64_t mask_kv_len = 0);
+    // Ordinary-owner cold initialization for an explicitly declared immutable
+    // callback subset. The descriptor must come from this owner's latest
+    // native domain. No Temp or successful forward receipt is produced.
+    void prime_resident_preloads(at::IntArrayRef selected_descriptor);
 
-    // Admitted chunk envelope: native SPM arithmetic and profile admission are
-    // separate guards. A candidate must satisfy both before hardware submission.
-    //
-    // chunk bounds the physical chunk on every path. max_kv_len additionally
-    // bounds the explicit-mask allocation, whose size scales as
-    // comp_cs * ceil16(kv) * 32. Without an explicit mask, it bounds the admitted
-    // AUTO request range rather than a mask allocation.
+    // Profile-specific chunk and KV bounds supplement the SPM capacity check.
+    // An undeclared envelope rejects automatic planning. Explicit-mask paths
+    // include a mask buffer that grows with KV length; mask-free paths still
+    // respect their declared KV limit.
     struct ChunkEnvelope {
         int64_t max_kv_len = 0;   // 0 = UNDECLARED => deny
         int64_t chunk      = 0;   // 0 = "auto is certified within max_kv_len"
@@ -1281,6 +1291,10 @@ public:
     std::shared_ptr<const FmbPreparedStageCandidate> prepare_stage_candidate(
         at::IntArrayRef descriptor) const;
 protected:
+    // Model-owned whitelist only: never include per-request/AdaRMS callbacks.
+    // Configure before Persistent reservation and before the first forward.
+    void configure_resident_preloads(std::vector<std::string> callback_names);
+    bool resident_preloads_enabled() const;
     // Valid only during this dispatch, after actual temporary layout matched
     // the COMPLETE plan. Persistent addresses require separate owner checks.
     uint64_t checked_layer_body_replay_layout_hash() const;
@@ -1495,6 +1509,10 @@ protected:
     // hash byte-identical for every subclass that does not override.
     virtual int64_t subclass_layout_hash() const { return 0; }
 
+    // Opt-in for owners that evict their Graphs between varying shapes.
+    // Other models retain the historical per-handle registry policy.
+    virtual bool graph_scoped_ddr_buffers() const { return false; }
+
     virtual SpmFmbTraversalCapability spm_fmb_traversal_capability() const {
         return SpmFmbTraversalCapability::Unsealed;
     }
@@ -1691,7 +1709,7 @@ protected:
     // RECORDING scope whose signature segment key equals profile_hash().  A
     // production run_all_layers consumes only a live profile; the protected
     // CPU driver consumes only a CPU-dry profile and invokes the same resolved
-    // kv/layer callbacks without requiring RPU tensors.  seal() is legal only
+    // kv/layer callbacks without requiring device tensors.  seal() is legal only
     // after Graph::end() has committed the same build as BUILT.  The initial
     // fail-closed contract permits one armed FMB trace per owner thread/outer
     // Graph; composite multi-owner tracing needs a later coordinator token.
@@ -1881,10 +1899,14 @@ protected:
                            bool acc32 = false,
                            bool fuse_silu_mul = false,
                            bool skip_down = false,
+                           bool fuse_wall_gate_up = false,
                            bool bind_silu_mul_route = false,
                            uint32_t residual_spm_addr = 0,
                            bool pi05_xor3 = false,
                            bool pi05_nvfp4_v2 = false,
+                           uint32_t gate_weight_spm_addr = 0,
+                           uint32_t up_weight_spm_addr = 0,
+                           const WallSortingConfig& sorting = {},
                            bool prefer_gemv = false,
                            RpuUnaryPrecision unary_precision = RpuUnaryPrecision::BASE,
                            bool high_precision_silu_mul = false);
@@ -1986,6 +2008,7 @@ private:
         std::shared_ptr<const FmbPreparedStageCandidate> prepared_candidate = {});
     void run_preload_callbacks_(const std::vector<BufferDecl>& decls,
                                 FusedModelBase& self);
+    void validate_resident_preloads_() const;
     SpmFmbResolvedExecutionProfile
     resolve_spm_pipeline_execution_profile_impl(
         const SpmFmbResolvedProfileRequest& request,

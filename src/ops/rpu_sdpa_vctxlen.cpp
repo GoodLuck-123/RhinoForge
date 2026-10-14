@@ -22,6 +22,11 @@ using namespace ::rhino_lkn;
 
 namespace {
 
+constexpr int kWallVisionCores = 8;
+constexpr int kWallVisionBatch = 3;
+constexpr int kWallVisionSeq = 576;
+constexpr int kWallVisionHeadsPerCore = 2;
+constexpr int kWallVisionHeadDim = 80;
 
 struct SpmRegion {
     uint32_t offset;
@@ -92,6 +97,76 @@ std::vector<uint8_t> spm_cores(int num_cores) {
 }
 
 }  // namespace
+
+void rpu_launch_wall_base_vision_ragged_sdpa_spm(
+    uint32_t q_spm,
+    uint32_t k_spm,
+    uint32_t v_transposed_spm,
+    uint32_t output_spm,
+    uint32_t mask_spm,
+    double scale,
+    int64_t rows,
+    int num_cores) {
+    TORCH_CHECK((rows == 324 || rows == 336) && num_cores == 8,
+                "Wall base ragged SDPA requires B1/M324 or M336/TP8");
+    const float scale_f32 = static_cast<float>(scale);
+    TORCH_CHECK(std::isfinite(scale) && std::isfinite(scale_f32),
+                "Wall base ragged SDPA scale must be finite in fp32");
+    // The nine-window kernel keeps the full image's Q/K/V and mask strides.
+    // M324 has only four real queries in the last tile; K/Vt still back 336
+    // rows. M336 retains its dense-mask isolation of real4 versus dummy12.
+    const size_t q_bytes = checked_spm_bytes("ragged Q/output", {rows, 2, 80});
+    const size_t kv_bytes = checked_spm_bytes("ragged K/Vt", {336, 2, 80});
+    const size_t mask_bytes = checked_spm_bytes("ragged mask", {rows, 336});
+    const SpmRegion q = checked_spm_region(q_spm, q_bytes, "ragged Q");
+    const SpmRegion k = checked_spm_region(k_spm, kv_bytes, "ragged K");
+    const SpmRegion v = checked_spm_region(v_transposed_spm, kv_bytes, "ragged Vt");
+    const SpmRegion output = checked_spm_region(output_spm, q_bytes, "ragged output");
+    const SpmRegion mask = checked_spm_region(mask_spm, mask_bytes, "ragged mask");
+    const std::array<SpmRegion, 5> regions{q, k, v, output, mask};
+    check_spm_regions_disjoint(regions);
+    for (const auto& region : regions) {
+        for (int core = 0; core < num_cores; ++core) {
+            const uint64_t start = uint64_t{SPM_ALLOC.addr(core, 0)} + region.offset;
+            TORCH_CHECK((start & 31u) == 0 && start <= UINT32_MAX &&
+                            region.bytes - 1 <= UINT32_MAX - start,
+                        "Wall base ragged SDPA per-core SPM range exceeds uint32 ABI");
+        }
+    }
+    constexpr auto id = KernelId::WALL_BASE_VISION_RAGGED_SDPA;
+    TORCH_CHECK(KernelCache::instance().has_loaded(id),
+                "Wall base ragged SDPA payload is unavailable");
+    auto* kernel = GET_KERNEL(id);
+    TORCH_CHECK(kernel != nullptr, "Wall base ragged SDPA kernel is missing");
+    kernel->reset_regs();
+    const auto u16 = [&](int reg, uint16_t value) {
+        TORCH_CHECK(kernel->set_regs(reg, value) == kKernelRegOk,
+                    "Wall base ragged SDPA parameter write failed: ", reg);
+    };
+    // Exact private-micro packet: unused high halves/cache fields remain zero.
+    for (int reg = 0; reg < 68; ++reg) u16(reg, 0);
+    u16(0, rows); u16(2, rows); u16(3, 21); u16(4, 21);
+    u16(6, 16); u16(7, 16); u16(8, 2); u16(9, 2);
+    for (int reg = 10; reg < 13; ++reg) u16(reg, 80);
+    for (int reg = 13; reg < 16; ++reg) u16(reg, 5);
+    u16(18, 8); u16(19, 1);
+    const uint32_t scale_bits = float32_to_uint32(scale_f32);
+    u16(40, uint16_t(scale_bits)); u16(41, uint16_t(scale_bits >> 16));
+    u16(42, 1); u16(56, 4); u16(58, 64); u16(59, 80); u16(60, 256);
+    u16(61, 4); u16(62, 5); u16(63, 16); u16(64, 2); u16(65, 1); u16(66, 9);
+    for (int core = 0; core < num_cores; ++core) {
+        const int base = SCM_REG_OFFSET + core * 12;
+        set_scm_spm_ptr(kernel, base, core, q.offset);
+        rpu_set_scm_u32_checked(kernel, base + 2, 0, "Wall base ragged SDPA unused temporary");
+        set_scm_spm_ptr(kernel, base + 4, core, mask.offset);
+        set_scm_spm_ptr(kernel, base + 6, core, output.offset);
+        set_scm_spm_ptr(kernel, base + 8, core, k.offset);
+        set_scm_spm_ptr(kernel, base + 10, core, v.offset);
+    }
+    auto* queue = GET_QUEUE(num_cores);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {2, 1, 9}, spm_cores(num_cores));
+}
 
 void rpu_launch_sdpa_spm_vctxlen_kernel(
     const at::Tensor &key,
@@ -595,4 +670,112 @@ void rpu_launch_sdpa_by_mha_spm(
                   static_cast<uint16_t>(grid_dim_y),
                   static_cast<uint16_t>(batch)},
         spm_cores(num_cores));
+}
+
+
+void rpu_launch_wall_window_sdpa_by_mha_spm(
+    uint32_t q_spm,
+    uint32_t k_spm,
+    uint32_t v_transposed_spm,
+    uint32_t output_spm,
+    double scale) {
+    static_assert(kWallVisionCores == 8 && kWallVisionBatch == 3 &&
+                  kWallVisionSeq == 576 &&
+                  kWallVisionHeadsPerCore * kWallVisionCores == 16 &&
+                  kWallVisionHeadDim == 80);
+    constexpr size_t kOperandBytes = 552'960;
+    static_assert(
+        kOperandBytes == kWallVisionBatch * kWallVisionSeq *
+                kWallVisionHeadsPerCore * kWallVisionHeadDim *
+                sizeof(c10::Half));
+
+    const float scale_f32 = static_cast<float>(scale);
+    TORCH_CHECK(std::isfinite(scale) && std::isfinite(scale_f32),
+                "Wall window SDPA scale must be finite in fp32, got ", scale);
+    const SpmRegion q = checked_spm_region(q_spm, kOperandBytes, "Wall window Q");
+    const SpmRegion k = checked_spm_region(k_spm, kOperandBytes, "Wall window K");
+    const SpmRegion v = checked_spm_region(
+        v_transposed_spm, kOperandBytes, "Wall window V transpose");
+    const SpmRegion output = checked_spm_region(
+        output_spm, kOperandBytes, "Wall window attention output");
+    TORCH_CHECK(q.offset != output.offset,
+                "Wall window SDPA requires distinct Q/output buffers");
+    check_spm_regions_disjoint(std::array<SpmRegion, 4>{q, k, v, output});
+
+    Kernel_t* kernel = GET_KERNEL(
+        KernelId::WALL_WINDOW_SDPA_BY_MHA_B3S576H16D80);
+    TORCH_CHECK(kernel != nullptr,
+                "Wall window SDPA kernel is unavailable in the expansion ref");
+    kernel->reset_regs();
+    kernel->set_regs(0, static_cast<uint16_t>(576));
+    kernel->set_regs(2, static_cast<uint16_t>(576));
+    kernel->set_regs(3, static_cast<uint16_t>(36));
+    kernel->set_regs(4, static_cast<uint16_t>(36));
+    kernel->set_regs(6, static_cast<uint16_t>(16));
+    kernel->set_regs(7, static_cast<uint16_t>(16));
+    kernel->set_regs(8, static_cast<uint16_t>(2));
+    kernel->set_regs(9, static_cast<uint16_t>(2));
+    kernel->set_regs(10, static_cast<uint16_t>(80));
+    kernel->set_regs(11, static_cast<uint16_t>(80));
+    kernel->set_regs(12, static_cast<uint16_t>(80));
+    kernel->set_regs(13, static_cast<uint16_t>(5));
+    kernel->set_regs(14, static_cast<uint16_t>(5));
+    kernel->set_regs(15, static_cast<uint16_t>(5));
+    kernel->set_regs(18, static_cast<uint16_t>(8));
+    kernel->set_regs(19, static_cast<uint16_t>(1));
+    const uint32_t scale_bits = float32_to_uint32(scale_f32);
+    kernel->set_regs(40, static_cast<uint16_t>(scale_bits));
+    kernel->set_regs(41, static_cast<uint16_t>(scale_bits >> 16));
+    kernel->set_regs(42, static_cast<uint16_t>(1));
+    kernel->set_regs(56, static_cast<uint16_t>(0));
+    kernel->set_regs(58, static_cast<uint16_t>(64));
+    kernel->set_regs(59, static_cast<uint16_t>(80));
+    kernel->set_regs(60, static_cast<uint16_t>(256));
+    kernel->set_regs(61, static_cast<uint16_t>(4));
+    kernel->set_regs(62, static_cast<uint16_t>(5));
+    kernel->set_regs(63, static_cast<uint16_t>(16));
+    kernel->set_regs(64, static_cast<uint16_t>(2));
+    kernel->set_regs(65, static_cast<uint16_t>(1));
+    kernel->set_regs(66, static_cast<uint16_t>(36));
+
+    constexpr int kScmStride = 12;
+    for (int core = 0; core < kWallVisionCores; ++core) {
+        const int base = SCM_REG_OFFSET + core * kScmStride;
+        set_scm_spm_ptr(kernel, base, core, q.offset);
+        set_scm_spm_ptr(kernel, base + 6, core, output.offset);
+        set_scm_spm_ptr(kernel, base + 8, core, k.offset);
+        set_scm_spm_ptr(kernel, base + 10, core, v.offset);
+    }
+
+    auto* queue = GET_QUEUE(kWallVisionCores);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(
+        *kernel, {2, 1, 36}, spm_cores(kWallVisionCores));
+}
+
+void rpu_launch_v_transpose_spm_batch3_576(
+    uint32_t input_spm,
+    uint32_t output_spm) {
+    rpu_launch_v_transpose_spm(
+        input_spm, output_spm,
+        kWallVisionBatch, kWallVisionSeq,
+        kWallVisionHeadsPerCore * kWallVisionCores,
+        kWallVisionHeadDim, kWallVisionCores);
+}
+
+void rpu_launch_sdpa_by_mha_spm_batch3_576(
+    uint32_t q_spm,
+    uint32_t k_spm,
+    uint32_t v_transposed_spm,
+    uint32_t output_spm,
+    uint32_t mask_spm,
+    int attn_mask_type,
+    double scale) {
+    rpu_launch_sdpa_by_mha_spm(
+        q_spm, k_spm, v_transposed_spm, output_spm, mask_spm,
+        attn_mask_type, scale,
+        kWallVisionBatch, kWallVisionSeq, kWallVisionSeq,
+        kWallVisionHeadsPerCore * kWallVisionCores,
+        kWallVisionHeadsPerCore * kWallVisionCores,
+        kWallVisionHeadDim, kWallVisionCores);
 }

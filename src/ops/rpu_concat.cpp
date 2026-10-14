@@ -1,7 +1,8 @@
-// rpu_concat.cpp - Concat operation for RPU backend (memcpy version)
+// rpu_concat.cpp - Concat operation for device backend (memcpy version)
 #include "rpu_ops.h"
 #include <string.h>  // for memcpy
 #include <vector>
+#include <limits>
 
 using namespace at;
 
@@ -72,7 +73,7 @@ at::Tensor rpu_cat(const c10::IListRef<at::Tensor>& tensors, int64_t dim) {
     }
     output_shape[dim] = cat_dim_size;
 
-    // 在 RPU 上分配输出
+    // 在 device 上分配输出
     auto output = at::empty(output_shape, first.options().device(target_device));
 
     // 计算 memcpy 参数
@@ -97,12 +98,65 @@ at::Tensor rpu_cat(const c10::IListRef<at::Tensor>& tensors, int64_t dim) {
     char* out_ptr = static_cast<char*>(output.data_ptr());
     int64_t cat_offset = 0;  // 当前在 cat 维度上的偏移
 
-    // Host memcpy crosses the CPU<->RPU coherency boundary.  The regular
-    // rpu_ddr_flush knob is intentionally disabled for intra-RPU traffic, so
+    // Host memcpy crosses the CPU<->device coherency boundary.  The regular
+    // rpu_ddr_flush knob is intentionally disabled for intra-device traffic, so
     // it cannot guard these reads/writes.  Flush only the live tensor ranges.
+    // Batch has no SDK owner/bounds lookup. Prove every rounded read range
+    // before deferring any acquire, including disjointness from the fresh output.
+    std::vector<void*> acquire_ptrs;
+    std::vector<size_t> acquire_sizes;
+    const uintptr_t max_addr = std::numeric_limits<uintptr_t>::max();
+    const uintptr_t out_begin = reinterpret_cast<uintptr_t>(out_ptr);
+    const size_t out_bytes = output.nbytes();
+    bool batch_acquire = g_rpu_ddr_flush_force_enabled && out_begin != 0 &&
+        out_bytes != 0 && out_bytes <= max_addr - out_begin &&
+        out_begin + out_bytes <= max_addr - 63;
+    const uintptr_t out_lo = out_begin & ~uintptr_t(63);
+    const uintptr_t out_hi = batch_acquire
+        ? (out_begin + out_bytes + 63) & ~uintptr_t(63) : 0;
     for (const auto& inp : inputs) {
-        if (inp.device().type() == c10::DeviceType::PrivateUse1) {
-            rpu_ddr_flush_force_sized(inp.data_ptr(), inp.nbytes());
+        if (!batch_acquire) break;
+        void* ptr = inp.data_ptr();
+        const size_t bytes = inp.nbytes();
+        const uintptr_t begin = reinterpret_cast<uintptr_t>(ptr);
+        if (begin == 0 || bytes == 0 || bytes > max_addr - begin ||
+            begin + bytes > max_addr - 63) {
+            batch_acquire = false;
+            break;
+        }
+        const uintptr_t lo = begin & ~uintptr_t(63);
+        const uintptr_t hi = (begin + bytes + 63) & ~uintptr_t(63);
+        if (lo < out_hi && out_lo < hi) {
+            batch_acquire = false;
+            break;
+        }
+        if (inp.device().type() != c10::DeviceType::PrivateUse1) continue;
+        auto* owner = rhino_lkn::RpuGetHostddr(ptr);
+        if (!owner) {
+            batch_acquire = false;
+            break;
+        }
+        const uintptr_t base = reinterpret_cast<uintptr_t>(owner->get_cpu_ptr());
+        const size_t extent = owner->get_memory_size();
+        if (base == 0 || extent == 0 || extent > max_addr - base ||
+            lo < base || hi - base > extent) {
+            batch_acquire = false;
+            break;
+        }
+        acquire_ptrs.push_back(ptr);
+        acquire_sizes.push_back(bytes);
+    }
+    if (batch_acquire && acquire_ptrs.size() > 1) {
+        rhino_lkn::RpuDdrFlushBatch(
+            acquire_ptrs.data(), acquire_sizes.data(), acquire_ptrs.size());
+#if defined(__aarch64__)
+        __asm__ volatile("dsb sy" ::: "memory");
+#endif
+    } else {
+        for (const auto& inp : inputs) {
+            if (inp.device().type() == c10::DeviceType::PrivateUse1) {
+                rpu_ddr_flush_force_sized(inp.data_ptr(), inp.nbytes());
+            }
         }
     }
 
@@ -123,7 +177,7 @@ at::Tensor rpu_cat(const c10::IListRef<at::Tensor>& tensors, int64_t dim) {
     }
 
     if (target_device.type() == c10::DeviceType::PrivateUse1) {
-        // Publish the host-written output before the next RPU DMA reads it.
+        // Publish the host-written output before the next device DMA reads it.
         rpu_ddr_flush_force_sized(out_ptr, output.nbytes());
     }
 
