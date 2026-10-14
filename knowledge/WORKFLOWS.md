@@ -126,6 +126,15 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   Exclude physical padding from logical KV position; replace only the old prefill
   Graph when prompt length changes. Predictor keeps one decode Graph; codec keeps
   one current-frame Graph. Retire Graphs before handles and weights.
+- Speech TOMLs under `examples/configs/qwen3_asr` and `qwen3_tts` use the shared
+  CLI and the dedicated audio runner. Keep configuration checks free of Torch/device
+  imports and validate paths/audio before loading weights. Record resident latency,
+  process CPU time and actual-duration RTF separately from load and profiling.
+- The opt-in TTS `codec_backend="rpu"` offloads only twelve kernel-7 residual
+  convolutions through synchronous FP16/ACC32 Linear. Validate all geometries before
+  conversion, preserve CPU weights, restore forwards on close and report actual calls.
+  CPU im2col, bias and the rest of the vocoder remain explicit; do not claim full
+  device execution or bitwise equality with the FP32 anchor.
 - CPU codec matrix multiplication and adjacent-block overlap-add preserve output
   lengths; other convolutions retain their original path. Keep thread settings
   caller-controlled and check retained outputs, input changes and close/reload

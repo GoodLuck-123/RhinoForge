@@ -426,7 +426,7 @@ from rpu_backend.api import Qwen3ASRModel, Qwen3TTSModel
 |---|---|
 | `Qwen3ASRModel.from_pretrained(checkpoint, dtype=torch.float16)` | 本地固定 Qwen3-ASR-0.6B checkpoint |
 | `model.transcribe(audio, sample_rate=16000, max_new_tokens=64)` | 一维 CPU 有限浮点波形，单声道 16 kHz、0.5–8 秒；生成上限 1–64。返回 `ASRTranscription(text, raw_text, token_ids)` |
-| `Qwen3TTSModel.from_pretrained(checkpoint, source=prepared_package, dtype=torch.float16)` | 本地固定 Qwen3-TTS-12Hz-0.6B-Base checkpoint 和准备后的 `qwen_tts/` 源码目录 |
+| `Qwen3TTSModel.from_pretrained(checkpoint, source=prepared_package, dtype=torch.float16, codec_backend="cpu")` | 本地固定 Qwen3-TTS-12Hz-0.6B-Base checkpoint 和准备后的 `qwen_tts/` 源码目录 |
 | `model.synthesize(text, reference_audio=local_file, language="Chinese", max_new_tokens=256)` | 文本 1–1024 字符；语言 `Chinese` / `English`；参考音频为有限、非全零的单声道 24 kHz、0.5–20 秒；每段生成上限 2–256。返回独立 float32 单声道波形及采样率 24000 |
 
 ASR 使用 greedy，不提供 context、时间戳或流式接口。TTS 使用非流式 speaker
@@ -468,3 +468,5 @@ speaker embedding，每次请求仍读取和校验参考文件。输出存储独
 先清 Graph，再释放 native handle 和权重。Predictor 的最后一行设备 hidden 只借给
 紧接着的输出头；请求 hidden states 时仍返回独立 CPU 存储。加载前通过
 `torch.set_num_threads` 设置 CPU 线程数，API 不修改此值。
+
+`codec_backend="rpu"` 为实验性 12 层残差卷积卸载，其余声码器仍在 CPU。`execution_stats().codec_convolutions` 返回 backend、已安装层数和累计设备调用次数，详见[语音指南](qwen3_audio.zh.md#实验性-rpu-声码器卷积)。

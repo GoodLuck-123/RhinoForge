@@ -3,7 +3,9 @@
 简体中文 | [English](qwen3_audio.md)
 
 `Qwen3ASRModel` 将本地音频转成文本，`Qwen3TTSModel` 根据文本和参考音频生成语音。
-两者使用独立 Python API，不经过文本/视觉 TOML runner 或 CausalLM/VLM registry。
+两者保留独立 Python API，并提供 [ASR](../examples/configs/qwen3_asr/README.md) /
+[TTS](../examples/configs/qwen3_tts/README.md) TOML 入口，通过 `python -m examples.run --config PATH`
+运行；不经过 CausalLM/VLM registry。
 
 ## 模型与输入
 
@@ -161,3 +163,20 @@ FP32 Linear 累加；codec 前段 LayerScale 在 FP32 中折入投影后转 FP16
   此优化需要重新编译匹配的 native，不能用通用 Graph 跳过开关代替。
 - TTS 只缓存最新参考音频内容的 speaker embedding，每次请求仍读取和检查文件。
   转换失败后关闭模型，从干净权重重新加载；释放时先清 Graph，再释放 handle 和权重。
+
+## 实验性 RPU 声码器卷积
+
+在 `Qwen3TTSModel.from_pretrained` 中设置 `codec_backend="rpu"`，或使用
+`examples/configs/qwen3_tts/0_6b/base_rpu_codec.toml`。默认仍为 `cpu`。
+RPU 模式将 12 层残差 Conv1d（kernel 7；通道 768/384/192/96；dilation 1/3/9）
+转换成显式八核 Linear，输入/权重 FP16、累加 FP32。权重只转换一次，保留原 CPU FP32
+权重；输出通道补齐到 128 对齐后裁回原大小，再加原 FP32 bias。
+
+CPU 仍执行列展开、码本、SnakeBeta、其余卷积和上采样，因此属于部分卸载。
+复用同步 immediate Linear 和第五个共享 arena，不新增常驻 Graph。几何不匹配会拒绝
+安装，执行错误直接抛出，不静默退回 CPU。`execution_stats().codec_convolutions`
+记录 `backend`、安装的 `layers` 和累计 RPU `calls`。前段 Transformer 的 63 帧设备
+边界和更长序列的 CPU 滑窗注意力保持不变。
+
+FP16 舍入会改变波形，应使用同一份 codec tokens 对照 CPU FP32 并核验语音内容。
+该模式为实验选项，不继承默认配置的音质结论，运行成功不等于音质认证。

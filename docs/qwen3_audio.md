@@ -3,8 +3,10 @@
 [简体中文](qwen3_audio.zh.md) | English
 
 `Qwen3ASRModel` transcribes local audio. `Qwen3TTSModel` generates speech from
-text and reference audio. Both use dedicated Python APIs,
-separate from the text/vision TOML runner and CausalLM/VLM registry.
+text and reference audio. Both retain dedicated Python APIs and now have TOML entry points under
+[ASR examples](../examples/configs/qwen3_asr/README.md) and
+[TTS examples](../examples/configs/qwen3_tts/README.md), dispatched by
+`python -m examples.run --config PATH`. They do not use the CausalLM/VLM registry.
 
 ## Models and inputs
 
@@ -189,3 +191,27 @@ and its 72-frame sliding attention.
   content; every request still reads and validates the file. After a failed
   transformation, close the model and reload clean weights. Retire Graphs before
   releasing handles and weights.
+
+## Experimental RPU vocoder convolutions
+
+Set `codec_backend="rpu"` in `Qwen3TTSModel.from_pretrained`, or select
+`examples/configs/qwen3_tts/0_6b/base_rpu_codec.toml`. The default remains `cpu`.
+This option moves twelve residual Conv1d layers (kernel 7, channels
+768/384/192/96, dilation 1/3/9) to explicit eight-core RPU Linear with FP16
+inputs/weights and FP32 accumulation. Weights are converted once from independent
+copies; original CPU FP32 weights remain intact. Output channels are padded to
+128 alignment and sliced back before applying the original FP32 bias.
+
+CPU still performs im2col, codebook, SnakeBeta, the other convolutions and
+upsampling. This is partial vocoder offload, not an all-RPU decoder. Each Linear
+uses the existing synchronous immediate path and the shared fifth arena; no new
+retained Graph is introduced. Unsupported geometry rejects installation; execution
+errors propagate instead of silently reverting to CPU. `execution_stats()` adds
+`codec_convolutions` with `backend`, installed `layers` and cumulative RPU `calls`.
+The frontend's existing 63-frame device bound and CPU sliding-attention fallback
+remain unchanged.
+
+FP16 rounding changes the waveform. Compare identical codec tokens against the
+CPU FP32 anchor and inspect speech content; runtime checks alone do not certify
+audio quality. The RPU option is experimental and does not inherit the default
+profile's quality evidence.

@@ -35,6 +35,8 @@ Install the `audio` extra and call `Qwen3ASRModel` or `Qwen3TTSModel`.
 The [speech guide](qwen3_audio.md) provides checkpoint downloads, TTS source
 preparation and complete Python examples.
 
+Speech CLI: `python -m examples.run --config examples/configs/qwen3_tts/0_6b/base.toml --check-config`; fill local paths before running. [ASR templates](../examples/configs/qwen3_asr/README.md) and [TTS templates](../examples/configs/qwen3_tts/README.md) record resident latency, process CPU time and RTF.
+
 ## Repository checks
 
 Run the host suite with `make ci-local-core PYTHON=python`. It uses the same

@@ -34,6 +34,8 @@ python -m examples.run --config examples/configs/pi05/2cam/w8a16_action_nvfp4.to
 安装 `audio` 可选依赖，调用 `Qwen3ASRModel` 或 `Qwen3TTSModel`。
 下载权重、准备 TTS 源码及完整 Python 用法见[语音指南](qwen3_audio.zh.md)。
 
+语音也可通过 `python -m examples.run --config examples/configs/qwen3_tts/0_6b/base.toml --check-config` 检查，填写本地路径后执行。[ASR](../examples/configs/qwen3_asr/README.md) / [TTS](../examples/configs/qwen3_tts/README.md) 入口记录常驻推理耗时、累计 CPU 时间和 RTF。
+
 ## 仓库检查
 
 运行 `make ci-local-core PYTHON=python` 执行主机测试，测试范围和设备用例排除清单与 CI 一致。
