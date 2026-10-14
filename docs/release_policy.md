@@ -15,13 +15,16 @@ Cut the release branch before advancing `main`. Launch uses `develop` for its
 development line and follows the same version stages. Merge release fixes back
 into development while keeping its next-version metadata.
 
-Tag the stable release `v1.2.0` and retain a dated archive tag with its source
-commit. The current download entry is `1.2.0`; superseded candidates remain in
-history. Advancing development does not retire the current stable release.
-A development entry may provide source only. Preserve published tags, package
-bytes and checksums; keep build dates and component commits with each archive.
-New stable fixes increment the patch version. Archive status does not determine
-whether a release receives maintenance.
+Tag each stable release once, such as `v1.2.0`. Its Release records the date,
+source and component commits, and package checksums; a duplicate `archive/` tag
+is unnecessary. The current download entry is `1.2.0`. Keep superseded candidate
+packages and their original checksums in the download history. Before removing
+a candidate tag or Release, migrate its records and update download links.
+
+Keep stable tags and published package bytes fixed. Advance `main` independently;
+compatible stable fixes receive a new patch version. Retain `main` and the active
+release branches, and remove merged working branches after checking for new
+commits. A development entry may provide source only.
 
 ## Build and dependency versions
 
@@ -46,10 +49,13 @@ RhinoForge、Runtime 和 Rhino Launch 使用同一发行版本，`VERSION` 为�
 `release/1.2` 发布正式版 `1.2.0`，`main` 开发 `1.3.0.dev0`；Launch 开发分支为
 `develop`。兼容修复递增补丁号，并合回开发分支，保留开发线的版本信息。
 
-正式版使用 `v1.2.0` 标签，同时保留含日期与源码 commit 的归档标签。下载页当前
-版本为 `1.2.0`，被替代的候选版进入历史记录。开发线升版不影响当前正式版入口。
-开发版可仅提供源码。已发布的标签、包和校验和保持不变，归档记录日期和组件
-commit；归档状态不代表停止维护。
+每个正式版只保留一个标准标签，如 `v1.2.0`；Release 记录日期、源码及组件 commit
+和包校验和，无需重复创建 `archive/` 标签。当前下载入口为 `1.2.0`。被替代的候选包
+及原校验和保留在下载历史中，删除候选标签或 Release 前先迁移记录并更新链接。
+
+正式标签和已发布包保持固定。`main` 独立开发，兼容修复递增补丁号。长期保留
+`main` 和仍在维护的 release 分支；工作分支合并后确认没有新增提交即可删除。
+开发版可仅提供源码。
 
 CMake 数值版本不含开发后缀，构建时另行核对完整发行版本。Launch ABI 和 Python
 API 兼容版本独立维护。算子资产固定来自 main 与 DDR-expansion 两个分支，依赖
