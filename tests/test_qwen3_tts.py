@@ -17,21 +17,39 @@ def test_fixed_predictor_sampling_steps_and_cache():
 
         def __init__(self):
             self.calls = 0
+            self.model = self
+            self.small_to_mtp_projection = lambda value: value + 1
+            self.lm_head = [self.head(index) for index in range(15)]
+
+        def get_input_embeddings(self):
+            def embed(index):
+                def forward(ids):
+                    assert ids.item() == index
+                    return torch.full((1, 1, 1024), index, dtype=torch.float32)
+                return forward
+            return [embed(index) for index in range(14)]
+
+        def head(self, index):
+            def forward(hidden):
+                assert hidden.item() == index
+                logits = torch.zeros(1, 1, 16)
+                logits[0, 0, index] = 1000
+                return logits
+            return forward
 
         def __call__(self, **kwargs):
             index = self.calls
-            assert kwargs["generation_steps"] == index
             assert kwargs["past_key_values"] == (None if index == 0 else index)
+            assert kwargs["use_cache"] and not kwargs["output_hidden_states"]
+            assert not kwargs["output_attentions"]
             if index == 0:
                 assert kwargs["inputs_embeds"].shape == (1, 2, 1024)
-                assert kwargs["input_ids"] is None
+                assert torch.all(kwargs["inputs_embeds"] == 1)
             else:
-                assert kwargs["inputs_embeds"] is None
-                assert kwargs["input_ids"].item() == index - 1
+                assert kwargs["inputs_embeds"].shape == (1, 1, 1024)
+                assert torch.all(kwargs["inputs_embeds"] == index)
             self.calls += 1
-            logits = torch.zeros(1, 1, 16)
-            logits[0, 0, index] = 1000
-            return SimpleNamespace(logits=logits, past_key_values=self.calls)
+            return SimpleNamespace(last_hidden_state=torch.tensor(index), past_key_values=self.calls)
 
     owner = Predictor()
     result = tts._predictor_generate(owner, torch.zeros(1, 2, 1024),
@@ -50,9 +68,19 @@ def test_predictor_uses_checkpoint_sampling_and_rejects_other_recipes():
     class Predictor:
         generation_config = SimpleNamespace(eos_token_id=None, repetition_penalty=None)
 
+        def __init__(self):
+            self.model = self
+            self.small_to_mtp_projection = torch.nn.Identity()
+            self.lm_head = [lambda hidden, index=index: self.scores(index) for index in range(15)]
+
+        def get_input_embeddings(self):
+            return [lambda ids: torch.zeros(1, 1, 1024)] * 14
+
+        def scores(self, index):
+            return torch.linspace(-2, 2, 128).roll(index).view(1, 1, -1)
+
         def __call__(self, **kwargs):
-            scores = torch.linspace(-2, 2, 128).roll(kwargs["generation_steps"])
-            return SimpleNamespace(logits=scores.view(1, 1, -1), past_key_values=None)
+            return SimpleNamespace(last_hidden_state=kwargs["inputs_embeds"], past_key_values=None)
 
     owner = Predictor()
     torch.manual_seed(17)
@@ -61,7 +89,7 @@ def test_predictor_uses_checkpoint_sampling_and_rejects_other_recipes():
     torch.manual_seed(17)
     expected = []
     for index in range(15):
-        scores = owner(generation_steps=index).logits[:, -1]
+        scores = owner.scores(index)[:, -1]
         scores = TemperatureLogitsWarper(0.9)(None, scores)
         scores = TopKLogitsWarper(50)(None, scores)
         expected.append(torch.multinomial(scores.softmax(-1), 1))

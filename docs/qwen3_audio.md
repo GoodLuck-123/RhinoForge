@@ -178,6 +178,13 @@ and its 72-frame sliding attention.
   matching signatures.
 - Predictor passes its last device hidden row directly to the immediate output
   head, consumed once; callers requesting hidden states receive owned CPU output.
+- Predictor uses native checked decode replay only for its five-layer FP16 path,
+  32-position cache, 1D RoPE and separate output heads. After recording the full
+  operator sequence, replay checks weight versions, KV owners, Graph identity and
+  memory layout, then updates position and attention parameters while skipping
+  repeated host emission. Input uploads, device computation, output heads and
+  sampling remain unchanged. An unproven binding uses ordinary execution. Rebuild
+  the matching native extension; generic Graph skip controls are not a substitute.
 - TTS caches only the latest reference audio's speaker embedding by decoded
   content; every request still reads and validates the file. After a failed
   transformation, close the model and reload clean weights. Retire Graphs before

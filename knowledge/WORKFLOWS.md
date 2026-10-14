@@ -106,6 +106,12 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   top-k 50, temperature 0.9 and top-p 1.0. Require EOS before waveform decoding;
   each segment allows up to 256 steps. Compare deterministic outputs after
   resetting the same seed when changing sampling.
+- Predictor checked decode replay retains the ordinary input/output route and
+  sampling. Bind its exact five-layer FP16/32-row/1D-RoPE grammar, versioned
+  immutable weights and tables, KV owners, Graph lifetime and physical layout
+  before skipping host emission. Refresh position and attention fields on every
+  replay, including resets to zero; use ordinary emission when the proof cannot
+  be established, and fail explicitly on inconsistencies after skipping starts.
 - Accept up to 1024 characters. Keep requests within 128 characters and 32 tokens
   on their single-segment path. Split longer text at punctuation with a 12-token
   target and 128-character bound; retain tiny sentence endings up to 16 tokens.

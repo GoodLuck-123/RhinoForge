@@ -154,5 +154,10 @@ FP32 Linear 累加；codec 前段 LayerScale 在 FP32 中折入投影后转 FP16
   Predictor decode 及当前帧数的 codec 图。长度变化按组件淘汰旧签名，同长度重放。
 - Predictor 最后一行设备 hidden 只供紧接着的输出头使用一次；请求 hidden states
   时仍返回独立 CPU 存储。
+- Predictor 复用 native checked decode replay：仅匹配五层 FP16、32 位置缓存、
+  一维 RoPE 和无融合输出头的固定路径。首次记录完整算子序列，后续校验权重版本、
+  KV 所有者、Graph 和内存布局，再更新位置及 attention 参数，跳过重复的主机算子
+  调度。输入上传、设备计算、输出头和原采样继续执行；无法建立证明时走普通路径。
+  此优化需要重新编译匹配的 native，不能用通用 Graph 跳过开关代替。
 - TTS 只缓存最新参考音频内容的 speaker embedding，每次请求仍读取和检查文件。
   转换失败后关闭模型，从干净权重重新加载；释放时先清 Graph，再释放 handle 和权重。
