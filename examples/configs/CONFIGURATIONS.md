@@ -307,6 +307,23 @@ CPU 列为请求值，`继承` 表示按运行器或环境设置。固定 P/D �
 | [qwen3_5/vl/9b/fp16_p512_d192.toml](qwen3_5/vl/9b/fp16_p512_d192.toml) | [run.py](../run.py)<br>固定 P/D 复现 | `fp16`；图像=448；P=512；D=192；TP=8 | 12 | `CONTROLLED_EVALUATION`<br>`QWEN35_VISION_HW_UNVERIFIED` |
 | [qwen3_5/vl/9b/w8a16_text.toml](qwen3_5/vl/9b/w8a16_text.toml) | [run.py](../run.py)<br>运行模板 | `w8a16`；D=32；TP=8 | 继承 | `CONTROLLED_EVALUATION`<br>`QWEN35_QUANT_VISION_IMPLEMENTED_UNVERIFIED_HW` |
 
+## qwen3_asr
+
+[配置说明](qwen3_asr/README.md) · [权重准备](qwen3_asr/README.md#quantization)
+
+| 配置 | 入口 / 用途 | 精度 / 输入默认 | CPU 请求 | 登记支持 |
+|---|---|---|---|---|
+| [qwen3_asr/0_6b/fp16.toml](qwen3_asr/0_6b/fp16.toml) | [run.py](../run.py)<br>运行模板 | `—` | 4 | 未登记；模型专用模板 |
+
+## qwen3_tts
+
+[配置说明](qwen3_tts/README.md) · [权重准备](qwen3_tts/README.md#quantization)
+
+| 配置 | 入口 / 用途 | 精度 / 输入默认 | CPU 请求 | 登记支持 |
+|---|---|---|---|---|
+| [qwen3_tts/0_6b/base.toml](qwen3_tts/0_6b/base.toml) | [run.py](../run.py)<br>运行模板 | `—` | 16 | 未登记；模型专用模板 |
+| [qwen3_tts/0_6b/base_rpu_codec.toml](qwen3_tts/0_6b/base_rpu_codec.toml) | [run.py](../run.py)<br>运行模板 | `—` | 16 | 未登记；模型专用模板 |
+
 ## qwen3_vl
 
 [配置说明](qwen3_vl/README.md) · [权重准备](qwen3_vl/README.md#quantization)
@@ -408,4 +425,4 @@ CPU 列为请求值，`继承` 表示按运行器或环境设置。固定 P/D �
 | [wall_oss/sorting/w8a16.toml](wall_oss/sorting/w8a16.toml) | [run.py](../run.py)<br>运行模板 | `w8a16` | 继承 | 未登记；模型专用模板 |
 | [wall_oss/sorting/w8a16_action_w4a16_g32.toml](wall_oss/sorting/w8a16_action_w4a16_g32.toml) | [run.py](../run.py)<br>运行模板 | `w8a16_action_w4a16` | 继承 | 未登记；模型专用模板 |
 
-合计 **290** 份配置。
+合计 **293** 份配置。

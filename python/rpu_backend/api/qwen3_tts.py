@@ -53,7 +53,8 @@ def _split_text(text, tokenizer):
                         break
         segment = remaining[:end].strip()
         # Keep tiny sentence endings attached to their preceding clause.
-        if (segments and segments[-1].endswith((",", "，", ":", "：", "、"))
+        if (segments and (segments[-1].endswith((",", "，", ":", "：", "、"))
+                          or not segment.rstrip("。！？.!?"))
                 and segment.endswith(("。", "！", "？", ".", "!", "?"))
                 and len(segment.rstrip("。！？.!?")) <= 8
                 and len(segments[-1] + segment) <= 128
@@ -109,12 +110,24 @@ def _predictor_generate(owner, inputs_embeds, *, max_new_tokens, do_sample,
     return types.SimpleNamespace(sequences=torch.cat(tokens, dim=1))
 
 
+def _tts_mlp_weight(weight, component, layer_index, path):
+    # The frozen Predictor's third-layer SiLU*up exceeds FP16; balance its two
+    # linear projections before packing so every token can stay on device.
+    if component == "predictor" and layer_index == 2:
+        if path == "mlp.up_proj":
+            weight = weight / 8
+        elif path == "mlp.down_proj":
+            weight = weight * 8
+    return weight.half()
+
+
 class Qwen3TTSModel:
     """Frozen 0.6B Base, bounded non-streaming voice cloning, batch one.
 
     Talker, Code Predictor and their output heads execute FP16 on device.
     The codec frontend also uses device FP16 when the native RoPE contract is available.
-    Embedding, speaker encoder, remaining codec and composition use CPU FP32.
+    Embedding, speaker encoder and composition use CPU FP32. The codec's twelve
+    residual convolutions default to RPU FP16/ACC32; the rest stays CPU.
     Only speech output is exposed; internal per-layer traces are not an API.
     """
 
@@ -131,16 +144,20 @@ class Qwen3TTSModel:
         self._head_calls = [0] * 16
         self._retirement_error = None
         self._reference_key = self._voice_clone_prompt = None
+        self._codec_convolutions = {"backend": "cpu", "layers": 0, "calls": 0}
 
     @classmethod
-    def from_pretrained(cls, checkpoint, *, source, dtype=torch.float16):
-        """Load local frozen weights and the explicitly prepared upstream source."""
+    def from_pretrained(cls, checkpoint, *, source, dtype=torch.float16, codec_backend="rpu"):
+        """Load frozen weights/source; codec_backend=cpu restores FP32 residual convolutions."""
         from rpu_backend.adapters.qwen3_tts import load_cpu_model
         from .causal_lm import _claim_live_instance
 
         if dtype is not torch.float16:
             raise RPUUnsupportedDtypeError("TTS device components require torch.float16; CPU components use float32")
+        if codec_backend not in ("cpu", "rpu"):
+            raise ValueError("codec_backend must be cpu or rpu (experimental residual convolutions)")
         model = cls()
+        model._codec_convolutions["backend"] = codec_backend
         _claim_live_instance(model)
         model._closed = False
         try:
@@ -187,8 +204,9 @@ class Qwen3TTSModel:
             for path in ("self_attn.q_norm", "self_attn.k_norm", "input_layernorm", "post_attention_layernorm"):
                 groups.append([layer.get_submodule(path).weight.detach().half().to("rpu") for layer in core.layers])
             for path, partition in (("mlp.gate_proj", 1), ("mlp.up_proj", 1), ("mlp.down_proj", 0)):
-                groups.append([transform_linear_weight(layer.get_submodule(path).weight.detach().half(), partition, 8).to("rpu")
-                               for layer in core.layers])
+                groups.append([transform_linear_weight(_tts_mlp_weight(
+                    layer.get_submodule(path).weight.detach(), name, index, path), partition, 8).to("rpu")
+                    for index, layer in enumerate(core.layers)])
             positions = torch.arange(part["capacity"]).view(1, -1)
             if name == "talker":
                 positions = positions.unsqueeze(0).expand(3, -1, -1)
@@ -207,6 +225,7 @@ class Qwen3TTSModel:
             core._rpu_decoder_handle = handle
             core._rpu_decoder_graph_cache = graph
             torch.ops.rpu.causal_decoder_set_weights(handle, *groups, cos, sin, norm, 16, 8, 128, 1024, 3072, 1e-6, True)
+            torch.ops.rpu.causal_decoder_set_linear_acc32(handle, True)
             if name == "predictor":
                 torch.ops.rpu.causal_decoder_set_fast_replay(handle, True)
             if name == "talker":
@@ -259,6 +278,11 @@ class Qwen3TTSModel:
         from rpu_backend.adapters.qwen3_tts.codec_transformer import install_codec_transformer
 
         install_codec_transformer(self, self._wrapper.model.speech_tokenizer.model.decoder.pre_transformer)
+        if self._codec_convolutions["backend"] == "rpu":
+            from rpu_backend.adapters.qwen3_tts.codec import install_rpu_residual_convolutions
+
+            install_rpu_residual_convolutions(self._wrapper.model.speech_tokenizer.model.decoder,
+                                            self._restore, self._codec_convolutions)
 
     def _generate_talker(self, *args, **kwargs):
         result = self._restore_talker_generate[1](*args, **kwargs)
@@ -353,6 +377,7 @@ class Qwen3TTSModel:
             result["codec_frontend"] = {"device": device,
                 "fallback_reason": (None if device == "rpu" else "sequence exceeds 63 device codec frames")
                     if codec_rpu else "native lacks explicit TTS codec mode"}
+            result["codec_convolutions"] = dict(self._codec_convolutions)
             for name, part in self._components.items():
                 graph = part["graph"]
                 result["components"][name] = {"calls": part["calls"], "tokens": part["tokens"],

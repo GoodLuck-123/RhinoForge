@@ -38,5 +38,6 @@ runtime contracts are indexed in the [implementation map](../knowledge/synthesis
 
 `Qwen3ASRModel` and `Qwen3TTSModel` provide dedicated ASR and TTS entry points
 with CPU and device components. Use the [speech guide](qwen3_audio.md) for pinned
-assets, input limits, source preparation and process ownership. These interfaces
-are separate from the text/vision TOML runner and CausalLM/VLM registry.
+assets, input limits, source preparation and process ownership. Use the [ASR](../examples/configs/qwen3_asr/README.md) and
+[TTS](../examples/configs/qwen3_tts/README.md) TOMLs with `examples.run`;
+the dedicated speech APIs remain separate from the CausalLM/VLM registry.

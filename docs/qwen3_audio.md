@@ -3,8 +3,10 @@
 [简体中文](qwen3_audio.zh.md) | English
 
 `Qwen3ASRModel` transcribes local audio. `Qwen3TTSModel` generates speech from
-text and reference audio. Both use dedicated Python APIs,
-separate from the text/vision TOML runner and CausalLM/VLM registry.
+text and reference audio. Both retain dedicated Python APIs and now have TOML entry points under
+[ASR examples](../examples/configs/qwen3_asr/README.md) and
+[TTS examples](../examples/configs/qwen3_tts/README.md), dispatched by
+`python -m examples.run --config PATH`. They do not use the CausalLM/VLM registry.
 
 ## Models and inputs
 
@@ -33,6 +35,7 @@ to 16 tokens. Adding sentence stops can change token counts, pauses and
 intonation. Every segment starts from the request's initial CPU RNG state; later
 segments restore the caller state left by the first. All segments must succeed
 before their independently stored waveforms are concatenated.
+Sentence-stop-only tails join the preceding segment within those bounds.
 
 Loaders check the pinned checkpoint, configuration and tokenizer before weight
 transformation. ASR identities are in
@@ -148,7 +151,7 @@ ASR also accepts a one-dimensional CPU floating-point Tensor. See
 | Model | CPU | Rhino device |
 |---|---|---|
 | ASR | Audio reading, mel features/chunking, convolutions and their activations, single-token embedding, finite checks, argmax, text decoding | conv_out, positions and valid rows, audio encoder and output projections, prefill text/audio composition, text decoder and vocabulary head |
-| TTS | Embedding, reference processing, speaker encoder, generation control, codebook, convolutions/upsampling, SnakeBeta, waveform output | Talker, Predictor and output heads; codec input/output projections and Transformer frontend when supported by native interfaces |
+| TTS | Embedding, reference processing, speaker encoder, generation control, codebook, remaining convolutions/upsampling, SnakeBeta, waveform output | Twelve residual convolutions by default; Talker, Predictor and output heads; codec input/output projections and Transformer frontend when supported by native interfaces |
 
 ASR convolutions use channels-last storage and FP16-rounded weights in CPU FP32
 computation, then round outputs to FP16. The device audio Graph uses FP32 Linear
@@ -178,6 +181,15 @@ and its 72-frame sliding attention.
   matching signatures.
 - Predictor passes its last device hidden row directly to the immediate output
   head, consumed once; callers requesting hidden states receive owned CPU output.
+- All Predictor tokens, including the first conditioning token, execute on RPU.
+  In the frozen checkpoint's third layer (index 2), `SiLU(gate) * up` can exceed
+  FP16 range before the down projection, although the final residual fits FP16.
+  Installation divides that layer's up-projection weights by 8 and multiplies
+  its down-projection weights by 8 in FP32 before FP16 packing. The paired
+  power-of-two scaling preserves the MLP function without clipping, per-token
+  work or a CPU decoder path; original checkpoint/CPU weights stay unchanged.
+  Talker and Predictor explicitly bind FP32 Linear accumulation before resolving
+  their Graph descriptors; their activation and weight storage remains FP16.
 - Predictor uses native checked decode replay only for its five-layer FP16 path,
   32-position cache, 1D RoPE and separate output heads. After recording the full
   operator sequence, replay checks weight versions, KV owners, Graph identity and
@@ -189,3 +201,29 @@ and its 72-frame sliding attention.
   content; every request still reads and validates the file. After a failed
   transformation, close the model and reload clean weights. Retire Graphs before
   releasing handles and weights.
+
+## Experimental RPU vocoder convolutions
+
+`Qwen3TTSModel.from_pretrained` and the example runner default to
+`codec_backend="rpu"`, including when the argument/configuration field is omitted.
+Both `examples/configs/qwen3_tts/0_6b/base.toml` and `base_rpu_codec.toml` select it.
+Set `codec_backend="cpu"` explicitly to restore the CPU FP32 residual convolutions.
+This option moves twelve residual Conv1d layers (kernel 7, channels
+768/384/192/96, dilation 1/3/9) to explicit eight-core RPU Linear with FP16
+inputs/weights and FP32 accumulation. Weights are converted once from independent
+copies; original CPU FP32 weights remain intact. Output channels are padded to
+128 alignment and sliced back before applying the original FP32 bias.
+
+CPU still performs im2col, codebook, SnakeBeta, the other convolutions and
+upsampling. This is partial vocoder offload, not an all-RPU decoder. Each Linear
+uses the existing synchronous immediate path and the shared fifth arena; no new
+retained Graph is introduced. Unsupported geometry rejects installation; execution
+errors propagate instead of silently reverting to CPU. `execution_stats()` adds
+`codec_convolutions` with `backend`, installed `layers` and cumulative RPU `calls`.
+The frontend's existing 63-frame device bound and CPU sliding-attention fallback
+remain unchanged.
+
+FP16 rounding changes the waveform. Compare identical codec tokens against the
+CPU FP32 anchor and inspect speech content; runtime checks alone do not certify
+audio quality. The RPU path remains experimental even though it is now the default; it does
+not inherit the previous CPU residual-convolution profile's quality evidence.

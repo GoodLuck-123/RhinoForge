@@ -112,6 +112,17 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   before skipping host emission. Refresh position and attention fields on every
   replay, including resets to zero; use ordinary emission when the proof cannot
   be established, and fail explicitly on inconsistencies after skipping starts.
+- Keep every Predictor token on device. Its frozen third MLP layer (index 2)
+  overflows FP16 at `SiLU(gate) * up`, before the down projection; subsequent
+  RMSNorm receives Inf and produces zero. The ordinary device RMSNorm handles
+  the finite ~53k residual correctly in isolation, so do not infer a norm defect
+  from a CPU FP16-square experiment. Divide up weights by 8 and multiply down
+  weights by 8 in FP32 before packing, without mutating CPU reference weights.
+  Check the paired transform's semantics, finite intermediate products, and
+  position-zero device decode/replay. Keep sentence-stop-only tails attached
+  within the segment bounds so punctuation cannot exhaust EOS.
+  Explicitly bind Talker/Predictor FP32 Linear accumulation before planning their
+  descriptors; changing it after descriptor resolution leaves a stale plan.
 - Accept up to 1024 characters. Keep requests within 128 characters and 32 tokens
   on their single-segment path. Split longer text at punctuation with a 12-token
   target and 128-character bound; retain tiny sentence endings up to 16 tokens.
@@ -126,6 +137,17 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   Exclude physical padding from logical KV position; replace only the old prefill
   Graph when prompt length changes. Predictor keeps one decode Graph; codec keeps
   one current-frame Graph. Retire Graphs before handles and weights.
+- Speech TOMLs under `examples/configs/qwen3_asr` and `qwen3_tts` use the shared
+  CLI and the dedicated audio runner. Keep configuration checks free of Torch/device
+  imports and validate paths/audio before loading weights. Record resident latency,
+  process CPU time and actual-duration RTF separately from load and profiling.
+- TTS defaults to `codec_backend="rpu"` in both the API and TOML runner;
+  explicit `codec_backend="cpu"` restores FP32 residual convolutions. The RPU path
+  offloads only twelve kernel-7 residual
+  convolutions through synchronous FP16/ACC32 Linear. Validate all geometries before
+  conversion, preserve CPU weights, restore forwards on close and report actual calls.
+  CPU im2col, bias and the rest of the vocoder remain explicit; do not claim full
+  device execution or bitwise equality with the FP32 anchor.
 - CPU codec matrix multiplication and adjacent-block overlap-add preserve output
   lengths; other convolutions retain their original path. Keep thread settings
   caller-controlled and check retained outputs, input changes and close/reload

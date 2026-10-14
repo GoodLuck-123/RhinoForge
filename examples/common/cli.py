@@ -49,6 +49,16 @@ def main(argv=None, *, keep_logging_until_exit=False) -> int:
 
 def _dispatch(config, args):
     from examples.common.logging import configuration_checked
+    if "qwen3_asr" in config or "qwen3_tts" in config:
+        from examples.runners.qwen3_audio.runner import validate_example_config, run_example_config
+        try:
+            validate_example_config(config)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+        if args.check_config:
+            configuration_checked(f"configuration OK: {args.config} (speech; syntax/input envelope only)")
+            return 0
+        return run_example_config(config)
     if "wall_oss" in config or "wall_oss_sorting" in config:
         if args.hwperf or args.profile:
             kind = "base" if "wall_oss" in config else "sorting"

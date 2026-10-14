@@ -3,7 +3,9 @@
 简体中文 | [English](qwen3_audio.md)
 
 `Qwen3ASRModel` 将本地音频转成文本，`Qwen3TTSModel` 根据文本和参考音频生成语音。
-两者使用独立 Python API，不经过文本/视觉 TOML runner 或 CausalLM/VLM registry。
+两者保留独立 Python API，并提供 [ASR](../examples/configs/qwen3_asr/README.md) /
+[TTS](../examples/configs/qwen3_tts/README.md) TOML 入口，通过 `python -m examples.run --config PATH`
+运行；不经过 CausalLM/VLM registry。
 
 ## 模型与输入
 
@@ -28,6 +30,7 @@ checkpoint 配置：top-k 50、temperature 0.9、top-p 1.0。未生成 EOS 时�
 片段最多 128 字符，目标 12 token；不超过八个字符的短句尾可与前一分句合并至
 16 token。段尾补句号可能改变 token 数、停顿和语调。每段从本次请求初始 CPU 随机状态开始，后续分段
 恢复第一段留下的调用方状态。各段独立复制，全部成功后拼接返回；失败不返回部分音频。
+在上述长度范围内，仅含句末标点的尾段并回前一段，避免单独合成句号。
 
 加载器先核对固定 checkpoint、配置和 tokenizer 身份，再转换权重。ASR 身份见
 [`qwen3_asr.py`](../python/rpu_backend/api/qwen3_asr.py)，TTS 身份见
@@ -134,7 +137,7 @@ CPU 浮点 Tensor。
 | 模型 | CPU | Rhino 设备 |
 |---|---|---|
 | ASR | 音频读取、mel/分块、卷积与层间激活、单 token embedding、有限值检查、argmax、文本解码 | conv_out、位置和有效行处理、音频 encoder 与末尾投影、prefill 文本/音频组装、文本 decoder 和输出头 |
-| TTS | embedding、参考音频、speaker encoder、生成控制、码本、卷积/上采样、SnakeBeta、波形输出 | Talker、Predictor 和输出头；具备对应 native 接口时还包括 codec 输入/输出投影和 Transformer 前段 |
+| TTS | embedding、参考音频、speaker encoder、生成控制、码本、其余卷积/上采样、SnakeBeta、波形输出 | 默认卸载的 12 层残差卷积；Talker、Predictor 和输出头；具备对应 native 接口时还包括 codec 输入/输出投影和 Transformer 前段 |
 
 ASR 卷积使用 FP16 舍入权重进行 CPU FP32 计算，再转回 FP16；卷积采用 channels-last。
 设备音频 Graph 使用 FP32 Linear 累加。TTS CPU 组件保持 FP32，设备组件使用 FP16、
@@ -154,6 +157,12 @@ FP32 Linear 累加；codec 前段 LayerScale 在 FP32 中折入投影后转 FP16
   Predictor decode 及当前帧数的 codec 图。长度变化按组件淘汰旧签名，同长度重放。
 - Predictor 最后一行设备 hidden 只供紧接着的输出头使用一次；请求 hidden states
   时仍返回独立 CPU 存储。
+- Predictor 包括首个条件 token 在内，全部在 RPU 计算。固定 checkpoint 的第三层
+  （索引 2）`SiLU(gate) * up` 中间值会超过 FP16 范围，而 down 投影后的残差仍在范围内。
+  安装时在 FP32 中将该层 up 权重除以 8、down 权重乘以 8，再转换为 FP16 并打包。
+  成对的二次幂缩放保持 MLP 的数学函数，不裁剪激活，不增加逐 token 计算或 CPU 解码；
+  原 checkpoint 与 CPU 参考权重不变。
+  Talker 和 Predictor 均在解析 Graph 描述前显式启用 FP32 Linear 累加，激活与权重仍以 FP16 存储。
 - Predictor 复用 native checked decode replay：仅匹配五层 FP16、32 位置缓存、
   一维 RoPE 和无融合输出头的固定路径。首次记录完整算子序列，后续校验权重版本、
   KV 所有者、Graph 和内存布局，再更新位置及 attention 参数，跳过重复的主机算子
@@ -161,3 +170,21 @@ FP32 Linear 累加；codec 前段 LayerScale 在 FP32 中折入投影后转 FP16
   此优化需要重新编译匹配的 native，不能用通用 Graph 跳过开关代替。
 - TTS 只缓存最新参考音频内容的 speaker embedding，每次请求仍读取和检查文件。
   转换失败后关闭模型，从干净权重重新加载；释放时先清 Graph，再释放 handle 和权重。
+
+## 实验性 RPU 声码器卷积
+
+`Qwen3TTSModel.from_pretrained` 和示例运行器默认使用 `codec_backend="rpu"`，
+省略参数或配置字段时也启用 RPU。`examples/configs/qwen3_tts/0_6b/base.toml`
+和 `base_rpu_codec.toml` 均选择该模式；显式设置 `codec_backend="cpu"` 可恢复 CPU FP32 残差卷积。
+RPU 模式将 12 层残差 Conv1d（kernel 7；通道 768/384/192/96；dilation 1/3/9）
+转换成显式八核 Linear，输入/权重 FP16、累加 FP32。权重只转换一次，保留原 CPU FP32
+权重；输出通道补齐到 128 对齐后裁回原大小，再加原 FP32 bias。
+
+CPU 仍执行列展开、码本、SnakeBeta、其余卷积和上采样，因此属于部分卸载。
+复用同步 immediate Linear 和第五个共享 arena，不新增常驻 Graph。几何不匹配会拒绝
+安装，执行错误直接抛出，不静默退回 CPU。`execution_stats().codec_convolutions`
+记录 `backend`、安装的 `layers` 和累计 RPU `calls`。前段 Transformer 的 63 帧设备
+边界和更长序列的 CPU 滑窗注意力保持不变。
+
+FP16 舍入会改变波形，应使用同一份 codec tokens 对照 CPU FP32 并核验语音内容。
+该路径虽已设为默认，仍属实验性实现，不继承此前 CPU 残差卷积配置的音质结论；运行成功不等于音质认证。
