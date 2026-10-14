@@ -3896,9 +3896,31 @@ Tensor rpu_linear_with_accumulation(
   const Tensor scale = scale_opt.has_value()
       ? (packed ? rpu_retain_linear_quant_scale(weight, *scale_opt) : *scale_opt)
       : Tensor{};
-  rpu_launch_linear_ddr_kernel(
-      input_2d, weight, output_2d, bias, has_bias, static_cast<int>(partition),
-      nullptr, 0, nullptr, static_cast<int>(num_cores), scale, linear_acc32);
+  // shortcut: the measured TTS Predictor head geometry; benchmark before expanding.
+  // A one-shot Graph joins upload/compute/write-back without retaining fresh operands.
+  if (!RpuKernelGraph::has_active() && rows == 1 && k == 1024 && n == 2048 && partition == 1 &&
+      num_cores == 8 && !linear_acc32 && !has_bias &&
+      weight.scalar_type() == at::kHalf && !scale.defined()) {
+    const uint64_t dst = RpuGetDevAddr(output_2d.data_ptr<c10::Half>());
+    RpuKernelGraph graph;
+    graph.begin();
+    try {
+      graph.keep_alive(input_2d);
+      graph.keep_alive(weight);
+      graph.keep_alive(output_2d);
+      rpu_launch_linear_ddr_kernel(
+          input_2d, weight, output_2d, bias, false, 1,
+          &dst, 0, nullptr, 8, {}, false);
+      graph.end();
+    } catch (...) {
+      graph.abort();
+      throw;
+    }
+  } else {
+    rpu_launch_linear_ddr_kernel(
+        input_2d, weight, output_2d, bias, has_bias, static_cast<int>(partition),
+        nullptr, 0, nullptr, static_cast<int>(num_cores), scale, linear_acc32);
+  }
   return output;
 }
 

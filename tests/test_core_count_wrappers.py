@@ -893,10 +893,13 @@ def test_explicit_linear_public_caller_validates_before_allocating_and_returns_f
 namespace c10 {
 template<class T> using optional = std::optional<T>;
 using std::nullopt;
+using Half = uint16_t;
 }
 namespace graph_dma { bool capturing = false; bool active() { return capturing; } }
 int allocations = 0, copies = 0, launches = 0, last_cores = 0, last_partition = -1;
 int retained_scales = 0;
+int batches = 0, aborts = 0;
+bool fail_launch = false;
 bool last_acc32 = false;
 std::shared_ptr<int> last_scale;
 namespace at {
@@ -930,6 +933,7 @@ struct Tensor {
     Options options() const { return opts; }
     Tensor contiguous() const { ++copies; auto result = *this; result.dense = true; return result; }
     Tensor view(std::initializer_list<int64_t> dims) const { auto result = *this; result.shape = dims; return result; }
+    template<class T> T* data_ptr() const { return reinterpret_cast<T*>(storage.get()); }
 };
 Tensor empty(const std::vector<int64_t>& dims, Options opts) {
     ++allocations;
@@ -938,6 +942,16 @@ Tensor empty(const std::vector<int64_t>& dims, Options opts) {
 }
 }
 using Tensor = at::Tensor;
+uint64_t RpuGetDevAddr(c10::Half* pointer) { return reinterpret_cast<uint64_t>(pointer); }
+struct RpuKernelGraph {
+    std::vector<Tensor> owners;
+    static bool has_active() { return graph_dma::capturing; }
+    void begin() { assert(!has_active()); graph_dma::capturing = true; }
+    void keep_alive(const Tensor& tensor) { owners.push_back(tensor); }
+    void end() { assert(has_active() && owners.size() == 3); ++batches; graph_dma::capturing = false; }
+    void abort() { ++aborts; graph_dma::capturing = false; }
+    ~RpuKernelGraph() { assert(!has_active()); }
+};
 Tensor rpu_retain_linear_quant_scale(const Tensor& weight, const Tensor& scale) {
     assert(weight.scalar_type() == at::kByte && scale.defined());
     ++retained_scales;
@@ -947,7 +961,13 @@ void rpu_launch_linear_ddr_kernel(const Tensor& input, const Tensor& weight,
         Tensor& output, const Tensor& bias, bool has_bias, int partition,
         const uint64_t* live_dst, int64_t offset, const uint64_t* live_bias, int cores,
         const Tensor& scale, c10::optional<bool> linear_acc32) {
-    assert(!live_dst && !live_bias && offset == 0);
+    assert(!live_bias && offset == 0);
+    if (live_dst) {
+        assert(graph_dma::active() && *live_dst == RpuGetDevAddr(output.data_ptr<c10::Half>()));
+        assert(input.size(0) == 1 && weight.size(1) == 1024 && weight.size(0) == 2048);
+        assert(cores == 8 && partition == 1 && !has_bias && !*linear_acc32);
+    } else assert(!graph_dma::active());
+    if (fail_launch) throw std::runtime_error("launch failed");
     assert(input.dim() == 2 && output.dim() == 2 && input.dense);
     const bool packed = weight.scalar_type() == at::kByte;
     assert(input.size(0) == output.size(0));
@@ -963,6 +983,23 @@ void rpu_launch_linear_ddr_kernel(const Tensor& input, const Tensor& weight,
 }
 __FUNCTIONS__
 int main() {
+    Tensor head_input({1,1024}), head_weight({2048,1024});
+    auto held = rpu_linear_with_accumulation(head_input, head_weight, {}, 1, 8, false, {});
+    const int held_value = *held.storage;
+    auto fresh = rpu_linear_with_accumulation(head_input, head_weight, {}, 1, 8, false, {});
+    assert(batches == 2 && held.storage != fresh.storage && *held.storage == held_value);
+    rpu_linear_with_accumulation(head_input, head_weight, {}, 1, 8, true, {});
+    rpu_linear_with_accumulation(head_input, head_weight, {}, 1, 4, false, {});
+    rpu_linear_with_accumulation(head_input, head_weight, Tensor({2048}), 1, 8, false, {});
+    assert(batches == 2);
+    fail_launch = true;
+    bool failed = false;
+    try { rpu_linear_with_accumulation(head_input, head_weight, {}, 1, 8, false, {}); }
+    catch (const std::runtime_error&) { failed = true; }
+    assert(failed && aborts == 1 && !RpuKernelGraph::has_active());
+    fail_launch = false;
+    rpu_linear_with_accumulation(head_input, head_weight, {}, 1, 8, false, {});
+    assert(batches == 3);
     Tensor input({2,16,1024}), weight({3072,1024}), bias({3072});
     input.dense = false;
     for (int64_t cores : {4,6,8}) {

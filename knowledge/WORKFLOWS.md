@@ -112,6 +112,11 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   before skipping host emission. Refresh position and attention fields on every
   replay, including resets to zero; use ordinary emission when the proof cannot
   be established, and fail explicitly on inconsistencies after skipping starts.
+- The measured single-row TP8 FP16/ACC16 `1024→2048` output head uses a one-shot
+  Graph, within the existing temporary arena budget. Keep operands alive through
+  synchronous completion, retain DMA/flush checks and abort on failure; never
+  reuse a Graph with fresh fixed input addresses. CPU codec temporary reuse must
+  preserve residual inputs, retained outputs and the frozen SnakeBeta formula.
 - Keep every Predictor token on device. Its frozen third MLP layer (index 2)
   overflows FP16 at `SiLU(gate) * up`, before the down projection; subsequent
   RMSNorm receives Inf and produces zero. The ordinary device RMSNorm handles
@@ -142,15 +147,16 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   imports and validate paths/audio before loading weights. Record resident latency,
   process CPU time and actual-duration RTF separately from load and profiling.
 - TTS defaults to `codec_backend="rpu"` in both the API and TOML runner;
-  explicit `codec_backend="cpu"` restores FP32 residual convolutions. The RPU path
-  offloads only twelve kernel-7 residual
-  convolutions through synchronous FP16/ACC32 Linear. Validate all geometries before
-  conversion, preserve CPU weights, restore forwards on close and report actual calls.
-  CPU im2col, bias and the rest of the vocoder remain explicit; do not claim full
-  device execution or bitwise equality with the FP32 anchor.
+  explicit `codec_backend="cpu"` restores FP32 Conv1d. The RPU path offloads all
+  31 decoding Conv1d layers through synchronous FP16/ACC32 Linear, including
+  two depthwise layers expanded to channel-diagonal weights at installation.
+  Leave the shared quantizer's two encoder-only input projections untouched. Validate
+  all geometries before conversion, preserve CPU weights, restore forwards on close
+  and report actual calls. CPU padding/im2col, bias, transposed convolutions,
+  ConvNeXt Linear/normalization and activations remain explicit; do not claim
+  full device execution or bitwise equality with the FP32 anchor.
 - CPU codec matrix multiplication and adjacent-block overlap-add preserve output
-  lengths; other convolutions retain their original path. Keep thread settings
-  caller-controlled and check retained outputs, input changes and close/reload
+  lengths. Keep thread settings caller-controlled and check retained outputs, input changes and close/reload
   when changing component handoffs.
 
 ## Version and release changes

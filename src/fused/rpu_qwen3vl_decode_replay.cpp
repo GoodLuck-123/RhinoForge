@@ -189,7 +189,7 @@ bool bind_decode_patches(const std::vector<DecodeKernelSlot>& kernels,
         } else if (!linear() || !take("llm_all_reduce_residual_nopace") || !norm()) return false;
         if (profile.fused_mlp) {
             if (!take("qwen3vl_gateup_swiglu_gemv")) return false;
-        } else if (profile.tts_predictor) {
+        } else if (profile.tts_predictor && !profile.acc32) {
             if (!linear() || !linear() || !take("llama_silu_mul")) return false;
         } else if (profile.layers == 36 && profile.dtype == at::kChar && profile.gemv) {
             if (!linear() || !linear() || !take("silu_mul")) return false;
@@ -426,7 +426,7 @@ bool CausalDecoderModel::begin_qwen3vl_decode_replay(
         layer_weights_.front().q_w.scalar_type() == at::kHalf;
     const bool tts_predictor = fast_replay_skip_layer_loop_ && num_layers() == 5 &&
         hidden_size() == 1024 && intermediate_size() == 3072 && num_q_heads() == 16 &&
-        !linear_acc32_ && !has_mrope_ && !fuse_lm_head_ && !lm_head_w_.defined() &&
+        !has_mrope_ && !fuse_lm_head_ && !lm_head_w_.defined() &&
         !lm_head_w_scale_.defined() && deepstack_lang_layers_.empty() && rope_position_base_ < 0 &&
         !layer_weights_.empty() && layer_weights_.front().q_w.defined() &&
         layer_weights_.front().q_w.scalar_type() == at::kHalf;
