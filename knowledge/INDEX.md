@@ -109,4 +109,5 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
 ## Speech inference
 
 - [Qwen3 ASR/TTS](../docs/qwen3_audio.md): pinned assets, source preparation,
-  input limits, CPU/device ownership, Predictor checked replay and Python API calls.
+  input limits, CPU/device ownership, Predictor checked replay, one-shot output
+  heads, 31-layer Conv1d offload, frozen CPU codec activations and Python API calls.

@@ -151,12 +151,13 @@ ASR also accepts a one-dimensional CPU floating-point Tensor. See
 | Model | CPU | Rhino device |
 |---|---|---|
 | ASR | Audio reading, mel features/chunking, convolutions and their activations, single-token embedding, finite checks, argmax, text decoding | conv_out, positions and valid rows, audio encoder and output projections, prefill text/audio composition, text decoder and vocabulary head |
-| TTS | Embedding, reference processing, speaker encoder, generation control, codebook, remaining convolutions/upsampling, SnakeBeta, waveform output | Twelve residual convolutions by default; Talker, Predictor and output heads; codec input/output projections and Transformer frontend when supported by native interfaces |
+| TTS | Embedding, reference processing, speaker encoder, generation control, codebook, transposed convolutions/upsampling, SnakeBeta, waveform output | All 31 decoding Conv1d layers by default; Talker, Predictor and output heads; codec input/output projections and Transformer frontend when supported by native interfaces |
 
 ASR convolutions use channels-last storage and FP16-rounded weights in CPU FP32
 computation, then round outputs to FP16. The device audio Graph uses FP32 Linear
 accumulation. TTS CPU components stay FP32; device components use FP16 with FP32
-Linear accumulation. Codec LayerScale is folded into projections in FP32 before
+Linear accumulation, except Talker/Predictor output heads, which retain FP16
+accumulation. Codec LayerScale is folded into projections in FP32 before
 conversion to FP16, while RoPE retains FP32 frequencies. The device codec frontend
 accepts 1–63 frames. Sequences of 64–255 frames use the original CPU FP32 frontend
 and its 72-frame sliding attention.
@@ -181,6 +182,15 @@ and its 72-frame sliding attention.
   matching signatures.
 - Predictor passes its last device hidden row directly to the immediate output
   head, consumed once; callers requesting hidden states receive owned CPU output.
+- The single-row, eight-core FP16/ACC16 bias-free `1024→2048` Predictor head
+  batches input upload, compute and write-back in a one-shot Graph. DMA ownership,
+  boundary flushes and completion waits remain checked; changing addresses are
+  not cached and no persistent Graph is added. Other Linear paths are unchanged.
+  This optimization requires a rebuilt native extension.
+- CPU codec SnakeBeta precomputes the frozen parameters' exponentials and inverse
+  scale, then updates only a newly allocated temporary in place. Convolutions add
+  bias into their own output. Residual inputs and previously returned waveforms
+  remain independent, and CPU arithmetic stays FP32.
 - All Predictor tokens, including the first conditioning token, execute on RPU.
   In the frozen checkpoint's third layer (index 2), `SiLU(gate) * up` can exceed
   FP16 range before the down projection, although the final residual fits FP16.
@@ -191,7 +201,9 @@ and its 72-frame sliding attention.
   Talker and Predictor explicitly bind FP32 Linear accumulation before resolving
   their Graph descriptors; their activation and weight storage remains FP16.
 - Predictor uses native checked decode replay only for its five-layer FP16 path,
-  32-position cache, 1D RoPE and separate output heads. After recording the full
+  including FP32 Linear accumulation, with a 32-position cache, 1D RoPE and separate
+  output heads. The recorded Linear kernels must match the accumulation mode.
+  After recording the full
   operator sequence, replay checks weight versions, KV owners, Graph identity and
   memory layout, then updates position and attention parameters while skipping
   repeated host emission. Input uploads, device computation, output heads and
@@ -207,19 +219,24 @@ and its 72-frame sliding attention.
 `Qwen3TTSModel.from_pretrained` and the example runner default to
 `codec_backend="rpu"`, including when the argument/configuration field is omitted.
 Both `examples/configs/qwen3_tts/0_6b/base.toml` and `base_rpu_codec.toml` select it.
-Set `codec_backend="cpu"` explicitly to restore the CPU FP32 residual convolutions.
-This option moves twelve residual Conv1d layers (kernel 7, channels
-768/384/192/96, dilation 1/3/9) to explicit eight-core RPU Linear with FP16
-inputs/weights and FP32 accumulation. Weights are converted once from independent
-copies; original CPU FP32 weights remain intact. Output channels are padded to
-128 alignment and sliced back before applying the original FP32 bias.
+Set `codec_backend="cpu"` explicitly to restore CPU FP32 Conv1d.
+This option moves all 31 Conv1d layers used in decoding to explicit eight-core RPU
+Linear with FP16 inputs/weights and FP32 accumulation: twelve kernel-7 residual
+convolutions, fourteen kernel-1 projections, three input/output convolutions and
+two depthwise convolutions. Depthwise weights expand into a channel-diagonal
+matrix at installation, preserving group semantics. The shared quantizer's two
+encoder-only input projections are not transformed. Weights are converted once
+from independent copies; original CPU FP32 weights remain intact. Output channels
+are padded to 128 alignment and sliced back before applying the original FP32 bias.
 
-CPU still performs im2col, codebook, SnakeBeta, the other convolutions and
-upsampling. This is partial vocoder offload, not an all-RPU decoder. Each Linear
+CPU still performs padding, im2col, bias, codebook, SnakeBeta, six transposed
+convolutions, ConvNeXt Linear/normalization/GELU and upsampling layout operations. Inputs round to FP16 before
+im2col to avoid an expanded FP32 copy.
+This is partial vocoder offload, not an all-RPU decoder. Each Linear
 uses the existing synchronous immediate path and the shared fifth arena; no new
 retained Graph is introduced. Unsupported geometry rejects installation; execution
 errors propagate instead of silently reverting to CPU. `execution_stats()` adds
-`codec_convolutions` with `backend`, installed `layers` and cumulative RPU `calls`.
+`codec_convolutions` with `backend`, installed `layers` (31 in RPU mode) and cumulative RPU `calls`.
 The frontend's existing 63-frame device bound and CPU sliding-attention fallback
 remain unchanged.
 

@@ -4,11 +4,11 @@
 
 | 模板 | 声码器后段 |
 |---|---|
-| [0_6b/base.toml](0_6b/base.toml) | 默认：12 层残差卷积使用 RPU FP16/ACC32，其余仍为 CPU |
+| [0_6b/base.toml](0_6b/base.toml) | 默认：31 层解码 Conv1d 使用 RPU FP16/ACC32，转置卷积与激活仍为 CPU |
 | [0_6b/base_rpu_codec.toml](0_6b/base_rpu_codec.toml) | 显式选择同一 RPU 配方，保留既有配置路径 |
 
 两者均复用设备 Talker、Predictor 及现有 codec Transformer 路由。
-省略 `codec_backend` 时也默认使用 RPU；如需原 FP32 残差卷积，将该字段改为 `"cpu"`。
+省略 `codec_backend` 时也默认使用 RPU；如需原 FP32 Conv1d，将该字段改为 `"cpu"`。
 RPU 卷积路径仍为经过有限样本验证的实验性实现。
 只接受固定 Base checkpoint、中英文文本 1–1024 字符和单声道 24 kHz、0.5–20 秒非静音参考音频。
 不是完整声码器全 RPU 迁移。详细采样、分段和前段 CPU 回退范围见[语音指南](../../../docs/qwen3_audio.zh.md)。
@@ -44,6 +44,6 @@ RTF = 整句耗时 / 实际音频时长；正式计时排除加载、预热及�
 `cpu_ms_runs` 是进程所有线程累计 CPU 时间，可大于墙钟时间，不是 CPU 占用百分比。
 `--profile` 另加一次诊断请求，不计入性能样本。
 
-`execution_stats[].codec_convolutions` 记录后段选择、12 个已安装层和累计 RPU 调用次数。
+`execution_stats[].codec_convolutions` 记录后段选择、31 个已安装层和累计 RPU 调用次数。
 RPU 模式会改变波形舍入，需比较同 tokens 的 CPU 基准并核验内容；不能用运行成功替代音质检查。
-它保留 CPU 列展开、bias、SnakeBeta、其他卷积和上采样，不保证所有文本都更快。
+它保留 CPU 补边、列展开、bias、SnakeBeta、转置卷积和上采样整理，不保证所有文本都更快。
