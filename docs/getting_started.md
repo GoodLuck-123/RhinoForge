@@ -25,7 +25,7 @@ python3.12 -m venv "$RHINOFORGE_ENV"
 cd "$RHINOFORGE_SOURCE"
 
 python -m pip install "torch==2.10.0" "scikit-build-core>=0.12,<0.13" "cmake==4.1.3" "ninja==1.13.0"
-python -m pip install . --no-build-isolation \
+python -m pip install . -c constraints/security.txt --no-build-isolation \
   -Ccmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch" \
   -Cbuild.tool-args=-j2
 python -m pip check
@@ -35,6 +35,13 @@ Project dependencies come from [pyproject.toml](../pyproject.toml). Use
 `'.[vision]'` for vision, `'.[vla]'` for policies, or `'.[audio]'` for
 [speech models](qwen3_audio.md) in the install command.
 For editable installs and building wheels, see [Development build](development_build.md).
+
+To apply the validated network and image dependency updates to an existing environment:
+
+```bash
+python -m pip install --upgrade -r constraints/security.txt
+python -m pip check
+```
 
 ## 2. Prepare the public model
 

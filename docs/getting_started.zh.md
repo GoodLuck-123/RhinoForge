@@ -23,7 +23,7 @@ python3.12 -m venv "$RHINOFORGE_ENV"
 cd "$RHINOFORGE_SOURCE"
 
 python -m pip install "torch==2.10.0" "scikit-build-core>=0.12,<0.13" "cmake==4.1.3" "ninja==1.13.0"
-python -m pip install . --no-build-isolation \
+python -m pip install . -c constraints/security.txt --no-build-isolation \
   -Ccmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch" \
   -Cbuild.tool-args=-j2
 python -m pip check
@@ -33,6 +33,13 @@ python -m pip check
 `'.[vision]'`，策略模型改为 `'.[vla]'`，[语音模型](qwen3_audio.zh.md)改为 `'.[audio]'`。
 可编辑安装和 wheel 构建参考
 [源码构建指南](development_build.md)。
+
+已有环境可单独更新已验证的网络和图像依赖：
+
+```bash
+python -m pip install --upgrade -r constraints/security.txt
+python -m pip check
+```
 
 ## 2. 准备公开模型
 
