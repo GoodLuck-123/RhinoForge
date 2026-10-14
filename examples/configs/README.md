@@ -1,32 +1,40 @@
-# Public model configurations
+# 按模型选择配置
 
-每个模型只保留一套当前配置目录，按版本、组件、尺寸和精度区分。文件名中的不同精度、相机数、P/D 长度表示不同工作量，不是新旧格式的重复副本。
+[示例入口](../README.md) · [全部 TOML](CONFIGURATIONS.md) · [权重准备](WEIGHTS.md) · [通用参数](PARAMETERS.md) · [命名规则](NAMING.md)
 
-| 模型 | 唯一配置目录 | 内容 |
+模型页列出配置差异、下载或转换步骤、输入格式和运行命令。
+
+| 模型族 | 配置说明 | 主要区别 |
 |---|---|---|
-| Qwen3 | [qwen3/text](qwen3/README.md) | 尺寸、FP16/W8、W4/G32 与 LM-head recipe |
-| Qwen3-VL | [qwen3_vl/{text,vision,vl}](qwen3_vl/README.md) | 独立 Text、Vision、图文及精度/长度组合 |
-| Qwen3.5 | [qwen3_5/{text,vl,legacy}](qwen3_5/README.md) | Dense、MoE、精度、核数和长度；legacy 是独立 checkpoint 格式 |
-| Pi0.5 | [pi05/{2cam,3cam}](pi05/README.md) | 8 核 FP16、W8、Action NVFP4、Prefill A8 + Action NVFP4 |
-| LingBot | [lingbot/v2](lingbot/v2) | 6B FP16、W8A16；只保留 v2 配置 |
-| RhinoVLA | [rhinovla/{v1,v3}](rhinovla/README.md) | 按版本选择调用方提供的 trusted runtime factory |
-| Wall-OSS | [wall_oss/base](wall_oss/README.md) | 公开基础模型的四种精度配置 |
-| DINOv3 | [dinov3/vit_b](dinov3/vit_b) | ViT-B FP16 |
-| Gemma4 | [gemma4/e4b](gemma4/e4b) | E4B FP16 |
-| Llama | [llama/3_2_1b](llama/3_2_1b) | Llama 3.2 1B FP16 |
-| Hy-Embodied | [hy_embodied/umi](hy_embodied/umi) | 公开 UMI 配置 |
-| HALO | [halo/action_expert](halo/action_expert) | Action expert 单步组件 |
-| 其他集成入口 | [g05/base](g05/base)、[gr00t/n1_7_droid](gr00t/n1_7_droid)、[internvla/navdp](internvla/navdp)、[siglip/pi05_component](siglip/pi05_component) | 各自公开模型/组件合同 |
+| G0.5 | [g05](g05/README.md) | 2/3cam × FP16、W8、W8+Action NVFP4；ACC/text 在文件内修改 |
+| Pi0.5 | [pi05](pi05/README.md) | 2/3cam × 四精度；TP8 优化与 TP4/6 通用执行 |
+| HyVLA | [hy_vla](hy_vla/README.md) | 2/3cam × 三精度；当前优化入口为 TP8 |
+| Wall-OSS | [wall_oss](wall_oss/README.md) | base 按相机/分辨率/精度；RTC 与分拣为不同负载 |
+| GR00T | [gr00t](gr00t/README.md) | 224/256 × FP16/W8，text 在文件内修改 |
+| RhinoVLA | [rhinovla](rhinovla/README.md) | v1 官方/调用者 factory、v3 factory 与九种独立配置 |
+| Qwen3 | [qwen3](qwen3/README.md) | 模型大小、精度、Instruct / lm_head recipe |
+| Qwen3.5 | [qwen3_5](qwen3_5/README.md) | text/VL、Dense/MoE、精度、固定 P/D 输入 |
+| Qwen3-VL | [qwen3_vl](qwen3_vl/README.md) | text/VL、模型大小、精度、固定 P/D 输入 |
+| DINOv3 | [dinov3](dinov3/README.md) | ViT-B FP16 图像编码 |
+| Gemma4 | [gemma4](gemma4/README.md) | E4B FP16 |
+| Llama | [llama](llama/README.md) | 3.2-1B FP16 |
+| HY Embodied | [hy_embodied](hy_embodied/README.md) | 三图 UMI FP16 接口；其他配方见 HyVLA |
+| HALO | [halo](halo/README.md) | Action expert；组件配置 |
+| InternVLA | [internvla](internvla/README.md) | System2/RGBD/NavDP 完整链，混合精度 |
+| LingBot | [lingbot](lingbot/README.md) | v1 CPU/设备混合；v2 FP16/W8 与 exact-Z2 |
 
-```sh
-python examples/run_model.py --config examples/configs/qwen3_5/vl/2b/fp16.toml --check-config
-python examples/run_model.py --config examples/configs/qwen3_5/vl/2b/fp16.toml
-```
+## 如何选择
 
-从仓库根目录运行。`--check-config` 不加载权重或访问板卡。alias 在 `RPU_MODEL_CACHE` 下解析，默认根目录为 `~/.cache/rhinoforge/models`；相对输入路径以进程工作目录为基准。
+先确定模型版本和任务，再选择输入规格与精度配方。`text/`、`vl/`、`vision/` 表示执行组件；相机槽位、分辨率和模型大小由目录区分。同一组权重可以被不同输入和核数的配置复用，具体关系写在模型页。
 
-模型配置使用 `[example]`、`[input]`、`[run]` 和可选 `[rpu_execution]`，Pi 使用 `[pi05]`。`example.profile_id` 对应 [profiles.json](profiles.json) 中实际被模板引用的精度、组件和冷态约束。G0.5、GR00T、NavDP、SigLIP 的单个集成模板使用 `[runner/model/request]`；调用方自有的旧格式文件仍可运行，目录中不另放兼容副本。
+FP16、W8、W4 等文件名描述运行配方；实际量化范围由名称中的模块限定和模型页共同说明。固定 P/D、TP、ACC 变体的含义见[命名规则](NAMING.md)，所有路径见[配置索引](CONFIGURATIONS.md)。
 
-短测请复制目标配置，保留 `run.warmup=2`，将 `run.runs=2` 或 `3`，生成模型的 `input.decode_steps=32`，省略 `warmup_decode_steps` 或使其等于正式 decode 长度；`warmup >= 2` 时拒绝更短的预热。两次预热覆盖固定 signature 的 BUILD 和真实 REPLAY；预热耗时单独记录为 `warmup_wall_ms_runs`。显式零次或一次预热可用于冷路径诊断，但不代表稳态。保留需要比较的其他输入、精度和执行设置。长 P/D 配置仅在显式选择时运行。
+公共运行入口的 TOML 为完整模板；RhinoVLA `controlled/` 使用对应页面的独立命令。改变精度配方时直接复制对应文件，再按其获取步骤准备权重；输入路径、线程和采样次数等常调项按模型页填写。
 
-`assets/example.ppm` 是公开示意图片，不是历史性能或质量报告的原始输入。权重、batch、预处理 tensor 和应用请求由调用方提供。配置存在不扩大运行时准入或声明质量认证；本目录不包含客户模型、私有 fixture 或部署定制。
+<a id="配置日志输出"></a>
+
+日志级别与产物说明见[日志与结果](../RESULTS.md#日志设置)，公共字段见[通用参数](PARAMETERS.md)。
+
+<a id="本轮路径迁移"></a>
+
+文件改名记录见[路径对照](config_names.json)；命令行使用当前配置路径。

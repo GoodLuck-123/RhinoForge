@@ -5,10 +5,12 @@
 #include <ATen/record_function.h>
 #include <c10/util/Half.h>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "rpu_ops.h"
@@ -143,6 +145,94 @@ void launch_moe_topk_by_kvsort_fp16_pass(
 }
 
 }  // namespace
+
+void rpu_launch_lingbot2_route_compact_e32_t51_tp64_spm_kernel(
+    uint32_t mask_spm_addr, uint32_t expert_ids_spm_addr,
+    uint32_t token_ids_spm_addr, uint32_t counts_spm_addr) {
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "lingbot2_route_compact: SPM allocator is not initialized");
+    const uint32_t base = SPM_ALLOC.addr(0, 0);
+    const std::array<std::pair<uint32_t, uint32_t>, 4> ranges{{
+        {mask_spm_addr, 4096},
+        {expert_ids_spm_addr, 408},
+        {token_ids_spm_addr, 408},
+        {counts_spm_addr, 64},
+    }};
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const auto [address, bytes] = ranges[i];
+        TORCH_CHECK(address >= base && address % 32 == 0 &&
+                        uint64_t(address) - base <=
+                            uint64_t(SpmAllocator::SPM_USABLE) - bytes,
+                    "lingbot2_route_compact: invalid 32-byte-aligned "
+                    "absolute core-0 SPM interval");
+        for (size_t j = 0; j < i; ++j) {
+            TORCH_CHECK(uint64_t(address) + bytes <= ranges[j].first ||
+                            uint64_t(ranges[j].first) + ranges[j].second <= address,
+                        "lingbot2_route_compact: all SPM operands must be disjoint");
+        }
+    }
+
+    Kernel_t* kernel = GET_KERNEL(KernelId::LINGBOT2_ROUTE_COMPACT_E32_T51_TP64);
+    TORCH_CHECK(kernel != nullptr,
+                "lingbot2_route_compact: optional payload is absent from the active oplib");
+    kernel->reset_regs();
+    // This fixed ABI takes byte addresses, unlike the generic kvsort v16 ABI.
+    set_reg_u32(kernel, 0, mask_spm_addr);
+    set_reg_u32(kernel, 2, expert_ids_spm_addr);
+    set_reg_u32(kernel, 4, token_ids_spm_addr);
+    set_reg_u32(kernel, 6, counts_spm_addr);
+    kernel->set_regs(64, static_cast<uint16_t>(1));
+    kernel->set_regs(65, static_cast<uint16_t>(1));
+    kernel->set_regs(66, static_cast<uint16_t>(1));
+    auto* queue = GET_QUEUE(1);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {1, 1, 1}, {0});
+}
+
+void rpu_launch_lingbot2_route_compact_inverse_e32_t51_tp64_spm_kernel(
+    uint32_t mask_spm_addr, uint32_t expert_ids_spm_addr,
+    uint32_t token_ids_spm_addr, uint32_t counts_spm_addr, uint32_t inverse_spm_addr) {
+    TORCH_CHECK(SPM_ALLOC.is_initialized(),
+                "lingbot2_route_inverse: SPM allocator is not initialized");
+    const uint32_t base = SPM_ALLOC.addr(0, 0);
+    const std::array<std::pair<uint32_t, uint32_t>, 5> ranges{{
+        {mask_spm_addr, 4096},
+        {expert_ids_spm_addr, 408},
+        {token_ids_spm_addr, 408},
+        {counts_spm_addr, 64},
+        {inverse_spm_addr, 4096},
+    }};
+    for (size_t i = 0; i < ranges.size(); ++i) {
+        const auto [address, bytes] = ranges[i];
+        TORCH_CHECK(address >= base && address % 32 == 0 &&
+                        uint64_t(address) - base <=
+                            uint64_t(SpmAllocator::SPM_USABLE) - bytes,
+                    "lingbot2_route_inverse: invalid 32-byte-aligned "
+                    "absolute core-0 SPM interval");
+        for (size_t j = 0; j < i; ++j) {
+            TORCH_CHECK(uint64_t(address) + bytes <= ranges[j].first ||
+                            uint64_t(ranges[j].first) + ranges[j].second <= address,
+                        "lingbot2_route_inverse: all SPM operands must be disjoint");
+        }
+    }
+
+    Kernel_t* kernel = GET_KERNEL(KernelId::LINGBOT2_ROUTE_COMPACT_INVERSE_E32_T51_TP64);
+    TORCH_CHECK(kernel != nullptr,
+                "lingbot2_route_inverse: optional payload is absent from the active oplib");
+    kernel->reset_regs();
+    // This fixed ABI takes byte addresses, unlike the generic kvsort v16 ABI.
+    set_reg_u32(kernel, 0, mask_spm_addr);
+    set_reg_u32(kernel, 2, expert_ids_spm_addr);
+    set_reg_u32(kernel, 4, token_ids_spm_addr);
+    set_reg_u32(kernel, 6, counts_spm_addr);
+    set_reg_u32(kernel, 8, inverse_spm_addr);
+    kernel->set_regs(64, static_cast<uint16_t>(1));
+    kernel->set_regs(65, static_cast<uint16_t>(1));
+    kernel->set_regs(66, static_cast<uint16_t>(1));
+    auto* queue = GET_QUEUE(1);
+    queue->set_broadcast_mode(true);
+    queue->enqueu_kernel(*kernel, {1, 1, 1}, {0});
+}
 
 void rpu_launch_moe_topk_scalar_fp16_spm_kernel(
     uint32_t input_key_spm_addr,

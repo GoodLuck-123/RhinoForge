@@ -32,13 +32,10 @@
 //   y_shared          = down_s(silu(gate_s(h)) * up_s(h)) # always-on, UNGATED
 //   out               = y_routed + y_shared
 //
-// We implement the DENSE-EINSUM formulation that the official source itself uses
-// (qwen2_action_expert.py:342-351): every expert is evaluated for every token and
-// combined with a STATIC [E,T] weight matrix whose non-top-k entries are 0. This
-// keeps every shape static — no device-side topk/gather/dispatch, no data-dependent
-// control flow, no CPU callback (which would force sync_point() -> replayable=false,
-// src/graph/custom_cpu_fallback_dispatch.cpp:55-60). Expert evaluation uses
-// static shapes even when the selected experts differ between tokens.
+// The baseline evaluates every expert with a static [E,T] routing mask. The
+// cold sparse path retains that selector and executes only T*top_k gathered
+// rows through device-counted grouped GEMM. Capacities remain static; routing
+// values, including zero-count experts, change on every Graph replay.
 #pragma once
 
 #include "rpu_qwen3_model.h"   // v3::CausalDecoderModel
@@ -90,11 +87,11 @@ public:
     // expert through its dense gate_w/up_w/down_w lists with
     // intermediate_size == shared_inter_pad.
     //
-    //   router_gate_w  [nl]    each [E, hidden]  single-core col-swizzled fp16 RPU
-    //   router_bias    [nl]    each [E]          fp16 RPU (per-layer correction bias)
-    //   expert_gate_w  [nl*E]  each [I, hidden]  8-core col-swizzled fp16 RPU
-    //   expert_up_w    [nl*E]  each [I, hidden]  8-core col-swizzled fp16 RPU
-    //   expert_down_w  [nl*E]  each [hidden, I]  8-core row-swizzled fp16 RPU
+    //   router_gate_w  [nl]    each [E, hidden]  single-core col-swizzled fp16 device
+    //   router_bias    [nl]    each [E]          fp16 device (per-layer correction bias)
+    //   expert_gate_w  [nl*E]  each [I, hidden]  8-core col-swizzled fp16 device
+    //   expert_up_w    [nl*E]  each [I, hidden]  8-core col-swizzled fp16 device
+    //   expert_down_w  [nl*E]  each [hidden, I]  8-core row-swizzled fp16 device
     // Expert bank index is layer_idx * num_experts + e (DDR-resident: 2.25 MB per
     // expert x 32 = 72 MB/layer > 60 MB total SPM, so it is streamed per GEMM by
     // rpu_launch_linear_spm_to_spm_acc16_kernel, whose weight operand IS a DDR
@@ -108,11 +105,13 @@ public:
         bool grouped_experts_requested);
 
     // Optional cold, selection-only router bank: [nl][E,hidden], contiguous
-    // single-core col-swizzled FP16 RPU. Call before any forward/Z2 prime.
+    // single-core col-swizzled FP16 device. Call before any forward/Z2 prime.
     // The caller centers the FP32 source weights before the FP16 conversion.
     // Requires strict FP16 top-k and exactly zero installed correction biases;
     // original sigmoid scores continue to supply the normalised weights.
     void set_router_rank_weights(at::TensorList rank_weights);
+    void configure_runtime_graph(bool fused_router, bool routed_gemm);
+    void enable_resident_preloads();
 
     std::vector<int64_t> resolve_action_stage_domain(
         int64_t execution_len, int64_t prefix_len,
@@ -130,11 +129,13 @@ public:
         const at::Tensor& adarms_is, const at::Tensor& adarms_ish,
         const at::Tensor& adarms_ps, const at::Tensor& adarms_psh,
         int64_t state_dim, int64_t action_dim, int64_t state_dim_pad,
-        int64_t action_dim_pad, int64_t num_steps);
+        int64_t action_dim_pad, int64_t num_steps, bool tp8_encoder = false);
 
     // One caller-owned GraphCache capture emits all num_steps bodies. x0/state
     // and x_final may drift between forwards; the graph patches their mutable
     // DMA bases on REPLAY. x_final is [1, chunk_size, action_dim_pad].
+    // inputs_published is a per-call promise for adapter-owned uploads. Public
+    // callers keep the default boundary flush for writable CPU aliases.
     void denoise_unroll_forward(
         const at::Tensor& x0_rpu, const at::Tensor& state_rpu,
         std::vector<at::Tensor>& k_caches,
@@ -142,7 +143,8 @@ public:
         const std::optional<at::Tensor>& attention_mask,
         at::Tensor& x_final, double dt, int64_t prefix_len,
         int64_t cos_sin_offset, int64_t num_steps,
-        at::IntArrayRef planned_stage_descriptor = {});
+        at::IntArrayRef planned_stage_descriptor = {},
+        bool inputs_published = false);
 
     // Reversible CPU-only admission for the three exact LingBot2 suffix profiles.
     // It validates all weights/scales and returns the dry layout identity before
@@ -167,6 +169,10 @@ protected:
 
     std::vector<BufferDecl> declare_buffers(const LayoutContext& ctx) override;
     ModelStaticConfig static_config() override;
+    int64_t subclass_layout_hash() const override {
+        const int64_t base = CausalDecoderModel::subclass_layout_hash();
+        return denoise_tp8_encoder_ ? detail::layout_mix(base, INT64_C(0x4c32494f545038)) : base;
+    }
     bool subclass_chunk_size_valid(
         int64_t chunk_size, int64_t seq_len,
         int64_t position) const override;
@@ -207,6 +213,9 @@ private:
     void emit_moe_mlp(int layer_idx, int64_t seq_len);
     // GROUPED variant: core-slice-interleaved packed experts (RPU_LINGBOT2_GROUPED_EXPERTS).
     void emit_moe_mlp_grouped(int layer_idx, int64_t seq_len);
+    void emit_moe_mlp_sparse(int layer_idx, int64_t seq_len);
+    std::vector<int64_t> moe_execution_arguments() const;
+    void preload_sparse_ids(bool expert, uint32_t address);
 
     // The fp32 router/select seam. Must produce "moe_rwbc" = dense [E,Tp]
     // routing weights. Currently escalates: no fp32 router-select op exists in
@@ -237,6 +246,17 @@ public:
     // Bind per-layer packed expert weights + enable the grouped path (opt-in).
     void set_packed_expert_weights(at::TensorList gate_packed, at::TensorList up_packed,
                                    at::TensorList down_packed);
+    // Runtime grouped ABI: per-layer [E, N*K] packed FP16 or INT8 weights;
+    // INT8 scales [E,N], FP16 scale lists empty. Cold and mutually exclusive
+    // with the dense core-slice-interleaved packing above.
+    void set_sparse_expert_weights(
+        at::TensorList gate_up, at::TensorList down,
+        at::TensorList gate_up_scales,
+        at::TensorList down_scales);
+    // Full already-swizzled bank owns the two legacy Gate/Up tensor views.
+    // W8 scales are separately interleaved by core; original scales survive.
+    void set_shared_gate_up_weights(at::TensorList joint_weights,
+                                   at::TensorList joint_scales);
     // Quantized grouped experts: bind W8 [N] or controller-striped W4 pgrp scales.
     // Called AFTER set_packed_expert_weights, only for int8 or packed-int4 weights.
     void set_packed_expert_scales(at::TensorList gate_scale, at::TensorList up_scale,
@@ -256,25 +276,28 @@ public:
     // reference can be computed on the SAME activations the fp16 router saw --
     // residual1 sits AFTER attention, so it is not host-computable.
     at::Tensor debug_router_h() const { return h_stage_; }
+    // Existing sparse routing relay, including raw U16 IDs/counts. Reading it
+    // adds no capture DMA; callers synchronize before copying it to the host.
+    at::Tensor debug_sparse_route_stage() const { return sparse_route_stage_; }
     // DEBUG-ONLY all-layer residual-stream taps (opt-in via RPU_L2_CAP_RESID). layer_in =
     // residual1 at phase-1 start (= layer input), attn_resid = residual2 after phase-5
     // (= layer_input + attention_output). Together with debug_router_h they localise, per
-    // layer, whether the RPU-vs-CPU drift enters at attention or at the MoE MLP.
+    // layer, whether the device-vs-CPU drift enters at attention or at the MoE MLP.
     at::Tensor debug_layer_in() const { return lin_stage_; }
     at::Tensor debug_attn_resid() const { return ar_stage_; }
 
 private:
 
-    at::Tensor ones_pad_;     // [Tp*E] fp16 RPU — fills the router score pad rows with 1.0 so
+    at::Tensor ones_pad_;     // [Tp*E] fp16 device — fills the router score pad rows with 1.0 so
                               //          each pad column sums to E and divides to a finite 1/E
                               //          (never 0/0=NaN), with no unaligned denominator patch
     at::Tensor expert_scatter_ids_; // [Tp,E] raw uint16 (expert*Tp+token) held in
                                     // FP16-sized DDR; persistent strict-top-k lookup
-    at::Tensor rw_stage_;     // [nl, E, Tp] fp16 RPU — per-layer core0->all-cores relay
-    at::Tensor h_stage_;      // [nl, Tp, h] fp16 RPU — DEBUG router-input capture, opt-in,
+    at::Tensor rw_stage_;     // [nl, E, Tp] fp16 device — per-layer core0->all-cores relay
+    at::Tensor h_stage_;      // [nl, Tp, h] fp16 device — DEBUG router-input capture, opt-in,
                               //          one slot PER LAYER (never overwritten downstream)
-    at::Tensor lin_stage_;    // [nl, Tp, h] fp16 RPU — DEBUG layer-input (residual1 @ phase1), opt-in
-    at::Tensor ar_stage_;     // [nl, Tp, h] fp16 RPU — DEBUG post-attention residual (residual2 @ phase5), opt-in
+    at::Tensor lin_stage_;    // [nl, Tp, h] fp16 device — DEBUG layer-input (residual1 @ phase1), opt-in
+    at::Tensor ar_stage_;     // [nl, Tp, h] fp16 device — DEBUG post-attention residual (residual2 @ phase5), opt-in
     std::vector<int64_t> kvinsert_cost_weight_identity() const override {
         auto identity = causal_kvinsert_cost_weight_identity();
         if (identity.empty()) return {};
@@ -351,6 +374,53 @@ private:
                 &mo_bias_, &op_, &op_bias_}) {
             append_kvinsert_cost_tensor_identity(identity, *tensor);
         }
+        if (sparse_experts_) {
+            identity.push_back(INT64_C(0x4c32535041525345));  // L2SPARSE
+            identity.push_back(sparse_weight_mode_);
+            identity.push_back(sparse_gate_up_expert_y4_ ? 1 : 0);
+            identity.push_back(sparse_route_compact_ ? 1 : 0);
+            identity.push_back(sparse_combine_scan_ ? 1 : 0);
+            identity.push_back(sparse_topk_lane2_ ? 1 : 0);
+            identity.push_back(sparse_swiglu_route_ ? 1 : 0);
+            identity.push_back(sparse_inverse_combine_ ? 1 : 0);
+            identity.push_back(sparse_direct_route_ ? 1 : 0);
+            identity.push_back(sparse_adarms_norm_shift_capable_ ? 1 : 0);
+            identity.push_back(sparse_inverse_shared_combine_ ? 1 : 0);
+            identity.push_back(sparse_shared_gate_up_ ? 1 : 0);
+            identity.push_back(sparse_gate_up_routed_ ? 1 : 0);
+            identity.push_back(sparse_gate_up_activation_ ? 1 : 0);
+            identity.push_back(sparse_down_scale_shuffle_ ? 1 : 0);
+            identity.push_back(sparse_kv_t51_ ? 1 : 0);
+            identity.push_back(sparse_qk_rope_t51_ ? 1 : 0);
+            identity.push_back(sparse_shared_silu_vector_ ? 1 : 0);
+            identity.push_back(sparse_qkv_multibase_mode_);
+            identity.push_back(sparse_sdpa_tail_t51_ ? 1 : 0);
+            identity.push_back(sparse_down_ordered_combine_ ? 1 : 0);
+            identity.push_back(sparse_topk_compact_ ? 1 : 0);
+            identity.push_back(sparse_adarms_norm_shift_diagonal_ ? 1 : 0);
+            identity.push_back(sparse_qk_rope_kv_t51_ ? 1 : 0);
+            identity.push_back(sparse_router_sigmoid_pad_ ? 1 : 0);
+            identity.push_back(sparse_shared_gate_up_resident_silu_w8_ ? 1 : 0);
+            identity.push_back(sparse_shared_gate_up_resident_silu_fp16_ ? 1 : 0);
+            identity.push_back(sparse_attn_ring_adarms_ ? 1 : 0);
+            for (const auto* bank : {&sparse_gate_up_, &sparse_down_,
+                                     &sparse_gate_up_s_, &sparse_down_s_,
+                                     &shared_gate_up_, &shared_gate_up_scales_}) {
+                identity.push_back(static_cast<int64_t>(bank->size()));
+                for (const auto& tensor : *bank)
+                    append_kvinsert_cost_tensor_identity(identity, tensor);
+            }
+        }
+        if (denoise_tp8_encoder_) {
+            identity.insert(identity.end(), {INT64_C(0x4c32494f545038), 1, 51, 768, 64, 8});
+            append_kvinsert_cost_tensor_identity(identity, denoise_mo_bias_rows_);
+            append_kvinsert_cost_tensor_identity(identity, time_all_);
+        }
+        if (fused_router_ || routed_gemm_) {
+            identity.insert(identity.end(), {INT64_C(0x4c32525447525048),
+                fused_router_ ? 1 : 0, routed_gemm_ ? 1 : 0});
+            append_kvinsert_cost_tensor_identity(identity, fused_expert_ids_);
+        }
         return identity;
     }
 
@@ -365,7 +435,7 @@ private:
     // dim 0 carries group_size. Empty => fp16 weights.
     std::vector<at::Tensor> packed_gate_s_, packed_up_s_, packed_down_s_;
     bool packed_w8a16_ = false;
-    at::Tensor wtm_stage_;   // [nl, Tp, E] fp16 RPU — token-major routing-weight relay
+    at::Tensor wtm_stage_;   // [nl, Tp, E] fp16 device — token-major routing-weight relay
     at::Tensor l0_out_;      // DEBUG [Tp,h] capture of layer-0 MoE output (residual1)
     at::Tensor innorm_;      // DEBUG [Tp,h] capture of layer-0 input_norm (post AdaRMS)
     at::Tensor gcap_;        // DEBUG [Tp, E*Ic] core-0 gate-GEMM output, layer 0
@@ -379,6 +449,66 @@ private:
     bool debug_cap_resid_ = false;
     bool debug_routed_only_ = false;
     bool grouped_experts_ = false;
+    bool sparse_experts_ = false;
+    // GateUp snapshots the matching FP16/W8 payload; the remaining sparse
+    // routes operate on the common FP16 activation and raw-U16 routing ABI.
+    bool sparse_gate_up_expert_y4_ = false;
+    // Optional matching dtype payload reads residual1 through raw token IDs;
+    // compact SwiGLU/Down retain moe_sparse_input and all existing lifetimes.
+    bool sparse_gate_up_routed_ = false;
+    // Optional exact-profile Routed GateUp + SwiGLU + route-weight fusion.
+    bool sparse_gate_up_activation_ = false;
+    bool sparse_down_scale_shuffle_ = false;
+    // Bound after the validated shared joint bank. Preserves task-major Down
+    // and +0/four expert-ordered FP16 adds/shared-last in one N64 leaf.
+    bool sparse_down_ordered_combine_ = false;
+    bool sparse_kv_t51_ = false;
+    bool use_kv_t51_pair(int64_t rows, int64_t position) const;
+    // Required paired RoPE payload, admitted only for the measured Q4/K1 suffix.
+    bool sparse_qk_rope_t51_ = false;
+    bool use_qk_rope_t51(int64_t rows) const;
+    // Optional same-tile Q/K RoPE + paired KV write, shared by both precisions.
+    bool sparse_qk_rope_kv_t51_ = false;
+    bool use_qk_rope_kv_t51(int64_t rows, int64_t position) const;
+    // Cold all-layer attention precision: 0=ordinary, 1=W8, 2=FP16.
+    int sparse_qkv_multibase_mode_ = 0;
+    int select_qkv_multibase_mode() const;
+    bool use_qkv_multibase(int64_t rows) const;
+    bool sparse_sdpa_tail_t51_ = false;
+    bool select_sdpa_tail_t51() const;
+    bool use_sdpa_tail_t51(int64_t rows, int64_t kv_len) const;
+    bool sparse_route_compact_ = false;
+    bool sparse_combine_scan_ = false;
+    bool sparse_swiglu_route_ = false;
+    bool sparse_inverse_combine_ = false;
+    // Ordered inverse combine can include the final shared-partial ADD after
+    // shared Down. The producer/route layout stays sparse_inverse_combine_.
+    bool sparse_inverse_shared_combine_ = false;
+    bool sparse_shared_gate_up_ = false;
+    bool sparse_shared_gate_up_resident_silu_w8_ = false;
+    bool sparse_shared_gate_up_resident_silu_fp16_ = false;
+    // Optional exact T51/D96 vector schedule, bound with the shared joint bank.
+    bool sparse_shared_silu_vector_ = false;
+    bool sparse_topk_lane2_ = false;
+    bool sparse_topk_compact_ = false;
+    bool sparse_router_sigmoid_pad_ = false;
+    bool use_router_sigmoid_pad(int64_t rows) const;
+    std::vector<int64_t> router_sigmoid_pad_arguments() const;
+    bool sparse_direct_route_ = false;
+    // Bind payload/profile availability before AdaRMS tensors are installed.
+    // Emission additionally requires adarms_; rebind retires this capability.
+    bool sparse_adarms_norm_shift_capable_ = false;
+    bool sparse_adarms_norm_shift_diagonal_ = false;
+    // Exact cold T51/H768/TP8/L36 ring + diagonal AdaRMS/shift capability.
+    bool sparse_attn_ring_adarms_ = false;
+    bool fused_router_ = false;
+    bool routed_gemm_ = false;
+    at::Tensor fused_expert_ids_, routed_counts_stage_;
+    int64_t sparse_weight_mode_ = 2;  // GroupedParallelLinearWeightMode::FP16
+    std::vector<at::Tensor> sparse_gate_up_, sparse_down_;
+    std::vector<at::Tensor> sparse_gate_up_s_, sparse_down_s_;
+    std::vector<at::Tensor> shared_gate_up_, shared_gate_up_scales_;
+    at::Tensor sparse_expert_ids_, sparse_token_ids_, sparse_route_stage_;
     // Python resolves legacy inputs before native create; every native consumer
     // below reads only this typed per-handle snapshot.
     bool runtime_config_bound_ = false;
@@ -406,6 +536,9 @@ private:
     // path, so it cannot perturb the existing graph or SPM manifest.
     bool denoise_unroll_ = false;
     bool denoise_unroll_active_ = false;
+    bool denoise_tp8_encoder_ = false;
+    at::Tensor denoise_mo_bias_rows_;
+    void emit_denoise_tp8_pre_layers();
     at::Tensor state_w_, state_b_, wc_, mo_, mo_bias_, op_, op_bias_, time_all_;
     at::Tensor denoise_stage_;  // stable DDR [1, chunk_size, hidden]
     int64_t state_dim_ = 0, action_dim_ = 0;

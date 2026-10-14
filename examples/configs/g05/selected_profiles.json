@@ -1,0 +1,1337 @@
+{
+  "schema_version": 2,
+  "profiles": [
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 32,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 52,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 64,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 128,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 192,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 256,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 32,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 52,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 64,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 128,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 192,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 256,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 32,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 52,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 64,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 128,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 192,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 256,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 32,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 52,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 64,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 128,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 192,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 256,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 32,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 52,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 64,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 128,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 192,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 256,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 32,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 52,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 192
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 64,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 128,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 2,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 192,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 2,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 256,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 32,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 52,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 64,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 128,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 192,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc32",
+      "text_length": 256,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 32,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 52,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 64,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 128,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 192,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "fp16_acc16",
+      "text_length": 256,
+      "weight_dtype": "fp16",
+      "action_weight_dtype": "fp16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 32,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 52,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 64,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 128,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 192,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc32",
+      "text_length": 256,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 32,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 52,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 64,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 1,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 128,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 192,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_acc16",
+      "text_length": 256,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "w8a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 32,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 52,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 64,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 128,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 192,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc32",
+      "text_length": 256,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc32",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 32,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 52,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 256
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 64,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 320
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 128,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 192,
+        "actual": 192,
+        "execution_length": 384
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 192,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    },
+    {
+      "cameras": 3,
+      "camera_names": [
+        "head_rgb",
+        "left_wrist_rgb",
+        "right_wrist_rgb"
+      ],
+      "precision": "w8a16_action_nvfp4_acc16",
+      "text_length": 256,
+      "weight_dtype": "w8a16",
+      "action_weight_dtype": "nvfp4a16",
+      "linear_accumulation": "acc16",
+      "vision_camera_batch": 3,
+      "text_chunk": {
+        "requested": 256,
+        "actual": 256,
+        "execution_length": 512
+      }
+    }
+  ]
+}

@@ -13,7 +13,7 @@
 //
 // Patch embed (Conv2d k=16 s=16) runs OUTSIDE the fused graph on CPU fp16
 // (qwen3_vl F31 pattern). Python adapter prepends CLS + 4 register tokens
-// and passes a `[1, num_tokens=1+R+num_patches, hidden]` fp16 RPU tensor to
+// and passes a `[1, num_tokens=1+R+num_patches, hidden]` fp16 device tensor to
 // `forward()`. ViT-B/16 224×224 → num_tokens = 5 + 196 = 201.
 //
 // =============================================================================
@@ -170,7 +170,7 @@ public:
     // adapter MUST swizzle all 6 weight tensors before calling.
     //
     // Per-layer preconditions:
-    //   - All tensors fp16 on PrivateUse1 (RPU), contiguous.
+    //   - All tensors fp16 on PrivateUse1 (device), contiguous.
     //   - q_w/k_w/v_w/o_w shape [hidden, hidden].
     //   - up_w shape [intermediate, hidden]; down_w [hidden, intermediate].
     //   - ln1_w/ln1_b/ln2_w/ln2_b/q_b/v_b/o_b/up_b/down_b/gamma_attn/gamma_mlp
@@ -227,7 +227,7 @@ public:
                 TORCH_CHECK(list[i].scalar_type() == at::kHalf,
                             "dinov3_vision_set_weights: ", name, "[", i, "] must be fp16");
                 TORCH_CHECK(list[i].device().type() == at::kPrivateUse1,
-                            "dinov3_vision_set_weights: ", name, "[", i, "] must be on RPU device");
+                            "dinov3_vision_set_weights: ", name, "[", i, "] must be on device");
                 TORCH_CHECK(list[i].is_contiguous(),
                             "dinov3_vision_set_weights: ", name, "[", i, "] must be contiguous");
             }
@@ -300,7 +300,7 @@ public:
     // ========================================================================
     // set_rope_tables — register FreqCos / FreqSin DDR static tables.
     //
-    // Tables shape: `[max_hw, head_dim/4]` fp16 RPU. The rope_2d_ddr kernel
+    // Tables shape: `[max_hw, head_dim/4]` fp16 device. The rope_2d_ddr kernel
     // indexes the SAME table by both row_idx and col_idx (DINOv3 normalized
     // patch centers map symmetrically across H/W). 256B alignment required —
     // the Python adapter must pad alloc if natural size doesn't align.
@@ -320,7 +320,7 @@ public:
                     "dinov3_vision_set_rope: freq_cos / freq_sin must be fp16");
         TORCH_CHECK(freq_cos.device().type() == at::kPrivateUse1
                     && freq_sin.device().type() == at::kPrivateUse1,
-                    "dinov3_vision_set_rope: freq_cos / freq_sin must be on RPU device");
+                    "dinov3_vision_set_rope: freq_cos / freq_sin must be on device");
         TORCH_CHECK(freq_cos.is_contiguous() && freq_sin.is_contiguous(),
                     "dinov3_vision_set_rope: freq_cos / freq_sin must be contiguous");
 
@@ -352,7 +352,7 @@ public:
         for (const auto* t : {&weight, &bias}) {
             TORCH_CHECK(t->scalar_type() == at::kHalf &&
                         t->device().type() == at::kPrivateUse1 && t->is_contiguous(),
-                        "dinov3 final norm tensors must be contiguous fp16 RPU");
+                        "dinov3 final norm tensors must be contiguous fp16 device");
         }
         final_norm_w_ = weight;
         final_norm_b_ = bias;
@@ -370,14 +370,14 @@ public:
                         && weight->scalar_type() == at::kHalf
                         && weight->device().type() == at::kPrivateUse1
                         && weight->is_contiguous(),
-                        "DINO output-MLP weights must be contiguous fp16 RPU [H,H]");
+                        "DINO output-MLP weights must be contiguous fp16 device [H,H]");
         }
         for (const auto* bias : {&first_bias, &second_bias}) {
             TORCH_CHECK(bias->dim() == 1 && bias->numel() == h
                         && bias->scalar_type() == at::kHalf
                         && bias->device().type() == at::kPrivateUse1
                         && bias->is_contiguous(),
-                        "DINO output-MLP biases must be contiguous fp16 RPU [H]");
+                        "DINO output-MLP biases must be contiguous fp16 device [H]");
         }
         output_mlp_w1_ = first_weight;
         output_mlp_b1_ = first_bias;
@@ -390,13 +390,13 @@ public:
     // ========================================================================
     // forward — drive the N-block encoder. Mirrors qwen3vl_vision_forward.
     //
-    // Input  : [1, num_tokens, hidden_size] fp16 RPU. Python adapter must
+    // Input  : [1, num_tokens, hidden_size] fp16 device. Python adapter must
     //          have already: (a) folded patch_embed (CPU fp16 Conv2d→Linear),
     //          (b) prepended CLS + register tokens, (c) written the per-patch
     //          (row, col) int16 pairs to slots [0..num_patches-1] of the
     //          keepalive returned by position_idx_keepalive().
     //          num_tokens == DINOV3_VISION_NUM_SPECIAL_TOKENS + num_patches.
-    // Output : [1, num_tokens, hidden_size] fp16 RPU (final block hidden
+    // Output : [1, num_tokens, hidden_size] fp16 device (final block hidden
     //          state, BEFORE the model's final LayerNorm and CLS slice —
     //          those happen in Python).
     // ========================================================================
@@ -415,7 +415,7 @@ public:
         TORCH_CHECK(has_rope_,
                     "DINOv3VisionModel::forward: set_rope_tables must be called first");
         TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                    "DINOv3VisionModel::forward: input must be on RPU device");
+                    "DINOv3VisionModel::forward: input must be on device");
         TORCH_CHECK(input.is_contiguous(),
                     "DINOv3VisionModel::forward: input must be contiguous");
         TORCH_CHECK(input.dim() == 3,
@@ -919,13 +919,14 @@ protected:
             {"oproj",       res,       4, 7, StorageClass::Temp, 0, nullptr},
             // Pre-zeroed dummy residual for AllReduce. The kernel always adds
             // a residual term; passing this all-zero buffer turns it into a
-            // plain Σ_cores sum. Persistent (shared across all layers) with
-            // a memset preload that runs once during emit_preload_weights.
+            // plain Σ_cores sum. Layer-wide temporary storage keeps the zeroes
+            // intact across the encoder and optional output MLP; layer 0
+            // initializes it once on every forward/replay.
             // P4.5 root cause: γ × per-core partial pushes intermediate values
             // into fp16 subnormal range (P1.3 γ_attn abs_min = 3.69e-6 ≪
             // fp16 smallest-normal 6.1e-5); AllReduce-then-multiply preserves
             // precision because the sum lands in normal-fp16 range first.
-            {"zero_residual", res,     4, 7, StorageClass::Persistent, 0, nullptr},
+            {"zero_residual", res,     1, 10, StorageClass::Temp, 0, nullptr},
 
             // q/k get rotated in place by rope_2d; v unchanged. Phases 2-3.
             {"q",           qkv,       2, 3, StorageClass::Temp, 0, nullptr},
@@ -1154,9 +1155,9 @@ protected:
 
         // One-time-per-forward zero-init of the dummy AllReduce residual.
         // Placed inside layer 0's subgraph so the size (= seq_len * h) is known
-        // and the memset runs exactly once per REPLAY. Persistent storage means
-        // subsequent layers (and later forwards) inherit the zeroes — AllReduce
-        // only reads the residual region, never writes it.
+        // and the memset runs exactly once per REPLAY. The temporary lifetime
+        // covers every layer and the output MLP; AllReduce only reads this
+        // region, and the next forward initializes it again.
         if (layer_idx == 0) {
             rpu_launch_memset_spm_multicore(addr(0, "zero_residual"),
                                              seq_len * h);
@@ -1279,7 +1280,7 @@ protected:
             /*spm_rows=*/0, kv_plan);
 
         // Hybrid CPU-SDPA branch: layer_idx < hybrid_layer_count_ → skip the
-        // fp16 RPU SDPA kernel (which overflows on ViT-S Q·K^T) and instead
+        // fp16 device SDPA kernel (which overflows on ViT-S Q·K^T) and instead
         // DMA the externally-computed sdpa_out (per-core layout
         // [8, seq, local_q_dim] held inside the [N, 8, seq, local_q_dim] DDR
         // staging) into SPM 'sdpa_out'. KV cache insert above is still emitted
@@ -1673,13 +1674,13 @@ public:
     // Hybrid CPU-SDPA fallback (verification / fp16 SDPA overflow workaround).
     //
     // When `hybrid_layer_count` > 0, layers [0, hybrid_layer_count) skip the
-    // RPU FLASH_ATTN_SPM kernel and instead pull externally-computed sdpa_out
+    // device FLASH_ATTN_SPM kernel and instead pull externally-computed sdpa_out
     // from the per-core scattered DDR tensor `hybrid_cpu_sdpa_out`. Used by
     // diagnostics to isolate FP16 attention overflow from the remaining layers.
     //
     // Shape contract:
     //   hybrid_cpu_sdpa_out: [num_layers, NUM_CORES=8, num_tokens, local_q_dim]
-    //     fp16 on PrivateUse1 (RPU), contiguous. Per-core layout matches the
+    //     fp16 on PrivateUse1 (device), contiguous. Per-core layout matches the
     //     dump produced by post_sdpa_debug_buf_ (head-major: core c holds head
     //     c when local_q_heads=1, or heads {c*lqh .. c*lqh+lqh-1} otherwise).
     //
@@ -1701,7 +1702,7 @@ public:
             TORCH_CHECK(sdpa_out.scalar_type() == at::kHalf,
                         "set_hybrid_cpu_sdpa: sdpa_out must be fp16");
             TORCH_CHECK(sdpa_out.device().type() == at::kPrivateUse1,
-                        "set_hybrid_cpu_sdpa: sdpa_out must be on RPU device");
+                        "set_hybrid_cpu_sdpa: sdpa_out must be on device");
             TORCH_CHECK(sdpa_out.is_contiguous(),
                         "set_hybrid_cpu_sdpa: sdpa_out must be contiguous");
         }

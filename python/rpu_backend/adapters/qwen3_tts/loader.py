@@ -1,4 +1,4 @@
-"""CPU FP32 strict loading for the frozen Base checkpoint; never opens an RPU."""
+"""CPU FP32 strict loading for the frozen Base checkpoint; never opens an device."""
 from __future__ import annotations
 
 import hashlib

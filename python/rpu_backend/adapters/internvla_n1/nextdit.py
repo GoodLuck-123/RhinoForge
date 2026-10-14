@@ -1,6 +1,6 @@
-"""RPU runtime for the standalone InternVLA-N1 Lumina NextDiT action core.
+"""device runtime for the standalone InternVLA-N1 Lumina NextDiT action core.
 
-The host keeps the small timestep/caption glue while RPU owns the 12
+The host keeps the small timestep/caption glue while device owns the 12
 transformer blocks and final continuous LayerNorm/projection.  This matches
 ``nextdit_traj.py`` exactly at the subsystem boundary and retains per-block
 numerical probes for correctness runs.
@@ -93,7 +93,7 @@ def _lumina_model(traj_dit: torch.nn.Module) -> torch.nn.Module:
 def _validate_geometry(traj_dit: torch.nn.Module) -> torch.nn.Module:
     model = _lumina_model(traj_dit)
     if len(model.layers) != NUM_LAYERS:
-        raise ValueError(f"RPU slice requires {NUM_LAYERS} layers, got {len(model.layers)}")
+        raise ValueError(f"device slice requires {NUM_LAYERS} layers, got {len(model.layers)}")
     layer0 = model.layers[0]
     geometry = (
         layer0.attn1.to_q.in_features,
@@ -102,7 +102,7 @@ def _validate_geometry(traj_dit: torch.nn.Module) -> torch.nn.Module:
     )
     expected = (HIDDEN, NUM_HEADS, HEAD_DIM)
     if geometry != expected:
-        raise ValueError(f"RPU slice requires geometry {expected}, got {geometry}")
+        raise ValueError(f"device slice requires geometry {expected}, got {geometry}")
     ff_intermediates = {
         layer.feed_forward.linear_1.out_features for layer in model.layers
     }
@@ -111,7 +111,7 @@ def _validate_geometry(traj_dit: torch.nn.Module) -> torch.nn.Module:
         or next(iter(ff_intermediates)) not in SUPPORTED_FF_INTERMEDIATES
     ):
         raise ValueError(
-            f"RPU slice requires FF intermediate in {SUPPORTED_FF_INTERMEDIATES}, "
+            f"device slice requires FF intermediate in {SUPPORTED_FF_INTERMEDIATES}, "
             f"got {sorted(ff_intermediates)}"
         )
     return model
@@ -216,7 +216,7 @@ def prepare_nextdit_step_cpu(
     if caption.device.type != "cpu" or caption.ndim != 3 or caption.shape[0] != 1:
         raise ValueError("caption must be a CPU tensor with shape [1,S,384]")
     if timestep.numel() != 1:
-        raise ValueError("the first RPU slice supports one trajectory per call")
+        raise ValueError("the first device slice supports one trajectory per call")
     timestep = timestep.reshape(1).to(device="cpu")
     if caption_embedding is None:
         encoder_mask = torch.ones((1, caption.shape[1]), device="cpu", dtype=torch.long)
@@ -333,7 +333,7 @@ class _StepBatchState:
 
 
 class NextDiTRPURuntime:
-    """Own one live RPU NextDiT policy and its graph/cache state."""
+    """Own one live device NextDiT policy and its graph/cache state."""
 
     def __init__(
         self,
@@ -352,7 +352,7 @@ class NextDiTRPURuntime:
         require_controlled_evaluation(asset_manifest)
         if not asset_paths:
             raise UnsupportedModelError(
-                "InternVLA-N1 NextDiT RPU requires asset_paths for SHA-256 verification"
+                "InternVLA-N1 NextDiT device requires asset_paths for SHA-256 verification"
             )
         verify_asset_manifest(asset_paths, asset_manifest)
         fold_norm_modulation = rpu_env_bool(
@@ -364,9 +364,9 @@ class NextDiTRPURuntime:
         fused_qkq = rpu_env_bool("RPU_INTERNVLA_NEXTDIT_FUSED_QKQ")
         model = _validate_geometry(traj_dit)
         if next(model.parameters()).device.type != "cpu":
-            raise ValueError("build the RPU runtime from an unswizzled CPU NextDiT model")
+            raise ValueError("build the device runtime from an unswizzled CPU NextDiT model")
         if getattr(traj_dit, "_rpu_nextdit_runtime", None) is not None:
-            raise RuntimeError("this NextDiT instance already has an RPU runtime")
+            raise RuntimeError("this NextDiT instance already has an device runtime")
 
         import rpu_backend
         from rpu_backend.api import RPUCache
@@ -411,18 +411,20 @@ class NextDiTRPURuntime:
         )
         self._max_cross_seq_len = max_cross_seq_len
         self._collect_layer_outputs = bool(collect_layer_outputs)
-        # Raw diagnostic exports are disabled in the public runtime.
-        self._debug_export = False
+        # Native diagnostic copies are selected when the retained graph BUILDs.
+        # The global setter does not invalidate model-owned graphs. Keep this
+        # diagnostic choice cold for this owner, including after hot config.
+        self._debug_export = self._collect_layer_outputs and bool(torch.rpu.get_debug_export())
         self._action_encoder_enabled = action_encoder is not None or action_decoder is not None
         if self._action_encoder_enabled:
             if action_encoder is None or action_decoder is None:
-                raise ValueError("RPU action I/O requires both encoder and decoder")
+                raise ValueError("device action I/O requires both encoder and decoder")
             if action_encoder.in_features != ACTION_DIM or action_encoder.out_features != HIDDEN:
-                raise ValueError("RPU action encoder requires Linear(3,384)")
+                raise ValueError("device action encoder requires Linear(3,384)")
             if action_decoder.in_features != HIDDEN or action_decoder.out_features != ACTION_DIM:
-                raise ValueError("RPU action decoder requires Linear(384,3)")
+                raise ValueError("device action decoder requires Linear(384,3)")
             if action_position is None or action_position.shape != (ACTION_SEQ, HIDDEN):
-                raise ValueError("RPU action position table must have shape [32,384]")
+                raise ValueError("device action position table must have shape [32,384]")
             self._action_encoder = action_encoder
             self._action_decoder = action_decoder
             self._action_position = action_position.detach().cpu()
@@ -557,6 +559,7 @@ class NextDiTRPURuntime:
             label="InternVLA NextDiT", handle_name="_handle")
         self._handle_finalizer = self._native_resource.finalizer
         try:
+            torch.ops.rpu.internvla_nextdit_set_debug_export(self._handle, self._debug_export)
             self._install_weights(self._handle)
             torch.ops.rpu.internvla_nextdit_set_chunk_envelope(
                 self._handle, int(self._packed_self_cache.max_seq_len),
@@ -728,7 +731,7 @@ class NextDiTRPURuntime:
                     return index, state
         if condition.shape[1] > self._max_cross_seq_len:
             raise ValueError(
-                f"condition length {condition.shape[1]} exceeds RPU cache {self._max_cross_seq_len}"
+                f"condition length {condition.shape[1]} exceeds device cache {self._max_cross_seq_len}"
             )
         if len(self._conditions) >= CONDITION_CACHE_SIZE:
             condition_slot = self._next_condition_slot
@@ -1203,7 +1206,7 @@ class NextDiTRPURuntime:
         timestep: torch.Tensor,
         condition: torch.Tensor,
     ) -> torch.Tensor:
-        """Run one or more hidden-state trajectories over the RPU runtime."""
+        """Run one or more hidden-state trajectories over the device runtime."""
         self._require_native()
         if x.ndim != 3 or condition.ndim != 3 or x.shape[0] != condition.shape[0]:
             raise ValueError("x and condition must be [B,T,C] with the same batch")
@@ -1319,10 +1322,10 @@ class NextDiTRPURuntime:
         condition_is_caption: bool = False,
         reuse_condition: bool = True,
     ) -> torch.Tensor:
-        """Run a fixed flow-matching Euler schedule as one RPU graph."""
+        """Run a fixed flow-matching Euler schedule as one device graph."""
         self._require_native()
         if not self._action_encoder_enabled:
-            raise RuntimeError("this runtime was built without an RPU action encoder")
+            raise RuntimeError("this runtime was built without an device action encoder")
         if (
             actions.device.type != "cpu"
             or actions.ndim != 3
@@ -1452,10 +1455,10 @@ class NextDiTRPURuntime:
         timestep: torch.Tensor,
         condition: torch.Tensor,
     ) -> torch.Tensor:
-        """Encode raw 3D actions on RPU, then run the fused NextDiT core."""
+        """Encode raw 3D actions on device, then run the fused NextDiT core."""
         self._require_native()
         if not self._action_encoder_enabled:
-            raise RuntimeError("this runtime was built without an RPU action encoder")
+            raise RuntimeError("this runtime was built without an device action encoder")
         if (
             actions.device.type != "cpu"
             or actions.ndim != 3
@@ -1514,6 +1517,8 @@ class NextDiTRPURuntime:
         _require_execution_process_safe()
         if self._handle is None:
             raise RuntimeError("NextDiTRPURuntime has been destroyed")
+        if self._collect_layer_outputs and bool(torch.rpu.get_debug_export()) != self._debug_export:
+            raise RuntimeError("NextDiT debug export is cold per runtime; restore the original mode or use a fresh owner")
 
     def destroy(self) -> None:
         if getattr(self, "_handle", None) is not None:
@@ -1554,7 +1559,7 @@ def build_nextdit_runtime(
     asset_paths: Sequence[str | Path] | None = None,
     rpu_execution=None,
 ) -> NextDiTRPURuntime:
-    """Build the first-slice RPU runtime from a loaded CPU NextDiT instance."""
+    """Build the first-slice device runtime from a loaded CPU NextDiT instance."""
 
     execution = component_execution(
         rpu_execution,

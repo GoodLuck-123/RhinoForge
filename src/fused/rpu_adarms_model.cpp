@@ -141,7 +141,7 @@ void check_adarms_scale_lists(
                                   int64_t i) {
         TORCH_CHECK(w.device().type() == at::kPrivateUse1 && w.is_contiguous(),
                     "adarms_set_weights: ", name, "[", i,
-                    "] must be contiguous RPU tensor");
+                    "] must be contiguous device tensor");
         TORCH_CHECK(w.scalar_type() == at::kHalf || w.scalar_type() == at::kChar
                     || w.scalar_type() == at::kByte,
                     "adarms_set_weights: ", name, "[", i,
@@ -154,7 +154,7 @@ void check_adarms_scale_lists(
                         && scale.device().type() == at::kPrivateUse1
                         && scale.is_contiguous(),
                         "adarms_set_weights: ", name, "_scale[", i,
-                        "] must be a contiguous fp16 RPU tensor");
+                        "] must be a contiguous fp16 device tensor");
             if (w.scalar_type() == at::kChar) {
                 TORCH_CHECK(scale.scalar_type() == at::kHalf && scale.dim() == 1 && scale.numel() == w.size(0),
                             "adarms_set_weights: W8A16 ", name, "_scale[", i,
@@ -299,7 +299,7 @@ public:
     // set_weights -- D-405 / D-407 (Python converter calls this)
     //
     // Layer-specific AdaRMS dense weights (attn & mlp) are per-layer.
-    // cos/sin are globals computed on RPU device with kernel format [max_pos, head_dim/2].
+    // cos/sin are globals computed on device with kernel format [max_pos, head_dim/2].
     // eps is the RMSNorm epsilon (typically 1e-6).
     // ========================================================================
     void set_weights(
@@ -477,7 +477,7 @@ public:
     }
 
     // ========================================================================
-    // forward -- D-405: cond is explicit per-call argument on RPU device
+    // forward -- D-405: cond is explicit per-call argument on device
     //
     // Each forward = one Pi0.5 denoising step with a new cond.
     // Cache key (D-404) excludes cond values; REPLAY cursor-patches the
@@ -498,14 +498,14 @@ public:
         TORCH_CHECK(!layer_weights_.empty(),
                     "AdaRMSModel::forward: internal state inconsistent");
         TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1,
-                    "AdaRMSModel::forward: hidden_states must be on RPU device");
+                    "AdaRMSModel::forward: hidden_states must be on device");
         TORCH_CHECK(cond.defined() && cond.dim() == 1 &&
                     cond.size(0) == hidden_size(),
                     "AdaRMSModel::forward: cond must be 1D [hidden_size=",
                     hidden_size(), "], got dim=", (cond.defined() ? cond.dim() : -1),
                     " size=", (cond.defined() ? cond.size(0) : -1));
         TORCH_CHECK(cond.device().type() == at::kPrivateUse1,
-                    "AdaRMSModel::forward: cond must be on RPU device");
+                    "AdaRMSModel::forward: cond must be on device");
         TORCH_CHECK(cond.scalar_type() == at::kHalf,
                     "AdaRMSModel::forward: cond must be fp16");
         TORCH_CHECK(position >= 0,
@@ -1203,6 +1203,7 @@ protected:
                           nvfp4_.enabled() ? addr(0, "nvfp4_up_ts") : 0,
                           nvfp4_.enabled() ? addr(0, "nvfp4_down_ts") : 0, layer_idx,
                           false, false, /*acc32=*/linear_acc32_, false, false,
+                          /*fuse_wall_gate_up=*/false,
                           /*bind_silu_mul_route=*/false,
                           /*residual_spm_addr=*/0, /*pi05_xor3=*/false, nvfp4_.enabled());
 

@@ -1,11 +1,11 @@
-"""Compatibility tombstone for the unsupported PaliGemma2 RPU policy.
+"""Compatibility tombstone for the unsupported PaliGemma2 device policy.
 
 The canonical user import is:
 
     from rpu_backend.api import PaliGemmaPolicy
 
 The adapter scaffold remains private for numerical investigation, but the
-public constructors fail before model loading or RPU mutation until the model
+public constructors fail before model loading or device mutation until the model
 passes the repository's support gates again.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ import torch
 
 
 _UNSUPPORTED_MESSAGE = (
-    "PaliGemma2 RPU execution is unsupported: the 3B pt-224 and mix-224 "
+    "PaliGemma2 device execution is unsupported: the 3B pt-224 and mix-224 "
     "profiles have not passed the required prefill/decode/logits numerical "
     "gates. PaliGemmaPolicy remains importable for API compatibility, but "
     "construction is disabled until the model is fixed and recertified."

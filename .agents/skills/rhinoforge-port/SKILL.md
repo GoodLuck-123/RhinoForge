@@ -1,6 +1,6 @@
 ---
 name: rhinoforge-port
-description: Port or assess a Hugging Face inference model for the RhinoForge RPU PyTorch backend. Use for model capability reviews, adapter work, profile admission, operator-gap classification, Graph/SPM/DMA planning, and release-profile verification.
+description: Port or assess a Hugging Face inference model for the RhinoForge device PyTorch backend. Use for model capability reviews, adapter work, profile admission, operator-gap classification, Graph/SPM/DMA planning, and release-profile verification.
 ---
 
 # Assess or port a model to RhinoForge
@@ -78,6 +78,9 @@ For a decoder-only CausalLM, start from
    `python/rpu_backend/adapters/_manifest.py` and through
    `register_adapter`. Use the `rpu_backend.plugins` entry point for an external
    package; never replace a built-in binding.
+8. Add the exact-profile TOML under `examples/configs/` and reuse its model-family
+   runner under `examples/runners/`. Validate it with
+   `python -m examples.run --config <TOML> --check-config` before device execution.
 
 Do not duplicate a public wrapper, broaden a support family from one passing
 size, transform one model instance twice, or approximate missing model math.
@@ -87,7 +90,7 @@ change.
 ## Verify before claiming support
 
 Run the board-free checks and, when explicitly authorized and available, the
-exact-board gates in [model porting](../../../docs/model_porting.md#8-verification-gates).
+exact-board gates in [model porting](../../../docs/model_porting.md#8-focused-verification).
 At minimum,
 verify early rejection, configuration validation, clean build/import, the
 profile's hard semantic, same-dtype, FP32-anchor, and task-quality gates,

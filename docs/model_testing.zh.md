@@ -1,70 +1,53 @@
-# 模型执行与性能采集
+# 模型运行与调试
 
-简体中文 | [English](model_testing.md)
+**简体中文** | [English](model_testing.md)
 
-`examples/` 中的模型脚本提供直接入口；`examples/run_model.py` 为同一入口应用
-TOML 中的环境设置和可选 Torch profiler。配置按模型归档，路径和精度语义见
-[模型示例](../examples/README.md)。
-[完整配置目录](../examples/configs/README.md) 包含 Qwen3.5 Text/VL、Qwen3-VL 独立组件，
-以及精度、核数和输入长度组合。新增 `[example]/[input]/[run]` 格式（Pi 用 `[pi05]`）
-仍通过同一模型入口运行。少数独立集成入口使用 `[runner]/[model]`，不再为同一模型保留两套模板；两种格式不要混用。
+从[模型示例](../examples/README.zh.md)选择 TOML。运行器位于 `examples/runners/`，共享配置与执行代码位于 `examples/common/`。
 
-## 运行一个配置
+## 运行
 
 ```sh
-python examples/run_model.py --config examples/configs/qwen3/text/0_6b/fp16.toml --check-config
-python examples/run_model.py --config examples/configs/qwen3_vl/vl/4b/w8a16.toml
-python examples/pi05.py --config examples/configs/pi05/2cam/w8a16_action_nvfp4.toml
+python -m examples.run --config examples/configs/qwen3/text/0_6b/fp16.toml --check-config
+python -m examples.run --config examples/configs/qwen3_vl/vl/4b/w8a16_text_head_vision.toml
+python -m examples.run --config examples/configs/pi05/2cam/w8a16_action_nvfp4.toml
 ```
 
-`--check-config` 不加载模型或访问板卡。执行前替换占位路径；TOML 中模型、图像、
-batch 和输出路径均相对命令工作目录解析。量化目录必须带有加载器要求的元数据，
-更改目录名称不会转换权重。转换方法见[量化说明](quantization.zh.md)。
+按模型指南填写 checkpoint 和输入，替换占位路径。`input.prompt_file` 和 `input.prepared_input_safetensors` 的相对路径按配置文件所在目录解析；其他资产路径按模型指南填写。`--check-config` 检查配置，不加载权重或访问设备。量化权重须携带加载器要求的元数据，见[量化](quantization.zh.md)。
 
-需要预处理 tensor 的示例使用调用者按公开 checkpoint processor 生成的 CPU 张量映射。
-组件示例不代表完整机器人策略或应用，实际输入范围由运行时前验决定。
-历史认证记录不作为当前实现的支持范围，也不会扩大示例的适用范围。
+预处理输入使用对应 checkpoint 的 processor 产生的 CPU 张量字典，形状与组件须符合所选模型要求。
 
-## Torch profile
+## 执行参数
 
-Qwen 与策略模板使用 `[run].profile = true` 或 `--profile`。使用 `[runner/model/request]` 的独立集成模板则使用：
+- `run.warmup` 默认两次调用，让新 Graph 完成 BUILD 和 REPLAY；`run.runs` 设置后续调用次数。
+- `warmup >= 2` 时，省略 `warmup_decode_steps` 或令其等于 `input.decode_steps`。显式 `warmup=0/1` 可做缩短 decode 的冷路径诊断。
+- decode 步数不含 prefill 产生的首 token。EOS 可提前结束；固定长度运行时，两阶段均设 `stop_on_eos=false`。
+- `run.output_dir` 指定输出目录；在生成文件中查看输出位置和 Graph 状态。
 
-```toml
-[runner.torch_profile]
-enabled = true
-output = "profiles/torch_trace.json"
-record_shapes = false
-profile_memory = false
-with_stack = false
+## 诊断调用
+
+`--profile` 或 `[run].profile=true` 在常规运行后增加一次 Torch profiler 调用。按需启用 shape、memory 或 stack。跟踪可能包含应用数据，保存在源码仓库外。
+
+公开入口拒绝 `hwperf=true`。设备问题可使用所安装运行时的 profiler，并记录匹配的资产和输入 shape。参数见[运行时配置](runtime_config.zh.md)，检查范围见[模型验证](validation_policy.zh.md)。
+
+## Qwen3 语音
+
+安装 `audio` 可选依赖，调用 `Qwen3ASRModel` 或 `Qwen3TTSModel`。
+下载权重、准备 TTS 源码及完整 Python 用法见[语音指南](qwen3_audio.zh.md)。
+
+## 仓库检查
+
+运行 `make ci-local-core PYTHON=python` 执行主机测试，测试范围和设备用例排除清单与 CI 一致。
+`make ci-local-quickstart` 检查示例配置和适配器注册表。
+
+按[安装指南](getting_started.md)配置公开 SDK 和源码构建后，可在同一构建目录启用 C++ 契约测试：
+
+```sh
+cmake -S . -B build -DRHINOFORGE_BUILD_HOST_TESTS=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+cmake -S . -B build -DRHINOFORGE_BUILD_DEVICE_TESTS=ON
+cmake --build build --target rhino_device_tests
 ```
 
-`[run].profile` 在计时样本结束后额外执行一次诊断推理。
-显式设置 `run.warmup` 和 `run.runs`；短测可使用 2 次预热、2–3 个样本和
-`input.decode_steps = 32`，并保持其他输入及执行配置一致；省略 `warmup_decode_steps`，让预热跟随正式 decode 长度。
-decode 步数是 prefill 首 token 之后的调用数，EOS 可以提前终止。
-长 decode 模板只在显式选择后运行；示意图片不能复现历史报告的性能输入。
-
-统一 runner 默认预热两次，让延迟构图路径先 BUILD，再实际 REPLAY，之后才采集正式样本。
-预热调用耗时单独保存在 `warmup_wall_ms_runs`，不参与正式统计。显式 `warmup=0` 或 `1`
-仍可用于冷路径诊断。`warmup >= 2` 时，必须省略 `warmup_decode_steps` 或使其等于
-`input.decode_steps`，两次预热都覆盖正式测量的 decode 负载及后续位置、形状。缩短 decode
-预热仅允许用于显式零次或一次的冷路径诊断。固定长度比较应设置 `stop_on_eos=false`，
-预热和测量共用该设置。验证数据清理与计时边界见[性能测量](performance.zh.md#分开报告启动与稳态)。
-
-Profiler 包围一次执行并会改变时延；性能数字应在关闭 profiler 后采集。
-除非诊断需要，保持 shape、内存和调用栈采集关闭。trace 可能包含应用数据。
-完整参数见[运行时配置](runtime_config.zh.md)。
-
-## Hardware performance trace
-
-公开示例 runner 在配置检查时拒绝 `hwperf=true`。
-只有具体算子或同步问题未解决时才使用已安装 runtime 的硬件 profiler。
-trace 与稳态时延分开采集，记录实际算子资产和输入形状；低层 trace 由应用方保管，
-不进入源码仓库。
-
-## 小范围检查
-
-板测前检查空闲并持有设备锁，使用绑定目标 worktree 的隔离环境。
-每条受影响路径选一个代表：通常回放 3–10 次，性能测试 2 次预热、5–10 次测量。
-先确认计算路径，再记录普通累计数值误差。受影响检查通过后停止，见
-[验证预算](validation_policy.zh.md)和[性能测量](performance.zh.md)。
+设备测试程序位于 `build/tests/`，配置运行资产后在空闲设备上执行。
+两个选项默认关闭；设备测试独立于主机 CI。

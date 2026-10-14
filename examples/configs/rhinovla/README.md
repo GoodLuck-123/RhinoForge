@@ -1,40 +1,28 @@
-# RhinoVLA 版本配置
+# RhinoVLA 配置
 
-仅保留 `v1/` 和 `v3/` 版本目录，两者均使用 `[example/input/run]`，通过公开 `RhinoVLAPolicy.from_factory` 调用模型集成方的可信 factory。原 `public/default.toml` 已合并到 `v1/fp16.toml`。
+RhinoVLA 分为公开 v1 和 v3。两者的模型权重、动作维度和输入各自配套，先按手中的资产选择入口。
 
-| 配置 | 入口与范围 |
-|---|---|
-| `v1/fp16.toml` | v1 FP16 caller factory；三组件 chunk 使用 AUTO |
-| `v3/fp16.toml` | v3 FP16 caller factory；保留公开 Vision、prefill、action 冷优化控制 |
-| `v3/expert_w8a16.toml`（兼容名 `v3/w8a16.toml`） | v3 caller factory；action expert 七类投影 W8A16 |
-| `v3/full_expert_w8a16.toml` | v3 caller factory；上述投影及 expert 的 AdaRMS 条件投影 W8A16 |
-| `v3/full_pipeline_w8a16.toml` | 实验性完整流水线 W8；HIGH、gate-TANH 预计算与 vector Q/K norm 显式关闭 |
-| `v3/full_pipeline_w8a16_high_precision_vector_qk.toml` | 实验性完整流水线 W8/HIGH；需独立原模型数值验证，不是默认推荐 |
+<a id="路径迁移"></a>
+<a id="weight-sources"></a>
+<a id="weight-recipes"></a>
+<a id="weights"></a>
 
-```sh
-python examples/run_model.py --config examples/configs/rhinovla/v1/fp16.toml --check-config
-python examples/run_model.py --config examples/configs/rhinovla/v3/fp16.toml --check-config
-python examples/run_model.py --config examples/configs/rhinovla/v3/expert_w8a16.toml --check-config
-python examples/run_model.py --config examples/configs/rhinovla/v3/full_expert_w8a16.toml --check-config
-python examples/run_model.py --config examples/configs/rhinovla/v3/full_pipeline_w8a16.toml --check-config
-python examples/run_model.py --config examples/configs/rhinovla/v3/full_pipeline_w8a16_high_precision_vector_qk.toml --check-config
-```
+## 配置说明
 
-运行前安装并审查相应版本的模型集成，把 `input.runtime_factory` 改成它导出的 `module:callable`，指定匹配的 checkpoint、`factory_config` JSON 和 `request` tensor 字典，保持显式 `trust_model_code=true`。v3 模板显式指向 v3 factory 和 checkpoint 占位路径；它不附带 v3 模型源码、checkpoint 或输入数据。factory 必须核对模型版本、精度、维度、预处理与 denoise schedule，再构造公开 adapter。
+| 模型 | 配置 | 权重与配套资产 | 详细说明 |
+|---|---|---|---|
+| v1，72D 动作 | [官方 FP16](v1/fp16.toml) | 官方 `HuixiAI/RhinoVLA` checkpoint、固定源码和 LIBERO 输入；加载为 FP16 | [下载、输入准备与运行](v1/README.md) |
+| v3，96D 动作 | [FP16](v3/fp16.toml)、[专家 W8](v3/w8a16_action.toml)、[完整专家 W8](v3/w8a16_action_adarms.toml) | 同一套公开浮点 checkpoint、固定模型源码和准备工具生成的请求；W8 在加载时转换 | [基准与配置增量](v3/README.md#baseline) |
+| v3，全流水线量化 | [全流水线 W8](v3/w8a16_pipeline.toml)、[HIGH/vector QK](v3/w8a16_pipeline_high_fused_vector_qk.toml) | 与上述 v3 配置共用原始 checkpoint；量化范围扩至 Vision、Text、Action IO 和 AdaRMS | [量化范围与计算精度](v3/README.md#full-pipeline) |
 
-`factory_config` JSON 原样提供模型集成方定义的附加字段；runner 同时绑定从 alias 或 `input.checkpoint` 解析的 `checkpoint`，以及 `input.num_steps` 对应的 `steps`，重复字段冲突时拒绝。`request` 由 `torch.load(..., weights_only=True)` 读取为映射，再传给 `policy.predict(**request)`。例如：
+W8A16 表示所选线性投影使用 INT8 权重、FP16 激活和逐输出通道 FP16 scale。v3 的五份 factory 配置共用一份原始权重，转换结果保存在运行进程中。
 
-```json
-{"model_root": "/path/to/your/reviewed/model/source"}
-```
+<a id="quantization"></a>
+<a id="使用"></a>
 
-此 JSON 仅展示常见模型源目录，实际字段由所选 factory 定义。factory、权重和请求全部由调用方管理；示例不加载隐含 fixture、golden 或私有 bundle。
+## 准备与运行
 
-模板预热两次，分别覆盖延迟 BUILD 和真实 REPLAY。若 factory 在首次调用中做数值校验，
-应在返回前释放仅用于校验的 tensor，并按实际 `run.warmup` 区分后续预热与正式样本。
-CPU prefix-KV 导出属于调用方，runtime 不额外保留；这不改变推理使用的设备 KV cache。
-预热耗时见报告的 `warmup_wall_ms_runs`，不计入正式推理统计。
+- **v1：** 按 [v1 说明](v1/README.md#quantization)下载固定版本、准备输入，再运行 `examples/run.py`。
+- **v3：** 按 [v3 说明](v3/README.md#quantization)下载固定源码与 checkpoint，生成输入和 factory JSON，再运行 `examples/run.py`。
 
-W8 模板还显式绑定 `input.expert_w8a16` 与 `input.full_w8a16`，并以同名布尔值传入 factory JSON。重复值必须类型、取值都一致，数字 `0/1` 不视为布尔值。factory 必须把这些值传到公开 expert 构造 API；runner 会检查绑定的实际 expert 权重、scale 和安装模式，拒绝仅改变精度标签。`full_w8a16` 在此是 **expert 构造参数**：`w8a16.toml` 与 `full_expert_w8a16.toml` 没有选择全 Vision/Language/action-IO 量化。独立的 full-pipeline 实验模板另外显式开启全流水线环境控制，并检查 text/vision/IO/AdaRMS 实际存储；运行时结果、浮点差异观测与独立任务质量证据分别报告。详细映射见 [v3 说明](v3/README.md)。未使用量化字段的既有 FP16 factory 保持原调用参数。
-
-`rpu_execution` 的组件配置必须由 factory 在权重安装前消费，并通过公开 `bind_rhinovla_execution_runtime` 绑定实际 language、vision、action 子模块。公开 facade 会核对 factory 声明的能力和有效配置，拒绝静默忽略。v3 优化组合及条件见 [v3 说明](v3/README.md)。配置检查和运行计时都不代表数值或机器人任务通过。
+[九份独立配置](v3/controlled/README.md)提供输入缓存、HIGH、vector K/QK 与 partial RoPE 的单独选择，通过 `scripts/validate_rhinovla_v3.py` 运行。

@@ -27,6 +27,27 @@ ordinary Linear path. Remove retired per-shape tile and auto-tiling environment
 values from configs. Validate the exact projection geometry, dequantized
 reference, same-semantic output, and model task gate.
 
+## Shared MLP and weight reuse
+
+The standard eight-core FP16 causal decoder can fuse SiLU with the following
+multiply when it uses sequential traversal, batch one, a compatible local MLP
+width and ACC16. Selection happens during profile installation; it has no
+separate environment switch. Other activations, quantization, accumulation,
+core layouts and composite owners keep their admitted execution paths.
+
+The optional W8A16 row-weight reuse path is narrower: row-partitioned eight-core
+Linear with `M=512`, `N=1024`, `K=2048`, ACC16, no bias and disjoint SPM input and
+output. The matching expansion asset must contain the required operator.
+Capability and geometry are checked before selecting the route. Other shapes
+or absent capability use ordinary auto-tiling; a selected route with invalid
+operands is rejected. Shape equality alone does not let another model adopt a
+model-owned route.
+
+These selections become part of the physical plan and Graph identity. They do
+not extend a weight or activation lifetime across chunks, denoise steps or
+component boundaries. Keep existing owner and allocation checks when adopting
+shared operations.
+
 ## Sources
 
 - [Quantization](../../docs/quantization.md)

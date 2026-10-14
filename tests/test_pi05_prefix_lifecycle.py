@@ -1,6 +1,6 @@
 """Exercise production Pi05 prepare/prefix/cache code with tiny host tensors.
 
-Only device transfer, SigLIP, the native assembly kernel, and Graph caches are
+Only device transfer, SigLIP, the native composition kernel, and Graph caches are
 replaced. Native view semantics are checked separately by the explicit board
 suite; these tests check the real Python lifecycle and output/cache ownership.
 """

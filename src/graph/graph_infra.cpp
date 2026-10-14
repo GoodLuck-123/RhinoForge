@@ -314,6 +314,10 @@ std::vector<RpuGraphCache::Snapshot> RpuGraphCache::snapshot() const {
             s.prepared_segment_hit_total     = gs.prepared_segment_hit_total;
             s.prepared_segment_miss_total    = gs.prepared_segment_miss_total;
             s.hw_batch_submit_total          = gs.hw_batch_submit_total;
+            s.batch_snapshot_mode = gs.batch_snapshot_mode;
+            s.batch_snapshot_available = gs.batch_snapshot_available;
+            s.batch_snapshot_effective_contracts = gs.batch_snapshot_effective_contracts;
+            s.batch_snapshot_fallback_reason = gs.batch_snapshot_fallback_reason;
             s.host_callback_tier1_count      = gs.host_callback_tier1_count;
             s.host_callback_tier2_count      = gs.host_callback_tier2_count;
             s.host_callback_tier3_count      = gs.host_callback_tier3_count;

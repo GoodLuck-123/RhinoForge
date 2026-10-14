@@ -1,8 +1,6 @@
-"""Wall-OSS-0.5 full VLA orchestration (P4 E2E) → RPU.
+"""Wall-OSS-0.5 full VLA orchestration (P4 E2E) → device.
 
-Stitches the P1/P2/P3 subsystems into one image+text → action-chunk pipeline, mirroring
-`tests/model/wall_oss/ref_wall_oss_e2e.py` one-for-one so the per-subsystem cos-sim checks
-line up:
+Runs the image+text → action-chunk pipeline:
 
   processor (real FLOW prompt + image)
     → vision tower (P3 `WallOssVision`, window attention) → merged [N/4, 2048]
@@ -16,7 +14,7 @@ line up:
 State (proprioception) rides in the text prompt as a discretized integer string
 (`use_state_string_representation=true`): the FLOW prompt below replicates wall-x
 `scripts/infer_robochallenge.py::get_text_flow` (system + camera setup + observation +
-instruction + `Proprioception: <discretized>` + assistant marker) so the RPU produces
+instruction + `Proprioception: <discretized>` + assistant marker) so the device produces
 robot-usable actions, not just numbers aligned to a minimal-prompt golden. The trailing
 `<|action|>×chunk` placeholder of the real prompt is dropped: the prefix-KV decomposition
 denoises the action chunk separately (the placeholders are causal-after the assistant
@@ -27,10 +25,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import types
 from collections.abc import Mapping
-from numbers import Integral
+from numbers import Integral, Real
 
 import numpy as np
 import torch
@@ -39,6 +38,7 @@ from transformers import AutoProcessor, AutoConfig
 import transformers.models.qwen2_5_vl.modeling_qwen2_5_vl as M
 
 from rpu_backend.runtime import rpu_env_bool
+from rpu_backend.adapters.wall_oss._sorting import sorting_config_from_env
 from rpu_backend.api._execution import (
     bind_execution_session,
     execution_serialized,
@@ -54,20 +54,26 @@ from rpu_backend.adapters.wall_oss.action import (
 )
 from rpu_backend.adapters.wall_oss.llm import build_wall_oss_llm
 from rpu_backend.adapters.wall_oss.checkpoint_validation import (
+    validate_rtc_w4_checkpoint_pair,
     validate_w8_nvfp4_checkpoint_pair,
 )
 
 IMAGE_PAD_ID = 151655
+_RTC_REAL_PREFIX_MIN = 599
+_RTC_REAL_PREFIX_MAX = 671
+_RTC_PREFILL_EXECUTION_LEN = 672
+_RTC_PREFILL_CHUNK_SIZE = 336
+_RTC_NUMERIC_BLOCKED_ENV = "RPU_WALL_OSS_RTC_ALLOW_NUMERIC_BLOCKED"
 
 WALL_OSS_TEXT_COMPONENT = "text_backbone"
 WALL_OSS_VISION_COMPONENT = "vision_encoder"
 WALL_OSS_ACTION_COMPONENT = "action_expert"
 WALL_OSS_EXECUTION_COMPONENTS = {
     WALL_OSS_TEXT_COMPONENT: {
-        "prefill": ("chunk_size", "padding_rows", "padding_budget"),
+        "prefill": ("chunk_size", "padding_rows", "padding_budget", "linear_acc32"),
     },
-    WALL_OSS_VISION_COMPONENT: {"vision": ("chunk_size",)},
-    WALL_OSS_ACTION_COMPONENT: {"action": ("chunk_size",)},
+    WALL_OSS_VISION_COMPONENT: {"vision": ("chunk_size", "linear_acc32")},
+    WALL_OSS_ACTION_COMPONENT: {"action": ("chunk_size", "linear_acc32")},
 }
 
 
@@ -111,11 +117,49 @@ def _action_builder_execution(text, action):
         },
         entry_point="build_wall_oss_action",
         supported={
-            "prefill": ("chunk_size", "padding_rows", "padding_budget"),
-            "action": ("chunk_size",),
+            "prefill": ("chunk_size", "padding_rows", "padding_budget", "linear_acc32"),
+            "action": ("chunk_size", "linear_acc32"),
         },
     )
 
+_RTC_TRAINING_METADATA = {
+    ("action_tokenizer_type",): "x2robot_tokenizer_v3_1_delta",
+    ("per_step_normalization",): "true",
+    ("disable_normalizer_clamp",): "true",
+    ("use_state_string_representation",): "true",
+    ("rtc_train", "enabled"): "true",
+    ("rtc_train", "max_delay"): "10",
+    ("use_per_token_tau",): "true",
+    ("rtc_rope_gap",): "10",
+    ("data", "action_horizon_flow"): "20",
+    ("data", "state_bins"): "512",
+    ("data", "use_state_string_representation"): "true",
+}
+
+_RTC_TRAINING_SEQUENCES = {
+    ("data", "obs_action_keys"): (
+        "follow_left_ee_cartesian_pos",
+        "follow_left_ee_rotation_6d",
+        "follow_left_gripper",
+        "follow_right_ee_cartesian_pos",
+        "follow_right_ee_rotation_6d",
+        "follow_right_gripper",
+        "velocity_decomposed",
+        "height",
+        "head_actions",
+    ),
+    ("data", "predict_action_keys"): (
+        "master_left_ee_cartesian_pos_relative",
+        "master_left_ee_rotation_6d_relative",
+        "master_left_gripper",
+        "master_right_ee_cartesian_pos_relative",
+        "master_right_ee_rotation_6d_relative",
+        "master_right_gripper",
+        "velocity_decomposed",
+        "height",
+        "head_actions",
+    ),
+}
 
 # wall-x `scripts/infer_robochallenge.py::_CAM_NAME_MAPPING` (raw view key → prose name
 # used in the FLOW prompt's Camera Setup / Observation lines).
@@ -161,6 +205,63 @@ def _validate_normalizer_dataset(
             )
 
 
+def _validate_rtc_training_metadata(ckpt_dir: str) -> None:
+    """Validate inference-critical fields recorded in ``config.yml``."""
+    path = os.path.join(ckpt_dir, "config.yml")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            lines = handle.readlines()
+    except OSError as exc:
+        raise ValueError(
+            f"Wall-OSS RTC checkpoint requires readable {path}"
+        ) from exc
+
+    values = {}
+    sequences = {}
+    parents = []
+    for raw in lines:
+        content = raw.split("#", 1)[0].rstrip()
+        if not content.strip():
+            continue
+        indent = len(content) - len(content.lstrip())
+        stripped = content.strip()
+        if stripped.startswith("- "):
+            while parents and parents[-1][0] > indent:
+                parents.pop()
+            if parents:
+                path_key = tuple(item[1] for item in parents)
+                sequences.setdefault(path_key, []).append(
+                    stripped[2:].strip().strip("'\"").lower()
+                )
+            continue
+        if ":" not in stripped:
+            continue
+        while parents and parents[-1][0] >= indent:
+            parents.pop()
+        key, value = stripped.split(":", 1)
+        path_key = tuple(item[1] for item in parents) + (key.strip(),)
+        value = value.strip().strip("'\"").lower()
+        if value:
+            values[path_key] = value
+        else:
+            parents.append((indent, key.strip()))
+
+    mismatches = [
+        f"{'.'.join(path_key)}={expected}"
+        for path_key, expected in _RTC_TRAINING_METADATA.items()
+        if values.get(path_key) != expected
+    ]
+    mismatches.extend(
+        f"{'.'.join(path_key)}={list(expected)!r}"
+        for path_key, expected in _RTC_TRAINING_SEQUENCES.items()
+        if tuple(sequences.get(path_key, ())) != expected
+    )
+    if mismatches:
+        raise ValueError(
+            "Wall-OSS v728 RTC config.yml requires " + ", ".join(mismatches)
+        )
+
+
 def _positive_runtime_int(name: str, value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
         raise ValueError(
@@ -179,18 +280,32 @@ def _discretize_proprioception(norm_active: np.ndarray, state_bins: int = 256) -
 
 
 def _build_flow_prompt(instruction: str, camera_names, dataset_name: str,
-                       delta_action: bool, propri_str: str) -> str:
+                       delta_action: bool, propri_str: str,
+                       rtc_enabled: bool = False) -> str:
     """Replicate wall-x `get_text_flow` (state_str=True) MINUS the trailing
-    `<|action|>×chunk` (prefix-KV denoise handles the action separately). The stock
-    prompt follows the public Wall-X implementation."""
+    `<|action|>×chunk` (prefix-KV denoise handles the action separately)."""
     short_prompt = rpu_env_bool("RPU_WALL_OSS_SHORT_PROMPT")
     multisuite_prologue = rpu_env_bool("RPU_WALL_OSS_MULTISUITE_PROLOGUE")
     generic_prologue = rpu_env_bool("RPU_WALL_OSS_GENERIC_PROLOGUE")
+    if rtc_enabled and (short_prompt or multisuite_prologue or generic_prologue):
+        raise ValueError(
+            "Wall-OSS RTC requires the default v728 embodied prompt; unset "
+            "RPU_WALL_OSS_SHORT_PROMPT, RPU_WALL_OSS_MULTISUITE_PROLOGUE, "
+            "and RPU_WALL_OSS_GENERIC_PROLOGUE"
+        )
+    if rtc_enabled:
+        instruction = re.sub(
+            r"\s*;?\s*speed:\s*[0-9]*\.?[0-9]+", "", instruction,
+            flags=re.I)
+        instruction = re.sub(
+            r"(?<![A-Za-z0-9.])([0-9]*\.?[0-9]+)\s*[xX](?![A-Za-z0-9])",
+            "", instruction)
+        instruction = re.sub(r"\[\s*;\s*", "[", instruction)
+        instruction = re.sub(r"\s*;\s*\]", "]", instruction)
+        instruction = re.sub(r"\[\s*\]", "", instruction)
+        instruction = re.sub(r"[ \t]{2,}", " ", instruction).strip()
     if short_prompt:
-        # Bare-instruction perf-characterization prompt: chat scaffold + one vision
-        # marker per camera + the instruction only (drops system prologue, observation
-        # labels, "Predict the next action…", proprioception). MUST stay byte-identical
-        # to ref_wall_oss_e2e.py's --short branch.
+        # Short prompt: chat scaffold, one vision marker per camera and instruction.
         markers = "".join(
             "<|vision_start|><|image_pad|><|vision_end|>" for _ in camera_names)
         return (f"<|im_start|>user\n{markers} {instruction}<|im_end|>\n"
@@ -204,7 +319,7 @@ def _build_flow_prompt(instruction: str, camera_names, dataset_name: str,
     if multisuite_prologue:
         # EXACT byte-replication of the wall-x run_scripts/infer_libero_multi_suite.py prologue
         # (x2r/text_utils.get_prologue_with_embodied_information; dataset libero_all →
-        # Embodiment "Single Franka", Frequency 10HZ, Abs EEF). Aligns the RPU eval to the repo's
+        # Embodiment "Single Franka", Frequency 10HZ, Abs EEF). Aligns the device eval to the repo's
         # four-suite harness, not scripts/infer_libero.py's shorter prologue.
         prologue = (
             "<|im_start|>system\nYou are an embodied vision-language-action (VLA) model "
@@ -214,10 +329,6 @@ def _build_flow_prompt(instruction: str, camera_names, dataset_name: str,
             prologue += f" {_CAM_NAME_MAPPING[_c]},"
         prologue += f"\n Frequency: 10HZ\n Action Space: {action_space}\n<|im_end|>\n"
     elif generic_prologue:
-        # Official wall-x LIBERO-eval prologue (`x2robot_utils.text_templates.
-        # get_prologue_with_embodied_information`, used by `scripts/infer_libero.py`): a generic
-        # system line + Camera Setup + Action Space, WITHOUT the Embodiment/Frequency lines of the
-        # infer_robochallenge `get_text_flow` prologue below.
         prologue = (
             "<|im_start|>system\nYou are an embodied vision-language-action model "
             f"controlling a robot with language instructions.\nCamera Setup: {cam}\n"
@@ -226,8 +337,12 @@ def _build_flow_prompt(instruction: str, camera_names, dataset_name: str,
             + "\n<|im_end|>\n")
     else:
         emb = (
-            dataset_name.split("_")[-1]
+            os.environ.get(
+                "RPU_WALL_OSS_RTC_EMBODIMENT", "X2 ex001_desktop")
+            if rtc_enabled else dataset_name.split("_")[-1]
         )
+        if rtc_enabled and not emb:
+            raise ValueError("RPU_WALL_OSS_RTC_EMBODIMENT must not be empty")
         prologue = (
             f"<|im_start|>system\nYou are an embodied vision-language-action (VLA) model "
             f"controlling the robot with language instructions.\n Embodiment: {emb}\n "
@@ -246,6 +361,7 @@ def _build_rope_helper(config, *, use_checkpoint_tokens_per_second: bool = False
     """Bind HF's index helpers to the temporal convention used to train Wall-OSS."""
     # The checkpoint declares 2, but wall_x training used the classic image-only
     # convention with no tokens-per-second scaling of the temporal coordinate.
+    # v728 RTC is the explicit exception: it was trained with the declared value 2.
     if not use_checkpoint_tokens_per_second:
         config.vision_config.tokens_per_second = 1
     rope = types.SimpleNamespace(config=config)
@@ -272,11 +388,11 @@ def _close_wall_component(component) -> None:
 
 
 class WallOssVLA:
-    """Full Wall-OSS-0.5 VLA on RPU. Construct via :func:`build_wall_oss_vla`."""
+    """Full Wall-OSS-0.5 VLA on device. Construct via :func:`build_wall_oss_vla`."""
 
     def __init__(self, *, vision, action, processor, rope_helper, normalizer,
                  normalizer_propri, dataset_key, camera_names, delta_action,
-                 state_bins: int = 256,
+                 state_bins: int = 256, rtc_enabled: bool = False,
                  normalizer_clamp: bool = True, execution_config=None,
                  component_generations=None):
         self._gc_retirement_enabled = False
@@ -288,25 +404,18 @@ class WallOssVLA:
         self.action = action               # WallOssAction (expert-1)
         self.llm = action.llm              # WallOssLLM (expert-0; shares cache with action)
         self._processor = processor
-        # Call image_processor and tokenizer directly, reproducing the
-        # AutoProcessor wrapper's <|image_pad|> expansion.
-        # _fast_proc_ok: None=untested, True=validated bit-identical vs the wrapper on the
-        # first call, False=fell back. RPU_WALL_OSS_FAST_PROCESSOR=0 forces the wrapper.
         self._fast_processor = rpu_env_bool(
             "RPU_WALL_OSS_FAST_PROCESSOR", default=True)
         self._fast_proc_ok = None
         # Fast image preproc: replicate Qwen2VLImageProcessor (rescale+normalize+patchify)
-        # in direct Torch for single or multiple images that need no resize.
-        # Compare against the HF processor on the first call.
-        # RPU_WALL_OSS_FAST_IMGPROC=0 forces the HF processor.
+        # in direct torch for equal-size cameras, skipping the HF
+        # image-processor's per-call Python machinery (its multi-image reshape/stack/cat is
+        # the dominant 3img-HEAD `aten::cat`). CPU host time → directly additive to E2E (no
+        # on-device offset). Self-validated bit-exact vs the real processor on the first
+        # call. RPU_WALL_OSS_FAST_IMGPROC=0 forces the HF processor.
         self._fast_imgproc = rpu_env_bool(
             "RPU_WALL_OSS_FAST_IMGPROC", default=True)
         self._fast_imgproc_ok = None
-        # Normalize-fold patch_embed: when fast-imgproc is active, bake the image normalize
-        # (rescale/mean/std) into the patch_embed weight (vision.enable_normalize_fold) and
-        # emit raw uint8 pixel_values. The device patch_embed GEMM applies the
-        # normalization and projection using a homogeneous bias column.
-        # RPU_WALL_OSS_PE_NORM_FOLD=0 disables this transformation.
         self._pe_norm_fold = False
         if self._fast_imgproc and rpu_env_bool(
                 "RPU_WALL_OSS_PE_NORM_FOLD", default=True):
@@ -321,18 +430,15 @@ class WallOssVLA:
         self.delta_action = delta_action         # FLOW prompt Action Space (Rel/Abs EEF)
         self.state_bins = state_bins             # proprioception discretization bins (256 base / 512 libero ft)
         self.action_dim = action.action_dim
+        self.rtc_enabled = bool(rtc_enabled)
         self._normalizer_clamp = bool(normalizer_clamp)
-        # Memoized get_rope_index output, keyed on the execution length, vision grid,
-        # and exact image-pad positions. mRoPE does not depend on ordinary
-        # text/proprioception token VALUES, but it does depend on where each image run
-        # appears in the prompt. Recurring prompt structures reuse one entry.
-        # RPU_WALL_OSS_HOST_CACHE=0 disables this cache.
+        self._rtc_max_delay = int(getattr(action, "_rtc_max_delay", 0))
         self._rope_cache = {}
         self._host_cache = rpu_env_bool("RPU_WALL_OSS_HOST_CACHE", default=True)
-        # On-device embed assembly (graph-coverage campaign): gather token embeddings
+        # On-device embed composition (graph-coverage campaign): gather token embeddings
         # via torch.ops.rpu.gather_embedding (llama_gather_embedding) and scatter the
         # vision tokens with an on-device slice copy, so inputs_embeds is built on the
-        # RPU instead of via the CPU F.embedding(155765x2048 table) + masked_scatter +
+        # device instead of via the CPU F.embedding(155765x2048 table) + masked_scatter +
         # a [1,seq,2048] fp32->fp16 upload round-trip. Bit-identical (gather of fp16
         # rows == fp16-cast of the gathered fp32 rows). RPU_WALL_OSS_ONDEVICE_EMBED=0
         # forces the legacy CPU path. _embed_w_rpu is the fp16 vocab table lazily
@@ -342,11 +448,12 @@ class WallOssVLA:
         # Fused-assemble has the vision forward return RAW window-order `merged` + stash
         # `_pending_rev` for the on-device assembler to reverse. The legacy CPU embed path
         # (ondevice_embed=0) does NOT consume `_pending_rev` — it masked_scatters `merged`
-        # directly → wrong vision-token order / RPU-vs-CPU device mismatch. So fused-assemble
+        # directly → wrong vision-token order / device-vs-CPU device mismatch. So fused-assemble
         # is only valid alongside the on-device embed path; disable it on the CPU path.
         if not self._ondevice_embed and getattr(self.vision, "_fused_assemble", False):
             self.vision._fused_assemble = False
         self._embed_w_rpu = None
+        self._embed_ids_cache = None
         # Optional deployment contract installed by prepare_graphs(): the accepted
         # REAL prefix range maps to a finite set of padded prefill/denoise execution
         # profiles. Once all three caches are READY, predict() validates the request
@@ -393,7 +500,7 @@ class WallOssVLA:
             child._retirement_owner = self
 
     def _runtime_complete(self) -> bool:
-        """Return whether this VLA still owns every callable RPU component."""
+        """Return whether this VLA still owns every callable device component."""
         if getattr(self, "_closed", None) is not False:
             return False
         try:
@@ -562,10 +669,22 @@ class WallOssVLA:
     def validate_execution_reconfigure(self, execution_config) -> None:
         if self._closed:
             raise RuntimeError("Wall-OSS runtime is closed")
-        _root, text, _vision, _action = self._resolve_execution(
+        _root, text, vision, action = self._resolve_execution(
             execution_config,
             entry_point="WallOssVLA.reconfigure",
         )
+        for stage, current, requested in (
+            ("prefill", self._text_execution, text),
+            ("vision", self._vision_execution, vision),
+            ("action", self._action_execution, action),
+        ):
+            if current.get(stage, {}).get("linear_acc32", False) != requested.get(
+                stage, {}
+            ).get("linear_acc32", False):
+                raise ValueError(
+                    f"Wall-OSS {stage}.linear_acc32 is cold-only; "
+                    "close and reload the policy"
+                )
         text_chunk = self._native_chunk(text, "prefill")
         if text_chunk > int(self.llm._prefill_chunk_size_cap):
             raise ValueError(
@@ -782,8 +901,18 @@ class WallOssVLA:
     def _prefill_execution_plan(
         self, real_len: int, *, horizon: int
     ) -> tuple[int, int]:
-        """Use the public decoder planner with reserved action rows."""
+        """Use the two graph-resident prefill buckets for strict RTC."""
         real_len = int(real_len)
+        if getattr(self, "rtc_enabled", False):
+            if not _RTC_REAL_PREFIX_MIN <= real_len <= _RTC_REAL_PREFIX_MAX:
+                raise ValueError(
+                    "Wall-OSS RTC real prefix is outside the supported graph "
+                    f"envelope [{_RTC_REAL_PREFIX_MIN}, {_RTC_REAL_PREFIX_MAX}]: "
+                    f"got {real_len}"
+                )
+            if real_len <= 640:
+                return 640, 320
+            return _RTC_PREFILL_EXECUTION_LEN, _RTC_PREFILL_CHUNK_SIZE
         return self.llm.prefill_execution_plan(
             real_len, reserve_rows=int(horizon)
         )
@@ -821,6 +950,8 @@ class WallOssVLA:
         horizon: int,
         num_steps: int,
         row_constant: bool,
+        rtc_delay: int = 0,
+        use_rtc: bool = False,
     ) -> None:
         profile = self._prepared_graph_profile
         if profile is None:
@@ -869,6 +1000,15 @@ class WallOssVLA:
             raise RuntimeError(
                 "Wall-OSS dof_mask execution mode differs from the prepared graph "
                 f"(row_constant={row_constant}, prepared={profile['row_constant']})")
+        rtc_request = bool(use_rtc or rtc_delay)
+        if rtc_request and not profile.get("rtc_enabled", False):
+            raise RuntimeError(
+                "Wall-OSS RTC request was not included in the prepared graph "
+                "profile; no online graph BUILD was attempted")
+        if rtc_delay > int(profile.get("rtc_max_delay", 0)):
+            raise RuntimeError(
+                f"Wall-OSS inference_delay={rtc_delay} exceeds prepared RTC "
+                f"max={profile.get('rtc_max_delay', 0)}")
 
     @execution_serialized
     @torch.no_grad()
@@ -909,15 +1049,22 @@ class WallOssVLA:
         H = int(noise.size(1))
         self.action.validate_execution_horizon(H)
         lo, hi = self._prefix_range_bounds(prefix_length_range)
+        padding_action = (
+            self._normalized_padding_action(H) if self.rtc_enabled else None
+        )
         steps = _positive_runtime_int("num_steps", num_steps)
         row_constant = _dof_mask_is_row_constant(dof_mask)
+        rtc_delays = (
+            tuple(range(0, self._rtc_max_delay + 1))
+            if self.rtc_enabled else ()
+        )
 
         # CPU-only admission check first: a bad example must fail before any graph
         # gets built. This also validates the exact image-processor geometry.
         propri_str = self._proprioception_string(proprioception, state_mask)
         text = _build_flow_prompt(
             instruction, self.camera_names, self.dataset_key,
-            self.delta_action, propri_str)
+            self.delta_action, propri_str, rtc_enabled=self.rtc_enabled)
         example_ids, _, example_grid = self._process_inputs(text, images)
         example_real_len = int(example_ids.size(1))
         if not lo <= example_real_len <= hi:
@@ -951,7 +1098,7 @@ class WallOssVLA:
                 prefix_length_range, horizon=H
             )
             prefill_profiles = len(profiles)
-            denoise_profiles = len(profiles)
+            denoise_profiles = len(profiles) * (1 + len(rtc_delays))
             prefill_capacity = self.llm._graph_cache.max_entries()
             denoise_capacity = self.action._graph_cache.max_entries()
             if (prefill_profiles > prefill_capacity
@@ -971,8 +1118,10 @@ class WallOssVLA:
                 "horizon": H,
                 "num_steps": steps,
                 "row_constant": row_constant,
-
-
+                "rtc_enabled": self.rtc_enabled,
+                "rtc_max_delay": (
+                    self._rtc_max_delay if self.rtc_enabled else 0
+                ),
                 "denoise_mode": {
                     "fused": bool(self.action._fused),
                     "fp32_tail": bool(self.action._action_fp32_tail),
@@ -982,10 +1131,29 @@ class WallOssVLA:
             self._prepared_graph_profile = profile
 
             # Warm the exact production seam, including image preprocessing,
-            # Vision, embed assembly, mRoPE, denoise and result readback.
+            # Vision, embed composition, mRoPE, denoise and result readback.
             warm_out = self.predict(
                 images, instruction, proprioception, state_mask, noise, dof_mask,
                 num_steps=steps, debug=False)
+            rtc_prefix_physical = None
+            warm_rtc_d0_out = None
+            warm_rtc_d1_out = None
+            if self.rtc_enabled:
+                action_min = self._normalizer[
+                    f"min.{self.dataset_key}"].float()
+                action_delta = self._normalizer[
+                    f"delta.{self.dataset_key}"].float()
+                rtc_prefix_physical = (
+                    action_min + 0.5 * action_delta).unsqueeze(0).contiguous()
+                warm_rtc_d0_out = self.predict(
+                    images, instruction, proprioception, state_mask, noise,
+                    dof_mask, num_steps=steps, debug=False, use_rtc=True)
+                warm_rtc_d1_out = self.predict(
+                    images, instruction, proprioception, state_mask, noise,
+                    dof_mask, num_steps=steps, debug=False,
+                    use_rtc=True,
+                    rtc_prefix_actions=rtc_prefix_physical,
+                    inference_delay=1)
             vision_graph_count = self.vision._graph_cache.size()
             if vision_graph_count < 1:
                 raise RuntimeError(
@@ -1020,7 +1188,58 @@ class WallOssVLA:
                     )[:, None].expand(H, 3).contiguous()
                     self.action.denoise_with_mask(
                         P, noise, dof_mask, pos_action, num_steps=steps,
-                        real_prefix_len=real_len, debug=False)
+                        real_prefix_len=real_len, debug=False,
+                        padding_action=padding_action)
+                    if self.rtc_enabled:
+                        # D is graph identity; prefix values are mutable.
+                        prefix_norm = torch.full(
+                            (1, H, self.action_dim),
+                            float(real_len - item["real_min"]) / 100.0,
+                            dtype=torch.float32)
+                        for delay in rtc_delays:
+                            rtc_kwargs = {
+                                "use_rtc": True,
+                                "rtc_delay": delay,
+                            }
+                            if delay:
+                                rtc_kwargs["rtc_prefix_actions"] = prefix_norm
+                            out_a = self.action.denoise_with_mask(
+                                P, noise, dof_mask, pos_action,
+                                num_steps=steps, real_prefix_len=real_len,
+                                debug=False,
+                                padding_action=padding_action,
+                                **rtc_kwargs)
+                            if delay and rep_index == 0:
+                                prefix_b = torch.full_like(prefix_norm, 0.25)
+                                out_b = self.action.denoise_with_mask(
+                                    P, noise, dof_mask, pos_action,
+                                    num_steps=steps, real_prefix_len=real_len,
+                                    debug=False,
+                                    rtc_prefix_actions=prefix_b,
+                                    rtc_delay=delay,
+                                    use_rtc=True,
+                                    padding_action=padding_action)
+                                out_a2 = self.action.denoise_with_mask(
+                                    P, noise, dof_mask, pos_action,
+                                    num_steps=steps, real_prefix_len=real_len,
+                                    debug=False,
+                                    rtc_prefix_actions=prefix_norm,
+                                    rtc_delay=delay,
+                                    use_rtc=True,
+                                    padding_action=padding_action)
+                                if torch.equal(out_a["x_norm"], out_b["x_norm"]):
+                                    raise RuntimeError(
+                                        "Wall-OSS RTC mutable prefix did not change "
+                                        f"the output for inference_delay={delay}")
+                                if not torch.equal(
+                                        out_a["x_norm"], out_a2["x_norm"]):
+                                    max_abs = float(
+                                        (out_a["x_norm"] - out_a2["x_norm"])
+                                        .abs().max())
+                                    raise RuntimeError(
+                                        "Wall-OSS RTC prefix A→B→A replay drift for "
+                                        f"inference_delay={delay} "
+                                        f"(x_norm max_abs={max_abs:.7g})")
 
             expected = {
                 # Mixed fixed camera geometries may legitimately split into
@@ -1043,6 +1262,20 @@ class WallOssVLA:
             ready_out = self.predict(
                 images, instruction, proprioception, state_mask, noise, dof_mask,
                 num_steps=steps, debug=False)
+            ready_rtc_outs = {}
+            if self.rtc_enabled:
+                # Prove every requested RTC identity is a lookup-only READY
+                # replay, including the otherwise compute-equivalent D0 graph.
+                for delay in rtc_delays:
+                    rtc_kwargs = {"use_rtc": True}
+                    if delay:
+                        rtc_kwargs.update(
+                            rtc_prefix_actions=rtc_prefix_physical,
+                            inference_delay=delay,
+                        )
+                    ready_rtc_outs[delay] = self.predict(
+                        images, instruction, proprioception, state_mask, noise,
+                        dof_mask, num_steps=steps, debug=False, **rtc_kwargs)
             ready_counts = {name: cache.size() for name, cache in caches}
             if ready_counts != actual:
                 raise RuntimeError(
@@ -1055,6 +1288,28 @@ class WallOssVLA:
                 raise RuntimeError(
                     "Wall-OSS READY replay differs from the real WARMING build "
                     f"after synthetic A→B→A probes (x_norm max_abs={max_abs:.7g})")
+            ready_rtc_d0_out = ready_rtc_outs.get(0)
+            ready_rtc_d1_out = ready_rtc_outs.get(1)
+            if (warm_rtc_d0_out is not None and ready_rtc_d0_out is not None
+                    and not torch.equal(
+                        warm_rtc_d0_out["x_norm"],
+                        ready_rtc_d0_out["x_norm"])):
+                max_abs = float(
+                    (warm_rtc_d0_out["x_norm"].float()
+                     - ready_rtc_d0_out["x_norm"].float()).abs().max())
+                raise RuntimeError(
+                    "Wall-OSS RTC D0 READY replay differs from WARMING after "
+                    f"delay/value sweeps (x_norm max_abs={max_abs:.7g})")
+            if (warm_rtc_d1_out is not None and ready_rtc_d1_out is not None
+                    and not torch.equal(
+                        warm_rtc_d1_out["x_norm"],
+                        ready_rtc_d1_out["x_norm"])):
+                max_abs = float(
+                    (warm_rtc_d1_out["x_norm"].float()
+                     - ready_rtc_d1_out["x_norm"].float()).abs().max())
+                raise RuntimeError(
+                    "Wall-OSS RTC D1 READY replay differs from WARMING after "
+                    f"delay/value sweeps (x_norm max_abs={max_abs:.7g})")
         except Exception:
             # No partially READY deployment: make every cache build-capable again
             # so a caller may fix the range/input and retry in the same process.
@@ -1072,20 +1327,19 @@ class WallOssVLA:
             "horizon": H,
             "num_steps": steps,
             "row_constant": row_constant,
-
-
+            "rtc_enabled": self.rtc_enabled,
+            "rtc_max_delay": self._rtc_max_delay if self.rtc_enabled else 0,
             "denoise_mode": dict(profile["denoise_mode"]),
             "phase": "READY",
             "ready_replay_validated": True,
         }
 
     def _fast_image_preproc(self, images):
-        """Direct-torch Qwen2VLImageProcessor for the wall_oss deployment case: N equal-size
-        images already a multiple of patch*merge (multi-camera, fixed shape, no resize). All
+        """Direct-torch Qwen2VLImageProcessor for N equal-size RGB images. All
         N processed as ONE batched CPU tensor — rescale+normalize+patchify in a single pass,
         no per-image loop, no cat — so the HF processor's multi-image reshape/stack/cat (the
         dominant 3img-HEAD `aten::cat`) is skipped. Returns (pixel_values [N*n_patch, 1176]
-        fp32, grid [N,3] int) or None when the assumption breaks (mixed size / needs resize /
+        fp32, grid [N,3] int) or None when the assumption breaks (mixed size /
         unexpected layout → np.stack or the resize check bails → caller uses the HF processor).
         The N images are stacked in order, so the output matches the HF concatenated layout
         (validated bit-exact on first call by _image_preproc); N=1 is the same path."""
@@ -1103,24 +1357,34 @@ class WallOssVLA:
             min_px = size.get("shortest_edge", getattr(ip, "min_pixels", 56 * 56))
             max_px = size.get("longest_edge", getattr(ip, "max_pixels", 28 * 28 * 1280))
             rH, rW = smart_resize(H, W, factor=ps * ms, min_pixels=min_px, max_pixels=max_px)
+            b = torch.from_numpy(arrs).permute(0, 3, 1, 2)
             if (rH, rW) != (H, W):
-                return None                                # resize needed → HF bicubic parity risk
+                if (H, W, rH, rW) != (256, 256, 252, 252):
+                    return None
+                # Match the loaded Fast processor's tensor resize, including its
+                # uint8 rounding and antialiasing. Reusing that primitive avoids
+                # per-camera grouping, temporal copies and concatenation in HF.
+                # Slow/PIL processors have different resize arithmetic and keep
+                # their ordinary path instead of substituting tensor bicubic.
+                from transformers.image_processing_utils_fast import BaseImageProcessorFast
+                from transformers.image_utils import SizeDict, pil_torch_interpolation_mapping
+                if (not isinstance(ip, BaseImageProcessorFast)
+                        or not ip.do_resize or arrs.dtype != np.uint8):
+                    return None
+                interpolation = pil_torch_interpolation_mapping.get(ip.resample, ip.resample)
+                b = ip.resize(
+                    image=b.contiguous(), size=SizeDict(height=rH, width=rW),
+                    interpolation=interpolation,
+                )
             gh, gw = rH // ps, rW // ps
             # Normalize-fold path: patchify RAW uint8 (no fp32 cast, no normalize passes) —
             # the normalize is baked into the patch_embed weight (vision.enable_normalize_fold).
             # Otherwise rescale+normalize in fp32 here (the HF-equivalent output).
-            if self._pe_norm_fold:
-                b = torch.from_numpy(arrs).permute(0, 3, 1, 2)             # [N,3,H,W] u8 view
-            else:
+            if not self._pe_norm_fold:
                 mean = torch.tensor(ip.image_mean, dtype=torch.float32).view(1, 3, 1, 1)
                 std = torch.tensor(ip.image_std, dtype=torch.float32).view(1, 3, 1, 1)
-                b = torch.from_numpy(arrs).permute(0, 3, 1, 2).to(torch.float32)  # [N,3,H,W] (fresh, owned)
+                b = b.to(torch.float32)  # fresh, owned; input images stay unchanged
                 b.mul_(ip.rescale_factor).sub_(mean).div_(std)          # rescale+normalize IN-PLACE (no intermediates)
-            # Temporal frames are IDENTICAL for a still image, so broadcast the temporal
-            # axis with expand (stride-0, NO copy) instead of repeat (which materializes a
-            # 2x buffer). b is contiguous post-normalize → the view+expand stays a view and
-            # final reshape().contiguous() is the only materialization. Equal
-            # temporal frames make this equivalent to repeat.
             p = b.view(N, 1, 3, gh // ms, ms, ps, gw // ms, ms, ps)     # split H/W, temporal=1 (view)
             p = p.expand(N, tp, 3, gh // ms, ms, ps, gw // ms, ms, ps)  # temporal 1->tp, stride-0 (no copy)
             p = p.permute(0, 3, 6, 4, 7, 2, 1, 5, 8)                    # matches HF transpose (N replaces t=1)
@@ -1170,19 +1434,29 @@ class WallOssVLA:
         img = ip(images=images, return_tensors="pt")
         return img["pixel_values"].float(), img["image_grid_thw"]
 
+    def _embedding_ids_rpu(self, ids: torch.Tensor) -> torch.Tensor:
+        """Reuse a private upload only after comparing all padded token IDs."""
+        cached = self._embed_ids_cache if self._host_cache else None
+        if cached is not None and torch.equal(cached[0], ids):
+            return cached[1]
+        out = ids.to(dtype=torch.int32, device="rpu").contiguous()
+        if self._host_cache:
+            self._embed_ids_cache = (ids.clone(), out)
+        return out
+
     def _assemble_inputs_embeds_ondevice(self, input_ids: torch.Tensor,
-                                         merged: torch.Tensor,
+                                         merged: torch.Tensor | tuple[torch.Tensor, ...],
                                          padded_len: int) -> torch.Tensor:
-        """Build inputs_embeds [1, padded_len, H] on the RPU device (no CPU embed-table
+        """Build inputs_embeds [1, padded_len, H] on the device device (no CPU embed-table
         gather, no masked_scatter, no [1,seq,H] fp32 upload round-trip, no torch.zeros
-        pad). All coherency flushes are CPU<->RPU-boundary only: ids/merged uploads.
+        pad). All coherency flushes are CPU<->device-boundary only: ids/merged uploads.
 
         input_ids [1, real_len] CPU int; merged [N_img, H] (vision output); padded_len
         >= real_len (v16 KV-insert alignment). Gather token embeddings on-device — the
         ids are pre-padded so the gather emits [padded_len, H] directly (pad rows gather
         vocab[0], a valid fp16 row that the action 2D mask discards) — then overwrite the
-        contiguous <|image_pad|> run(s) with the vision tokens via a device slice copy.
-        Multi-image = N contiguous runs filled from merged in image order."""
+        contiguous <|image_pad|> runs with the vision tokens through device DMA.
+        Separate Vision subgroups remain separate owners until this assembly."""
         if self._embed_w_rpu is None:
             # One-time: fp16 vocab table on the device (gather reads it via glarge,
             # so >4GB DDR is fine). _embed_w is [vocab, H] fp32 CPU.
@@ -1191,10 +1465,26 @@ class WallOssVLA:
         real_len = ids_flat.size(0)
         if padded_len > real_len:                       # tiny CPU pad → padded gather output
             ids_flat = F.pad(ids_flat, (0, padded_len - real_len))
-        ids_rpu = ids_flat.to(torch.int32).to("rpu").contiguous()
-        merged_rpu = merged.to(torch.float16).to("rpu").contiguous()
+        ids_rpu = self._embedding_ids_rpu(ids_flat)
+        merged_parts = tuple(
+            part.to(dtype=torch.float16, device="rpu").contiguous()
+            for part in (merged if isinstance(merged, tuple) else (merged,))
+        )
+        merged_rows = sum(part.size(0) for part in merged_parts)
         pos = (input_ids.reshape(-1) == IMAGE_PAD_ID).nonzero(as_tuple=False).reshape(-1).tolist()
         n_img = len(pos)
+        if n_img != merged_rows:
+            raise RuntimeError(
+                f"image-pad tokens {n_img} != merged rows {merged_rows}"
+            )
+        runs = []
+        i = 0
+        while i < n_img:
+            j = i + 1
+            while j < n_img and pos[j] == pos[j - 1] + 1:
+                j += 1
+            runs.append((pos[i], j - i))
+            i = j
         # Fused path: the vision tower returned RAW window-order merged + stashed the
         # window-reverse (RPU_WALL_OSS_FUSED_ASSEMBLE). One op gathers token embeddings
         # AND per-run reverse-gathers merged into the image positions — folding the
@@ -1202,14 +1492,10 @@ class WallOssVLA:
         # is window-order; rev_idx maps spatial→window row.
         rev = getattr(self.vision, "_pending_rev", None)
         if rev is not None and n_img > 0:
+            if len(merged_parts) != 1:
+                raise RuntimeError("fused reverse assembly requires one merged owner")
+            merged_rpu = merged_parts[0]
             rev_idx, mu_list = rev
-            runs = []                                   # (token_start, len) per image run
-            i = 0
-            while i < n_img:
-                j = i
-                while j + 1 < n_img and pos[j + 1] == pos[j] + 1:
-                    j += 1
-                runs.append((pos[i], j - i + 1)); i = j + 1
             run_lengths = [run[1] for run in runs]
             if run_lengths != list(mu_list):
                 raise RuntimeError(
@@ -1218,32 +1504,38 @@ class WallOssVLA:
                 )
             runs_t = torch.tensor(runs, dtype=torch.long)               # CPU [n_runs, 2]
             out = torch.ops.rpu.assemble_inputs_embeds_rev(
-                self._embed_w_rpu, ids_rpu, merged_rpu, rev_idx, runs_t)  # [padded_len, H] fp16 RPU
+                self._embed_w_rpu, ids_rpu, merged_rpu, rev_idx, runs_t)  # [padded_len, H] fp16 device
             return out.unsqueeze(0)
         contiguous = n_img > 0 and (pos[-1] - pos[0] + 1 == n_img)
-        if contiguous:
+        if contiguous and len(merged_parts) == 1:
             # Single contiguous image block (single image): one fully on-device op —
             # gather + scatter + out all in SPM, no host memcpy, no flushes.
             out = torch.ops.rpu.assemble_inputs_embeds(
-                self._embed_w_rpu, ids_rpu, merged_rpu, pos[0])         # [padded_len, H] fp16 RPU
+                self._embed_w_rpu, ids_rpu, merged_parts[0], pos[0])    # [padded_len, H] fp16 device
             return out.unsqueeze(0)
-        # Multi-image fallback: gather then fill each contiguous run with a device slice copy.
-        embeds = torch.ops.rpu.gather_embedding(self._embed_w_rpu, ids_rpu)  # [padded_len, H] fp16 RPU
-        off = 0
-        i = 0
-        while i < n_img:
-            j = i
-            while j + 1 < n_img and pos[j + 1] == pos[j] + 1:
-                j += 1
-            run_len = j - i + 1
-            embeds[pos[i]:pos[i] + run_len].copy_(merged_rpu[off:off + run_len])
-            off += run_len
-            i = j + 1
-        if off != merged_rpu.size(0):
-            raise RuntimeError(
-                f"placed {off} vision tokens != merged rows {merged_rpu.size(0)}"
-            )
-        return embeds.unsqueeze(0)                                          # [1, padded_len, H] fp16 RPU
+        # Image runs and Vision subgroups need not have matching boundaries.
+        # Split only tensor views; the device assembler moves them into one
+        # fresh output without host concat or device copy_ round-trips.
+        pieces, piece_runs = [], []
+        part_index = part_offset = 0
+        for start, length in runs:
+            placed = 0
+            while placed < length:
+                part = merged_parts[part_index]
+                count = min(length - placed, part.size(0) - part_offset)
+                if count <= 0:
+                    raise RuntimeError("Vision assembly has an empty merged part")
+                pieces.append(part.narrow(0, part_offset, count))
+                piece_runs.append((start + placed, count))
+                placed += count
+                part_offset += count
+                if part_offset == part.size(0):
+                    part_index += 1
+                    part_offset = 0
+        out = torch.ops.rpu.assemble_inputs_embeds_parts(
+            self._embed_w_rpu, ids_rpu, pieces,
+            torch.tensor(piece_runs, dtype=torch.long).reshape(-1, 2))
+        return out.unsqueeze(0)
 
     def _proprioception_string(self, proprioception: torch.Tensor,
                                state_mask: torch.Tensor) -> str:
@@ -1258,6 +1550,85 @@ class WallOssVLA:
         active = norm[state_mask.reshape(-1).bool()]          # [D_active]
         return _discretize_proprioception(active.cpu().numpy(), self.state_bins)
 
+    def _normalize_rtc_prefix(self, prefix_actions, *, rtc_delay: int,
+                              horizon: int) -> torch.Tensor | None:
+        """Raw physical model-space prefix -> per-step normalized ``[1,L,D]``."""
+        delay = int(rtc_delay)
+        if delay == 0:
+            if prefix_actions is not None:
+                raise ValueError("rtc_prefix_actions requires inference_delay > 0")
+            return None
+        if not self.rtc_enabled:
+            raise ValueError("this Wall-OSS runtime was not built with rtc=True")
+        if not 1 <= delay <= min(horizon, self._rtc_max_delay):
+            raise ValueError(
+                "inference_delay must be in "
+                f"[1, {min(horizon, self._rtc_max_delay)}], got {delay}")
+        try:
+            prefix = torch.as_tensor(
+                prefix_actions, dtype=torch.float32, device="cpu")
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise ValueError("rtc_prefix_actions must be numeric") from exc
+        if prefix.dim() == 2:
+            prefix = prefix.unsqueeze(0)
+        if (prefix.dim() != 3 or prefix.size(0) != 1
+                or prefix.size(2) != self.action_dim):
+            raise ValueError(
+                "rtc_prefix_actions must be [L, action_dim] or "
+                f"[1, L, action_dim] with action_dim={self.action_dim}, got "
+                f"{tuple(prefix.shape)}")
+        L = int(prefix.size(1))
+        if not delay <= L <= horizon:
+            raise ValueError(
+                f"rtc_prefix_actions length must satisfy delay <= L <= {horizon}, "
+                f"got delay={delay}, L={L}")
+        if not bool(torch.isfinite(prefix).all()):
+            raise ValueError("rtc_prefix_actions must contain only finite values")
+
+        mn = self._normalizer[f"min.{self.dataset_key}"].float()
+        dl = self._normalizer[f"delta.{self.dataset_key}"].float()
+        if mn.dim() == 2:
+            if tuple(mn.shape) != (horizon, self.action_dim):
+                raise ValueError(
+                    "RTC per-step action normalizer must be "
+                    f"[{horizon}, {self.action_dim}], got {tuple(mn.shape)}")
+            mn, dl = mn[:L], dl[:L]
+        elif tuple(mn.shape) != (self.action_dim,):
+            raise ValueError(
+                "action normalizer must be [action_dim] or per-step "
+                f"[H, action_dim], got {tuple(mn.shape)}")
+        if bool(torch.any(dl == 0)):
+            raise ValueError("RTC action normalizer delta must be non-zero")
+        norm = 2.0 * (prefix - mn) / dl - 1.0
+        if self._normalizer_clamp:
+            norm = torch.clamp(norm, -1.0, 1.0)
+        return norm.contiguous()
+
+    def _normalized_padding_action(self, horizon: int) -> torch.Tensor:
+        """Return normalized physical zero for the masked-DOF velocity path."""
+        mn = self._normalizer[f"min.{self.dataset_key}"].float()
+        dl = self._normalizer[f"delta.{self.dataset_key}"].float()
+        expected = (int(horizon), self.action_dim)
+        if mn.dim() == 1:
+            if tuple(mn.shape) != (self.action_dim,):
+                raise ValueError(
+                    f"action normalizer must be [action_dim], got {tuple(mn.shape)}"
+                )
+            mn = mn.unsqueeze(0).expand(expected)
+            dl = dl.unsqueeze(0).expand(expected)
+        elif tuple(mn.shape) != expected:
+            raise ValueError(
+                "per-step action normalizer must match [H, action_dim], got "
+                f"{tuple(mn.shape)} vs {expected}"
+            )
+        if tuple(dl.shape) != tuple(mn.shape):
+            raise ValueError("action normalizer min/delta shapes must match")
+        if bool(torch.any(dl == 0)):
+            raise ValueError("action normalizer delta must be non-zero")
+        norm = 2.0 * (torch.zeros_like(mn) - mn) / dl - 1.0
+        if self._normalizer_clamp:
+            norm = torch.clamp(norm, -1.0, 1.0)
+        return norm.unsqueeze(0).contiguous()
 
     def _process_inputs(self, text: str, images):
         """text + images → (input_ids [1,seq], pixel_values [N_patch,1176] fp32, grid [N,3]).
@@ -1349,7 +1720,9 @@ class WallOssVLA:
     @torch.no_grad()
     def predict(self, image, instruction: str, proprioception: torch.Tensor,
                 state_mask: torch.Tensor, noise: torch.Tensor,
-                dof_mask: torch.Tensor, num_steps: int = 10, debug: bool = False) -> dict:
+                dof_mask: torch.Tensor, num_steps: int = 10, debug: bool = False,
+                rtc_prefix_actions=None, inference_delay: int = 0,
+                use_rtc: bool = False) -> dict:
         """image: PIL.Image or list of PIL.Image (one per camera in camera_names);
         instruction: task string; proprioception/state_mask: raw robot state + active-dim
         mask ([D] or [1,1,D] CPU fp32); noise/dof_mask: [1,H,action_dim].
@@ -1359,7 +1732,7 @@ class WallOssVLA:
         final-normed last_hidden is NOT on the VLA critical path (the action denoiser reads
         per-layer K/V), so reading it back every frame is pure waste + a forced host↔device
         sync. The final action/x_norm are always returned. Set True for diagnostic tests.
-        """
+        ``use_rtc=True`` distinguishes the explicit RTC D0 graph from non-RTC."""
         # 1. processor — replicate the wall-x FLOW prompt (state as discretized string);
         #    one <|image_pad|> per camera is expanded to grid//merge^2 image tokens.
         images = list(image) if isinstance(image, (list, tuple)) else [image]
@@ -1369,6 +1742,21 @@ class WallOssVLA:
                 f"{self.camera_names}"
             )
         steps = _positive_runtime_int("num_steps", num_steps)
+        if (isinstance(inference_delay, bool)
+                or not isinstance(inference_delay, Integral)
+                or inference_delay < 0):
+            raise ValueError(
+                "Wall-OSS inference_delay must be a non-negative integer, "
+                f"got {inference_delay!r}")
+        rtc_delay = int(inference_delay)
+        if not isinstance(use_rtc, bool):
+            raise TypeError(f"Wall-OSS use_rtc must be bool, got {use_rtc!r}")
+        rtc_request = bool(use_rtc or rtc_delay)
+        if rtc_request and not self.rtc_enabled:
+            raise ValueError("this Wall-OSS runtime was not built with rtc=True")
+        rtc_prefix_norm = self._normalize_rtc_prefix(
+            rtc_prefix_actions, rtc_delay=rtc_delay,
+            horizon=int(noise.size(1)))
         # Host-region instrumentation (RPU_WALL_OSS_INSTRUMENT=1): perf_counter walls
         # per region, profiler-free (vs torch profile which inflates per-op). Zero cost off.
         _instr = rpu_env_bool("RPU_WALL_OSS_INSTRUMENT")
@@ -1378,7 +1766,8 @@ class WallOssVLA:
                 now = time.perf_counter(); _pt[name] = _pt.get(name, 0.0) + (now - _t0[0]) * 1000; _t0[0] = now
         propri_str = self._proprioception_string(proprioception, state_mask)
         text = _build_flow_prompt(instruction, self.camera_names, self.dataset_key,
-                                  self.delta_action, propri_str)
+                                  self.delta_action, propri_str,
+                                  rtc_enabled=getattr(self, "rtc_enabled", False))
         _mk("1_propri+prompt")
         input_ids, pixel_values, grid = self._process_inputs(text, images)
         n_img = int((input_ids == IMAGE_PAD_ID).sum())
@@ -1388,7 +1777,7 @@ class WallOssVLA:
         # length for a clean 16-aligned v16-KV-insert profile (e.g. 320 = 3·64 vision +
         # 128 text). Image tokens precede the trailing text, so only trailing text is
         # dropped. The resulting action is meaningless — do NOT use with correctness.
-        # Applied to input_ids up front so the embed assembly sees the final length.
+        # Applied to input_ids up front so the embed composition sees the final length.
         _ppfx = os.environ.get("WALL_OSS_PROFILE_PREFIX")
         if _ppfx:
             _tgt = int(_ppfx)
@@ -1404,7 +1793,8 @@ class WallOssVLA:
         row_constant = _dof_mask_is_row_constant(dof_mask)
         self._validate_prepared_request(
             real_len=real_len, grid=grid, horizon=H,
-            num_steps=steps, row_constant=row_constant)
+            num_steps=steps, row_constant=row_constant,
+            rtc_delay=rtc_delay, use_rtc=rtc_request)
 
         # Prefill and action share one cache. Reject an impossible logical
         # prefix before Vision; the final padded plan is resolved after Vision
@@ -1421,18 +1811,24 @@ class WallOssVLA:
         # the exact fused-graph boundary. Prepared-mode admission deliberately
         # runs first so an invalid request cannot mutate allocator state.
         torch.ops.rpu.spm_alloc_reset_temporary()
-        merged = self.vision.forward(pixel_values, grid)
+        if self._ondevice_embed and self.vision._fused_merger:
+            merged = self.vision._forward_parts(pixel_values, grid)
+        else:
+            merged = self.vision.forward(pixel_values, grid)
         _mk("3_vision.forward(wrap+hw)")
-        if merged.size(0) != n_img:
+        merged_rows = (sum(part.size(0) for part in merged)
+                       if isinstance(merged, tuple) else merged.size(0))
+        if merged_rows != n_img:
             raise RuntimeError(
-                f"vision tokens {merged.size(0)} != <|image_pad|> count {n_img}"
+                f"vision tokens {merged_rows} != <|image_pad|> count {n_img}"
             )
 
-        # Choose the execution length before embedding assembly. Prefixes that fit the
-        # single-chunk cap retain 16-token KV-insert alignment. The shared
-        # planner owns larger prefixes. Padding K/V is masked out in
+        # Choose the execution length before embedding composition. Prefixes that fit the
+        # proven single-chunk cap retain 16-token KV-insert alignment. Strict RTC
+        # maps REAL 599..640 to P640/C320 and 641..671 to P672/C336; stock
+        # deployments retain the generic planner. Padding K/V is masked out in
         # the action 2D mask, and pos_action continues from the REAL prefix.
-        # Free the vision graph's temporary SPM before the embed-assembly op. The vision
+        # Free the vision graph's temporary SPM before the embed-composition op. The vision
         # output (`merged`) is already read out, so the encoder/merger Temps are dead — but
         # a cached GraphCache graph leaves t_end at its peak (it doesn't reset, to keep baked
         # offsets for replay). The on-device gather_embedding (an immediate op) would then
@@ -1449,15 +1845,15 @@ class WallOssVLA:
         _mk("4_glue:reset+pad")
 
         # 3. assemble inputs_embeds [1, padded_len, H] — scatter vision into <|image_pad|>.
-        #    On-device (default): padded gather + slice-copy on the RPU (no CPU embed-table
+        #    On-device (default): padded gather + DMA on the device (no CPU embed-table
         #    gather / masked_scatter / fp32 upload / torch.zeros pad). Legacy CPU path under =0.
         if self._ondevice_embed:
             inputs_embeds = self._assemble_inputs_embeds_ondevice(input_ids, merged, padded_len)
         else:
             embed = F.embedding(input_ids.cpu(), self.llm._embed_w).float()    # [1, real_len, 2048]
             vmask = (input_ids == IMAGE_PAD_ID).unsqueeze(-1).expand_as(embed)
-            # merged is on RPU (the vision merger runs on-device); embed is CPU here, so move
-            # device too — `.to(dtype)` alone left a CPU/RPU mismatch in masked_scatter.
+            # merged is on device (the vision merger runs on-device); embed is CPU here, so move
+            # device too — `.to(dtype)` alone left a CPU or device mismatch in masked_scatter.
             inputs_embeds = embed.masked_scatter(vmask, merged.to(device=embed.device, dtype=embed.dtype))
             if padded_len != real_len:
                 inputs_embeds = F.pad(inputs_embeds, (0, 0, 0, padded_len - real_len))
@@ -1484,21 +1880,33 @@ class WallOssVLA:
         # 7. action positions continue after the REAL prefix (text-like → 3 axes equal). Computed
         # from the un-padded pos_prefix so the action RoPE is unaffected by the padding slots.
         next_pos = int(pos_prefix.max()) + 1
-        pos_action = torch.arange(next_pos, next_pos + H, dtype=torch.int32)[:, None] \
+        pos_action = torch.arange(next_pos, next_pos + H, dtype=torch.int32)[:, None]\
             .expand(H, 3).contiguous()
         _mk("8_glue:pos_action")
 
         # 8. expert-1 masked denoise. P (padded) = insert slot + mask width + cache.position;
         # real_len = the prefix the action actually attends to (mask -inf on [real_len, P)).
+        padding_action = (
+            self._normalized_padding_action(H) if self.rtc_enabled else None
+        )
         out = self.action.denoise_with_mask(
             P, noise, dof_mask, pos_action, num_steps=steps,
-            real_prefix_len=real_len, debug=debug)
+            real_prefix_len=real_len, debug=debug,
+            rtc_prefix_actions=rtc_prefix_norm, rtc_delay=rtc_delay,
+            use_rtc=rtc_request,
+            padding_action=padding_action)
         _mk("9_denoise.with_mask(wrap+hw)")
 
         # 8. de-normalize (per-dataset): action = (x+1)/2 * delta + min.
         mn = self._normalizer[f"min.{self.dataset_key}"]
         dl = self._normalizer[f"delta.{self.dataset_key}"]
         action = (out["x_norm"] + 1) / 2 * dl + mn
+        if rtc_delay:
+            prefix_physical = torch.as_tensor(
+                rtc_prefix_actions, dtype=torch.float32, device="cpu")
+            if prefix_physical.dim() == 2:
+                prefix_physical = prefix_physical.unsqueeze(0)
+            action[:, :rtc_delay] = prefix_physical[:, :rtc_delay]
         _mk("10_postproc(denorm)")
         if _instr:
             tot = sum(_pt.values())
@@ -1516,7 +1924,9 @@ class WallOssVLA:
         # Debug-only; the production path is untouched.
         merged_diag = None
         if debug:
-            merged_diag = merged.float().cpu()
+            merged_diag = (torch.cat([
+                part.to(device="cpu", dtype=torch.float32) for part in merged
+            ], dim=0) if isinstance(merged, tuple) else merged.float().cpu())
             _rev = getattr(self.vision, "_pending_rev", None)
             if _rev is not None:
                 merged_diag = merged_diag[_rev[0].cpu().long()]
@@ -1531,8 +1941,8 @@ class WallOssVLA:
             "prefix_last": prefix_last.float().cpu() if debug else None, "input_ids": input_ids,
             "prefix_len": P, "real_prefix_len": real_len,
             "dt": out["dt"], "dataset_key": self.dataset_key,
-
-
+            "use_rtc": rtc_request,
+            "inference_delay": rtc_delay,
             "text": text, "propri_str": propri_str,
         }
 
@@ -1552,6 +1962,10 @@ def build_wall_oss_vla(
     nvfp4_wint4_scope: bool = False,
     fp16_ckpt_dir: str | None = None,
     rpu_execution=None,
+    graph_runtime_policy=None,
+    rtc: bool = False,
+    rtc_w8_ckpt_dir: str | None = None,
+    action_w4a16_ckpt_dir: str | None = None,
 ) -> WallOssVLA:
     """Build the full VLA: vision tower + expert-0 prefill + expert-1 denoiser (sharing
     one RPUCache) + Qwen2.5-VL processor + action/proprioception normalizers.
@@ -1570,6 +1984,9 @@ def build_wall_oss_vla(
         w8a16: load expert-0/expert-1 decoder weights and vision transformer
             block weights from the W8A16 checkpoint. CPU patch_embed/merger and
             action preprocessing/proj_back stay sourced from ``fp16_ckpt_dir``.
+            Under ``rtc=True``, the two overflow boundaries (Vision block-17
+            ``down_proj`` and expert-0 layer-2 ``down_proj``) stay FP16 with
+            ACC32-to-BF16 output; the remaining eligible projections are W8A16.
         w8_nvfp4a16: internal validation-only action hybrid: load Vision and
             expert-0 from the W8A16 ``ckpt_dir``, then quantize only
             expert-1/action to NVFP4 from ``fp16_ckpt_dir``. It improves the raw
@@ -1581,9 +1998,25 @@ def build_wall_oss_vla(
             packaged NVFP4 composition and exactly matches the WINT4A16 op scope.
         fp16_ckpt_dir: source checkpoint for processor/normalizers and CPU glue
             for quantized modes.
+        rtc: select the strict ``wrc_sf_v728`` RTC contract.  ``rtc=True``
+            with ``w8a16=True`` selects the overflow-safe hybrid W8A16 path;
+            controlled W4A16 evaluation additionally requires
+            ``rtc_w8_ckpt_dir`` for the exact paired W8A16 Vision tower.
+        rtc_w8_ckpt_dir: exact W8A16 companion for RTC W4A16 Vision. It is
+            valid only with ``rtc=True, w4a16=True``.
+        action_w4a16_ckpt_dir: paired W4A16 checkpoint for expert-1 Action only
+            in the independent parcel-sorting RTC profile. Requires
+            ``rtc=True, w8a16=True``; Vision and expert-0 retain W8A16.
+            All three components are constructed before their shared Session.
     """
+    if graph_runtime_policy is not None:
+        from rpu_backend.graph import GraphRuntimePolicy
+        if not isinstance(graph_runtime_policy, GraphRuntimePolicy):
+            raise TypeError("graph_runtime_policy must be GraphRuntimePolicy or None")
     from rpu_backend.api._execution import _require_execution_process_safe
     _require_execution_process_safe()
+    graph_policy_options = ({"graph_runtime_policy": graph_runtime_policy}
+                            if graph_runtime_policy is not None else {})
     execution_config, text_execution, vision_execution, action_execution = (
         resolve_wall_oss_execution_components(
             rpu_execution,
@@ -1593,8 +2026,33 @@ def build_wall_oss_vla(
     action_builder_execution = _action_builder_execution(
         text_execution, action_execution
     )
+    if rtc and any(
+        config.get(stage, {}).get("linear_acc32", False)
+        for stage, config in (("prefill", text_execution),
+                              ("vision", vision_execution),
+                              ("action", action_execution))
+    ):
+        raise ValueError("Wall-OSS RTC does not support linear_acc32=True")
+    if rtc and os.environ.get(_RTC_NUMERIC_BLOCKED_ENV) != "1":
+        raise NotImplementedError(
+            "Wall-OSS wrc_sf_v728 RTC is fail-closed by default. Blocking CI "
+            "grants controlled temporary support only to exact FP16 P640/C320 "
+            "staged0 and W8A16 P640/C320 staged0+A16-stretch; W4 and other "
+            "profiles remain evaluation-only. Set exactly "
+            f"{_RTC_NUMERIC_BLOCKED_ENV}=1 to enter a controlled path; none is "
+            "formally or robot certified."
+        )
     if int(state_bins) < 2:   # mirror WallOssPolicy.from_checkpoint — fail here, not deep in np.digitize
         raise ValueError(f"state_bins must be >= 2, got {state_bins}")
+    if rtc and (
+        isinstance(max_seq_len, bool)
+        or not isinstance(max_seq_len, Integral)
+        or max_seq_len < _RTC_PREFILL_EXECUTION_LEN
+    ):
+        raise ValueError(
+            "Wall-OSS rtc=True requires max_seq_len>=672 for P672/C336, "
+            f"got {max_seq_len!r}"
+        )
     selected_precision = [
         name
         for name, enabled in (
@@ -1611,12 +2069,32 @@ def build_wall_oss_vla(
             "Wall-OSS precision modes are mutually exclusive, got "
             f"{selected_precision}"
         )
+    if rtc and selected_precision not in ([], ["w8a16"], ["w4a16"]):
+        raise ValueError(
+            "Wall-OSS v728 RTC supports FP16, overflow-safe hybrid W8A16, "
+            "or controlled W4A16; "
+            f"got {selected_precision}")
+    if action_w4a16_ckpt_dir is not None and not (rtc and w8a16):
+        raise ValueError(
+            "action_w4a16_ckpt_dir requires rtc=True, w8a16=True"
+        )
+    sorting = sorting_config_from_env()
+    fp16_transfer_mask = sorting.fp16_mask if rtc and not selected_precision else 0
+    if rtc_w8_ckpt_dir is not None and not (rtc and w4a16):
+        raise ValueError(
+            "rtc_w8_ckpt_dir is valid only with rtc=True, w4a16=True")
+    if rtc and w4a16 and rtc_w8_ckpt_dir is None:
+        raise ValueError(
+            "Wall-OSS RTC W4A16 requires rtc_w8_ckpt_dir for the exact paired "
+            "W8A16 Vision checkpoint")
     # Resolve and validate every checkpoint identity before mutating the
     # process-wide runtime profile. A caller that catches a bad-pair error must
-    # not inherit half-applied selectors in the same process.
+    # not inherit half-applied RTC selectors in the same process.
     from rpu_backend.model_registry import model_path
     if ckpt_dir is None:
-        if w4a16:
+        if rtc and w4a16:
+            default_model = "wall-oss-0.5-w4a16-pgrp"
+        elif w4a16:
             default_model = "wall-oss-0.5-w4a16"
         elif w8a16 or w8_nvfp4a16 or nvfp4_wint4_scope:
             default_model = "wall-oss-0.5-w8a16"
@@ -1625,40 +2103,58 @@ def build_wall_oss_vla(
         ckpt_dir = str(model_path(default_model))
     if fp16_ckpt_dir is None:
         fp16_ckpt_dir = str(model_path("wall-oss-0.5"))
-    if w8_nvfp4a16 or nvfp4_wint4_scope:
+    if rtc and w4a16:
+        validate_rtc_w4_checkpoint_pair(ckpt_dir, fp16_ckpt_dir)
+        validate_w8_nvfp4_checkpoint_pair(rtc_w8_ckpt_dir, fp16_ckpt_dir)
+    elif (rtc and w8a16) or w8_nvfp4a16 or nvfp4_wint4_scope:
         validate_w8_nvfp4_checkpoint_pair(ckpt_dir, fp16_ckpt_dir)
+    if action_w4a16_ckpt_dir is not None:
+        validate_rtc_w4_checkpoint_pair(action_w4a16_ckpt_dir, fp16_ckpt_dir)
     aux_ckpt_dir = (
         fp16_ckpt_dir
         if (w8a16 or w4a16 or nvfp4a16 or w8_nvfp4a16
             or nvfp4_wint4_scope)
         else ckpt_dir
     )
+    if rtc:
+        _validate_rtc_training_metadata(aux_ckpt_dir)
     # Wall-OSS keeps attention on all eight cores. Every residual reduction is
     # scheduled by the shared ring launcher; there is no model-scoped route.
+    if rtc:
+        os.environ["RPU_WALL_OSS_ACTION_FP32_TAIL"] = "0"
+        os.environ["RPU_WALL_OSS_FUSED_DENOISE"] = "1"
+        os.environ["RPU_WALL_OSS_DENOISE_UNROLL"] = "1"
+        os.environ["RPU_WALL_OSS_ATTN_TP8"] = "1"
+        os.environ["RPU_WALL_OSS_VISION_FUSED_MERGER"] = "1"
+        if w8a16:
+            # Exact RTC W8 defaults to the measured exact-MIMC implementation
+            # (which reuses the SISC by-MHA dataflow); explicit 0 retains Normal.
+            os.environ.setdefault("RPU_WALL_OSS_VISION_WEIGHT_OUTER", "1")
+        elif fp16_transfer_mask & 1:
+            os.environ["RPU_WALL_OSS_VISION_WEIGHT_OUTER"] = "1"
+        else:
+            os.environ["RPU_WALL_OSS_VISION_WEIGHT_OUTER"] = "0"
+        os.environ["RPU_WALL_OSS_VISION_LAYER_GROUP"] = "0"
+        os.environ["RPU_WALL_OSS_VISION_MIXED_PRECISION"] = "1"
+        os.environ["RPU_WALL_OSS_PREFILL_MIXED_PRECISION"] = "1"
+        if w4a16:
+            os.environ["RPU_WALL_OSS_EXPERT0_DOWN_INT4"] = "0"
     os.environ.setdefault("RPU_WALL_OSS_ATTN_TP8", "1")
-    # Warm graph replay skips the body op-stream walk after refreshing current
-    # inputs outside the body loop. Wall-OSS opts into this shared capability.
     os.environ.setdefault("RPU_WALL_OSS_FAST_REPLAY", "1")
-    # The common Graph executor may omit redundant kernel scans only when its
-    # replay-state and mutable-input guards allow it.
+    #  • RPU_FASTREPLAY_SKIP_SYNC — lets the common Graph executor omit the mutable-kernel
+    #    scan only when replay touched no kernel parameters and the segment has no mutable DMA.
+    #    Pinned-runtime ABBA evidence requires the conservative mutable-DMA guard while its
+    #    lower-layer cause remains open; the executor derives the guard from segment structure.
     os.environ.setdefault("RPU_FASTREPLAY_SKIP_SYNC", "1")
-    # Full-body replay can reuse prepared SPM and weight-preload state. Vision
-    # retains setup where its post_fn still reads the layout.
     os.environ.setdefault("RPU_DEEP_FAST_REPLAY", "1")
-    # Fuse vision window reversal with token gathering and image-slot assembly.
-    # Mixed-size groups retain the separate assembly path.
     os.environ.setdefault("RPU_WALL_OSS_FUSED_ASSEMBLE", "1")
-    # Broadcast ViT 2D-RoPE tables into SPM for per-token lookup.
+    #  • RPU_WALL_OSS_VISION_ROPE_SPM — broadcast the ViT 2D-RoPE cos/sin tables into SPM once
+    #    and use the SPM-table rope_2d kernel (per-token cos/sin gather hits SPM not DDR).
+    #    The table lookup preserves the rotary transformation.
     os.environ.setdefault("RPU_WALL_OSS_VISION_ROPE_SPM", "1")
-    # Include the vision merger in the graph through the base-class post_fn;
-    # body-only replay preserves the post_fn's layout setup.
     os.environ.setdefault("RPU_WALL_OSS_VISION_FUSED_MERGER", "1")
-    #  • RPU_WALL_OSS_PARTIAL_MROPE — required Qwen2.5-VL path: host-bake contiguous
-    #    T/H/W frequency chunks and stream them through partial_mrope. The legacy C++
-    #    launcher uses Qwen3-style THW interleaving and is incorrect for image positions,
-    #    so an explicit `0` fails fast. Covers prefill and fused denoise.
     os.environ.setdefault("RPU_WALL_OSS_PARTIAL_MROPE", "1")
-    # Validate every CPU-owned checkpoint artifact before any RPU model build or
+    # Validate every CPU-owned checkpoint artifact before any device model build or
     # irreversible weight transform. A dataset typo must never select an arbitrary
     # first normalizer after several GB of weights have already been constructed.
     normalizer = torch.load(
@@ -1673,47 +2169,125 @@ def build_wall_oss_vla(
     )
     _validate_normalizer_dataset(normalizer, normalizer_propri, dataset_key)
     processor = AutoProcessor.from_pretrained(
-        aux_ckpt_dir, **({}))
+        aux_ckpt_dir, **({"use_fast": False} if rtc else {}))
     config = AutoConfig.from_pretrained(aux_ckpt_dir)
     flow_time_scale = 1.0
+    if rtc:
+        causal_action_attention = getattr(
+            config, "causal_action_attention_mask", None)
+        if causal_action_attention is not False:
+            raise ValueError(
+                "Wall-OSS RTC checkpoint must set "
+                "causal_action_attention_mask=false, got "
+                f"{causal_action_attention!r}")
+        scheduler = getattr(config, "noise_scheduler", None)
+        scheduler_s = (
+            scheduler.get("s") if isinstance(scheduler, Mapping)
+            else getattr(scheduler, "s", None)
+        )
+        if (isinstance(scheduler_s, bool)
+                or not isinstance(scheduler_s, Real)
+                or abs(float(scheduler_s) - 0.999) > 1e-9):
+            raise ValueError(
+                "Wall-OSS v728 RTC checkpoint must declare noise_scheduler.s=0.999")
+        tokens_per_second = config.vision_config.tokens_per_second
+        if (isinstance(tokens_per_second, bool)
+                or not isinstance(tokens_per_second, Integral)
+                or tokens_per_second != 2):
+            raise ValueError(
+                "Wall-OSS v728 RTC checkpoint must declare "
+                f"vision tokens_per_second=2, got {tokens_per_second}")
+        action_min = normalizer[f"min.{dataset_key}"]
+        action_delta = normalizer[f"delta.{dataset_key}"]
+        if tuple(action_min.shape) != (20, 26):
+            raise ValueError(
+                "Wall-OSS v728 RTC requires per-step action normalizer "
+                f"[20, 26], got {tuple(action_min.shape)}")
+        if tuple(action_delta.shape) != tuple(action_min.shape):
+            raise ValueError(
+                "Wall-OSS RTC action min/delta normalizer shapes must match")
+        flow_time_scale = float(scheduler_s)
     rope = _build_rope_helper(
-        config, use_checkpoint_tokens_per_second=False)
+        config, use_checkpoint_tokens_per_second=rtc)
 
     fused = _fused_denoise_enabled()
+    if rtc and not fused:
+        raise ValueError("Wall-OSS RTC requires RPU_WALL_OSS_FUSED_DENOISE=1")
+    pair_arena_policy = None
+    if rpu_env_bool("RPU_WALL_OSS_VISION_PAIR_252"):
+        # Two Vision shapes, Prefill and Denoise retain four Graphs. Eager
+        # patch embedding needs a fifth, transient arena. Reserve cold, before
+        # any component uploads weights and fixes the SDK pool capacity.
+        from rpu_backend.graph import GraphRuntimePolicy
+        pair_arena_policy = GraphRuntimePolicy.from_environment(graph_arena_count=5)
+        if not pair_arena_policy.prepare_arenas():
+            raise RuntimeError("Wall-OSS paired Vision requires five cold Graph arenas")
     llm = action = vision = None
     try:
-        if nvfp4_wint4_scope:
+        if rtc and (w8a16 or w4a16 or (fp16_transfer_mask & 2)):
+            quant_kwargs = (
+                {"w8a16": True} if w8a16 else
+                {"w4a16": True} if w4a16 else {}
+            )
+            rmsnorm_kwargs = (
+                {"rmsnorm_fixed32": True}
+                if w8a16 or (fp16_transfer_mask & 2) else {}
+            )
+            llm = build_wall_oss_llm(
+                ckpt_dir, expert=0, max_seq_len=max_seq_len,
+                fp16_ckpt_dir=fp16_ckpt_dir,
+                execution_config=text_execution,
+                **quant_kwargs, **rmsnorm_kwargs, **graph_policy_options)
+            action_quant_kwargs = (
+                {"w4a16": True} if action_w4a16_ckpt_dir is not None
+                else quant_kwargs
+            )
+            action = build_wall_oss_action(
+                action_w4a16_ckpt_dir or ckpt_dir,
+                llm=llm, max_seq_len=max_seq_len,
+                fp16_ckpt_dir=fp16_ckpt_dir, fused=fused,
+                rtc_max_delay=10, rtc_rope_gap=10,
+                flow_time_scale=flow_time_scale,
+                execution_config=action_builder_execution, **action_quant_kwargs, **graph_policy_options)
+        elif nvfp4_wint4_scope:
             llm = build_wall_oss_llm(
                 fp16_ckpt_dir, expert=0, max_seq_len=max_seq_len,
                 nvfp4a16=True, w8_down_ckpt_dir=ckpt_dir,
-                execution_config=text_execution)
+                execution_config=text_execution, **graph_policy_options)
             action = build_wall_oss_action(
                 fp16_ckpt_dir, llm=llm, max_seq_len=max_seq_len,
                 nvfp4a16=True, fp16_ckpt_dir=fp16_ckpt_dir, fused=fused,
-                execution_config=action_builder_execution)
+                execution_config=action_builder_execution, **graph_policy_options)
         elif w8_nvfp4a16:
             llm = build_wall_oss_llm(
                 ckpt_dir, expert=0, max_seq_len=max_seq_len, w8a16=True,
-                execution_config=text_execution)
+                execution_config=text_execution, **graph_policy_options)
             action = build_wall_oss_action(
                 fp16_ckpt_dir, llm=llm, max_seq_len=max_seq_len,
                 nvfp4a16=True, fp16_ckpt_dir=fp16_ckpt_dir, fused=fused,
-                execution_config=action_builder_execution)
+                execution_config=action_builder_execution, **graph_policy_options)
         else:
             action = build_wall_oss_action(
                 ckpt_dir, max_seq_len=max_seq_len,
                 w8a16=w8a16, w4a16=w4a16, nvfp4a16=nvfp4a16,
                 fp16_ckpt_dir=fp16_ckpt_dir, fused=fused,
-
-
+                rtc_max_delay=10 if rtc else 0,
+                rtc_rope_gap=10,
                 flow_time_scale=flow_time_scale,
-                execution_config=action_builder_execution)  # expert-0 + expert-1
+                execution_config=action_builder_execution, **graph_policy_options)  # expert-0 + expert-1
             llm = action.llm
-        if w8_nvfp4a16 or nvfp4_wint4_scope:
+        if rtc and (w8a16 or w4a16):
+            vision_ckpt = ckpt_dir if w8a16 else rtc_w8_ckpt_dir
+            vision = build_wall_oss_vision(
+                vision_ckpt, window=True, w8a16=True,
+                fp16_ckpt_dir=fp16_ckpt_dir,
+                execution_config=vision_execution,
+                **rmsnorm_kwargs, **graph_policy_options)
+        elif w8_nvfp4a16 or nvfp4_wint4_scope:
             vision = build_wall_oss_vision(
                 ckpt_dir, window=True, w8a16=True,
                 fp16_ckpt_dir=fp16_ckpt_dir,
-                execution_config=vision_execution)
+                execution_config=vision_execution, **graph_policy_options)
         elif w4a16 or nvfp4a16:
             # Vision tower stays INT8 (loaded from the w8a16 ckpt) — the w4a16
             # ckpt's vision is fp16 (converter quantizes decoder only), and an
@@ -1722,23 +2296,26 @@ def build_wall_oss_vla(
             vision = build_wall_oss_vision(
                 vision_ckpt, window=True, w8a16=True,
                 fp16_ckpt_dir=fp16_ckpt_dir,
-                execution_config=vision_execution)
+                execution_config=vision_execution, **graph_policy_options)
         else:
             vision = build_wall_oss_vision(
                 ckpt_dir, window=True, w8a16=w8a16,
                 fp16_ckpt_dir=fp16_ckpt_dir,
-                execution_config=vision_execution)
+                execution_config=vision_execution,
+                rmsnorm_fixed32=bool(fp16_transfer_mask & 1), **graph_policy_options)
         runtime = WallOssVLA(
             vision=vision, action=action, processor=processor,
             rope_helper=rope, normalizer=normalizer,
             normalizer_propri=normalizer_propri, dataset_key=dataset_key,
             camera_names=camera_names, delta_action=delta_action,
             state_bins=state_bins,
-
-            normalizer_clamp=True,
+            rtc_enabled=rtc,
+            normalizer_clamp=not rtc,
             execution_config=execution_config,
         )
         runtime._gc_retirement_enabled = True
+        if pair_arena_policy is not None:
+            runtime._graph_arena_policy = pair_arena_policy
         return runtime
     except BaseException as error:
         from rpu_backend.adapters.wall_oss._retirement import _cleanup_build_failure, _clear_graphs

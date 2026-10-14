@@ -6,7 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 
-// 判定标准（todo.md §Wave3，简化版，不引入 RegisteredPtrSet）：
+// 判定标准：
 //   bytes == 0              → safe（no-op）
 //   bytes > 128 MB          → unsafe（异常大块，单 frame 不应出现）
 //   dst/src 区间重叠        → unsafe（memcpy UB，capture_data 无法保持语义）

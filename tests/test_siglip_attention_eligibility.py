@@ -9,7 +9,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_packed_attention_candidate_is_independent_of_previous_forward(tmp_path):
+def test_packed_attention_candidate_uses_current_context_not_previous_forward(tmp_path):
     compiler = shutil.which("c++")
     if compiler is None:
         pytest.skip("C++ compiler is unavailable")
@@ -42,6 +42,8 @@ bool sdpa_by_mha_spm_is_valid(int64_t, int64_t, int64_t, int64_t,
                             int64_t, int64_t, int64_t, int64_t) { return true; }
 class SiglipGeometry {
 public:
+    struct ForwardContext { int64_t seq_len = 0; } current;
+    const ForwardContext& ctx() const { return current; }
     int64_t seq_len_ = 0, image_batch_count_ = 3, orig_head_dim_ = 72;
     std::vector<int> layer_weights_ = std::vector<int>(27);
     int64_t num_layers() const { return 27; }
@@ -61,14 +63,19 @@ int main() {
     plan.qkv.chunks = {{0,768,768}};
     plan.compute.chunks = {{0,768,768}};
     plan.spans = {{0,256}, {256,256}, {512,256}};
-    // Cold planning, the matching forward, and a previous different shape
-    // must all resolve the same physical attention capability.
+    // Dry and live entrypoints bind the current context before eligibility;
+    // a cold or stale owner shape must not override that current candidate.
     for (int64_t previous : {0, 768, 1536}) {
         model.seq_len_ = previous;
+        model.current.seq_len = 768;
         if (!model.subclass_spm_kv_by_mha_eligible(plan, layout, 0)) return 1;
+        for (int64_t mismatched : {0, 512, 1536}) {
+            model.current.seq_len = mismatched;
+            if (model.subclass_spm_kv_by_mha_eligible(plan, layout, 0)) return 6;
+        }
     }
-    // Removing the unrelated previous-forward dependency must not weaken
-    // the packed coverage, masking, or causal/position guards.
+    model.current.seq_len = 768;
+    // The packed coverage, masking, and causal/position guards also apply.
     plan.spans[2].len = 240;
     if (model.subclass_spm_kv_by_mha_eligible(plan, layout, 0)) return 2;
     plan.spans[2].len = 256;

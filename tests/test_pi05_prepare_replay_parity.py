@@ -101,22 +101,18 @@ def prepare_owner(monkeypatch):
         runtime._PI05_PREPARED_GRAPH_PROFILES.pop(model, None)
 
 
-def test_prepare_admits_existing_microdifference_and_reports_actual_equality(prepare_owner):
-    build = torch.ones(1, 50, 7)
-    warm = build + 0.001953125
-    ready = warm + 0.001953125
-    adapter, model, caches, _ = prepare_owner([build, warm, ready])
-    result = adapter.prepare_graphs({})
-    assert result["phase"] == "READY" and result["ready_replay_validated"]
-    assert result["build_replay_bit_equal"] is False
-    assert result["action_bit_equal"] is False
-    assert result["build_replay_max_abs"] == 0.001953125
-    assert result["replay_parity"]["contract"] == "pi05-runtime-boundary-and-numeric-diagnostics-v2"
-    for comparison in ("build_vs_warming", "warming_vs_ready"):
-        assert result["replay_parity"][comparison]["max_abs"] == 0.001953125
-        assert result["replay_parity"][comparison]["row_single_zero_count"] == 0
-    assert runtime._PI05_PREPARED_GRAPH_PROFILES[model]["phase"] == "READY"
-    assert all(cache.frozen and cache.replays == 2 for cache in caches)
+@pytest.mark.parametrize("failure_stage", [1, 2], ids=["WARMING", "READY"])
+def test_prepare_rejects_even_small_replay_changes(prepare_owner, failure_stage):
+    base = torch.ones(1, 50, 7)
+    actions = [base] * 3
+    actions[failure_stage] = base + 0.001953125
+    adapter, model, caches, state = prepare_owner(actions)
+    with pytest.raises(RuntimeError, match="replay differs"):
+        adapter.prepare_graphs({})
+    assert model not in runtime._PI05_PREPARED_GRAPH_PROFILES
+    assert all(not cache.frozen for cache in caches)
+    state.update(actions=[base] * 3, calls=0)
+    assert adapter.prepare_graphs({})["phase"] == "READY"
 
 
 def test_prepare_keeps_exact_equality_diagnostics_when_equal(prepare_owner):
@@ -130,8 +126,7 @@ def test_prepare_keeps_exact_equality_diagnostics_when_equal(prepare_owner):
 
 @pytest.mark.parametrize("failure_stage", [1, 2], ids=["WARMING", "READY"])
 @pytest.mark.parametrize("kind,error", [
-    ("shape", "shape mismatch"),
-    ("dtype", "torch.float32 boundary"), ("nan", "non-finite"),
+    ("shape", "size of tensor"), ("nan", "replay differs"),
 ])
 def test_prepare_rejects_invalid_action_and_allows_clean_retry(
     prepare_owner, failure_stage, kind, error,
@@ -140,8 +135,6 @@ def test_prepare_rejects_invalid_action_and_allows_clean_retry(
     bad = base.clone()
     if kind == "shape":
         bad = torch.ones(1, 50, 8)
-    elif kind == "dtype":
-        bad = bad.half()
     elif kind == "nan":
         bad[0, 0, 0] = float("nan")
     actions = [base, base, base]
@@ -221,10 +214,8 @@ def test_finite_differences_are_measured_without_an_arbitrary_ceiling(prepare_ow
     metrics = _validate(actual, reference)
     assert metrics["mse"] == 0.25 and metrics["max_abs"] == 0.5
     adapter, _, _, _ = prepare_owner([reference, actual, actual])
-    result = adapter.prepare_graphs({})
-    assert result["replay_parity"]["numerical_status"] == "DIAGNOSTIC"
-    assert result["replay_parity"]["task_quality"] == "NOT_EVALUATED"
-    assert result["replay_parity"]["build_vs_warming"]["mse"] == 0.25
+    with pytest.raises(RuntimeError, match="WARMING replay differs"):
+        adapter.prepare_graphs({})
 
 
 def test_prepare_forwards_explicit_noise_through_build_warm_and_ready(prepare_owner):

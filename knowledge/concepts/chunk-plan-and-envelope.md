@@ -26,8 +26,10 @@ when the physical plan uses more rows.
 
 1. Reject a model or request outside the exact public profile before loading or
    transforming weights.
-2. Bind `rpu_execution` before RPU installation and the first Graph BUILD. A
-   later change requires a new model or policy.
+2. Bind cold `rpu_execution` fields before device installation. Use
+   `reconfigure_rpu_execution` between requests for session-supported planning
+   fields; it replaces stages and retires affected Graphs. Core count and
+   precision changes require a new model or policy.
 3. Evaluate only deterministic candidates. A fused subsystem's
    `declare_buffers` and chunk-validity hooks must not launch work or depend on
    mutable runtime state.
@@ -41,11 +43,33 @@ when the physical plan uses more rows.
 7. Record the requested and resolved plan with the exact release profile. Do
    not promote an adjacent length or model size from one passing example.
 
-A sticky prefill chunk override resolves to a capacity of 16 for a single-token
-decode. Both scalar EXACT and COMPLETE descriptor admission compare that
-request-local capacity without rewriting the stored prefill override; multi-token
-requests retain strict equality.
-[Fused planning implementation](../../src/core/fused_model_base.cpp)
+The legacy native prefill override clamps a single-token decode to a capacity
+of 16 without rewriting the stored prefill value; multi-token requests keep
+strict equality. This compatibility behavior is not an additional public
+`rpu_execution` tuning rule. [Fused planning implementation](../../src/core/fused_model_base.cpp)
+
+## Exact requests and semantic inputs
+
+A public integer `chunk_size` fixes the Q/K/V and compute capacities. It does
+not rewrite the input schedule or the semantic spans that separate images,
+views or independent streams. Those spans belong to the input owner. A model
+may require stricter alignment than the common 16-row boundary.
+
+Without a separately installed cost profile, the shared planner ranks admitted
+plans by the largest stage chunk count, optional padding, largest final-chunk
+deficit, then stable capacity tie-breaks. It uses actual input/QKV/compute
+schedules; this is deterministic structural selection.
+
+Automatic search considers only bounded, admitted candidates. Exhausting a
+search limit is a rejection, not permission to truncate the domain and report
+a complete result. An exact request that has no matching physical plan fails
+without substituting a nearby size. Unexpected device or programming errors
+remain errors; they are not silently treated as infeasible candidates.
+
+The public mapping supports the entry point's `prefill`, `vision` and `action`
+stages. Internal request modes, semantic spans and fixed decode controls are
+not additional tuning fields. Component overrides take precedence over stage
+defaults, and each component resolves against its own envelope.
 
 ## Stop conditions
 
@@ -57,7 +81,7 @@ profile.
 
 ## Sources
 
-- [Runtime configuration: TOML and `rpu_execution`](../../docs/runtime_config.md#toml-parameter-catalog)
+- [Runtime configuration: TOML and `rpu_execution`](../../docs/runtime_config.md#configuration-and-execution)
 - [Architecture: planning and invalidation](../../docs/architecture.md#planning-and-invalidation-lifecycle)
 - [Architecture: SPM design](../../docs/architecture.md#spm-design)
 - [Examples](../../docs/model_support.md)

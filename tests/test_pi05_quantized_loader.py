@@ -1,4 +1,4 @@
-"""Exercise the complete small safetensors loader with mixed W4-G32/KV8 data."""
+"""Exercise the complete small safetensors loader with per-channel W4/KV8 data."""
 import json
 import sys
 from types import ModuleType, SimpleNamespace
@@ -48,7 +48,7 @@ def test_loader_passes_loaded_group_config_and_preserves_mixed_weights(tmp_path,
         converted, *_ = _convert_tensor(
             prefix + name + ".weight",
             torch.linspace(-2, 2, 128 * 64).reshape(128, 64),
-            bits=4, group_size=32,
+            bits=4,
             int8_keep_suffixes=tuple(config["mixed_int8_suffixes"]),
         )
         checkpoint.update(converted)
@@ -60,7 +60,7 @@ def test_loader_passes_loaded_group_config_and_preserves_mixed_weights(tmp_path,
     assert TinyPI05.__init__ is original_init
     assert not policy.training and policy._pi05_quant_config == config
     projections = policy.model.paligemma_with_expert.paligemma.model.language_model.layers[0].self_attn
-    for name, expected_scale_shape in (("q_proj", (2, 128)), ("k_proj", (128,))):
+    for name, expected_scale_shape in (("q_proj", (128,)), ("k_proj", (128,))):
         projection = getattr(projections, name)
         assert projection.weight.dtype == torch.int8
         assert projection.weight_scale.dtype == torch.float16

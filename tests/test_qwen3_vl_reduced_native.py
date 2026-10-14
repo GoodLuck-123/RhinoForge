@@ -1,7 +1,9 @@
-"""Compile actual Vision admission paths without opening an RPU device."""
+"""Compile actual Vision admission paths without opening an device device."""
 from pathlib import Path
 import shutil
 import subprocess
+
+from test_fmb_standalone_layout_rebuild import _definition
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -10,6 +12,8 @@ def test_vision_reduced_weight_and_cache_admission(tmp_path):
     source = (ROOT / "src/fused/rpu_qwen3vl_vision_model.cpp").read_text()
     start = source.index("        TORCH_CHECK(hidden_size % num_heads == 0,")
     weight_gate = source[start:source.index("        // Vision encoder is MHA", start)]
+    list_gate = _definition(source, "        auto check_list =") + ";"
+    scale_gate = _definition(source, "static void check_qwen3vl_vision_w8a16_scale_list(")
     start = source.index("        if (num_cores() != 8) {", source.index("    at::Tensor forward_impl("))
     cache_gate = source[start:source.index("        if (pipeline_dispatch) {", start)]
     start = source.index("    DecoderExecutionTopology resolve_model_execution_topology(")
@@ -20,6 +24,7 @@ def test_vision_reduced_weight_and_cache_admission(tmp_path):
 #include <functional>
 #include <limits>
 #include <stdexcept>
+#include <set>
 #include <vector>
 #include "src/core/execution_topology.h"
 #define TORCH_CHECK(condition, ...) do { if (!(condition)) throw std::runtime_error("rejected"); } while (0)
@@ -46,11 +51,13 @@ struct Tensor {
     Device device() const { return where; }
     ScalarType scalar_type() const { return dtype; }
     int64_t dim() const { return shape.size(); }
+    int64_t numel()const {int64_t n=1;for(auto d:shape)n*=d;return n;}
     int64_t size(int axis) const { return shape.at(axis); }
     Sizes sizes() const { return shape; }
 };
 using TensorList = std::vector<Tensor>;
 }
+__SCALE_GATE__
 using v3::DecoderExecutionTopology;
 struct FusedModelBase {
     virtual ~FusedModelBase() = default;
@@ -91,6 +98,7 @@ struct Vision : FusedModelBase {
     }
     void weights() {
         const int64_t hidden_size=h, intermediate_size=intermediate, num_heads=heads, head_dim=hd;
+        __LIST_GATE__
         __WEIGHT_GATE__
         const auto topology=resolve_model_execution_topology(heads,heads,hd,h,intermediate);
         assert(topology.num_cores == cores);
@@ -146,7 +154,7 @@ int main() {
     }
 }
 '''
-    for marker, value in (("__TOPOLOGY__",topology),("__WEIGHT_GATE__",weight_gate),("__CACHE_GATE__",cache_gate)):
+    for marker, value in (("__SCALE_GATE__",scale_gate),("__LIST_GATE__",list_gate),("__TOPOLOGY__",topology),("__WEIGHT_GATE__",weight_gate),("__CACHE_GATE__",cache_gate)):
         cpp = cpp.replace(marker,value)
     path=tmp_path / "vision_admission.cpp"
     path.write_text(cpp)

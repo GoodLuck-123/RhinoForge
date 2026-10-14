@@ -1,6 +1,6 @@
 """Compile production queue/replay methods against an instrumented host SDK.
 
-No backend import, RPU device, or opaque operator assets are required. The mock
+No backend import, device device, or opaque operator assets are required. The mock
 checks address publication and resource ownership; actual SDK/cache coherency
 and model numerics still require the separately serialized board regression.
 """
@@ -138,6 +138,16 @@ def test_prepare_segment_queue_preflights_transactionally(tmp_path):
 #include <vector>
 #define TORCH_CHECK(condition, ...) do { if (!(condition)) throw std::runtime_error("contract rejection"); } while (0)
 #define RECORD_FUNCTION(...) do {} while (0)
+namespace at {
+enum class RecordScope { FUNCTION };
+struct RecordFunction {
+    explicit RecordFunction(RecordScope) {}
+    bool isActive() const { return false; }
+    void before(const char*) {}
+    void end() {}
+};
+}
+constexpr bool kRetainReplayState = true;
 struct Owner {};
 Owner owner;
 struct RpuDmaEndpoint {
@@ -200,6 +210,7 @@ template <typename T>
 void validate_semantic_dma_owner_for_execution(
         const T&, size_t, const char*) {}
 namespace rhino_lkn {
+namespace detail { class BatchSnapshot; }
 struct Kernel_t {};
 class Queue_t {
 public:
@@ -497,26 +508,13 @@ int main() {
         assert(active_leases == 0);
     }
     {
-        // Kernel domains must fit the cold execution budget even when a
-        // malformed Segment advertises a larger queue prefix.
+        // Segmentation validates the kernel budget before queue preparation.
         RpuKernelGraph graph;
         graph.runtime_policy_.execution_core_count = 4;
         graph.kernels_.push_back(std::make_unique<rhino_lkn::Kernel_t>());
         graph.nodes_.resize(1);
         graph.nodes_[0].kind = GraphNodeKind::Kernel;
-        Segment seg; seg.end_idx = 1; seg.core_ids = {0, 1, 2, 3, 4, 5};
-        for (const auto& ids : std::vector<std::vector<uint8_t>>{
-                 {0, 1, 2, 3, 4}, {4}, {0, 2}, {2, 1}, {}}) {
-            graph.nodes_[0].kernel.core_ids = ids;
-            rhino_lkn::Queue_t queue;
-            RpuDmaSubmissionLease lease;
-            const int before_resolve = resolve_calls;
-            bool rejected = false;
-            try { graph.prepare_segment_queue(seg, queue, false, lease); }
-            catch (const std::runtime_error&) { rejected = true; }
-            assert(rejected && queue.mutations == 0 && !lease);
-            assert(resolve_calls == before_resolve);
-        }
+        Segment seg; seg.end_idx = 1;
         graph.nodes_[0].kernel.core_ids = {2, 3};
         seg.core_ids = {0, 1, 2, 3};
         rhino_lkn::Queue_t queue;
@@ -580,8 +578,11 @@ int main() {
     subprocess.run([str(exe)], check=True, capture_output=True, text=True)
 
 
-@pytest.mark.parametrize("budget", [0, 8], ids=["safe-default", "bounded-retention"])
-def test_production_prepared_queue_methods(tmp_path, budget):
+@pytest.mark.parametrize("budget,snapshot_caps",
+                         [(0, None), (8, None), (0, True), (0, False)],
+                         ids=["safe-default", "bounded-retention", "same-queue-snapshot",
+                              "old-sdk-fallback"])
+def test_production_prepared_queue_methods(tmp_path, budget, snapshot_caps):
     compiler = shutil.which("g++")
     if compiler is None:
         pytest.skip("host C++ compiler unavailable")
@@ -600,6 +601,10 @@ def test_production_prepared_queue_methods(tmp_path, budget):
 #include <atomic>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <optional>
+#include <dlfcn.h>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -610,6 +615,15 @@ def test_production_prepared_queue_methods(tmp_path, budget):
 #include <sys/types.h>
 #define TORCH_CHECK(condition, ...) do { if (!(condition)) throw std::runtime_error("contract rejection"); } while (0)
 #define RECORD_FUNCTION(...) do {} while (0)
+namespace at {
+enum class RecordScope { FUNCTION };
+struct RecordFunction {
+    explicit RecordFunction(RecordScope) {}
+    bool isActive() const { return false; }
+    void before(const char*) {}
+    void end() {}
+};
+}
 struct Owner {};
 Owner owner;
 struct RpuDmaEndpoint {
@@ -630,31 +644,66 @@ struct RpuDmaAllocationWitness {
 };
 int active_submission_leases = 0;
 int submission_without_lease = 0;
+int active_owned_submission_leases = 0;
+int owned_leases_seen_at_sync = 0, owned_leases_seen_at_finish = 0;
 struct RpuDmaSubmissionLease {
     bool active = false;
+    bool owned_result = false;
     RpuDmaSubmissionLease() = default;
-    explicit RpuDmaSubmissionLease(bool value) : active(value) {
+    explicit RpuDmaSubmissionLease(bool value, bool owned = false)
+        : active(value), owned_result(owned) {
         if (active) ++active_submission_leases;
+        if (active && owned_result) ++active_owned_submission_leases;
     }
     ~RpuDmaSubmissionLease() { reset(); }
     RpuDmaSubmissionLease(const RpuDmaSubmissionLease&) = delete;
     RpuDmaSubmissionLease& operator=(const RpuDmaSubmissionLease&) = delete;
     RpuDmaSubmissionLease(RpuDmaSubmissionLease&& other) noexcept
-        : active(other.active) { other.active = false; }
+        : active(other.active), owned_result(other.owned_result) {
+        other.active = false; other.owned_result = false;
+    }
     RpuDmaSubmissionLease& operator=(RpuDmaSubmissionLease&& other) noexcept {
-        if (this != &other) { reset(); active = other.active; other.active = false; }
+        if (this != &other) {
+            reset(); active = other.active; owned_result = other.owned_result;
+            other.active = false; other.owned_result = false;
+        }
         return *this;
     }
     explicit operator bool() const { return active; }
     void reset() {
-        if (active) { --active_submission_leases; active = false; }
+        if (active) {
+            --active_submission_leases;
+            if (owned_result) --active_owned_submission_leases;
+            active = false; owned_result = false;
+        }
     }
+};
+class RpuResolvedDeviceDmaBatch final {
+    std::vector<RpuDmaEndpoint> endpoints_;
+    RpuDmaSubmissionLease lease_;
+    friend RpuResolvedDeviceDmaBatch rpu_resolve_device_dma_endpoints_owned(
+        const RpuDeviceDmaEndpointRequest*, size_t);
+public:
+    RpuResolvedDeviceDmaBatch() noexcept = default;
+    RpuResolvedDeviceDmaBatch(const RpuResolvedDeviceDmaBatch&) = delete;
+    RpuResolvedDeviceDmaBatch& operator=(const RpuResolvedDeviceDmaBatch&) = delete;
+    RpuResolvedDeviceDmaBatch(RpuResolvedDeviceDmaBatch&&) noexcept = default;
+    RpuResolvedDeviceDmaBatch& operator=(RpuResolvedDeviceDmaBatch&&) noexcept = default;
+    const std::vector<RpuDmaEndpoint>& endpoints() const noexcept { return endpoints_; }
+    const RpuDmaSubmissionLease& lease() const noexcept { return lease_; }
 };
 std::map<uint64_t, uint64_t> allocation_ids;
 std::map<uint64_t, Owner*> endpoint_owners;
 int endpoint_resolve_calls = 0;
+uint64_t invalid_endpoint = 0;
+size_t endpoint_requests_seen = 0;
+int owned_endpoint_resolves = 0;
+size_t fail_owned_endpoint_at = std::numeric_limits<size_t>::max();
+size_t semantic_owner_checks = 0;
+size_t invalid_semantic_owner_node = std::numeric_limits<size_t>::max();
 RpuDmaEndpoint rpu_resolve_device_dma_endpoint(uint64_t offset, size_t, const char*) {
     ++endpoint_resolve_calls;
+    TORCH_CHECK(offset != invalid_endpoint, "endpoint range is no longer live");
     const auto it = allocation_ids.find(offset);
     const auto owner_it = endpoint_owners.find(offset);
     return {owner_it == endpoint_owners.end() ? &owner : owner_it->second,
@@ -672,6 +721,20 @@ RpuDmaSubmissionLease rpu_resolve_device_dma_endpoints(
     std::copy(resolved.begin(), resolved.end(), endpoints);
     return RpuDmaSubmissionLease(count != 0);
 }
+RpuResolvedDeviceDmaBatch rpu_resolve_device_dma_endpoints_owned(
+        const RpuDeviceDmaEndpointRequest* requests, size_t count) {
+    ++owned_endpoint_resolves;
+    endpoint_requests_seen += count;
+    RpuResolvedDeviceDmaBatch batch;
+    batch.endpoints_.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        TORCH_CHECK(i != fail_owned_endpoint_at, "late owned endpoint rejection");
+        batch.endpoints_.push_back(rpu_resolve_device_dma_endpoint(
+            requests[i].device_addr, requests[i].bytes, requests[i].where));
+    }
+    batch.lease_ = RpuDmaSubmissionLease(count != 0, true);
+    return batch;
+}
 RpuDmaSubmissionLease rpu_validate_live_dma_allocation_witnesses(
         const RpuDmaAllocationWitness* witnesses, size_t count) {
     bool has_ddr_witness = false;
@@ -687,9 +750,13 @@ RpuDmaSubmissionLease rpu_validate_live_dma_allocation_witnesses(
 }
 template <typename T>
 void validate_semantic_dma_owner_for_execution(
-        const T&, size_t, const char*) {}
+        const T&, size_t node_idx, const char*) {
+    ++semantic_owner_checks;
+    TORCH_CHECK(node_idx != invalid_semantic_owner_node, "stale semantic owner");
+}
 struct Transfer { uint64_t src, dst; bool operator==(const Transfer& x) const { return src == x.src && dst == x.dst; } };
 namespace rhino_lkn {
+using Buffer_t = ::Owner;
 static constexpr uint32_t kKernelQueryOk = 0;
 class Kernel_t {
 public:
@@ -708,6 +775,11 @@ class Queue_t {
 public:
     static inline int live = 0;
     static inline int injected_failure = 0;
+    static inline int total_updates = 0;
+    static inline int next_cookie = 0;
+    int cookie = ++next_cookie;
+    int generation = 1;
+    bool completed = false;
     explicit Queue_t(size_t cores) : cores(cores) { ++live; }
     ~Queue_t() { --live; }
     size_t cores;
@@ -724,6 +796,7 @@ public:
     int published_kernel = 0;
     std::vector<Transfer> pending, published, last;
     int last_kernel = 0;
+    bool expects_owned_lease = false;
     uint32_t update_dma_kernel(uint32_t id, Owner&, uint64_t src, Owner&, uint64_t dst, size_t) {
         if (updates++ == fail_update_at) { injected_failure = 1; return 4; }
         // Launch patches mutable DMA packets in the built kd_buf directly.
@@ -731,6 +804,10 @@ public:
     }
     uint32_t sync_mutable_params() {
         ++syncs;
+        if (expects_owned_lease) {
+            assert(active_owned_submission_leases > 0);
+            ++owned_leases_seen_at_sync;
+        }
         if (fail_sync) { injected_failure = 2; return fail_sync; }
         // This API copies mutable kernel cfg packets only. DMA publication is
         // intentionally independent from this scan in the real Launch ABI.
@@ -739,16 +816,114 @@ public:
     }
     uint32_t enqueu_batch(bool) {
         ++submits;
+        if (expects_owned_lease) assert(active_owned_submission_leases > 0);
         if (has_dma && active_submission_leases == 0) {
             ++submission_without_lease;
         }
         if (fail_submit) { injected_failure = 3; return fail_submit; }
-        last = published; last_kernel = published_kernel; return 0;
+        last = published; last_kernel = published_kernel; completed = true;
+        if (expects_owned_lease) {
+            assert(active_owned_submission_leases > 0);
+            ++owned_leases_seen_at_finish;
+            expects_owned_lease = false;
+        }
+        return 0;
     }
 };
 }
-enum class GraphNodeKind { Kernel, Dma };
-struct KernelNodeData { size_t kernel_idx = 0; };
+
+enum class GraphBatchSnapshotMode : uint8_t { Auto, Off };
+namespace rhino_lkn {
+constexpr uint64_t kRuntimeCapabilityBatchSnapshotV1 = 4;
+constexpr uint32_t kBatchSnapshotInstructionArenaReadOnly = 1;
+constexpr uint32_t kBatchSnapshotPositionIndependentPrograms = 2;
+constexpr uint32_t kBatchSnapshotAuto = 1;
+struct BatchSnapshotOptionsV1 {
+    uint32_t size=sizeof(BatchSnapshotOptionsV1), mode=0, contracts=0, features=127;
+};
+}
+namespace rhino_lkn::detail {
+struct BatchSnapshotDmaBinding {
+    const Buffer_t* src; size_t src_offset; Buffer_t* dst; size_t dst_offset;
+    size_t bytes; int channel; bool mutable_dma;
+};
+class BatchSnapshot {
+public:
+    int cookie, generation, published_kernel;
+    int* kernel;
+    bool has_dma;
+    std::vector<Transfer> published;
+};
+}
+int snapshot_captures = 0, snapshot_restores = 0;
+int snapshot_miss = 0, snapshot_capture_miss = 0;
+bool snapshot_symbols = @SNAPSHOT_SYMBOLS@;
+bool snapshot_configure_symbol = true;
+uint64_t snapshot_capabilities = rhino_lkn::kRuntimeCapabilityBatchSnapshotV1;
+int snapshot_configure_rc = 0, snapshot_configures = 0;
+uint32_t configured_contracts = 0;
+uint64_t host_capabilities() noexcept { return snapshot_capabilities; }
+uint32_t host_configure(rhino_lkn::Queue_t* q,
+        const rhino_lkn::BatchSnapshotOptionsV1* options) noexcept {
+    ++snapshot_configures;
+    assert(!q->built && q->pending.empty() && !q->completed);
+    assert(options->mode==rhino_lkn::kBatchSnapshotAuto && options->features==127);
+    configured_contracts = options->contracts;
+    return snapshot_configure_rc;
+}
+uint32_t host_capture(rhino_lkn::Queue_t* q,
+        std::shared_ptr<const rhino_lkn::detail::BatchSnapshot>* out) noexcept {
+    ++snapshot_captures;
+    if (!q->completed || q->perf || snapshot_capture_miss) return 1;
+    auto s = std::make_shared<rhino_lkn::detail::BatchSnapshot>();
+    s->cookie=q->cookie; s->generation=q->generation;
+    s->published=q->published; s->published_kernel=q->published_kernel;
+    s->kernel=q->kernel; s->has_dma=q->has_dma;
+    *out=std::move(s); return 0;
+}
+uint32_t host_restore(rhino_lkn::Queue_t* q,
+        const std::shared_ptr<const rhino_lkn::detail::BatchSnapshot>* image,
+        const rhino_lkn::detail::BatchSnapshotDmaBinding* bindings, size_t count) noexcept {
+    ++snapshot_restores;
+    const auto& s=**image;
+    if (snapshot_miss || q->cookie!=s.cookie || q->generation!=s.generation || q->perf) return 1;
+    if (count) assert(active_submission_leases > 0);
+    if (count) assert(active_owned_submission_leases > 0);
+    q->expects_owned_lease = active_owned_submission_leases > 0;
+    q->published=s.published; q->published_kernel=s.published_kernel;
+    q->kernel=s.kernel; q->has_dma=s.has_dma; q->built=true;
+    // Deliberately restore capture-old packets here. Graph must independently
+    // clear its outgoing skip-cache and issue a typed update for current values.
+    for (size_t i=0;i<count;++i) assert(bindings[i].src && bindings[i].dst && bindings[i].bytes);
+    return 0;
+}
+void* host_dlsym(void*, const char* name) {
+    if (snapshot_configure_symbol && std::strcmp(name,"RhinoLaunchConfigureBatchSnapshotV1")==0)
+        return reinterpret_cast<void*>(&host_configure);
+    if (std::strcmp(name,"rhino_launch_runtime_capabilities")==0)
+        return reinterpret_cast<void*>(&host_capabilities);
+    if (std::strcmp(name,"RhinoLaunchCaptureBatchSnapshotV1")==0)
+        return reinterpret_cast<void*>(&host_capture);
+    if (snapshot_symbols && std::strcmp(name,"RhinoLaunchRestoreBatchSnapshotV1")==0)
+        return reinterpret_cast<void*>(&host_restore);
+    return nullptr;
+}
+#define dlsym host_dlsym
+enum class GraphNodeKind { Kernel, Dma, Barrier, Branch };
+struct BranchNodeData { bool is_physical_manifest_metadata() const { return true; } };
+
+const char* KERNEL_ID_NAMES[]{"trusted"};
+struct KernelCache {
+    static KernelCache& instance() { static KernelCache cache; return cache; }
+    uint32_t graph_snapshot_program_contracts(const std::string& name) const {
+        return name=="trusted" ? 3 : name=="readonly" ? 1 : 0;
+    }
+};
+struct KernelNodeData {
+    size_t kernel_idx = 0;
+    std::string kernel_name = "trusted";
+    std::optional<int> kernel_id;
+};
 struct DmaNodeData {
     enum class Variant { Fixed, MutableSrc, MutableDst };
     Variant variant = Variant::Fixed;
@@ -763,6 +938,8 @@ struct GraphNode {
     GraphNodeKind kind = GraphNodeKind::Dma;
     KernelNodeData kernel;
     DmaNodeData dma;
+    BranchNodeData branch;
+    const BranchNodeData& as_branch() const { return branch; }
     const KernelNodeData& as_kernel() const { return kernel; }
     const DmaNodeData& as_dma() const { return dma; }
 };
@@ -770,8 +947,12 @@ struct Segment {
     size_t start_idx = 0, end_idx = 0;
     std::vector<uint8_t> core_ids{0,1,2,3,4,5,6,7};
     int kernel = 0;
+    struct { bool broadcast_mode=true, flush_icache=false; } queue_state;
 ''' + segment + r'''
 };
+void validate_graph_dma_channel(uint8_t channel, size_t cores, const char*) {
+    TORCH_CHECK(channel < cores && channel < 8, "invalid channel");
+}
 struct RpuKernelGraph {
     std::vector<GraphNode> nodes_;
     std::vector<Segment> segments_;
@@ -779,11 +960,23 @@ struct RpuKernelGraph {
     struct {
         bool fast_replay_skip_sync = false;
         int execution_core_count = 8;
+        GraphBatchSnapshotMode batch_snapshot_mode = GraphBatchSnapshotMode::Off;
     } runtime_policy_;
+    bool batch_snapshot_admission_bound_=false, batch_snapshot_available_=false;
+    uint32_t batch_snapshot_contracts_=0;
+    std::string batch_snapshot_fallback_reason_="not_prepared";
+    void bind_batch_snapshot_admission();
     bool op_stream_fully_skipped_ = false;
     bool kernel_params_dirty_this_replay_ = false;
     struct { int prepared_segment_hit_total = 0, prepared_segment_miss_total = 0, hw_batch_submit_total = 0; } last_stats_;
 ''' + slots + r'''
+    struct Signature { std::string op_id_str; };
+    std::optional<Signature> pending_signature_;
+    Signature built_signature_;
+    uint64_t graph_lifetime_id_=1, build_generation_=1;
+    bool batch_snapshot_enabled() const;
+    void invalidate_batch_snapshots() noexcept;
+    void capture_segment_batch_snapshot(Segment&,PreparedQueueSlot&,bool) noexcept;
     int prepares = 0;
     int fail_build_count = 0;
     bool throw_build = false;
@@ -801,7 +994,7 @@ struct RpuKernelGraph {
         if (fail_build_count) { --fail_build_count; return 2; }
         seg.mutable_dmas.clear();
         auto table = std::make_shared<Segment::PreparedFixedDmaTable>();
-        q.pending.clear(); q.published.clear(); q.perf = perf; q.built = true;
+        q.pending.clear(); q.published.clear(); q.perf = perf; q.built = true; q.completed = false;
         q.has_dma = seg.start_idx != seg.end_idx;
         q.kernel = &seg.kernel; q.published_kernel = seg.kernel;
         for (size_t i = seg.start_idx; i < seg.end_idx; ++i) {
@@ -859,6 +1052,10 @@ void init(RpuKernelGraph& g, uint64_t& input) {
     }
 }
 int main() {
+    if (@SNAPSHOT_TEST@) setenv("RPU_LINGBOT2_BATCH_SNAPSHOT","1",1);
+    else unsetenv("RPU_LINGBOT2_BATCH_SNAPSHOT");
+    // Historical model-global flags do not override a per-instance OFF policy.
+    setenv("RPU_LINGBOT2_SNAPSHOT_ENDPOINT_OWNED", "1", 1);
     {
         // Mutable DMA publication is independent from kernel-argument sync. An
         // unchanged kernel token may skip the full scan after the DMA packets
@@ -1329,14 +1526,206 @@ int main() {
         many.clear();
         assert(g_extra_prepared_queues == 0);
     }
+
+    if (@SNAPSHOT_TEST@) {
+        const auto initialize = [](RpuKernelGraph& g, uint64_t& input) {
+            g.built_signature_.op_id_str="any_model_graph";
+            g.runtime_policy_.batch_snapshot_mode=GraphBatchSnapshotMode::Auto;
+            g.runtime_policy_.fast_replay_skip_sync=true;
+            g.nodes_.resize(6); g.segments_.resize(3);
+            for (size_t i=0;i<3;++i) {
+                auto& seg=g.segments_[i]; seg.start_idx=2*i; seg.end_idx=2*i+2;
+                seg.kernel=40+static_cast<int>(i);
+                auto& kn=g.nodes_[2*i]; kn.kind=GraphNodeKind::Kernel; kn.kernel.kernel_idx=i;
+                auto& d=g.nodes_[2*i+1].dma; d.variant=DmaNodeData::Variant::MutableSrc;
+                d.live_base=&input; d.live_offset=16*i; d.dst_addr=30000+16*i;
+                g.kernels_.push_back(std::make_unique<rhino_lkn::Kernel_t>(&seg.kernel));
+            }
+        };
+        uint64_t input=28000;
+        RpuKernelGraph g; initialize(g,input);
+        const int captures_before=snapshot_captures;
+        const int restores_before=snapshot_restores;
+        for (auto& seg:g.segments_) g.launch_segment_for_replay(seg,false);
+        assert(rhino_lkn::Queue_t::live==1 && g.prepares==3);
+        if (!snapshot_symbols) {
+            // One missing symbol disables the pair; old SDK remains loadable
+            // and follows the original same-Queue rebuild behavior.
+            assert(!g.batch_snapshot_enabled());
+            for (auto& seg:g.segments_) g.launch_segment_for_replay(seg,false);
+            assert(g.prepares==6 && snapshot_captures==captures_before && snapshot_restores==restores_before);
+        } else {
+            assert(g.batch_snapshot_enabled() && snapshot_captures==captures_before+3);
+            const auto original_image=g.segments_[0].batch_snapshot;
+            for (int round=0;round<2;++round) {
+                input+=128;
+                for (size_t i=0;i<3;++i) {
+                    g.kernels_[i]->write(70+round*10+i);
+                    auto* q=g.launch_segment_for_replay(g.segments_[i],false);
+                    assert(q->last==std::vector<Transfer>({{input+16*i,30000+16*i}}));
+                    assert(q->last_kernel==70+round*10+static_cast<int>(i));
+                    if (round==0 && i==0) {
+                        // Changing the environment after the first restore
+                        // must not switch a live graph's cold-selected path.
+                        setenv("RPU_LINGBOT2_SNAPSHOT_ENDPOINT_OWNED", "0", 1);
+                        setenv("RPU_LINGBOT2_BATCH_SNAPSHOT", "0", 1);
+                    }
+                }
+            }
+            assert(g.prepares==3 && g.last_stats_.prepared_segment_hit_total==6);
+            assert(snapshot_captures==captures_before+3);
+            assert(g.segments_[0].batch_snapshot==original_image);
+            auto& slot=g.private_queue_slots_[0];
+            auto* q=g.launch_segment_for_replay(g.segments_[0],false);
+            input+=64; g.kernels_[0]->write(99);
+            q=g.launch_segment_for_replay(g.segments_[0],false); // successfully commit B
+            assert(q->last_kernel==99 && slot.mutable_dma_packets.size()==1);
+            const int updates=q->updates, syncs=q->syncs;
+            slot.built_segment_idx=-1; // force restore of original A, with live B unchanged
+            q=g.launch_segment_for_replay(g.segments_[0],false);
+            assert(q->updates==updates+1 && q->syncs==syncs+1);
+            assert(q->last.at(0)==(Transfer{input,30000}) && q->last_kernel==99);
+            assert(g.segments_[0].batch_snapshot==original_image);
+
+            // A capacity/arena generation miss is transactional and performs a
+            // single ordinary rebuild, then admits a new completed image.
+            ++q->generation; slot.built_segment_idx=-1;
+            const int prepares=g.prepares;
+            q=g.launch_segment_for_replay(g.segments_[0],false);
+            assert(g.prepares==prepares+1 && g.segments_[0].batch_snapshot!=original_image);
+            snapshot_miss=1; slot.built_segment_idx=-1;
+            q=g.launch_segment_for_replay(g.segments_[0],false);
+            assert(g.prepares==prepares+2); snapshot_miss=0;
+
+            // HWF does not restore or capture. Its table replacement requires
+            // ordinary preparation before the next normal snapshot can exist.
+            const int captures=snapshot_captures, restores=snapshot_restores;
+            g.launch_segment_for_replay(g.segments_[0],true);
+            assert(!g.segments_[0].batch_snapshot && snapshot_captures==captures && snapshot_restores==restores);
+            g.launch_segment_for_replay(g.segments_[0],false);
+            assert(g.segments_[0].batch_snapshot && snapshot_captures==captures+1);
+
+            if (true) {
+                // A last-endpoint core rejection cannot reach the SDK restore
+                // or submit with a partially published owned result/lease.
+                const int before=snapshot_restores;
+                fail_owned_endpoint_at=1;
+                slot.built_segment_idx=-1;
+                bool rejected=false;
+                try { g.launch_segment_for_replay(g.segments_[0],false); }
+                catch (const std::runtime_error&) { rejected=true; }
+                assert(rejected && snapshot_restores==before && !slot.queue);
+                assert(active_owned_submission_leases==0);
+                for (const auto& seg:g.segments_) assert(!seg.batch_snapshot);
+                fail_owned_endpoint_at=std::numeric_limits<size_t>::max();
+                for (auto& seg:g.segments_) g.launch_segment_for_replay(seg,false);
+            }
+
+            // Entire live envelope and semantic owners are checked before any
+            // restore or packet mutation, including a stale final DMA.
+            const int before_restore=snapshot_restores;
+            invalid_endpoint=input+32;
+            bool rejected=false;
+            try { g.launch_segment_for_replay(g.segments_[2],false); }
+            catch (const std::runtime_error&) { rejected=true; }
+            assert(rejected && snapshot_restores==before_restore);
+            assert(!slot.queue);
+            for (const auto& seg:g.segments_) assert(!seg.batch_snapshot);
+            invalid_endpoint=0;
+        }
+    }
+    if (@SNAPSHOT_TEST@ && snapshot_symbols) {
+        for (int failure=0;failure<3;++failure) {
+            uint64_t input=32000;
+            RpuKernelGraph g; init(g,input);
+            g.built_signature_.op_id_str="arbitrary_model_label";
+            g.runtime_policy_.batch_snapshot_mode=GraphBatchSnapshotMode::Auto;
+            g.runtime_policy_.fast_replay_skip_sync=true;
+            for (auto& seg:g.segments_) g.launch_segment_for_replay(seg,false);
+            auto& slot=g.private_queue_slots_[0]; auto* q=slot.queue.get();
+            if (failure==0) q->fail_update_at=q->updates;
+            if (failure==1) { q->fail_sync=7; g.kernels_[0]->write(55); }
+            if (failure==2) q->fail_submit=8;
+            bool rejected=false;
+            try { g.launch_segment_for_replay(g.segments_[0],false); }
+            catch (const std::runtime_error&) { rejected=true; }
+            assert(rejected && !slot.queue);
+            assert(slot.mutable_dma_packets.empty() && !slot.kernel_register_tokens_valid);
+            for (const auto& seg:g.segments_) assert(!seg.batch_snapshot);
+            const int prepares=g.prepares;
+            g.launch_segment_for_replay(g.segments_[0],false);
+            assert(g.prepares==prepares+1 && g.segments_[0].batch_snapshot);
+        }
+        {
+            uint64_t input=34000; RpuKernelGraph g; init(g,input);
+            g.built_signature_.op_id_str="arbitrary_model_label";
+            g.runtime_policy_.batch_snapshot_mode=GraphBatchSnapshotMode::Auto;
+            g.kernels_[0]->query_ok=false;
+            const int captures=snapshot_captures;
+            g.launch_segment_for_replay(g.segments_[0],false);
+            assert(!g.segments_[0].batch_snapshot && snapshot_captures==captures);
+            g.built_signature_.op_id_str="pi05_or_wall";
+            assert(g.batch_snapshot_enabled());
+        }
+        {
+            uint64_t input=36000; RpuKernelGraph g; init(g,input);
+            g.built_signature_.op_id_str="arbitrary_model_label";
+            g.runtime_policy_.batch_snapshot_mode=GraphBatchSnapshotMode::Auto;
+            g.nodes_[1].dma.variant=DmaNodeData::Variant::Fixed;
+            g.nodes_[1].dma.src_addr=input;
+            for (auto& seg:g.segments_) g.launch_segment_for_replay(seg,false);
+            const int restores=snapshot_restores;
+            invalid_semantic_owner_node=1;
+            bool rejected=false;
+            try { g.launch_segment_for_replay(g.segments_[0],false); }
+            catch (const std::runtime_error&) { rejected=true; }
+            assert(rejected && snapshot_restores==restores && !g.private_queue_slots_[0].queue);
+            invalid_semantic_owner_node=std::numeric_limits<size_t>::max();
+        }
+    }
+    if (@SNAPSHOT_TEST@ && snapshot_symbols) {
+        // SDK presence grants no program contract. OFF and unknown AUTO both
+        // retain ordinary execution; readonly AUTO admits snapshots without PIC.
+        for (int mode=0;mode<5;++mode) {
+            uint64_t input=38000;
+            RpuKernelGraph g; init(g,input);
+            g.runtime_policy_.batch_snapshot_mode = mode==0
+                ? GraphBatchSnapshotMode::Off : GraphBatchSnapshotMode::Auto;
+            if (mode==1) g.nodes_[2].kernel.kernel_name="unknown";
+            if (mode==2) snapshot_capabilities=0;
+            if (mode==3) snapshot_configure_rc=1;
+            if (mode==4) g.nodes_[2].kernel.kernel_name="readonly";
+            const int captures=snapshot_captures, configures=snapshot_configures;
+            for (auto& seg:g.segments_) g.launch_segment_for_replay(seg,false);
+            if (mode==4) {
+                assert(g.batch_snapshot_enabled() && configured_contracts==1);
+                assert(snapshot_captures==captures+2);
+            } else {
+                assert(!g.batch_snapshot_enabled() && snapshot_captures==captures);
+                assert(!g.batch_snapshot_fallback_reason_.empty());
+                if (mode!=3) assert(snapshot_configures==configures);
+            }
+            snapshot_capabilities=rhino_lkn::kRuntimeCapabilityBatchSnapshotV1;
+            snapshot_configure_rc=0;
+        }
+    }
     assert(rhino_lkn::Queue_t::live == 0);
     assert(active_submission_leases == 0);
+    assert(active_owned_submission_leases == 0);
     assert(submission_without_lease == 0);
+    if (@SNAPSHOT_TEST@ && snapshot_symbols) {
+        assert(owned_endpoint_resolves>0);
+        assert(owned_leases_seen_at_sync>0 && owned_leases_seen_at_finish>0);
+    } else {
+        assert(owned_endpoint_resolves==0);
+    }
     std::cout << "prepared queues: address freshness, entry isolation, bounded ownership and failure recovery passed\n";
 }
 '''
     cpp = tmp_path / "prepared_queues.cpp"
     exe = tmp_path / "prepared_queues"
+    harness = harness.replace("@SNAPSHOT_SYMBOLS@", "false" if snapshot_caps is False else "true")
+    harness = harness.replace("@SNAPSHOT_TEST@", "true" if snapshot_caps is not None else "false")
     cpp.write_text(harness)
     subprocess.run([compiler, "-std=c++17", "-O0", "-g", "-Wall", "-Wextra", str(cpp), "-o", str(exe)], check=True, capture_output=True, text=True)
     result = subprocess.run([str(exe)], check=True, capture_output=True, text=True)
@@ -1357,8 +1746,10 @@ def test_queue_ownership_and_oneshot_lifecycle():
     invalidate = _between(runtime, "void RpuKernelGraph::invalidate_impl", "    nodes_.clear();")
     assert invalidate.index("release_prepared_queues();") < invalidate.index("kernels_.clear();")
     oneshot = source[source.index("void RpuKernelGraph::execute_graph_oneshot()") :]
-    assert "QueueCache::instance()" not in oneshot
-    assert "std::unique_ptr<::rhino_lkn::Queue_t> one_shot_queue" in oneshot
+    assert "QueueCache::instance().get(" in oneshot
+    assert "remaining_segments_by_core_count[8]" in oneshot
+    assert "retained_oneshot_queues[8]" in oneshot
+    assert "discard_retained_on_failure" in oneshot
     assert "/*retain_replay_state=*/false" in oneshot
     assert oneshot.index("wq->discard_completed_batch()") < oneshot.index("++seg_idx_oneshot")
 
@@ -1369,7 +1760,8 @@ def test_public_hwperf_metadata_writer(tmp_path):
     import stat
 
     source = EXECUTE.read_text()
-    assert '"r1/' not in source and "rhino_lkn::detail::" not in source
+    assert '"r1/' not in source
+    assert "rhino_lkn::detail::" not in source[source.index("std::string build_hw_perf_dump_path("):source.index("// Publish host companion metadata")]
     helpers = _between(source, "std::string build_hw_perf_dump_path(", "// Publish host companion metadata")
     cpp = tmp_path / "companion.cpp"
     binary = tmp_path / "companion"

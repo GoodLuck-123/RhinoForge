@@ -67,12 +67,12 @@ void rpu_launch_cumsum_spm_kernel(uint32_t in_spm_addr, uint32_t out_spm_addr,
 }
 
 // Isolated test harness (mirrors rpu_l2norm_test): DMA [N, C] in, run cumsum
-// (single core), DMA back. input fp16 RPU; returns cumsum(input, dim=-1).
+// (single core), DMA back. input fp16 device; returns cumsum(input, dim=-1).
 at::Tensor rpu_cumsum_test(const at::Tensor& input) {
     TORCH_CHECK(input.dim() == 2 && input.scalar_type() == at::kHalf,
                 "cumsum_test: input must be 2D fp16 [N, C]");
     TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                "cumsum_test: input must be on RPU");
+                "cumsum_test: input must be on device");
     const int64_t N = input.size(0), C = input.size(1);
     if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
 

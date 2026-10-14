@@ -64,7 +64,7 @@ def test_pi05_production_graph_routes_use_component_cold_snapshots():
     adapter = _source("python/rpu_backend/adapters/pi05/__init__.py")
     constructor = _section(
         adapter,
-        "    def __init__(self, lerobot_policy: Any) -> None:",
+        "    def __init__(self, lerobot_policy: Any, *, graph_runtime_policy=None) -> None:",
         "    def _close_without_session(",
     )
     assert "_rpu_legacy_prefix_pad16_request" in constructor
@@ -89,11 +89,11 @@ def test_pi05_fast_replay_policy_is_explicit_per_cache():
         "RPU_DEEP_FAST_REPLAY",
     ):
         assert f'os.environ.setdefault("{name}"' not in adapter
-    assert "graph_runtime_policy = _pi05_graph_runtime_policy()" in adapter
+    assert "graph_runtime_policy = _pi05_graph_runtime_policy(self._graph_runtime_policy_request)" in adapter
     assert adapter.count("runtime_policy=graph_runtime_policy") == 4
     policy = _section(
         adapter,
-        "def _pi05_graph_runtime_policy():",
+        "def _pi05_graph_runtime_policy(runtime_policy=None):",
         "def _validate_execution_geometry(",
     )
     assert 'rpu_env_bool("RPU_FASTREPLAY_SKIP_SYNC"' not in policy

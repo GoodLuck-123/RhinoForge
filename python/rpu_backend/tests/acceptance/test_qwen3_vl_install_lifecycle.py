@@ -12,6 +12,10 @@ import rpu_backend
 from rpu_backend.adapters import qwen3_vl
 from rpu_backend.adapters.qwen3_vl import text as qwen3_vl_text
 from rpu_backend.runtime import decoder as shared_decoder
+from rpu_backend.runtime.execution_planner import (
+    PreparedExecutionPlans,
+    _physical_manifest_fingerprint,
+)
 from rpu_backend.api._execution import (
     reconfigure_rpu_execution,
     rpu_execution_stats,
@@ -100,28 +104,30 @@ class _Cache:
     def __init__(self, state, name):
         self._state = state
         self._name = name
+        self._plans = PreparedExecutionPlans()
+
+    def prepare_plan(self, key, factory):
+        return self._plans.prepare(key, factory)
+
+    def is_frozen(self):
+        return self._plans._ready
 
     def clear(self):
         self._state["events"].append(("clear", self._name))
+        self._plans.clear()
 
     def begin_warmup(self):
         self._state["events"].append(("warmup", self._name))
+        self._plans.begin_warmup()
 
     def cache_invariant_ok(self):
         return True
 
-    def prepare_plan(self, key, prepare):
-        return prepare()
-
-    def is_frozen(self):
-        return False
-
 
 def _decode_descriptor(has_lm_head):
     """Small valid native wire with the actual lm-head topology site."""
-    from rpu_backend.runtime.execution_planner import _physical_manifest_fingerprint
-
-    route = (9, 3145128204432384004, 1, 0, 2, int(has_lm_head), 151936 if has_lm_head else 0)
+    route = (9, 3145128204432384004, 1, 0, 2,
+             int(has_lm_head), 151936 if has_lm_head else 0)
     manifest = (1, 1, 1, 0, 1, 1, 1, 3, 1)
     fingerprint = _physical_manifest_fingerprint((*manifest, *route))
     descriptor = [
@@ -159,10 +165,30 @@ def install_runtime(monkeypatch):
     state = {
         "events": [], "claims": [], "set_error": None,
         "vision_kwargs": None, "text_kwargs": None,
-        "lm_head_set": False, "decode_plans": [], "plan_error": None,
+        "acc32": False, "lm_head": False, "native_generation": 0,
+        "decode_fault": None,
         "allocator_enabled": False, "allocator_error": None,
         "claim_error": None,
     }
+
+    def resolve_decode(handle):
+        assert handle == 22
+        state["events"].append(("resolve_decode", state["acc32"], state["lm_head"]))
+        if state["lm_head"] and state["decode_fault"] == "empty":
+            return []
+        # One-row COMPLETE wire; the native route identity changes when either
+        # final policy setter changes the installed owner. Keep this fixture
+        # self-contained for the frozen-wheel acceptance test namespace.
+        route = [1, 101 + 10 * int(state["acc32"]) + int(state["lm_head"]), 2, 0, 0]
+        manifest = [1, 1, 1, 0, 1, 1, 1, 3, 1]
+        fingerprint = _physical_manifest_fingerprint([*manifest, *route])
+        descriptor = [
+            3, 0, 16, 16, 16, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1,
+            *([0, 0, 1, 1] * 3), 0, 1, -1,
+            *manifest, fingerprint >> 32, fingerprint & 0xFFFFFFFF, *route, 0,
+        ]
+        descriptor[1] = len(descriptor)
+        return descriptor
 
     def set_caching_allocator(enabled):
         state["events"].append(("set_caching_allocator", enabled))
@@ -207,7 +233,13 @@ def install_runtime(monkeypatch):
         model._rpu_text_graph_cache = _Cache(state, "text")
         model._rpu_decoder_graph_cache = _Cache(state, "decoder")
         model._rpu_decoder_handle_finalizer = _Finalizer(state, "text")
-        model._rpu_decode_stage_descriptor = resolve_decode(22)
+        model._rpu_decode_stage_descriptor = tuple(resolve_decode(22))
+        state["initial_decode_descriptor"] = model._rpu_decode_stage_descriptor
+        if state.get("prepare_before_head") or state["decode_fault"] == "stale_ready":
+            shared_decoder._text_decode_execution_plan(
+                model, 22, graph_cache=model._rpu_text_graph_cache)
+        if state["decode_fault"] == "stale_ready":
+            model._rpu_text_graph_cache._plans.freeze()
         model.forward = lambda *args, **kwargs: "rpu-text-forward"
         return 22
 
@@ -215,16 +247,13 @@ def install_runtime(monkeypatch):
         state["events"].append(("set_lm_head", handle))
         if state["set_error"] is not None:
             raise state["set_error"]
-        state["lm_head_set"] = True
-
-    def resolve_decode(handle):
-        state["decode_plans"].append(state["lm_head_set"])
-        if state["lm_head_set"] and state["plan_error"] is not None:
-            raise state["plan_error"]
-        return _decode_descriptor(state["lm_head_set"])
+        state["lm_head"] = True
+        state["native_generation"] += 1
 
     def set_linear_acc32(handle, enabled):
         state["events"].append(("set_linear_acc32", handle, enabled))
+        state["acc32"] = enabled
+        state["native_generation"] += 1
 
     def set_vision_linear_acc32(handle, enabled):
         state["events"].append(("set_vision_linear_acc32", handle, enabled))
@@ -233,6 +262,11 @@ def install_runtime(monkeypatch):
         state["events"].append(("enable_vision_mergers", model._rpu_vision_handle))
         model._rpu_vision_merger_on_device = True
         model._rpu_patch_embed_on_device = True
+
+    def register_vision_mergers(model):
+        state["events"].append(("register_vision_mergers", model._rpu_vision_handle))
+        model._rpu_vision_fused_merger = True
+        model._rpu_vision_fused_merger_w8a16 = False
 
     monkeypatch.setattr(qwen3_vl, "_claim_live_instance", claim)
     monkeypatch.setattr(
@@ -255,14 +289,22 @@ def install_runtime(monkeypatch):
         qwen3_vl, "enable_qwen3_vl_vision_merger_on_device", enable_vision_mergers
     )
     monkeypatch.setattr(
+        qwen3_vl, "register_qwen3vl_vision_fused_merger", register_vision_mergers
+    )
+    monkeypatch.setattr(
         torch.ops.rpu,
         "causal_decoder_set_lm_head",
         set_lm_head,
         raising=False,
     )
-    monkeypatch.setattr(torch.ops.rpu, "causal_decoder_resolve_decode_stage_descriptor", resolve_decode, raising=False)
-    monkeypatch.setattr(torch.ops.rpu, "causal_decoder_planner_cache_identity",
-                        lambda handle: (handle, int(state["lm_head_set"])), raising=False)
+    monkeypatch.setattr(
+        torch.ops.rpu, "causal_decoder_resolve_decode_stage_descriptor",
+        resolve_decode, raising=False,
+    )
+    monkeypatch.setattr(
+        torch.ops.rpu, "causal_decoder_planner_cache_identity",
+        lambda handle: (handle, state["native_generation"]), raising=False,
+    )
     for op, name in (("causal_decoder_destroy", "text"), ("qwen3vl_vision_destroy", "vision")):
         monkeypatch.setattr(torch.ops.rpu, op,
                             lambda handle, name=name: state["events"].append(("destroy", name)), raising=False)
@@ -284,6 +326,35 @@ def install_runtime(monkeypatch):
         set_vision_linear_acc32,
         raising=False,
     )
+    monkeypatch.setattr(
+        torch.ops.rpu,
+        "qwen3vl_vision_set_large_image_auto_chunk",
+        lambda handle, enabled: state["events"].append(
+            ("set_vision_large_image_auto_chunk", handle, enabled)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch.ops.rpu,
+        "qwen3vl_vision_set_fp16_chunked_merger",
+        lambda handle, enabled: state["events"].append(
+            ("set_fp16_chunked_merger", handle, enabled)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        torch.ops.rpu,
+        "qwen3vl_vision_set_fp16_compact_encoder",
+        lambda handle, enabled: state["events"].append(
+            ("set_fp16_compact_encoder", handle, enabled)),
+        raising=False,
+    )
+    for name in ("qwen3vl_vision_set_fast_replay", "qwen3vl_vision_set_preload_replay_skip",
+                 "causal_decoder_set_fast_replay", "causal_decoder_set_preload_replay_skip",
+                 "qwen3vl_vision_set_w8_compact_encoder"):
+        monkeypatch.setattr(
+            torch.ops.rpu, name,
+            lambda handle, enabled, name=name: state["events"].append((name, handle, enabled)),
+            raising=False,
+        )
     monkeypatch.setattr(
         torch.ops.rpu,
         "execution_reconfigure_begin",
@@ -511,7 +582,11 @@ def test_ready_publication_rollback_bypasses_all_model_attribute_hooks(
     )
 
 
-def test_success_is_published_last_and_reentry_is_a_noop(install_runtime):
+@pytest.mark.parametrize("prepare_before_head", [False, True])
+def test_success_is_published_last_and_reentry_is_a_noop(
+    install_runtime, prepare_before_head,
+):
+    install_runtime["prepare_before_head"] = prepare_before_head
     adapter = qwen3_vl.Qwen3VLAdapter(_Model())
     model = adapter.to_rpu()
 
@@ -536,14 +611,46 @@ def test_success_is_published_last_and_reentry_is_a_noop(install_runtime):
     assert allocations and all(
         claim_index < allocator_index < index for index in allocations
     )
-    assert install_runtime["events"][-3:] == [
+    assert install_runtime["events"][-4:] == [
         ("set_vision_linear_acc32", 11, False),
         ("set_linear_acc32", 22, False),
         ("set_lm_head", 22),
+        ("resolve_decode", False, True),
     ]
+    text = model.model.language_model
+    assert text._rpu_decode_stage_descriptor != install_runtime["initial_decode_descriptor"]
+    assert text._rpu_decode_stage_descriptor == tuple(
+        text._decoder_decode_plan[1].selected.stage_tuple.physical_descriptor)
     events = list(install_runtime["events"])
     assert adapter.to_rpu() is model
     assert install_runtime["events"] == events
+
+
+@pytest.mark.parametrize("fault, message", [
+    ("empty", "native stage-domain candidate length is invalid"),
+    ("stale_ready", "execution plan READY miss"),
+])
+def test_final_decode_plan_failure_cleans_install_before_ready(
+    install_runtime, fault, message,
+):
+    install_runtime["decode_fault"] = fault
+    adapter = qwen3_vl.Qwen3VLAdapter(_Model())
+    model = adapter.model
+
+    with pytest.raises((ValueError, RuntimeError), match=message):
+        adapter.to_rpu()
+
+    assert ("set_lm_head", 22) in install_runtime["events"]
+    assert not adapter._rpu_is_ready
+    assert model._rpu_swizzled is False
+    assert "forward" not in vars(model)
+    text = model.model.language_model
+    assert not hasattr(text, "_rpu_decoder_handle")
+    assert text._rpu_decode_stage_descriptor == install_runtime["initial_decode_descriptor"]
+    assert install_runtime["events"][-5:] == [
+        ("clear", "text"), ("clear", "decoder"), ("clear", "vision"),
+        ("destroy", "text"), ("destroy", "vision"),
+    ]
 
 
 def test_dense_install_streams_each_layer_after_claim_and_allocator(
@@ -707,6 +814,44 @@ def test_live_claim_rejection_does_not_change_allocator_policy(install_runtime):
     assert not getattr(adapter.model, "_rpu_swizzle_started", False)
 
 
+@pytest.mark.parametrize("vision_acc32", [False, True])
+def test_explicit_vision_accumulation_respects_native_fp16_optimization_contract(
+    install_runtime, monkeypatch, vision_acc32,
+):
+    from rpu_backend.quant import load
+
+    # Exercise the full composite installer with native setters enforcing the
+    # real ACC32-only admission that rejected an explicit ACC16 board run.
+    monkeypatch.setattr(qwen3_vl, "_is_qwen3_vl_2b_eager_profile", lambda _: True)
+    monkeypatch.setattr(qwen3_vl, "_is_qwen3_vl_dense_eager_profile", lambda _: True)
+    monkeypatch.setattr(load, "_move_materialized_decoder_for_rpu", lambda *a, **k: None)
+    calls = []
+
+    def acc32_only(handle, enabled, *, name):
+        assert ("set_vision_linear_acc32", handle, True) in install_runtime["events"]
+        assert enabled is True
+        calls.append(name)
+
+    names = ("large_image_auto_chunk", "fp16_chunked_merger", "fp16_compact_encoder")
+    for name in names:
+        monkeypatch.setattr(
+            torch.ops.rpu, f"qwen3vl_vision_set_{name}",
+            lambda handle, enabled, name=name: acc32_only(handle, enabled, name=name),
+        )
+    model = _Model()
+    model._rpu_execution = {
+        "components": {"vision_encoder": {"vision": {"linear_acc32": vision_acc32}}},
+    }
+    adapter = qwen3_vl.Qwen3VLAdapter(model)
+    assert adapter.to_rpu() is model
+    assert adapter._rpu_is_ready
+    assert model.model.visual._rpu_vision_linear_acc32 is vision_acc32
+    assert install_runtime["vision_kwargs"]["_pack_fp16_block_weights"] is True
+    assert ("enable_vision_mergers", 11) in install_runtime["events"]
+    assert calls == (list(names) if vision_acc32 else [])
+    assert install_runtime["acc32"] is False  # Text defaults to ACC16 independently.
+
+
 def test_public_vision_chunk_reaches_the_native_installer(install_runtime):
     model = _Model()
     model._rpu_execution = {"vision": {"chunk_size": 512}}
@@ -734,6 +879,98 @@ def test_component_overrides_win_over_top_level_defaults(install_runtime):
         "prefill": {"chunk_size": 32}
     }
     assert install_runtime["vision_kwargs"]["execution_chunk_size"] == 256
+
+
+def _text_stage_config(location, fields):
+    stage = {"prefill": fields}
+    return stage if location == "root" else {
+        "components": {"language_model": stage},
+    }
+
+
+@pytest.mark.parametrize("location", ["root", "component"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_public_reconfigure_rejects_fast_replay_change_before_mutation(
+    install_runtime, location, enabled,
+):
+    model = _Model()
+    model._rpu_execution = _text_stage_config(location, {"fast_replay": enabled})
+    adapter = qwen3_vl.Qwen3VLAdapter(model)
+    adapter.to_rpu()
+    views = (model, model.model.language_model, model.model.visual)
+    configs = tuple(view._rpu_execution for view in views)
+    before = rpu_execution_stats(model)
+    native_generation = install_runtime["native_generation"]
+    install_runtime["events"].clear()
+
+    with pytest.raises(ValueError, match="fast_replay is immutable"):
+        reconfigure_rpu_execution(model, _text_stage_config(
+            location, {"fast_replay": not enabled, "chunk_size": 64},
+        ))
+
+    assert all(view._rpu_execution is config for view, config in zip(views, configs))
+    assert adapter._text_fast_replay_policy is enabled
+    assert install_runtime["events"] == []
+    assert install_runtime["native_generation"] == native_generation
+    after = rpu_execution_stats(model)
+    assert after["generation"] == before["generation"]
+    assert after["commit_count"] == before["commit_count"]
+    assert after["state"] == "QUIESCENT"
+
+
+@pytest.mark.parametrize("location", ["root", "component"])
+def test_public_reconfigure_cannot_enable_omitted_fast_replay(install_runtime, location):
+    adapter = qwen3_vl.Qwen3VLAdapter(_Model())
+    model = adapter.to_rpu()
+    install_runtime["events"].clear()
+    with pytest.raises(ValueError, match="fast_replay is immutable"):
+        reconfigure_rpu_execution(model, _text_stage_config(location, {"fast_replay": True}))
+    assert install_runtime["events"] == []
+    assert rpu_execution_stats(model)["generation"] == 0
+    assert "fast_replay" not in adapter._text_execution.get("prefill", {})
+
+
+@pytest.mark.parametrize("location", ["root", "component"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("patch_kind", ["equal", "empty_stage", "chunk_only"])
+def test_public_reconfigure_preserves_equal_or_omitted_fast_replay(
+    install_runtime, location, enabled, patch_kind,
+):
+    model = _Model()
+    model._rpu_execution = _text_stage_config(location, {"fast_replay": enabled})
+    adapter = qwen3_vl.Qwen3VLAdapter(model)
+    adapter.to_rpu()
+    install_runtime["events"].clear()
+    fields = ({"fast_replay": enabled} if patch_kind == "equal" else
+              {"chunk_size": 64} if patch_kind == "chunk_only" else {})
+
+    reconfigure_rpu_execution(model, _text_stage_config(location, fields))
+
+    assert adapter._text_execution["prefill"]["fast_replay"] is enabled
+    assert adapter._text_fast_replay_policy is enabled
+    assert rpu_execution_stats(model)["generation"] == int(patch_kind == "chunk_only")
+    assert not any(event[0] in {
+        "causal_decoder_set_fast_replay", "causal_decoder_set_preload_replay_skip",
+    } for event in install_runtime["events"])
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_public_reconfigure_compares_effective_component_fast_replay(
+    install_runtime, enabled,
+):
+    model = _Model()
+    model._rpu_execution = _text_stage_config("component", {"fast_replay": enabled})
+    adapter = qwen3_vl.Qwen3VLAdapter(model)
+    adapter.to_rpu()
+    install_runtime["events"].clear()
+
+    reconfigure_rpu_execution(model, {"prefill": {"fast_replay": not enabled}})
+
+    assert model._rpu_execution["prefill"]["fast_replay"] is not enabled
+    assert adapter._text_execution["prefill"]["fast_replay"] is enabled
+    assert adapter._text_fast_replay_policy is enabled
+    assert install_runtime["events"] == []
+    assert rpu_execution_stats(model)["generation"] == 1
 
 
 def test_execution_session_reconfigures_children_and_invalidates_precisely(
@@ -920,13 +1157,30 @@ def test_staged_32b_streams_after_claim_without_second_swizzle(
         lambda _model: pytest.fail("staged model reached full CPU inventory validation"),
     )
 
+    prepared_policies = []
+
+    def prepare_arenas(graph_policy):
+        assert graph_policy.graph_arena_count > 0
+        assert install_runtime["events"][-2:] == [
+            ("claim", "model"),
+            ("set_caching_allocator", True),
+        ]
+        prepared_policies.append(graph_policy)
+        install_runtime["events"].append(("prepare_arenas", "model"))
+        return True
+
+    monkeypatch.setattr(
+        rpu_backend.graph.GraphRuntimePolicy, "prepare_arenas", prepare_arenas
+    )
+
     def materialize(seen):
         assert seen is model
         assert seen._rpu_swizzle_started is True
         assert install_runtime["allocator_enabled"] is True
-        assert install_runtime["events"][-2:] == [
+        assert install_runtime["events"][-3:] == [
             ("claim", "model"),
             ("set_caching_allocator", True),
+            ("prepare_arenas", "model"),
         ]
         install_runtime["events"].append(("stream", "decoder"))
 
@@ -939,6 +1193,7 @@ def test_staged_32b_streams_after_claim_without_second_swizzle(
     assert adapter._rpu_w8a16_staged_plan is plan
     assert adapter.to_rpu() is model
     assert adapter._rpu_w8a16_staged_plan is None
+    assert prepared_policies == [adapter._graph_arena_policy]
     assert ("stream", "decoder") in install_runtime["events"]
     assert ("swizzle", "text") not in install_runtime["events"]
     assert [event for event in install_runtime["events"]

@@ -1,10 +1,9 @@
-"""Numeric-blocked RGBD DINOv2-S tower via the reused RPU DINOv3 engine.
+"""RGBD DINOv2-S tower via the reused device DINOv3 engine.
 
 The fixed 224x224 path prepares patch14/CLS/position tokens on CPU, then runs all 12 transformer
-blocks and final LayerNorm on RPU. Unsupported image shapes keep the general CPU token-preparation
-fallback. See
-[[internvla-n1-rgbd-rpu-derisk]]: fp16 is safe (max q·kᵀ 2670), k_bias is softmax-irrelevant, and
-RoPE is no-op'd with identity tables so dinov3's NUM_SPECIAL_TOKENS=5 constant doesn't matter.
+blocks and final LayerNorm on device. Unsupported image shapes keep the general CPU token-preparation
+fallback. k_bias does not affect softmax; identity RoPE tables preserve positions
+independently of the shared engine's special-token count.
 """
 from __future__ import annotations
 
@@ -121,7 +120,7 @@ def _pad_heads(w, nh, hd, target, dim0=True):
 
 
 class RGBDTowerRPU:
-    """One DINOv2 ViT-S tower: CPU glue + RPU blocks. Call forward(x[B,3,224,224])→[B,256,384]."""
+    """One DINOv2 ViT-S tower: CPU glue + device blocks. Call forward(x[B,3,224,224])→[B,256,384]."""
 
     def __init__(
         self,
@@ -157,10 +156,10 @@ class RGBDTowerRPU:
         )
         norm_fold = rpu_env_bool("RPU_INTERNVLA_DINO_NORM_FOLD")
         if (nh, hd, hidden, inter, eps) != (6, 64, 384, 1536, 1e-6):
-            raise ValueError("InternVLA-N1 RGBD RPU tower profile mismatch")
+            raise ValueError("InternVLA-N1 RGBD device tower profile mismatch")
         blocks = list(getattr(dinov2_tower, "blocks", ()))
         if len(blocks) != 12:
-            raise ValueError(f"InternVLA-N1 RGBD RPU tower requires 12 blocks, got {len(blocks)}")
+            raise ValueError(f"InternVLA-N1 RGBD device tower requires 12 blocks, got {len(blocks)}")
         expected = {
             "attn.qkv.weight": (1152, 384), "attn.qkv.bias": (1152,),
             "attn.proj.weight": (384, 384), "attn.proj.bias": (384,),
@@ -266,7 +265,7 @@ class RGBDTowerRPU:
             if self.handle is None or self._gc.size():
                 raise RuntimeError("DINO output MLP binding requires a cold live handle")
             if not self._final_norm_on_rpu:
-                raise RuntimeError("DINO output MLP requires final norm on RPU")
+                raise RuntimeError("DINO output MLP requires final norm on device")
             keepalive = [
                 _hr(tp_col_swizzle_mc_weight(first_weight.half(), NUM_CORES)),
                 _hr(first_bias),
@@ -492,10 +491,10 @@ def _row(w): return _hr(tp_row_swizzle_mc_weight(w.to(torch.float16), NUM_CORES)
 
 
 class FormerRPU(nn.Module):
-    """RGBD former_net perceiver on RPU — reuses the NavDP fused decoder via former_mode
+    """RGBD former_net perceiver on device — reuses the NavDP fused decoder via former_mode
     (POST-LN, ReLU, non-causal self-attn, memory_len=1024). Drop-in for `nn.TransformerDecoder`:
     __call__(q[B,32,384], memory[B,1024,384]) -> hidden[B,32,384] (CPU float; project_layer stays
-    host). Gate: isolated cos 0.999998 vs CPU POST-LN golden. Weights: rgbd_encoder.former_net.*."""
+    host). Weights: rgbd_encoder.former_net.*."""
     H, NH, HD, FF, ML, NQ = 384, 8, 48, 2048, 1024, 32
 
     def __init__(
@@ -583,11 +582,12 @@ class FormerRPU(nn.Module):
                 L[f"{n}_w"].append(_hr(gg(f"{p}.{src}.weight"))); L[f"{n}_b"].append(_hr(gg(f"{p}.{src}.bias")))
         self.cache = RPUCache(num_layers=2, batch_size=1, max_seq_len=1152, num_kv_heads=self.NH, head_dim=self.HD)
         self.gc = rpu_backend.graph.GraphCache()
+        self._input_cache = {}
 
         self.handle = torch.ops.rpu.navdp_create(True, False)
         self._native_resource = _InstalledNativeResource(
             self, self.handle, torch.ops.rpu.navdp_destroy,
-            graphs=(self.gc,), keepalive=(L, self.cache),
+            graphs=(self.gc,), keepalive=(L, self.cache, self._input_cache),
             label="InternVLA RGBD Former", handle_name="handle")
         self._handle_finalizer = self._native_resource.finalizer
         try:
@@ -628,8 +628,20 @@ class FormerRPU(nn.Module):
                 ],
                 dtypes=[torch.float16],
             )
+            inputs = []
+            for name, source in (("query", q[b:b+1]), ("memory", memory[b:b+1])):
+                source = source.to(dtype=torch.float16).contiguous()
+                cached = self._input_cache.get(name)
+                if cached is None:
+                    cached = _hr(source)
+                    self._input_cache[name] = cached
+                else:
+                    if cached.shape != source.shape:
+                        raise ValueError("InternVLA RGBD Former Graph input shape changed")
+                    cached.copy_(source)
+                inputs.append(cached)
             with self.gc.capture(sig):
-                hid = torch.ops.rpu.navdp_forward(self.handle, _hr(q[b:b+1]), _hr(memory[b:b+1]),
+                hid = torch.ops.rpu.navdp_forward(self.handle, *inputs,
                                                   self.cache.k_caches, self.cache.v_caches, None,
                                                   plan.selected.stage_tuple.physical_descriptor)
             resolved = int(
@@ -649,7 +661,7 @@ class FormerRPU(nn.Module):
                 logical_len=self.NQ,
                 resolved_chunk_size=resolved,
             )
-            outs.append(hid.float().cpu()[0])
+            outs.append(hid.to(device="cpu", dtype=torch.float32)[0])
         return torch.stack(outs, 0)
 
     def destroy(self):
@@ -657,6 +669,7 @@ class FormerRPU(nn.Module):
             return
         self._native_resource.retire_owned(self)
         self.cache = None
+        self._input_cache.clear()
 
 
 def build_rgbd_encoder_rpu(
@@ -666,10 +679,9 @@ def build_rgbd_encoder_rpu(
     asset_manifest: Mapping[str | Path, str] | None = None,
     rpu_execution=None,
 ):
-    """Full RGBD encoder with the two ViT-S towers on RPU (former_net stays board CPU).
+    """Full RGBD encoder with the two ViT-S towers on device (former_net stays board CPU).
     Returns an RGBDEncoder whose towers' `get_intermediate_layers` is monkey-patched to the
-    RPU dinov3 engine — same forward(images, depths) interface as the CPU build. Verified
-    rgbd_embed cos 0.986 vs golden (see [[internvla-n1-rgbd-rpu-derisk]])."""
+    device dinov3 engine, preserving the forward(images, depths) interface."""
     _require_execution_process_safe()
     root_execution, child_execution = resolve_internvla_execution(
         rpu_execution,
@@ -701,7 +713,7 @@ def build_rgbd_encoder_rpu(
         )
         components.append(former)
 
-        # RPU tower.forward(x[B,3,224,224]) -> [B,256,384]
+        # device tower.forward(x[B,3,224,224]) -> [B,256,384]
         # == get_intermediate_layers(x)[0]
         enc.rgb_model.get_intermediate_layers = (
             lambda x, *a, **k: [rgb_tw.forward(x)]

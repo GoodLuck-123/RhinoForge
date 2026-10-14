@@ -1,9 +1,8 @@
-"""Qwen3-VL text decoder → rpu_backend (R-Phase 1).
+"""Qwen3-VL text decoder integration.
 
 Wires `Qwen3VLTextModel` into the existing `causal_decoder_set_weights` /
-`causal_decoder_forward` op family with M-RoPE enabled. Reuses 90 % of the
-Qwen3 adapter wiring (same QKV / RMSNorm / SwiGLU / qk-norm layout) and
-adds three pieces:
+`causal_decoder_forward` op family with M-RoPE enabled. Reuses the Qwen3
+QKV / RMSNorm / SwiGLU / qk-norm layout and adds three pieces:
 
 1. `mrope_section` is read from `text_config.rope_parameters["mrope_section"]`
    and passed through the new append-only kwarg.
@@ -11,13 +10,10 @@ adds three pieces:
    `[max_seq, head_dim/2]` (NOT the HF-expanded `[max_seq, head_dim]` form —
    the C++ side rejects the latter on M-RoPE).
 3. position_ids is built at forward time by HF's `get_rope_index` and
-   normalized to `[seq_len, 3]` int32 RPU by `_run_causal_decoder_forward`.
+   normalized to `[seq_len, 3]` int32 device by `_run_causal_decoder_forward`.
 
-R-Phase 1 verification uses `install_qwen3_vl_text_for_rpu` directly from
-the verify_mrope_text_only.py golden test; the user-facing entry
-(`RPUModelForConditionalGeneration`) lands in R-Phase 4.
-
-DeepStack helpers + injection wiring arrive in R-Phase 2.
+The public conditional-generation loader installs this decoder through the
+Qwen3-VL adapter.
 """
 
 from __future__ import annotations
@@ -85,6 +81,11 @@ def _chunk_envelope_for_execution(
         f"got {requested!r}"
     )
 
+
+# Exact ordinary LingBot TP8 KV-only prefill also admits C320/C400. The native
+# single-chunk SDPA predicate and actual SPM layout still determine feasibility;
+# the ordinary Qwen3-VL-4B certificate remains C256.
+_LINGBOT_KV_ONLY_ENVELOPE = ChunkEnvelope(4176, 400)
 
 _RUNTIME_QUANTIZED_32B_ENVELOPE = ChunkEnvelope(4176, 64)
 
@@ -165,6 +166,10 @@ def install_qwen3_vl_text_for_rpu(
     execution_config=None, topology=None, runtime_align_w8a16=False,
     _runtime_quantized_32b=False, _legacy_32b_w8a16=False,
     _graph_cache_max_entries=None,
+    folded_rmsnorm=False,
+    prefill_kv_only=False,
+    prefill_kv_pair=False,
+    prefill_qk_norm_rope=False,
 ) -> int:
     """Bind this exact profile's geometry to the shared M-RoPE installer."""
     if type(_runtime_quantized_32b) is not bool:
@@ -177,6 +182,24 @@ def install_qwen3_vl_text_for_rpu(
             raise ValueError("legacy 32B text requires its own TP8 profile")
         cfg = text_config if text_config is not None else getattr(text_model, "config", None)
         _validate_legacy_32b_text(text_model, cfg, scale_lists)
+    if type(folded_rmsnorm) is not bool or type(prefill_kv_only) is not bool:
+        raise ValueError("folded_rmsnorm and prefill_kv_only must be bool")
+    if type(prefill_kv_pair) is not bool or (prefill_kv_pair and
+            not (folded_rmsnorm and prefill_kv_only and scale_lists is not None)):
+        raise ValueError("paired KV requires a bool and the folded W8 KV-only owner")
+    if type(prefill_qk_norm_rope) is not bool or (prefill_qk_norm_rope and
+            not (folded_rmsnorm and prefill_kv_only and scale_lists is not None)):
+        raise ValueError("QK norm/RoPE requires a bool and the folded W8 KV-only owner")
+    if folded_rmsnorm or prefill_kv_only:
+        cfg = text_config if text_config is not None else text_model.config
+        if (_runtime_quantized_32b or runtime_align_w8a16 or topology is not None
+                or execution_core_count(execution_config) != 8
+                or (cfg.num_hidden_layers, cfg.hidden_size, cfg.intermediate_size,
+                    cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim)
+                   != (36, 2560, 9728, 32, 8, 128)):
+            raise ValueError("folded/KV-only LingBot language requires exact ordinary 4B TP8")
+        if folded_rmsnorm and not getattr(text_model, "_lingbot_runtime_norm_folded", False):
+            raise ValueError("folded language policy requires the cold FP32 weight transform")
     if _runtime_quantized_32b:
         if (runtime_align_w8a16 or topology is not None
                 or execution_core_count(execution_config) != 8):
@@ -200,12 +223,18 @@ def install_qwen3_vl_text_for_rpu(
             _RUNTIME_QUANTIZED_32B_ENVELOPE if _runtime_quantized_32b
             and (arch, num_layers, hidden_size) == (QWEN3_VL_TEXT_ARCH, 64, 5120) else
             ChunkEnvelope(4176, 256) if runtime_align_w8a16 else
+            _LINGBOT_KV_ONLY_ENVELOPE if prefill_kv_only
+            and (arch, num_layers, hidden_size) == (QWEN3_VL_TEXT_ARCH, 36, 2560) else
             _chunk_envelope_for_execution(arch, num_layers, hidden_size, execution_config)
         ),
         text_config=text_config, max_seq_len=max_seq_len,
         vision_config=vision_config, deepstack_lang_layers=deepstack_lang_layers,
         enable_deepstack=enable_deepstack, scale_lists=scale_lists,
         execution_config=execution_config, topology=topology,
+        folded_rmsnorm=folded_rmsnorm,
+        prefill_kv_only=prefill_kv_only,
+        prefill_kv_pair=prefill_kv_pair,
+        prefill_qk_norm_rope=prefill_qk_norm_rope,
         _kv_cache_layer_bank_size=8 if (_runtime_quantized_32b or _legacy_32b_w8a16) else 1,
         **({"_graph_cache_max_entries": _graph_cache_max_entries}
            if _graph_cache_max_entries is not None else {}),
@@ -223,7 +252,7 @@ def get_or_create_zero_keepalive(
     text_config: Any | None = None,
     max_seq_len: int = 8192,
 ) -> torch.Tensor:
-    """Return a per-model `[max_seq_len, hidden_size]` fp16 RPU zero buffer.
+    """Return a per-model `[max_seq_len, hidden_size]` fp16 device zero buffer.
 
     The buffer is created on first call and cached on the text_model. Its
     purpose is to serve as the "zero" dense visual_embeds tensor that the
@@ -259,9 +288,9 @@ def make_zero_visual_embeds(
     """Return `n_mergers` views into the per-model zero keepalive, each
     shaped `[seq_len, hidden]`. Use for text-only / decode forwards.
 
-    All views share the same underlying storage — the C++ side flushes them
-    once and reads the (all-zero) memory in the mutable DMA. Allocating once
-    per model (not per forward) keeps the RPU caching allocator from churning.
+    All views share storage published by the allocation's zero-fill; mutable
+    DMA can read these unchanged zeros without another flush. Allocating once
+    per model (not per forward) keeps the device caching allocator from churning.
     """
     z = get_or_create_zero_keepalive(text_model)
     if seq_len > z.shape[0]:
@@ -295,9 +324,10 @@ def scatter_visual_embeds_to_dense(
     """Build dense FP16 DeepStack inputs with zero execution-padding rows.
 
     A cache owner enables stable internal DDR buffers. Per-image source parts
-    may mix CPU and RPU tensors; unchanged leading cached parts are retained
+    may mix CPU and device tensors; unchanged leading cached parts are retained
     while only fresh suffix rows are overwritten. Scatter indices remain in
-    the logical `seq_len` even when the buffer has `execution_len` rows.
+    the logical `seq_len` even when the buffer has `execution_len` rows. Each
+    native scatter publishes the host-written rows before returning.
     """
     if execution_len is None:
         execution_len = seq_len
@@ -348,7 +378,7 @@ def scatter_visual_embeds_to_dense(
             row_indices_cpu = row_indices_cpu.detach().to(
                 device="cpu", dtype=torch.int64
             ).contiguous()
-        if execution_len > seq_len and row_indices_cpu.numel() \
+        if execution_len > seq_len and row_indices_cpu.numel()\
                 and int(row_indices_cpu.max()) >= seq_len:
             raise ValueError("DeepStack scatter indices must stay within logical seq_len")
         previous_mask = getattr(
@@ -359,7 +389,7 @@ def scatter_visual_embeds_to_dense(
             and previous_mask is not None
             and torch.equal(previous_mask, mask_cpu)
         )
-        if previous_signature == signature and previous_mask is not None \
+        if previous_signature == signature and previous_mask is not None\
                 and not mask_unchanged:
             for dense in dense_list:
                 dense.zero_()

@@ -24,8 +24,11 @@ class ResidentAudioEncoder:
         self.last_length = None
         self.calls = 0
         self.positions = None
+        self._resource = None
 
-    def install(self):
+    def install(self, parent=None):
+        from rpu_backend.runtime._native_retirement import _InstalledNativeResource
+
         a = self.audio
         c = a.config
         if (c.d_model, c.encoder_layers, c.encoder_attention_heads, c.encoder_ffn_dim,
@@ -37,8 +40,16 @@ class ResidentAudioEncoder:
                 raise UnsupportedModelError("resident ASR LayerNorm epsilon differs")
         if a.ln_post.eps != 1e-5:
             raise UnsupportedModelError("resident ASR final LayerNorm epsilon differs")
+        self.graph = torch.rpu.GraphCache(max_entries=1)
         self.handle = torch.ops.rpu.siglip_create(True)
         columns = [[] for _ in range(16)]
+        keepalive = {"audio": a, "weights": columns}
+        self._resource = _InstalledNativeResource(
+            self, self.handle, torch.ops.rpu.siglip_destroy,
+            graphs=(self.graph,), keepalive=keepalive,
+            label="ASR audio encoder", handle_name="handle",
+        )
+        self._resource.take_ownership(self if parent is None else parent)
         for layer in a.layers:
             attn = layer.self_attn
             modules = [attn.q_proj, attn.k_proj, attn.v_proj, attn.out_proj, layer.fc1, layer.fc2]
@@ -64,8 +75,8 @@ class ResidentAudioEncoder:
             transform_linear_weight(a.proj2.weight.detach(), 1, 8).to("rpu"),
             a.proj2.bias.detach().to("rpu"))
         self.cache = RPUCache(18, 1, 128, 16, 64, dtype=torch.float16, attn_tp=8)
-        self.graph = torch.rpu.GraphCache(max_entries=1)
         self.positions = a.positional_embedding.positional_embedding[:13].unsqueeze(0).expand(8, -1, -1).contiguous().to("rpu")
+        keepalive.update(cache=self.cache, positions=self.positions)
 
     def encode(self, hidden):
         from rpu_backend.adapters.siglip import _siglip_component_execution_plan
@@ -120,10 +131,9 @@ class ResidentAudioEncoder:
         return BaseModelOutputWithPooling(last_hidden_state=hidden)
 
     def close(self):
-        if self.graph is not None:
+        if self._resource is not None:
+            self._resource.retire()
+        elif self.graph is not None:
             self.graph.clear()
-        if self.handle is not None:
-            torch.ops.rpu.siglip_destroy(self.handle)
-            self.handle = None
         self.cache = self.graph = None
         self.positions = None

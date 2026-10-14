@@ -2,7 +2,7 @@
 
 Only device initialization and unrelated owner bookkeeping are replaced. The
 production caller, allocation paths, allocator arithmetic/aliasing and complete
-layout hash are compiled from the checkout, so no RPU library/device is loaded.
+layout hash are compiled from the checkout, so no device library/device is loaded.
 """
 from pathlib import Path
 import re

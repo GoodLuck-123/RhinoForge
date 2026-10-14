@@ -1,41 +1,9 @@
-"""HALO text_decode_step（mode="und" subtask 文本自回归解码单步）→ RPU（WS-2 组件 C）。
+"""HALO autoregressive text decoding through the shared causal decoder.
 
-旁路口径（``use_subtask=True``，**非部署 action 路径**）下 ``Bagel.generate_text``
-(bagel.py:1355) 每步：``forward_inference(mode="und", is_causal=True)`` 产 post-norm
-hidden（``packed_query_sequence``，bagel.py:1403）→ ``lm_head``（:1404）→ logits →
-argmax（``do_sample=False``，:1410）。assess verdict = **Adapter-only**（同 sibling
-A，``text_cache.py``）：复用通用 ``causal_decoder_*`` op + HALO und/base 权重，
-**零新 C++**。C 唯一比 A 多的（vocab logits）走 **host** ``F.linear``：HALO 实际
-``language_model.lm_head.weight`` = [151933,1536]，151933 % NUM_CORES(8) = 5 ≠ 0 →
-片上 fused lm_head 的 ``vocab % 8 == 0`` 硬约束（``rpu_qwen3_model.h:635/681``）拒绝
-它（pad 151933→152064 + argmax 前 mask 131 行垃圾 = gratuitous）；host 投影镜像动作
-专家 M1 边界，零对齐风险。
-
-机制：
-  * **seq=1 decode**：query = 1 token，attend 长前缀 P。传 ``is_causal=True`` +
-    ``attention_mask=None``：入口守卫（``rpu_qwen3_model.h:502`` 拒 ``is_causal=false``
-    且无 mask）放行；``seq_len==1`` 时内层 ``sdpa_causal = is_causal && (seq_len > 1)``
-    = false → **MASK_NONE**（full-attend ``kv_seq_len = P+1``，tail 因果，**不触发 LTM
-    前缀对齐拒绝**），故 C **无需** A 的显式 2D causal-prefix mask（``:1287``）。
-  * **RoPE 解耦**（与 A cond regime 同源根因，已证）：HALO MoT 压缩图像 token 的 RoPE
-    （``bagel.py:387-390``：kv_len +num_img+2，rope 只 +1，同 ``curr_position_id``），
-    decode token 的语义 position ``P_sem``（rope 续尾，实测≈11）与 KV 落位 ``P_idx``
-    （物理 kv_len）**解耦**。复用 A 的 ``cos_sin_offset``：
-    seq=1 时单 chunk ``chunk.offset=0`` ⇒ ``cos_sin_start == cos_sin_offset``，设
-    ``cos_sin_offset=P_sem`` / ``position=P_idx``（``rpu_qwen3_model.h:1078``）。
-  * **lm_head host**：forward 返回 post-final-norm hidden ``[1,1,H]``，**capture 退出
-    后**读（graph end() 写入，作用域内提前读会得全 0；同 ``runtime.py:259``）→ host
-    ``F.linear(hidden.float(), lm_head_w.float())`` → logits → argmax。
-
-验收（先验证再定 gate，2026-06-16 拍板）：cond 长前缀 regime argmax-token-match 硬门
-+ hidden cos/MSE 诊断（cond 可能继承 A 的 L16 v3.x kernel 残差，先实测再定 hidden 是否
-入硬门）；clean 短前缀 regime（如构造）hidden cos≥0.999 证 port 正确。proof 边界：数值
-正确性由 @hardware .81 测试对 golden gate，本模块自身不构成硬件证据。
-
-权重复用：``weights.py:load_halo_branches`` 的 text（und/base）分支 + 新增 host
-``lm_head_w``。前缀注入复用 ``runtime._swizzle_prefix_7d``（7-D cache 布局，与 kernel
-DMA 契约一致）。RoPE 表复用 A 的 ``build_seq_rope_tables``（顺序 1D RoPE，theta=1e6）。
-"""
+Each call consumes one token and attends to the supplied prefix. Its semantic
+RoPE position is separate from the KV insertion offset. Read post-norm hidden
+states after graph execution, then apply the vocabulary head and argmax on
+CPU because the checkpoint vocabulary does not match the fused head layout."""
 from __future__ import annotations
 
 import dataclasses
@@ -84,7 +52,7 @@ class HaloTextDecodeStep:
 
     复用通用 ``causal_decoder_*`` op + HALO und/base 权重 + host lm_head。
     ``_cos``/``_sin`` 是顺序 1D-RoPE 表（与 handle 等寿命，set_weights 已绑同一份）。
-    所有权：RPU 权重/表/cache 在 runner 存活期有效；``_handle`` 由 finalize 释放。
+    所有权：device 权重/表/cache 在 runner 存活期有效；``_handle`` 由 finalize 释放。
     """
 
     cfg: HaloConfig
@@ -111,7 +79,7 @@ class HaloTextDecodeStep:
                            handles={"_handle": (self._handle, _destroy_causal_decoder)})
 
     def _embed_token(self, token_id: torch.Tensor) -> torch.Tensor:
-        """单 decode token → ``[1, 1, H]`` fp16 RPU。
+        """单 decode token → ``[1, 1, H]`` fp16 device。
 
         跟 HALO runtime 路径（``generate_text`` 走 ``embed_tokens`` + 同 A 的
         autocast embed）：``F.embedding`` → ``.float()`` → ``.to(bf16).to(fp16)``，
@@ -125,12 +93,10 @@ class HaloTextDecodeStep:
     def _inject_prefix(
         self, prefix_k: List[torch.Tensor], prefix_v: List[torch.Tensor], prefix_len: int
     ) -> None:
-        """灌入 28 层 decode 前缀 K/V（CUDA NaiveCache ``[P,2,128]`` bf16/fp32）。
+        """Copy per-layer ``[prefix, heads, head_dim]`` K/V into stable cache storage.
 
-        前缀 = 图像 prefill + 文本 prompt prefill（cond regime 实测 P=4706）。
-        复用 text_cache 的稳址 7-D 写入，再 ``reset_to_position(P)``（新 token K/V
-        落 ``[P, P+1)``）；换址才 invalidate / 更新 signature，内容变化不换 key。
-        """
+        Set insertion position to the prefix length. A storage change invalidates
+        the graph; an in-place content update preserves its signature."""
         _inject_text_prefix(self, prefix_k, prefix_v, prefix_len)
 
     def _execution_plan(self, position: int):
@@ -182,20 +148,12 @@ class HaloTextDecodeStep:
         query_position_id: torch.Tensor,
         prefix_kv: Tuple[List[torch.Tensor], List[torch.Tensor]],
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        """一次 und 解码单步。返回 ``(hidden [H], logits [vocab], argmax_token)`` CPU fp32。
+        """Return CPU FP32 hidden ``[hidden]``, logits ``[vocab]``, and an argmax token.
 
-        I/O 契约（golden ``step0/`` 同名字段，golden 由 ``generate_text`` 首步捕获）：
-          * ``start_token_id`` 标量/``[1]`` int —— ``packed_start_tokens``（首步 = BOS）。
-          * ``query_position_id`` 标量/``[1]`` int —— ``packed_query_position_ids``，
-            驱动 1D RoPE 的**语义** position ``P_sem``（cond regime 与 KV 落位偏移
-            解耦：实测 ≈11 vs 落位 4706）。
-          * ``prefix_kv`` = (28 层 k, 28 层 v) 各 ``[P,2,128]`` —— decode 进入时的前缀
-            KV（图像 + 文本 prompt prefill，cond regime golden ``step0/prefix_kv.pt``）。
-
-        走 ``is_causal=True`` + ``attention_mask=None``（seq=1 → MASK_NONE，过入口守卫，
-        无需显式 mask）；KV 插入于 ``position=P``，RoPE 由 ``cos_sin_offset=P_sem`` 驱动
-        （C++ WS-2 解耦，见 ``rpu_qwen3_model.h:rope_position_base_``）。
-        """
+        ``start_token_id`` and ``query_position_id`` are scalar or single-item integer
+        inputs. ``prefix_kv`` contains per-layer ``[prefix, heads, head_dim]`` K/V.
+        The token attends to the full prefix: insert KV at its length and use the
+        independent query position as the RoPE offset."""
         cfg = self.cfg
         prefix_k, prefix_v = prefix_kv
         prefix_len = int(prefix_k[0].shape[0])
@@ -215,7 +173,7 @@ class HaloTextDecodeStep:
         plan = self._execution_plan(prefix_len)
         descriptor = plan.selected.stage_tuple.physical_descriptor
         self._inject_prefix(prefix_k, prefix_v, prefix_len)
-        ie = self._embed_token(start_token_id)               # [1,1,H] fp16 RPU
+        ie = self._embed_token(start_token_id)               # [1,1,H] fp16 device
         # sig 含 prefix_len（KV 落位 P_idx）+ seq=1 + rope_base（RoPE 起点 P_sem，
         # BUILD 期烘焙进 cos_sin_start kernel 常量）+ prefix_epoch（DMA 指针代数）。
         # Codex Q5：decode 每步 P_idx/P_sem 递增，必须进 key 防陈旧 replay 用错

@@ -1,0 +1,32 @@
+# Official dense Qwen3-14B source, converted once during cold installation.
+# Decoder seven projections: symmetric INT4/G32; lm_head: INT4/G32.
+# TP8/B1, default ACC16, P128/D7.
+# Only the listed length/ACC combinations are supported.
+[example]
+profile_id = "qwen3-14b.w4a16-g32-lm-head.text"
+registry_alias = "qwen3-14b"
+target = "qwen3"
+dtype = "w4a16"
+architecture = "Qwen3ForCausalLM"
+
+[example.opt_in]
+
+[input]
+prompt = "Explain what a compiler does."
+prefill_tokens = 128
+decode_steps = 7
+stop_on_eos = false
+
+[run]
+warmup = 2
+runs = 5
+hwperf = false
+profile = false
+seed = 0
+
+[rpu_execution.model]
+num_cores = 8
+
+[rpu_execution.prefill]
+chunk_size = "auto"
+linear_acc32 = false

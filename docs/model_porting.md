@@ -129,6 +129,36 @@ For DDR/SPM transfers, choose ownership explicitly:
 - mutable DMA updates a caller or fresh-output address before replay; and
 - immediate DMA is a one-shot transfer outside capture.
 
+### Connect an execution-plan owner
+
+Register stable component IDs and only the stages that the owner implements.
+Use `normalize_rpu_execution` and `resolve_component_rpu_execution` for mapping
+validation before weight mutation. Reuse `plan_bounded_prefill_execution` or
+`plan_native_component_execution`; a fixed-ABI owner uses
+`plan_fixed_component_execution` instead of inventing a search domain.
+
+The native resolver supplies complete, ordered, unique candidates after checking
+shape and SPM capacity. Pass real input spans and an explicit `plan_signature`
+covering mask, RoPE mode, KV length and grouping where relevant. Cache the
+immutable selected plan with the actual Graph owner. An exact mismatch or
+exhausted search limit fails; it must not clamp to another configuration.
+
+Pass the selected physical descriptor to the forward and include its
+`graph_key_words()` in retained Graph signatures. `FmbPhysicalManifestConsumer`
+checks every selected route and finishes with `require_all_consumed()`.
+Python does not duplicate the allocator, and the forward does not choose a new
+route. Hot changes use the owning `ExecutionSession` transaction to validate,
+apply or roll back controls and retire affected plans and Graphs.
+
+For fused subclasses, `cross_layer_batch_size=0` uses the framework's default
+grouping. `chunk_mode` defaults to `SEQUENTIAL`; `KV_FIRST` separates KV
+preparation when required by the attention contract. `inter_layer_io=AUTO`
+resolves storage from the plan. Preload, KV-first and post callbacks are optional;
+the adapter owns Graph signatures and capture, including callback operations.
+Callbacks must not open a nested raw batch or Graph cache. See
+[chunk planning](../knowledge/concepts/chunk-plan-and-envelope.md) and
+[composite handoff](../knowledge/concepts/component-handoff.md).
+
 ## 5. Add or reuse a public operator
 
 When an existing operator is sufficient, call its public host wrapper rather

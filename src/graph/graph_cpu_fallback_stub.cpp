@@ -5,16 +5,16 @@
 //
 // 本实现从 feature-auto-batch src/rpu_backend.cpp:2176 port 过来,去掉了 bug3
 // 诊断 logging (port-v5 上没那套基础设施,简化版优先)。逻辑分两段:
-//   Step 1: 把 stack 上的 RPU tensor / TensorList / OptionalTensorList 改成 CPU
-//           zero-copy view (共用 RPU DDR storage);view 进 cpu_view_lifeline +
+//   Step 1: 把 stack 上的 device tensor / TensorList / OptionalTensorList 改成 CPU
+//           zero-copy view (共用 device DDR storage);view 进 cpu_view_lifeline +
 //           ZeroCopyHolderGuard 镜像登记,防 .out variant redispatch 期间
 //           storage_holder 被提前 deleter 触发 use-after-free
 //           (Bug3 fix:topk.values / sort.values SIGABRT 根因)。
 //   Step 2: op.redispatchBoxed(CPU dispatch_key, stack) — 在 CPU 上跑真 op。
 //   Step 3:
-//     alias=true (Tier1 .out variant): return slot 替换回原 RPU .out= input tensor
-//                (CPU op 已通过 zero-copy view 写穿到原 RPU storage)。
-//     alias=false (Tier2 functional): return CPU tensor `.to(target_device)` 拷回 RPU。
+//     alias=true (Tier1 .out variant): return slot 替换回原 device .out= input tensor
+//                (CPU op 已通过 zero-copy view 写穿到原 device storage)。
+//     alias=false (Tier2 functional): return CPU tensor `.to(target_device)` 拷回 device。
 //
 // 用户面影响:配合 custom_cpu_fallback 的 graph state fork (P7.1a 第二步) 后,
 // RECORDING/REPLAYING 期 dispatcher 调到的 CPU fallback op 会走 HostCallback
@@ -39,7 +39,7 @@ void run_cpu_fallback_zerocopy(const c10::OperatorHandle& op,
     const auto num_arguments = schema.arguments().size();
     const auto stack_start = stack->size() - num_arguments;
 
-    // 保存原始 RPU tensor (alias=true 时回填 return slot 用) + 原 device
+    // 保存原始 device tensor (alias=true 时回填 return slot 用) + 原 device
     // (alias=false 时 .to() 拷回用)。
     std::vector<at::Tensor> rpu_inputs(num_arguments);
     std::vector<c10::optional<c10::Device>> original_devices(num_arguments);
@@ -65,7 +65,7 @@ void run_cpu_fallback_zerocopy(const c10::OperatorHandle& op,
         }
     };
 
-    // Step 1: RPU tensor / TensorList / OptionalTensorList → CPU view
+    // Step 1: device tensor / TensorList / OptionalTensorList → CPU view
     for (size_t i = 0; i < num_arguments; ++i) {
         auto& ivalue = (*stack)[stack_start + i];
         if (ivalue.isTensor()) {
@@ -134,7 +134,7 @@ void run_cpu_fallback_zerocopy(const c10::OperatorHandle& op,
     op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), stack);
 
     // Write-back flush. The CPU op writes `.out=` results through zero-copy
-    // views into RPU DDR, leaving dirty CPU cache lines. A later device read
+    // views into device DDR, leaving dirty CPU cache lines. A later device read
     // requires explicit publication of those writes, including mutable DMA
     // during Graph replay. Only schema-marked writable arguments enter this
     // list (`is_mutable_output_arg`); read-only inputs are never flushed here.
@@ -163,8 +163,8 @@ void run_cpu_fallback_zerocopy(const c10::OperatorHandle& op,
     // functional) 走两条路。
     if (alias_output_args) {
         // Tier1 .out variant: returns 与 output_arg_indices schema 顺序一一对应。
-        // 把 stack 上每个 return slot 替换回原 RPU .out= input arg —— CPU op 已
-        // 经通过 zero-copy view 写穿到该 RPU storage,直接 return 原 tensor 即
+        // 把 stack 上每个 return slot 替换回原 device .out= input arg —— CPU op 已
+        // 经通过 zero-copy view 写穿到该 device storage,直接 return 原 tensor 即
         // 跨 replay 稳定 dev_addr。如果对 zero-copy CPU view 做 .to(rpu),
         // storage allocator=nullptr 会触发 heap corruption (历史 SIGABRT 根因)。
         auto out_indices = collect_output_arg_indices(schema);
@@ -177,13 +177,13 @@ void run_cpu_fallback_zerocopy(const c10::OperatorHandle& op,
             TORCH_CHECK(arg_idx < num_arguments &&
                             rpu_inputs[arg_idx].defined(),
                         "run_cpu_fallback_zerocopy(alias=true): out arg ",
-                        arg_idx, " was not RPU tensor at input; op=",
+                        arg_idx, " was not device tensor at input; op=",
                         schema.name());
             (*stack)[ret_start + r] = rpu_inputs[arg_idx];
         }
     } else {
         // Tier2 functional: CPU op 内部自己 alloc fresh CPU tensor (allocator
-        // 非 nullptr),.to(target_device) 拷回 RPU 安全。
+        // 非 nullptr),.to(target_device) 拷回 device 安全。
         c10::optional<c10::Device> target_device;
         for (const auto& dev : original_devices) {
             if (dev.has_value()) {

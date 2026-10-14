@@ -51,7 +51,7 @@
 //   - cfg.cross_layer_batch_size = num_layers() (force single group).
 //
 // Framework contract: src/core/fused_model_base.h
-// Pitfall 2 structural fix reference: CLAUDE.md §"P2 Out-of-band SPM"
+// Pitfall 2 structural fix reference: docs/pitfalls.md
 
 #include "fused_model_base.h"
 #include "pi05_execution_topology.h"
@@ -68,9 +68,11 @@
 #include "rpu_spm_allocator.h"
 #include "rpu_runtime_state.h"  // v5-07: shared runtime globals (g_chunk_size_override, get_cross_layer_batch_size)
 #include <ATen/record_function.h>
+#include <c10/core/InferenceMode.h>
 #include <c10/util/Half.h>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 #include <algorithm>
@@ -162,7 +164,7 @@ void check_gemma_scale_lists(
                                   int64_t i) {
         TORCH_CHECK(w.device().type() == at::kPrivateUse1 && w.is_contiguous(),
                     "gemma_set_weights: ", name, "[", i,
-                    "] must be contiguous RPU tensor");
+                    "] must be contiguous device tensor");
         TORCH_CHECK(w.scalar_type() == at::kHalf || w.scalar_type() == at::kChar
                     || w.scalar_type() == at::kByte,
                     "gemma_set_weights: ", name, "[", i,
@@ -175,7 +177,7 @@ void check_gemma_scale_lists(
                         && scale.device().type() == at::kPrivateUse1
                         && scale.is_contiguous(),
                         "gemma_set_weights: ", name, "_scale[", i,
-                        "] must be a contiguous fp16 RPU tensor");
+                        "] must be a contiguous fp16 device tensor");
             if (w.scalar_type() == at::kChar) {
                 TORCH_CHECK(scale.dim() == 1 && scale.numel() == w.size(0),
                             "gemma_set_weights: W8A16 ", name, "_scale[", i,
@@ -376,8 +378,8 @@ public:
     }
 
     void set_prefill_pair_rows(int64_t rows) {
-        TORCH_CHECK(rows == 272 || rows == 288 || rows == 304 || rows == 320 || rows == 400 || rows == 416 || rows == 432 || rows == 448,
-                    "Gemma paired prefill supports only exact C272/C288/C304/C320/C400/C416/C432/C448 profiles");
+        TORCH_CHECK(rows == 272 || rows == 288 || rows == 304 || rows == 320 || rows == 336 || rows == 400 || rows == 416 || rows == 432 || rows == 448 || rows == 464,
+                    "Gemma paired prefill supports only exact C272/C288/C304/C320/C336/C400/C416/C432/C448/C464 profiles");
         TORCH_CHECK(layer_weights_.empty(),
                     "Gemma paired prefill rows must be bound before set_weights");
         TORCH_CHECK(!pi05_pair_rows_bound_ || pi05_pair_rows_ == rows,
@@ -422,6 +424,12 @@ public:
         // an earlier owner.  The cold policy itself is immutable per handle.
         pi05_prefill_kv1_replica_proof_ = false;
         pi05_a8_scales_.clear();
+        chunk_mask_publications_.clear();
+        pi05_prefill_rope_cpu_published_ = false;
+        pi05_prefill_rope_private_owned_ = false;
+        pi05_reduced_prefill_rope_receipt_ = false;
+        pi05_reduced_prefill_rope_owner_generation_ = 0;
+        pi05_reduced_prefill_rope_keepalive_ = {};
         if (pi05_prefill_kv1_pair_direct_) prefill_rope_ready_ = false;
         int64_t N = static_cast<int64_t>(q_w_list.size());
         TORCH_CHECK(N > 0, "gemma_set_weights: empty weight lists");
@@ -557,12 +565,15 @@ public:
                     sin_.is_contiguous() && cos_.size(0) >= pi05_prefix_rows() &&
                     cos_.size(1) == 128,
                 "Pi Prefill KV1 pair/direct requires the exact W8A16 "
-                "18-layer H2048/D256 owner and contiguous RPU FP16 RoPE tables");
+                "18-layer H2048/D256 owner and contiguous device FP16 RoPE tables");
             // These owners must exist before stage-domain planning.  They are
             // rewritten in place by set_prefill_rope and never rebound while
             // a graph can reference them.
             prefill_cos_ = at::empty(cos_.sizes(), cos_.options());
             prefill_sin_ = at::empty(sin_.sizes(), sin_.options());
+            pi05_prefill_rope_private_owned_ =
+                pi05_prefill_rope_private_owners_[0].snapshot(prefill_cos_) &&
+                pi05_prefill_rope_private_owners_[1].snapshot(prefill_sin_);
             for (const auto& weights : layer_weights_) {
                 rpu_validate_pi05_prefill_kv1_pair_owner_w8a16(
                     weights.k_w, weights.k_ws, weights.v_w, weights.v_ws);
@@ -598,6 +609,15 @@ public:
             }
         }
 
+        // Only the already validated reduced Pi weight/topology installation
+        // admits the P800 CPU gather; a caller cannot supply this authority.
+        pi05_reduced_prefill_rope_receipt_ =
+            (num_cores() == 4 || num_cores() == 6) && num_layers() == 18 &&
+            hidden_size == 2048 && num_q_heads == 8 && num_kv_heads == 4 &&
+            head_dim == 256 && logical_intermediate_size_ == 16384 &&
+            attn_tp() == 4 && mlp_tp() == num_cores() &&
+            (q_w_list[0].scalar_type() == at::kHalf ||
+             q_w_list[0].scalar_type() == at::kChar);
         invalidate_model_state();  // D-503: last non-empty statement of set_weights
     }
 
@@ -620,6 +640,10 @@ public:
     // absolute row.
     // ========================================================================
     void set_prefill_rope(const at::Tensor& cos, const at::Tensor& sin) {
+        const bool was_published = pi05_prefill_rope_cpu_published_;
+        // Clear before validation or either copy: a failed pair must not retain
+        // authority for the previous contents, even if the first copy succeeded.
+        pi05_prefill_rope_cpu_published_ = false;
         if (pi05_prefill_kv1_pair_direct_) prefill_rope_ready_ = false;
         TORCH_CHECK(cos_.defined(),
                     "gemma_set_prefill_rope: call gemma_set_weights first");
@@ -638,12 +662,12 @@ public:
                     "static table's ", cos_.size(0));
         if (pi05_prefill_kv1_pair_direct_) {
             TORCH_CHECK(
-                cos.device().type() == at::kPrivateUse1 &&
-                    sin.device().type() == at::kPrivateUse1 &&
+                (cos.device().is_cpu() || cos.device().type() == at::kPrivateUse1) &&
+                    (sin.device().is_cpu() || sin.device().type() == at::kPrivateUse1) &&
                     cos.is_contiguous() && sin.is_contiguous() &&
                     cos.size(0) >= pi05_prefix_rows() && cos.size(1) == 128,
                 "Pi Prefill KV1 pair/direct RoPE update must be contiguous "
-                "RPU FP16 and cover all 800 rows");
+                "CPU or device FP16 and cover all ", pi05_prefix_rows(), " rows");
         }
         if (!prefill_cos_.defined()) {
             TORCH_CHECK(
@@ -652,11 +676,90 @@ public:
                 "allocated by set_weights");
             prefill_cos_ = at::empty_like(cos_);
             prefill_sin_ = at::empty_like(sin_);
+            // Only this fresh lazy allocation can own a reduced-core receipt.
+            // Reinstall clears authority but retains addresses: existing slots
+            // are never relabelled as a new install's private allocation.
+            if (pi05_reduced_prefill_rope_receipt_) {
+                pi05_reduced_prefill_rope_owner_generation_ =
+                    installed_model_state_generation();
+                pi05_reduced_prefill_rope_keepalive_ = {prefill_cos_, prefill_sin_};
+                pi05_prefill_rope_private_owned_ =
+                    pi05_prefill_rope_private_owners_[0].snapshot(prefill_cos_) &&
+                    pi05_prefill_rope_private_owners_[1].snapshot(prefill_sin_);
+            }
+        }
+        const uint64_t generation =
+            (pi05_prefill_kv1_pair_direct_ || pi05_reduced_prefill_rope_receipt_)
+                ? installed_model_state_generation() : 0;
+        const auto private_cpu_pair = [&] {
+            if ((!pi05_prefill_kv1_pair_direct_ && !pi05_reduced_prefill_rope_receipt_) ||
+                !pi05_prefill_rope_private_owned_ ||
+                !cos.device().is_cpu() || !sin.device().is_cpu() ||
+                cos.unsafeGetTensorImpl()->is_neg() || sin.unsafeGetTensorImpl()->is_neg() ||
+                cos.unsafeGetTensorImpl()->is_conj() || sin.unsafeGetTensorImpl()->is_conj() ||
+                cos.unsafeGetTensorImpl()->requires_grad() ||
+                sin.unsafeGetTensorImpl()->requires_grad() ||
+                cos.unsafeGetTensorImpl()->layout() != c10::kStrided ||
+                sin.unsafeGetTensorImpl()->layout() != c10::kStrided)
+                return false;
+            // A hit must not bypass copy_'s inference-owner mutation guard.
+            if (!c10::InferenceMode::is_enabled() &&
+                (prefill_cos_.is_inference() || prefill_sin_.is_inference()))
+                return false;
+            std::array<Pi05PrefillRopeSpan, 2> owners, sources;
+            if (!owners[0].snapshot(prefill_cos_) ||
+                !owners[1].snapshot(prefill_sin_) ||
+                owners != pi05_prefill_rope_private_owners_ ||
+                !sources[0].snapshot(cos) || !sources[1].snapshot(sin) ||
+                owners[0].rows < cos.size(0) || owners[1].rows < sin.size(0) ||
+                !owners[0].disjoint(owners[1]))
+                return false;
+            if (pi05_reduced_prefill_rope_receipt_) {
+                if (generation == 0 ||
+                    pi05_reduced_prefill_rope_owner_generation_ != generation ||
+                    cos.size(0) != 800 || cos.size(1) != 128)
+                    return false;
+                for (size_t i = 0; i < owners.size(); ++i) {
+                    const auto& slot = i == 0 ? prefill_cos_ : prefill_sin_;
+                    if (!pi05_reduced_prefill_rope_keepalive_[i].defined() ||
+                        !slot.is_same(pi05_reduced_prefill_rope_keepalive_[i]) ||
+                        slot.unsafeGetTensorImpl()->is_neg() ||
+                        slot.unsafeGetTensorImpl()->is_conj() ||
+                        slot.unsafeGetTensorImpl()->requires_grad() ||
+                        owners[i].device.type() != at::kPrivateUse1 ||
+                        owners[i].offset != 0 || owners[i].data != owners[i].base ||
+                        owners[i].bytes != owners[i].storage_bytes ||
+                        sources[i].offset != 0 || sources[i].data != sources[i].base ||
+                        sources[i].bytes != sources[i].storage_bytes)
+                        return false;
+                }
+            }
+            // An unused tail can still alias a destination's full backing.
+            // Such sources retain the original copy path and gain no receipt.
+            for (const auto& source : sources)
+                for (const auto& owner : owners)
+                    if (!source.disjoint(owner)) return false;
+            return true;
+        };
+        if (g_rpu_ddr_flush_force_enabled && was_published &&
+            pi05_prefill_rope_cpu_generation_ == generation &&
+            pi05_prefill_rope_cpu_rows_ == cos.size(0) && private_cpu_pair() &&
+            std::memcmp(cos.data_ptr(), prefill_cos_.data_ptr(), cos.nbytes()) == 0 &&
+            std::memcmp(sin.data_ptr(), prefill_sin_.data_ptr(), sin.nbytes()) == 0) {
+            pi05_prefill_rope_cpu_published_ = true;
+            if (pi05_prefill_kv1_pair_direct_) prefill_rope_ready_ = true;
+            return;
         }
         // narrow() of a contiguous tensor on dim 0 is itself contiguous, so this
         // is a plain prefix write into the stable buffer, not a strided copy.
         prefill_cos_.narrow(0, 0, cos.size(0)).copy_(cos);
         prefill_sin_.narrow(0, 0, sin.size(0)).copy_(sin);
+        if (g_rpu_ddr_flush_force_enabled && private_cpu_pair() &&
+            installed_model_state_generation() == generation) {
+            pi05_prefill_rope_cpu_generation_ = generation;
+            pi05_prefill_rope_cpu_rows_ = cos.size(0);
+            pi05_prefill_rope_cpu_published_ = true;
+        }
         if (pi05_prefill_kv1_pair_direct_) prefill_rope_ready_ = true;
     }
 
@@ -748,7 +851,7 @@ public:
 
         // run_all_layers does full k/v cache validation (size / device / dtype / contiguous).
         TORCH_CHECK(hidden_states.device().type() == at::kPrivateUse1,
-                    "GemmaModel::forward: hidden_states must be on RPU device");
+                    "GemmaModel::forward: hidden_states must be on device");
         TORCH_CHECK(position >= 0,
                     "GemmaModel::forward: position must be non-negative, got ", position);
         const int64_t seq_len = hidden_states.size(1);
@@ -1686,11 +1789,12 @@ protected:
             }
             if (!pi05_pair_scratch_mask())
                 paired.push_back({"sdpa_mask", pi05_pair_mask_bytes(), 0, 30, StorageClass::Temp, 0, nullptr, ALL});
-            paired.push_back({"pi05_pair_residual", pi05_pair_compact_root_bytes(), 0, 30, StorageClass::Temp, 0, nullptr, ALL});
+            if (!pi05_pair_slab_compact())
+                paired.push_back({"pi05_pair_residual", pi05_pair_compact_root_bytes(), 0, 30, StorageClass::Temp, 0, nullptr, ALL});
             const auto alias = [&](const char* name, const char* root) {
                 paired.push_back({name, 0, 0, 30, StorageClass::Temp, 0, root, ALL});
             };
-            // C416/C432/C448 paired-O consumes both masks before any post-attention
+            // C416/C432/C448/C464 paired-O consumes both masks before any post-attention
             // normalization writes S1. Reuse this declared root and upload
             // both halves in every layer; no mask contents survive the MLP.
             if (pi05_pair_scratch_mask()) alias("sdpa_mask", "pi05_pair_s1");
@@ -2331,7 +2435,7 @@ private:
     // A cold execution profile, bound before planner enumeration. Keep the
     // legacy C400 default; actual two-camera T32 binds C272, while T64 binds
     // C288 for two cameras and C416 for three cameras; T96 binds C304/C432,
-    // and T128 binds C320/C448.
+    // T128 binds C320/C448, and T160 binds C336/C464.
     // Planner trials never mutate this geometry or infer it from a candidate.
     int64_t pi05_pair_rows_ = 400;
     bool pi05_pair_rows_bound_ = false;
@@ -2342,26 +2446,31 @@ private:
     int64_t pi05_pair_owner_elements() const { return pi05_pair_owner_bytes() / 2; }
     int64_t pi05_pair_mask_bytes() const { return pi05_pair_rows() * pi05_prefix_rows() * 2; }
     int64_t pi05_pair_tile_rows() const {
-        return pi05_pair_rows() == 448 ? 96 :
+        return pi05_pair_rows() == 464 ? 80 : pi05_pair_rows() == 448 ? 96 :
             (pi05_pair_rows() == 432 ? 112 : (pi05_pair_rows() == 416 ? 128 : 160));
     }
-    bool pi05_pair_single_compact() const { return pi05_pair_rows() == 448; }
+    bool pi05_pair_single_compact() const { return pi05_pair_rows() == 448 || pi05_pair_rows() == 464; }
+    bool pi05_pair_slab_compact() const { return pi05_pair_rows() == 464; }
+    int64_t pi05_pair_spill_elements() const {
+        return (pi05_pair_slab_compact() ? 2 : 1) * pi05_pair_owner_elements();
+    }
     int64_t pi05_pair_compact_root_bytes() const {
+        if (pi05_pair_slab_compact()) return 0;
         return (pi05_pair_single_compact() ? 1 : 2) * pi05_pair_owner_bytes();
     }
     const char* pi05_pair_kv_norm_name(bool legacy_reuse) const {
-        // C448 keeps input C1 in S3+4D across both KVIN callbacks.
+        // C448/C464 keeps input C1 in S3+4D across both KVIN callbacks.
         // The legacy non-C400 fallback normalizes into S3 and would erase it.
         return pi05_pair_single_compact() || legacy_reuse ? "input_norm_kv" : "input_norm";
     }
     bool pi05_pair_scratch_mask() const {
         // Without paired-O, COMP1 still owns its input/gate in S1.
-        return (pi05_pair_rows() == 416 || pi05_pair_rows() == 432 || pi05_pair_rows() == 448) && pi05_prefill_o_pair_;
+        return (pi05_pair_rows() == 416 || pi05_pair_rows() == 432 || pi05_pair_rows() == 448 || pi05_pair_rows() == 464) && pi05_prefill_o_pair_;
     }
     int64_t pi05_pair_mask_selector(int half) const {
         TORCH_CHECK(half == 0 || half == 1, "Pi paired mask requires half 0/1");
         // 1: S1 each layer; 2: independent root once per request;
-        // 3: S1 scratch each layer under the exact C416/C432/C448 paired-O owner.
+        // 3: S1 scratch each layer under the exact C416/C432/C448/C464 paired-O owner.
         return pi05_pair_scratch_mask() ? 3 : (half == 0 ? 1 : 2);
     }
     bool pi05_pair_mask_upload(int layer_idx, int half) const {
@@ -2371,6 +2480,11 @@ private:
         TORCH_CHECK(half == 0 || half == 1, "Pi paired compact input requires half 0/1");
         if (!pi05_pair_single_compact())
             return {pi05_pair_owner_elements(),pi05_pair_owner_bytes(),8,half};
+        // C464 owns both input stripes in S3, beyond both SDPA outputs.
+        if (pi05_pair_slab_compact())
+            return {3,pi05_pair_owner_elements(),pi05_pair_owner_bytes(),8,half,
+                    3,(half == 0 ? 5 : 4)*pi05_pair_owner_bytes(),
+                    pi05_pair_owner_bytes(),pi05_pair_slab_bytes()};
         // ABI2: extract source owner stripe; C0 is root4, C1 is S3+4D.
         return {2,pi05_pair_owner_elements(),pi05_pair_owner_bytes(),8,half,
                 half == 0 ? 4 : 3,half == 0 ? 0 : 4*pi05_pair_owner_bytes(),
@@ -2378,9 +2492,10 @@ private:
     }
     uint32_t pi05_pair_input_compact_address(int half) const {
         TORCH_CHECK(half == 0 || half == 1, "Pi paired compact input requires half 0/1");
-        const bool in_s3 = pi05_pair_single_compact() && half == 1;
+        const bool in_s3 = pi05_pair_slab_compact() || (pi05_pair_single_compact() && half == 1);
         const uint32_t base = addr(0,in_s3 ? "pi05_pair_s3" : "pi05_pair_residual");
-        const int64_t offset = (in_s3 ? 4 : half) * pi05_pair_owner_bytes();
+        const int64_t offset = (pi05_pair_slab_compact() ? (half == 0 ? 5 : 4) :
+            (in_s3 ? 4 : half)) * pi05_pair_owner_bytes();
         const int64_t extent = pi05_pair_owner_bytes();
         const int64_t root_bytes = in_s3 ? pi05_pair_slab_bytes() : pi05_pair_compact_root_bytes();
         TORCH_CHECK(base % 256 == 0 && offset % 256 == 0 && extent > 0 &&
@@ -2392,8 +2507,9 @@ private:
     std::vector<int64_t> pi05_pair_spill_arguments() const {
         // ABI1: S3[0,D) <-> q_ddr per-core first half, FP16, eight slots;
         // stride policy1 uses actual retained tensor capacity, minimum P rows.
-        return {1,pi05_pair_rows(),pi05_prefix_rows(),256,8,2,
-                pi05_pair_owner_bytes(),3,0,1,pi05_pair_slab_bytes(),
+        // ABI2 packs both post-attention residuals at S3[0,2D).
+        return {pi05_pair_slab_compact() ? 2 : 1,pi05_pair_rows(),pi05_prefix_rows(),256,8,2,
+                pi05_pair_spill_elements()*2,3,0,1,pi05_pair_slab_bytes(),
                 4*pi05_pair_owner_bytes(),pi05_pair_compact_root_bytes(),1}; // KVIN norm root S1
     }
     int64_t pi05_pair_spill_stride() const {
@@ -2403,10 +2519,10 @@ private:
                     q_ddr_buf_.storage_offset() == 0 && q_ddr_buf_.dim() == 3 &&
                     q_ddr_buf_.size(0) == 8 && q_ddr_buf_.size(1) >= pi05_prefix_rows() &&
                     q_ddr_buf_.size(2) == 256,
-                    "Pi C448 compact spill requires retained eight-slot Q DDR owner");
+                    "Pi single-compact spill requires retained eight-slot Q DDR owner");
         const int64_t stride = q_ddr_buf_.size(1) * 256 * sizeof(c10::Half);
         TORCH_CHECK(stride >= 2*pi05_pair_owner_bytes() && stride % 256 == 0,
-                    "Pi C448 compact spill Q DDR stride is invalid");
+                    "Pi single-compact spill Q DDR stride is invalid");
         return stride;
     }
     bool pi05_pair_fp16() const {
@@ -2435,9 +2551,15 @@ private:
         if (pi05_pair_rows() == 288) return pi05_pair_fp16()
             ? KernelId::PI05_PREFILL_KV1_PAIR_OWNER_FP16_M288N32X2K2048
             : KernelId::PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M288N32X2K2048;
+        if (pi05_pair_rows() == 336) return pi05_pair_fp16()
+            ? KernelId::PI05_PREFILL_KV1_PAIR_OWNER_FP16_M336N32X2K2048
+            : KernelId::PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M336N32X2K2048;
         if (pi05_pair_rows() == 320) return pi05_pair_fp16()
             ? KernelId::PI05_PREFILL_KV1_PAIR_OWNER_FP16_M320N32X2K2048
             : KernelId::PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M320N32X2K2048;
+        if (pi05_pair_rows() == 464) return pi05_pair_fp16()
+            ? KernelId::PI05_PREFILL_KV1_PAIR_OWNER_FP16_M464N32X2K2048
+            : KernelId::PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M464N32X2K2048;
         if (pi05_pair_rows() == 448) return pi05_pair_fp16()
             ? KernelId::PI05_PREFILL_KV1_PAIR_OWNER_FP16_M448N32X2K2048
             : KernelId::PI05_PREFILL_KV1_PAIR_OWNER_W8A16_M448N32X2K2048;
@@ -2473,12 +2595,26 @@ private:
                 ? KernelId::PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_FP16_C288X2_M160N80K128
                 : KernelId::PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_W8A16_C288X2_M160N80K128;
         }
+        if (pi05_pair_rows() == 336) {
+            if (pi05_prefill_a8_)
+                return KernelId::PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_C336_M48N32K2048;
+            return pi05_pair_fp16()
+                ? KernelId::PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_FP16_C336X2_M160N80K128
+                : KernelId::PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_W8A16_C336X2_M160N80K128;
+        }
         if (pi05_pair_rows() == 320) {
             if (pi05_prefill_a8_)
                 return KernelId::PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_C320_M48N32K2048;
             return pi05_pair_fp16()
                 ? KernelId::PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_FP16_C320X2_M160N80K128
                 : KernelId::PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_W8A16_C320X2_M160N80K128;
+        }
+        if (pi05_pair_rows() == 464) {
+            if (pi05_prefill_a8_)
+                return KernelId::PI05_PREFILL_GATE_UP_GEGLU_W8A8_SPLIT_C464_M48N32K2048;
+            return pi05_pair_fp16()
+                ? KernelId::PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_FP16_C464X2_M80N80K128
+                : KernelId::PI05_PREFILL_GATE_UP_GEGLU_WEIGHT_OUTER_W8A16_C464X2_M80N80K128;
         }
         if (pi05_pair_rows() == 448) {
             if (pi05_prefill_a8_)
@@ -2555,6 +2691,22 @@ private:
                 loaded(KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M288D256P288) &&
                 (!pi05_prefill_a8_ || loaded(KernelId::PI05_OWNER_NORM_COMPACT_A8_M288N2048));
         }
+        if (pi05_pair_rows() == 336) {
+            const auto o = pi05_pair_fp16()
+                ? KernelId::PI05_PREFILL_O_WEIGHT_OUTER_FP16_C336X2_M128N80K128
+                : KernelId::PI05_PREFILL_O_WEIGHT_OUTER_W8A16_C336X2_M128N80K128;
+            const auto down = pi05_pair_fp16()
+                ? KernelId::PI05_DOWN_WEIGHT_OUTER_FP16_C336X2_M160N80K128
+                : KernelId::PI05_DOWN_WEIGHT_OUTER_W8A16_C336X2_M160N80K128;
+            return loaded(o) && loaded(down) && loaded(pi05_prefill_gateup_pair_kernel()) &&
+                loaded(pi05_prefill_kv1_pair_kernel()) &&
+                loaded(KernelId::PI05_RING_XOR3_M336N2048) &&
+                loaded(KernelId::PI05_OWNER_NORM_FULL_RESIDUAL_M336N2048) &&
+                loaded(KernelId::PI05_OWNER_NORM_COMPACT_RESIDUAL_M336N2048) &&
+                loaded(KernelId::PI05_XOR3_COMPACT_RESIDUAL_RAW_FULL_M336N2048) &&
+                loaded(KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M336D256P336) &&
+                (!pi05_prefill_a8_ || loaded(KernelId::PI05_OWNER_NORM_COMPACT_A8_M336N2048));
+        }
         if (pi05_pair_rows() == 320) {
             const auto o = pi05_pair_fp16()
                 ? KernelId::PI05_PREFILL_O_WEIGHT_OUTER_FP16_C320X2_M128N80K128
@@ -2570,6 +2722,22 @@ private:
                 loaded(KernelId::PI05_XOR3_COMPACT_RESIDUAL_RAW_FULL_M320N2048) &&
                 loaded(KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M320D256P320) &&
                 (!pi05_prefill_a8_ || loaded(KernelId::PI05_OWNER_NORM_COMPACT_A8_M320N2048));
+        }
+        if (pi05_pair_rows() == 464) {
+            const auto o = pi05_pair_fp16()
+                ? KernelId::PI05_PREFILL_O_WEIGHT_OUTER_FP16_C464X2_M80N80K128
+                : KernelId::PI05_PREFILL_O_WEIGHT_OUTER_W8A16_C464X2_M80N80K128;
+            const auto down = pi05_pair_fp16()
+                ? KernelId::PI05_DOWN_WEIGHT_OUTER_FP16_C464X2_M80N80K128
+                : KernelId::PI05_DOWN_WEIGHT_OUTER_W8A16_C464X2_M80N80K128;
+            return loaded(o) && loaded(down) && loaded(pi05_prefill_gateup_pair_kernel()) &&
+                loaded(pi05_prefill_kv1_pair_kernel()) &&
+                loaded(KernelId::PI05_RING_XOR3_M464N2048) &&
+                loaded(KernelId::PI05_OWNER_NORM_FULL_RESIDUAL_M464N2048) &&
+                loaded(KernelId::PI05_OWNER_NORM_COMPACT_RESIDUAL_M464N2048) &&
+                loaded(KernelId::PI05_XOR3_COMPACT_RESIDUAL_RAW_FULL_M464N2048) &&
+                loaded(KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M464D256P464) &&
+                (!pi05_prefill_a8_ || loaded(KernelId::PI05_OWNER_NORM_COMPACT_A8_M464N2048));
         }
         if (pi05_pair_rows() == 448) {
             const auto o = pi05_pair_fp16()
@@ -2636,8 +2804,12 @@ private:
                 ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M304D256P304
                 : pi05_pair_rows() == 432
                 ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M432D256P432
+                : pi05_pair_rows() == 464
+                ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M464D256P464
                 : pi05_pair_rows() == 448
                 ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M448D256P448
+                : pi05_pair_rows() == 336
+                ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M336D256P336
                 : pi05_pair_rows() == 320
                 ? KernelId::PI05_PREFILL_KV1_DIRECT_CACHE_M320D256P320
                 : pi05_pair_rows() == 288
@@ -3091,11 +3263,12 @@ private:
     std::vector<int64_t> pi05_prefill_gateup_pair_arguments() const {
         if (pi05_prefill_a8_)
             return {3,pi05_pair_rows(),2048,16384,2048,8,48,32,2048,8,4,
-                    1,0,2,3,0,14,22,18,2080,(pi05_pair_rows() < 400 ? 256 : 384),pi05_a8_root_bytes(),
+                    1,0,2,3,0,14,22,18,2080,(pi05_pair_rows() == 464 ? 448 : pi05_pair_rows() == 336 ? 320 :
+                        (pi05_pair_rows() < 400 ? 256 : 384)),pi05_a8_root_bytes(),
                     pi05_a8_bytes(),1,1,1};
         // ABI2, two exact-profile halves, K2048, global/local N16384/2048, TP8,
         // M160/N80/K128 weight-outer for T32/two-camera profiles, M128 for
-        // C416, M112 for C432 (396/400 VLM slots), M96 for C448; grid26 and
+        // C416, M112 for C432 (396/400 VLM slots), M96 for C448, M80 for C464; grid26 and
         // four disjoint full slabs.
         // SPM roots X0/X1=S1/S0 and Y0/Y1=S2/S3; register low halves are
         // p0/p4 and p28/p30. Column partition, FP16, production GeGLU v1.
@@ -3184,6 +3357,13 @@ private:
 
     const bool pi05_prefill_o_pair_ = !linear_acc32_ && pi05_kernel_opt_in("RPU_PI05_PREFILL_O_PAIR");
     std::vector<int64_t> pi05_o_pair_arguments() const {
+        if (pi05_pair_slab_compact()) {
+            // ABI4: input stripes S3+5D/S3+4D, postraw S3[0,2D),
+            // both spilled together to retained Q DDR across GateUp/Down.
+            return {4,pi05_pair_rows(),256,2048,8,80,26,4,0,2,3,
+                    5*pi05_pair_owner_bytes(),4*pi05_pair_owner_bytes(),
+                    0,pi05_pair_owner_bytes(),pi05_pair_spill_elements()*2};
+        }
         if (pi05_pair_single_compact()) {
             // ABI3: M96 paired projections, one independent compact C0;
             // input C1=S3+4D, raw0 uses retained Q DDR until Down finishes.
@@ -3199,8 +3379,18 @@ private:
         return {1,pi05_pair_rows(),256,2048,8,80,26,4,1,2,3,0,pi05_pair_owner_bytes(),0,2,0,2,1,3,1,0,2,0};
     }
     std::vector<int64_t> pi05_o_pair_norm_arguments(int half) const {
+        if (pi05_pair_slab_compact()) {
+            TORCH_CHECK(half == 0 || half == 1, "Pi slab-compact norm requires half 0/1");
+            return {pi05_prefill_a8_ ? 7 : 6,pi05_pair_rows(),2048,8,pi05_pair_rows()/8,1,half,
+                    half == 0 ? 0 : 2,3,(half == 0 ? 5 : 4)*pi05_pair_owner_bytes(),
+                    3,half*pi05_pair_owner_bytes(),pi05_prefill_a8_ ? 1 : (half == 0 ? 1 : 0),
+                    static_cast<int64_t>(c10::Half(1e-6).x),
+                    pi05_prefill_a8_ ? half*pi05_pair_rows()*2080 : 0,
+                    pi05_prefill_a8_ ? pi05_a8_bytes()+half*pi05_prefix_rows() : 0,
+                    pi05_prefill_a8_ ? 2080 : 4096,pi05_prefill_a8_ ? pi05_a8_root_bytes() : pi05_pair_slab_bytes()};
+        }
         if (pi05_pair_single_compact()) {
-            TORCH_CHECK(half == 0 || half == 1,"Pi C448 norm requires half 0/1");
+            TORCH_CHECK(half == 0 || half == 1,"Pi single-compact norm requires half 0/1");
             // ABI4/5: residual root+byte offset explicit; raw0=S3/raw1=C0.
             return {pi05_prefill_a8_ ? 5 : 4,pi05_pair_rows(),2048,8,pi05_pair_rows()/8,1,half,
                     half==0?0:2,half==0?4:3,half==0?0:4*pi05_pair_owner_bytes(),
@@ -3221,8 +3411,12 @@ private:
                 static_cast<int64_t>(c10::Half(1e-6).x)};
     }
     std::vector<int64_t> pi05_o_pair_companion_arguments(int half) const {
+        if (pi05_pair_slab_compact()) {
+            TORCH_CHECK(half == 0 || half == 1, "Pi slab-compact companion requires half 0/1");
+            return {4,pi05_pair_rows(),2048,8,half,half,3,half*pi05_pair_owner_bytes(),half == 0 ? 2 : 0};
+        }
         if (pi05_pair_single_compact()) {
-            TORCH_CHECK(half == 0 || half == 1,"Pi C448 companion requires half 0/1");
+            TORCH_CHECK(half == 0 || half == 1,"Pi single-compact companion requires half 0/1");
             // ABI3: restored raw0 is S3, raw1 remains C0; output order stays.
             return {3,pi05_pair_rows(),2048,8,half,half==0?0:1,half==0?3:4,half==0?2:0};
         }
@@ -3338,7 +3532,7 @@ private:
         for(int half=0;half!=2;++half) {
             const uint32_t partial=half == 0 ? s0 : s2;
             const uint32_t input=half == 0 ? c0 : c1;
-            const uint32_t raw=half == 0 ? s3 : c0;
+            const uint32_t raw=pi05_pair_slab_compact() ? s3+half*pi05_pair_owner_bytes() : (half == 0 ? s3 : c0);
             const uint32_t normalized=
                 gateup_pair && half == 1 ? s0 : s1;
             ctx().consume_physical_route(FmbRouteFamily::ALL_REDUCE,PI05_O_PAIR_NORM_SITE,
@@ -3357,13 +3551,13 @@ private:
                     s1,lw.gate_proj_w,lw.up_proj_w,partial,lw.gate_ws,lw.up_ws);
             }
         }
-        // Both Q halves have been consumed by SDPA before paired O. C448
-        // saves raw0 into that retained DDR owner's first half; C0 holds raw1.
+        // Both Q halves have been consumed by SDPA before paired O. C448/C464
+        // saves raw0 there; C464 packs raw0/raw1 into both halves.
         // S3+4D input C1 is now dead and GateUp may overwrite the whole S3.
         if (pi05_pair_single_compact()) {
             ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,PI05_O_PAIR_SPILL_SITE,
                 1,0,pi05_pair_spill_arguments(),0);
-            rpu_launch_spm_scatter_ddr_dma(s3,q_ddr_buf_,0,pi05_pair_owner_elements(),
+            rpu_launch_spm_scatter_ddr_dma(s3,q_ddr_buf_,0,pi05_pair_spill_elements(),
                 pi05_pair_spill_stride(),8);
         } else {
             // Copy the same local slice: zero source stride, not owner-extract stride.
@@ -3395,17 +3589,18 @@ private:
             gateup_pair ? s1 : s3,lw.down_ws,pi05_pair_rows());
         if (pi05_pair_single_compact()) {
             // Down has consumed S3's GateUp input; restore raw0 before its
-            // companion. Next-layer Q writes cannot occur until both finish.
+            // companion (C464 restores both). Next-layer Q waits for both.
             ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,PI05_O_PAIR_SPILL_SITE,
                 2,0,pi05_pair_spill_arguments(),1);
-            rpu_launch_ddr_scatter_spm_dma(q_ddr_buf_,0,pi05_pair_owner_elements(),
+            rpu_launch_ddr_scatter_spm_dma(q_ddr_buf_,0,pi05_pair_spill_elements(),
                 pi05_pair_spill_stride(),s3,8);
         }
         for(int half=0;half!=2;++half) {
             const uint32_t partial=gateup_pair
                 ? (half == 0 ? s0 : s1)
                 : (half == 0 ? s1 : s3);
-            const uint32_t residual=half == 0 ? (pi05_pair_single_compact()?s3:c1) : c0;
+            const uint32_t residual=pi05_pair_slab_compact() ? s3+half*pi05_pair_owner_bytes() :
+                (half == 0 ? (pi05_pair_single_compact()?s3:c1) : c0);
             const char* output=half == 0 ? "pi05_pair_s2" : "residual1";
             ctx().consume_physical_route(FmbRouteFamily::ALL_REDUCE,PI05_O_PAIR_COMPANION_SITE,
                 1,0,pi05_o_pair_companion_arguments(half),half);
@@ -3668,6 +3863,10 @@ private:
 
     const bool pi05_prefill_owner_norm_ = !linear_acc32_ && pi05_kernel_opt_in("RPU_PI05_PREFILL_OWNER_NORM");
     std::vector<int64_t> pi05_owner_norm_arguments() const {
+        if (pi05_pair_slab_compact())
+            return {4,pi05_pair_rows(),2048,8,pi05_pair_rows()/8,pi05_pair_owner_bytes(),pi05_pair_slab_bytes(),
+                    static_cast<int64_t>(c10::Half(1e-6).x),3,5*pi05_pair_owner_bytes(),4*pi05_pair_owner_bytes(),
+                    0,pi05_pair_owner_bytes(),pi05_pair_spill_elements()*2};
         if (pi05_pair_single_compact())
             return {3,pi05_pair_rows(),2048,8,pi05_pair_rows()/8,pi05_pair_owner_bytes(),pi05_pair_slab_bytes(),1,
                     static_cast<int64_t>(c10::Half(1e-6).x),1,1,3,4*pi05_pair_owner_bytes(),1};
@@ -3699,10 +3898,14 @@ private:
     const bool pi05_prefill_down_pair_ = !linear_acc32_ && pi05_kernel_opt_in("RPU_PI05_PREFILL_DOWN_PAIR");
     const bool pi05_prefill_down_pair_rope_cache_ = !linear_acc32_ && pi05_kernel_opt_in("RPU_PI05_PREFILL_ROPE_CACHE");
     std::vector<int64_t> pi05_down_pair_arguments() const {
+        if (pi05_pair_slab_compact())
+            return {9,pi05_pair_rows(),2048,2048,8,80,26,4,0,0,2,3,0,1,pi05_pair_tile_rows(),
+                    3,5*pi05_pair_owner_bytes(),4*pi05_pair_owner_bytes(),0,pi05_pair_owner_bytes(),
+                    pi05_pair_spill_elements()*2};
         if (pi05_pair_single_compact()) {
-            // ABI8: C448, M96, four full roots, no mask root, one compact,
+            // ABI8: C448/M96; four full roots, no mask root, one compact,
             // raw0 retained in Q DDR; C1 input at S3+4D; KVIN norm in S1.
-            return {8,pi05_pair_rows(),2048,2048,8,80,26,4,0,1,1,2,3,0,1,96,3,3,
+            return {8,pi05_pair_rows(),2048,2048,8,80,26,4,0,1,1,2,3,0,1,pi05_pair_tile_rows(),3,3,
                     1,4*pi05_pair_owner_bytes(),1};
         }
         if (pi05_pair_scratch_mask()) {
@@ -4102,8 +4305,12 @@ private:
                     ? KernelId::PI05_OWNER_NORM_COMPACT_A8_M304N2048
                     : pi05_pair_rows() == 432
                     ? KernelId::PI05_OWNER_NORM_COMPACT_A8_M432N2048
+                    : pi05_pair_rows() == 464
+                    ? KernelId::PI05_OWNER_NORM_COMPACT_A8_M464N2048
                     : pi05_pair_rows() == 448
                     ? KernelId::PI05_OWNER_NORM_COMPACT_A8_M448N2048
+                    : pi05_pair_rows() == 336
+                    ? KernelId::PI05_OWNER_NORM_COMPACT_A8_M336N2048
                     : pi05_pair_rows() == 320
                     ? KernelId::PI05_OWNER_NORM_COMPACT_A8_M320N2048
                     : pi05_pair_rows() == 288
@@ -4163,27 +4370,174 @@ private:
         return {sdpa_kernel_, head_dim(), num_q_heads(), num_kv_heads(), attn_tp(), mask};
     }
 
+    // Only Gemma's private chunk-mask writer retains these owners. No public
+    // Tensor getter or device destination writer exposes the prepared slots.
+    struct GemmaChunkMaskSpan {
+        const void* tensor_impl = nullptr;
+        const void* storage_impl = nullptr;
+        uintptr_t base = 0, data = 0;
+        size_t storage_bytes = 0, bytes = 0;
+        int64_t offset = 0, rows = 0, cols = 0, stride0 = 0, stride1 = 0;
+        bool snapshot(const at::Tensor& tensor) {
+            if (!tensor.defined() || tensor.device().type() != at::kPrivateUse1 ||
+                tensor.dim() != 2 || tensor.scalar_type() != at::kHalf ||
+                !tensor.is_contiguous() || tensor.nbytes() == 0)
+                return false;
+            const auto storage = tensor.storage();
+            *this = {tensor.unsafeGetTensorImpl(), storage.unsafeGetStorageImpl(),
+                reinterpret_cast<uintptr_t>(storage.data_ptr().get()),
+                reinterpret_cast<uintptr_t>(tensor.data_ptr()), storage.nbytes(), tensor.nbytes(),
+                tensor.storage_offset(), tensor.size(0), tensor.size(1),
+                tensor.stride(0), tensor.stride(1)};
+            const auto max = std::numeric_limits<uintptr_t>::max();
+            return base != 0 && data >= base && offset >= 0 &&
+                storage_bytes <= max - base && bytes <= max - data &&
+                data + bytes <= base + storage_bytes &&
+                static_cast<uint64_t>(offset) <= storage_bytes / sizeof(c10::Half) &&
+                data == base + static_cast<size_t>(offset) * sizeof(c10::Half);
+        }
+        bool operator==(const GemmaChunkMaskSpan& other) const {
+            return tensor_impl == other.tensor_impl && storage_impl == other.storage_impl &&
+                base == other.base && data == other.data && storage_bytes == other.storage_bytes &&
+                bytes == other.bytes && offset == other.offset && rows == other.rows &&
+                cols == other.cols && stride0 == other.stride0 && stride1 == other.stride1;
+        }
+        bool disjoint(uintptr_t other_base, size_t other_bytes) const {
+            const auto max = std::numeric_limits<uintptr_t>::max();
+            return other_base != 0 && other_bytes <= max - other_base &&
+                (base + storage_bytes <= other_base ||
+                 other_base + other_bytes <= base);
+        }
+    };
+    struct GemmaChunkMaskPublication {
+        PreparedMask mask;  // Strong private owner; never returned to callers.
+        GemmaChunkMaskSpan span;
+        uint64_t generation = 0;
+        int64_t ordinal = 0, logical_k = 0;
+        bool published = false;
+    };
+    std::vector<GemmaChunkMaskPublication> chunk_mask_publications_;
+
     // Build per-chunk cached masks for KV_FIRST mode (D-10).
     void build_chunk_masks(const ChunkPlan& plan) {
         chunk_masks_.clear();
-        if (!raw_mask_.has_value()) return;
-
-        int64_t total_kv_seq_len = ctx().position + ctx().seq_len;
-
-        for (int64_t i = 0; i < plan.num_chunks; i++) {
-            int64_t offset = i * plan.chunk_size;
-            int64_t len = std::min(plan.chunk_size, ctx().seq_len - offset);
-            auto chunk_mask = gemma_model_prepare_chunk_mask(
-                raw_mask_, offset, len, total_kv_seq_len);
-            // `i` as the mask ordinal: all these masks are alive at once (the
-            // whole vector is built before any chunk executes), so two chunks of
-            // EQUAL length would otherwise share one DDR slot and every chunk
-            // would read the last one's mask.
-            chunk_masks_.push_back(
-                gemma_build_chunk_pm(
-                    chunk_mask, false, len, total_kv_seq_len,
-                    sdpa_stable_mask_cache(), i));
+        if (!raw_mask_.has_value()) {
+            chunk_mask_publications_.clear();
+            return;
         }
+
+        const uint64_t generation = installed_model_state_generation();
+        const int64_t total_kv_seq_len = ctx().position + ctx().seq_len;
+        // The raw input's full backing matters: contiguous()/dtype conversion
+        // can otherwise hide a CPU alias of a private slot, including its tail.
+        uintptr_t source_base = 0;
+        size_t source_bytes = 0;
+        bool cacheable = g_rpu_ddr_flush_force_enabled &&
+            raw_mask_->defined() && raw_mask_->device().is_cpu() &&
+            raw_mask_->layout() == at::kStrided &&
+            !raw_mask_->is_neg() && !raw_mask_->is_conj();
+        if (cacheable) {
+            const auto storage = raw_mask_->storage();
+            source_base = reinterpret_cast<uintptr_t>(storage.data_ptr().get());
+            source_bytes = storage.nbytes();
+            const auto source_data = reinterpret_cast<uintptr_t>(raw_mask_->data_ptr());
+            const int64_t source_offset = raw_mask_->storage_offset();
+            const size_t item_bytes = raw_mask_->element_size();
+            cacheable = source_base != 0 && source_bytes != 0 && item_bytes != 0 &&
+                source_bytes <= std::numeric_limits<uintptr_t>::max() - source_base &&
+                source_data >= source_base && source_data < source_base + source_bytes &&
+                source_offset >= 0 && static_cast<uint64_t>(source_offset) <= source_bytes / item_bytes &&
+                source_data == source_base + static_cast<size_t>(source_offset) * item_bytes;
+        }
+        for (const auto& receipt : chunk_mask_publications_) {
+            if (!cacheable) break;
+            GemmaChunkMaskSpan current;
+            cacheable = receipt.published && receipt.generation == generation &&
+                current.snapshot(receipt.mask.ddr_tensor) && current == receipt.span &&
+                current.disjoint(source_base, source_bytes);
+        }
+        if (!cacheable) chunk_mask_publications_.clear();
+        if (cacheable) chunk_mask_publications_.resize(plan.num_chunks);
+
+        try {
+            for (int64_t i = 0; i < plan.num_chunks; i++) {
+                const int64_t offset = i * plan.chunk_size;
+                const int64_t len = std::min(plan.chunk_size, ctx().seq_len - offset);
+                auto chunk_mask = gemma_model_prepare_chunk_mask(
+                    raw_mask_, offset, len, total_kv_seq_len);
+                // Each receipt holds the private prepared owner for this exact
+                // ordinal. The shared SDPA cache/API never gains skip authority.
+                if (cacheable && chunk_mask.has_value()) {
+                    auto& receipt = chunk_mask_publications_[i];
+                    if (g_rpu_ddr_flush_force_enabled && receipt.published && receipt.ordinal == i &&
+                        receipt.generation == generation && installed_model_state_generation() == generation &&
+                        receipt.logical_k == total_kv_seq_len &&
+                        receipt.span.rows == len &&
+                        (c10::InferenceMode::is_enabled() ||
+                         !receipt.mask.ddr_tensor.is_inference()) &&
+                        chunk_mask_matches_published(*chunk_mask, receipt)) {
+                        chunk_masks_.push_back(receipt.mask);
+                        continue;
+                    }
+                    // Clear before the original copy_: failure or force-off can
+                    // never inherit a previous successful publication.
+                    receipt.published = false;
+                }
+                // `i` distinguishes simultaneously live equal-shape masks.
+                auto prepared = gemma_build_chunk_pm(
+                    chunk_mask, false, len, total_kv_seq_len,
+                    sdpa_stable_mask_cache(), i);
+                chunk_masks_.push_back(prepared);
+                if (cacheable) {
+                    auto& receipt = chunk_mask_publications_[i];
+                    GemmaChunkMaskSpan span;
+                    bool private_span = prepared.mask_type == 4 &&
+                        span.snapshot(prepared.ddr_tensor) && span.rows == len &&
+                        span.cols == Align(total_kv_seq_len, 16) &&
+                        span.disjoint(source_base, source_bytes);
+                    for (int64_t j = 0; private_span && j < i; ++j) {
+                        const auto& other = chunk_mask_publications_[j];
+                        if (other.published)
+                            private_span = span.disjoint(other.span.base, other.span.storage_bytes);
+                    }
+                    if (!private_span || !g_rpu_ddr_flush_force_enabled ||
+                        installed_model_state_generation() != generation) {
+                        chunk_mask_publications_.clear();
+                        cacheable = false;
+                    } else {
+                        receipt = {prepared, span, generation, i, total_kv_seq_len, true};
+                    }
+                }
+            }
+        } catch (...) {
+            chunk_mask_publications_.clear();
+            throw;
+        }
+    }
+
+    // Compare exactly the bytes produced by sdpa_prepare_mask, including the
+    // FP16 -inf K tail, without a CPU mirror or another padding allocation.
+    bool chunk_mask_matches_published(
+        const at::Tensor& cpu_mask, const GemmaChunkMaskPublication& receipt) const {
+        if (!cpu_mask.device().is_cpu() || cpu_mask.scalar_type() != at::kHalf ||
+            cpu_mask.dim() != 2 || !cpu_mask.is_contiguous() ||
+            cpu_mask.size(0) != receipt.span.rows ||
+            cpu_mask.size(1) != receipt.logical_k || cpu_mask.nbytes() == 0)
+            return false;
+        const auto* source = static_cast<const c10::Half*>(cpu_mask.data_ptr());
+        const auto* target = static_cast<const c10::Half*>(receipt.mask.ddr_tensor.data_ptr());
+        const c10::Half masked(-std::numeric_limits<float>::infinity());
+        for (int64_t row = 0; row < receipt.span.rows; ++row) {
+            if (std::memcmp(source + row * receipt.logical_k,
+                    target + row * receipt.span.cols,
+                    static_cast<size_t>(receipt.logical_k) * sizeof(c10::Half)) != 0)
+                return false;
+            for (int64_t col = receipt.logical_k; col < receipt.span.cols; ++col)
+                if (std::memcmp(target + row * receipt.span.cols + col,
+                        &masked, sizeof(c10::Half)) != 0)
+                    return false;
+        }
+        return true;
     }
 
     // ----- Model state -----
@@ -4201,7 +4555,55 @@ private:
     // sdpa_prepare_mask's stable slots follow). Sized like cos_ — big enough
     // for any sequence this model can run — with only the first seq_len rows
     // written.
+    // Direct set_weights owners and admitted reduced-core fresh lazy owners
+    // can retain a completed CPU publication. No getter exposes these slots.
+    struct Pi05PrefillRopeSpan {
+        const void* tensor_impl = nullptr;
+        const void* storage_impl = nullptr;
+        uintptr_t base = 0, data = 0;
+        size_t storage_bytes = 0, bytes = 0;
+        int64_t offset = 0, rows = 0, width = 0, stride0 = 0, stride1 = 0;
+        c10::Device device{at::kCPU};
+        bool snapshot(const at::Tensor& tensor) {
+            if (!tensor.defined() || tensor.dim() != 2 ||
+                tensor.scalar_type() != at::kHalf || !tensor.is_contiguous() ||
+                tensor.nbytes() == 0)
+                return false;
+            const auto storage = tensor.storage();
+            *this = {tensor.unsafeGetTensorImpl(), storage.unsafeGetStorageImpl(),
+                reinterpret_cast<uintptr_t>(storage.data_ptr().get()),
+                reinterpret_cast<uintptr_t>(tensor.data_ptr()),
+                storage.nbytes(), tensor.nbytes(), tensor.storage_offset(),
+                tensor.size(0), tensor.size(1), tensor.stride(0), tensor.stride(1),
+                tensor.device()};
+            const auto max = std::numeric_limits<uintptr_t>::max();
+            return base != 0 && data >= base && offset >= 0 &&
+                storage_bytes <= max - base && bytes <= max - data &&
+                data + bytes <= base + storage_bytes &&
+                static_cast<uint64_t>(offset) <= storage_bytes / sizeof(c10::Half) &&
+                data == base + static_cast<size_t>(offset) * sizeof(c10::Half);
+        }
+        bool operator==(const Pi05PrefillRopeSpan& other) const {
+            return tensor_impl == other.tensor_impl && storage_impl == other.storage_impl &&
+                base == other.base && data == other.data &&
+                storage_bytes == other.storage_bytes && bytes == other.bytes &&
+                offset == other.offset && rows == other.rows && width == other.width &&
+                stride0 == other.stride0 && stride1 == other.stride1 && device == other.device;
+        }
+        bool disjoint(const Pi05PrefillRopeSpan& other) const {
+            return base + storage_bytes <= other.base ||
+                other.base + other.storage_bytes <= base;
+        }
+    };
+    std::array<Pi05PrefillRopeSpan, 2> pi05_prefill_rope_private_owners_{};
+    bool pi05_prefill_rope_private_owned_ = false;
+    bool pi05_prefill_rope_cpu_published_ = false;
+    uint64_t pi05_prefill_rope_cpu_generation_ = 0;
+    int64_t pi05_prefill_rope_cpu_rows_ = 0;
     at::Tensor prefill_cos_, prefill_sin_;
+    bool pi05_reduced_prefill_rope_receipt_ = false;
+    uint64_t pi05_reduced_prefill_rope_owner_generation_ = 0;
+    std::array<at::Tensor, 2> pi05_reduced_prefill_rope_keepalive_{};
     bool prefill_rope_ready_ = false;
     bool pi05_prefill_kv1_replica_proof_ = false;
     at::Tensor final_norm_w_;

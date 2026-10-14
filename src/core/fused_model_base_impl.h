@@ -402,6 +402,16 @@ public:
     uint64_t alloc_gen_             = 0;
     uint64_t cached_persistent_gen_ = 0;  // for ensure_allocated Path 1 detection
     uint64_t cached_preload_gen_    = 0;  // D-502 — tracks when preload_callbacks last fired
+    // Cold initialization authority for a bounded ordinary-owner callback
+    // subset. Defaults empty; typed pipeline/composite admission is unchanged.
+    std::vector<std::string> resident_preload_names_;
+    std::vector<BufferDecl> resident_preload_decls_;
+    uint64_t resident_preload_model_generation_ = 0;
+    uint64_t resident_preload_persistent_generation_ = 0;
+    int64_t resident_preload_layout_hash_ = 0;
+    uint64_t resident_preload_manifest_fingerprint_ = 0;
+    std::vector<FmbRouteManifestEntry> resident_preload_routes_;
+    bool resident_preload_priming_ = false;
     int64_t  chunk_size_override_   = 0;
     bool     execution_reconfigure_guard_enabled_ = false;
     KvInsertCostCatalog kvinsert_cost_catalog_;
@@ -456,7 +466,7 @@ public:
 
     c10::Half* ddr_bufA_ptr_ = nullptr;
     c10::Half* ddr_bufB_ptr_ = nullptr;
-    // Layer-0 input live RPU dev addr — set per forward to
+    // Layer-0 input live device dev addr — set per forward to
     // `RpuGetDevAddr(hidden_states.data_ptr())`. The framework's mutable DMA
     // registry (slot.mutable_dmas) holds `&hidden_in_src_base_`; REPLAY end()
     // dereferences this and calls Queue_t::update_dma_kernel to patch each

@@ -5,12 +5,17 @@
 // RoPE precedes QK normalization, whose weights are shared with the expert.
 // The model has no QKV bias and uses one final norm.
 #include "rpu_hyvla_vlm_model.h"
+#include "hyvla_vlm_vision_gu176.h"
+#include "hyvla_linear_precision.h"
 #include "model_handle_registry.h"
 #include "rpu_kernel_decls.h"
 #include "rpu_ops.h"
 #include "rpu_eltwise.h"
 #include "rpu_helpers.h"
 #include "rpu_runtime_state.h"
+#include "hyvla_row_merge.h"
+#include "ops/rpu_hyvla_vlm_gateup_w8.h"
+#include "hyvla_paired_rmsnorm.h"
 
 #include <ATen/record_function.h>
 #include <c10/util/Half.h>
@@ -59,6 +64,11 @@ namespace v3 {
 constexpr int64_t HYVLA_VLM_ATTN_SITE = 4354974985578103569LL;
 constexpr int64_t HYVLA_VLM_KV_SITE = 2260457013508596554LL;
 constexpr int64_t HYVLA_VLM_GRAPH_SCHEDULE_SITE = 1891892172693751815LL;
+constexpr int64_t HYVLA_VLM_PREFILL_KV_ONLY_SITE = 623508127183406920LL;
+constexpr int64_t HYVLA_VLM_GATEUP_SWIGLU_SITE = 623508127183406960LL;
+constexpr int64_t HYVLA_VLM_VISION_GU176_SITE = 623508127183407160LL;
+constexpr int64_t HYVLA_VLM_ROW_MERGE_SITE = 623508127183406980LL;
+constexpr int64_t HYVLA_VLM_PAIRED_RMSNORM_SITE = 623508127183407000LL;
 constexpr int64_t HYVLA_VLM_MASK_SCHEDULE_SITE = 8543552822435768982LL;
 constexpr int64_t HYVLA_VLM_INPUT_NORM_TOPOLOGY_SITE = 7126209149859475005LL;
 constexpr int64_t HYVLA_VLM_POST_NORM_TOPOLOGY_SITE = 7589253846984036685LL;
@@ -126,8 +136,111 @@ ModelStaticConfig HyVlaVlmModel::static_config() {
     return cfg;
 }
 
-HyVlaVlmModel::HyVlaVlmModel() = default;
+HyVlaVlmModel::HyVlaVlmModel(bool prefill_kv_only)
+    : cold_prefill_kv_only_(prefill_kv_only) {}
 HyVlaVlmModel::~HyVlaVlmModel() = default;
+
+bool HyVlaVlmModel::gateup_swiglu_enabled(int64_t rows, int64_t position) const {
+    if ((!cold_gateup_swiglu_available_ && !cold_w8_vlm_gateup_available_) ||
+        !cold_prefill_kv_only_ || cold_silu_mul_ ||
+        rows != 240 || position != 0 || moe_chunk_size_ != 240 ||
+        num_layers() != 32 || hidden_size() != 2048 || intermediate_size() != 6144 ||
+        num_q_heads() != 16 || num_kv_heads() != 8 || head_dim() != 128 ||
+        attn_tp() != NUM_CORES || text_layers_.size() != 32 || moe_layers_.size() != 32)
+        return false;
+    if (!text_layers_.front().q_w.defined()) return false;
+    const auto dtype = text_layers_.front().q_w.scalar_type();
+    if ((dtype == at::kHalf && !cold_gateup_swiglu_available_) ||
+        (dtype == at::kChar &&
+         !(cold_w8_optimizations_available_ && cold_w8_vlm_gateup_available_))) return false;
+    for (const auto* tower : {&text_layers_, &moe_layers_}) {
+        for (const auto& w : *tower) {
+            if (!w.q_w.defined() || w.q_w.scalar_type() != dtype ||
+                !hyvla_linear_precision(w, cold_w8_optimizations_available_ &&
+                                             cold_w8_vlm_gateup_available_)) return false;
+        }
+    }
+    return true;
+}
+
+bool HyVlaVlmModel::row_merge_enabled(int64_t rows, int64_t position) const {
+    const bool eligible = cold_row_merge_available_ && cold_prefill_kv_only_ &&
+        cold_mot_norm_nomerge_ == (MOT_NOMERGE_QKV | MOT_NOMERGE_MLP) &&
+        (rows >= 128 && rows <= 240 && rows % 16 == 0) &&
+        position == 0 && moe_chunk_size_ == rows &&
+        num_layers() == 32 && hidden_size() == 2048 && intermediate_size() == 6144 &&
+        num_q_heads() == 16 && num_kv_heads() == 8 && head_dim() == 128 &&
+        attn_tp() == NUM_CORES && text_layers_.size() == 32 && moe_layers_.size() == 32;
+    if (!eligible) return false;
+    for (const auto* tower : {&text_layers_, &moe_layers_}) {
+        for (const auto& w : *tower) {
+            if (w.q_w.scalar_type() != tower->front().q_w.scalar_type() ||
+                !hyvla_linear_precision(w, cold_w8_optimizations_available_)) return false;
+        }
+    }
+    return true;
+}
+
+bool HyVlaVlmModel::vision_gu176_enabled(int64_t rows, int64_t position) const {
+    if (!cold_vision_gu176_available_ || !standard_three_camera_mask_ ||
+        cold_silu_mul_ || gateup_swiglu_enabled(rows, position) ||
+        !row_merge_enabled(rows, position) || !cold_w8_optimizations_available_)
+        return false;
+    // Enable this route for three-camera P224; other buckets keep full rows.
+    if (rows != 224) return false;
+    for (const auto* tower : {&text_layers_, &moe_layers_})
+        for (const auto& w : *tower)
+            if (w.q_w.scalar_type() != at::kChar) return false;
+    return true;
+}
+
+std::vector<int64_t> HyVlaVlmModel::vision_gu176_arguments() const {
+    // ABI; total/full/terminal layers; vision branch; S/effectiveM/P/H/I/localN/TP;
+    // standard mask proof version/cameras/vision count; separate SiLU then Mul;
+    // gate-tail FP16 zero fill offset/elements/value; unchanged full-S Down;
+    // GU/Down partition and AUTO_TILE selector.
+    return {1,32,31,31,1,moe_chunk_size_,176,0,2048,6144,768,8,
+            1,3,147,1,2,176*768*2,(moe_chunk_size_-176)*768,0,
+            moe_chunk_size_,1,0,static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE)};
+}
+
+bool HyVlaVlmModel::paired_rmsnorm_enabled(int64_t rows, int64_t position) const {
+    if (!row_merge_enabled(rows, position) || eps_hyvla_ != 1e-5) return false;
+    const auto route = cold_rmsnorm_spm_contract_.resolve(rows, hidden_size());
+    return (route == RpuRmsNormSpmRoute::V16_GRID8 && cold_paired_rmsnorm_available_) ||
+           (route == RpuRmsNormSpmRoute::V32_GRID8 && cold_paired_rmsnorm_v32_available_);
+}
+
+std::vector<int64_t> HyVlaVlmModel::paired_rmsnorm_arguments() const {
+    // ABI; total/full/terminal layers; S/P/H/TP; gammas; V/grid/rows-per-block;
+    // branch-local mode; original norm selector; FP16 epsilon bits.
+    const bool v32 = cold_rmsnorm_spm_contract_.resolve(moe_chunk_size_, hidden_size()) ==
+        RpuRmsNormSpmRoute::V32_GRID8;
+    return {v32 ? 2 : 1, 32, 31, 31, moe_chunk_size_, 0, 2048, 8, 2, v32 ? 32 : 16, 8,
+            moe_chunk_size_ / 8, 3, v32 ? 6 : 5, 168};
+}
+
+std::vector<int64_t> HyVlaVlmModel::row_merge_arguments() const {
+    // ABI; layers/full/terminal; S/P/TP; Q/KV/H widths; norm mode;
+    // row tiles for C128/C256/C2048; two FP16 products then FP16 ADD.
+    return {1, 32, 31, 31, moe_chunk_size_, 0, 8, 256, 128, 2048, 3, 32, 32, 16, 1};
+}
+
+std::vector<int64_t> HyVlaVlmModel::gateup_swiglu_arguments() const {
+    // ABI, total/full layers, MoT branches, M/P/H/I/localN/TP, tile M/N/K, grid,
+    // decomposed-source activation mode (standalone SiLU then Mul).
+    return {!text_layers_.empty() && text_layers_.front().q_w.defined() &&
+                text_layers_.front().q_w.scalar_type() == at::kChar ? 2 : 1,
+            32, 31, 2, 240, 0, 2048, 6144, 768, 8, 320, 112, 128, 7, 0};
+}
+
+std::vector<int64_t> HyVlaVlmModel::prefill_kv_only_arguments(int64_t rows) const {
+    // ABI1; total/full layer counts; terminal layer; physical geometry;
+    // terminal input norm/KV enabled, Q/attention+MLP/final norm/output disabled.
+    return {1, num_layers(), num_layers() - 1, num_layers() - 1,
+            rows, hidden_size(), num_q_heads(), num_kv_heads(), head_dim(),
+            attn_tp(), 1, 1, 0, 0, 0, 0};
+}
 
 void HyVlaVlmModel::set_runtime_config(
     bool fast_replay, bool fast_replay_preload, bool mask_once,
@@ -159,6 +272,24 @@ void HyVlaVlmModel::set_runtime_config(
     const RpuRmsNormSpmContract rmsnorm_spm_contract =
         rpu_snapshot_rmsnorm_spm_contract(
             static_cast<uint32_t>(rmsnorm_capability));
+    const bool gateup_swiglu_available =
+        KernelCache::instance().get_kernel("hyvla_vlm_gateup_swiglu_s240") != nullptr &&
+        KernelCache::instance().get_program("wall_prefill_gate_up_swiglu_fp16_m320n112k128") != nullptr;
+    const bool vision_gu176_available =
+        KernelCache::instance().get_kernel("hyvla_vlm_vision_gu176_w8") != nullptr;
+    const bool paired_rmsnorm_available =
+        KernelCache::instance().get_kernel("hyvla_mot_paired_rmsnorm_s240") != nullptr;
+    const bool paired_rmsnorm_v32_available =
+        KernelCache::instance().get_kernel("hyvla_mot_paired_rmsnorm_v32") != nullptr;
+    const bool row_merge_available =
+        KernelCache::instance().get_kernel("hyvla_mot_row_merge_s240") != nullptr;
+    const bool w8_optimizations_available =
+        KernelCache::instance().get_kernel("hyvla_w8a16_optimizations_s240_s51") != nullptr &&
+        KernelCache::instance().get_program("gate_up_parallel_w8a16_multibase_spm_weight_m592n32k128") != nullptr &&
+        KernelCache::instance().get_program("fused_gate_up_swiglu_w8a16_m320n112k128") != nullptr;
+    const bool w8_vlm_gateup_available =
+        KernelCache::instance().get_kernel("hyvla_vlm_gateup_swiglu_w8_s240") != nullptr &&
+        KernelCache::instance().get_program("fused_gate_up_swiglu_w8a16_m320n112k128") != nullptr;
     invalidate_model_state();
 
     cold_fast_replay_ = fast_replay;
@@ -167,6 +298,13 @@ void HyVlaVlmModel::set_runtime_config(
     cold_partial_rope_ = partial_rope;
     cold_mot_norm_nomerge_ = static_cast<unsigned>(mot_norm_nomerge);
     cold_silu_mul_ = silu_mul;
+    cold_gateup_swiglu_available_ = gateup_swiglu_available;
+    cold_w8_optimizations_available_ = w8_optimizations_available;
+    cold_w8_vlm_gateup_available_ = w8_vlm_gateup_available;
+    cold_row_merge_available_ = row_merge_available;
+    cold_paired_rmsnorm_available_ = paired_rmsnorm_available;
+    cold_paired_rmsnorm_v32_available_ = paired_rmsnorm_v32_available;
+    cold_vision_gu176_available_ = vision_gu176_available;
     cold_rmsnorm_spm_contract_ = rmsnorm_spm_contract;
     cold_config_bound_ = true;
 }
@@ -247,7 +385,7 @@ void HyVlaVlmModel::set_weights_hyvla(
 // ─────────────────────────────────────────────────────────────────────────────
 // dynamic_config — 基类断言单 chunk，并统一准备显式 mask。HyVLA 直接复用
 // CausalDecoderModel 的稳定 PreparedMask，避免同一输入在一个 forward 内重复
-// RPU→CPU→RPU 归一化。
+// device→CPU→device 归一化。
 // ─────────────────────────────────────────────────────────────────────────────
 ModelDynamicConfig HyVlaVlmModel::dynamic_config(const ChunkPlan& plan) {
     ModelDynamicConfig cfg = CausalDecoderModel::dynamic_config(plan);
@@ -324,6 +462,15 @@ FmbPhysicalExecutionManifest HyVlaVlmModel::physical_manifest_for_candidate(
                std::move(arguments));
     };
 
+    if (cold_prefill_kv_only_) {
+        TORCH_CHECK(num_layers() > 1 && position == 0 &&
+                        logical_len == physical_len && chunk.len == moe_chunk_size_,
+                    "HyVlaVlmModel KV-only requires an initial single-chunk "
+                    "prefix and at least two layers");
+        append(FmbRouteFamily::GRAPH_SCHEDULE, HYVLA_VLM_PREFILL_KV_ONLY_SITE,
+               1, prefill_kv_only_arguments(chunk.len));
+    }
+
     append(
         FmbRouteFamily::GRAPH_SCHEDULE,
         HYVLA_VLM_GRAPH_SCHEDULE_SITE,
@@ -369,7 +516,12 @@ FmbPhysicalExecutionManifest HyVlaVlmModel::physical_manifest_for_candidate(
             static_cast<int64_t>(cold_rmsnorm_spm_contract_.resolve(rows, cols)),
             cold_rmsnorm_spm_contract_.manifest_arguments(rows, cols));
     };
-    append_rmsnorm(kHyVlaVlmRmsNormFullRowsSite, chunk.len, h);
+    if (paired_rmsnorm_enabled(chunk.len, position)) {
+        append(FmbRouteFamily::GRAPH_SCHEDULE, HYVLA_VLM_PAIRED_RMSNORM_SITE,
+               1, paired_rmsnorm_arguments());
+    } else {
+        append_rmsnorm(kHyVlaVlmRmsNormFullRowsSite, chunk.len, h);
+    }
     append_rmsnorm(
         kHyVlaVlmRmsNormQHeadRowsSite, chunk.len * local_q, hd);
     append_rmsnorm(
@@ -394,6 +546,10 @@ FmbPhysicalExecutionManifest HyVlaVlmModel::physical_manifest_for_candidate(
         append_bias_dma(q_bias_elems, /*bias_invocation=*/0);
         append_bias_dma(kv_bias_elems, /*bias_invocation=*/1);
         append_bias_dma(kv_bias_elems, /*bias_invocation=*/2);
+    }
+    if (row_merge_enabled(chunk.len, position)) {
+        append(FmbRouteFamily::GRAPH_SCHEDULE, HYVLA_VLM_ROW_MERGE_SITE,
+               1, row_merge_arguments());
     }
     append_linear(HYVLA_VLM_QKV_LINEAR_SITE);
     append(
@@ -441,28 +597,36 @@ FmbPhysicalExecutionManifest HyVlaVlmModel::physical_manifest_for_candidate(
         HYVLA_VLM_ATTN_ALL_REDUCE_SITE,
         fmb_ring_all_reduce_route_selector(chunk.len, h),
         {chunk.len, h, tp, NUM_CORES});
-    append_linear(
-        HYVLA_VLM_MLP_GATE_LINEAR_SITE,
-        {chunk.len, intermediate_size(), h, 1, NUM_CORES});
-    append_linear(
-        HYVLA_VLM_MLP_UP_LINEAR_SITE,
-        {chunk.len, intermediate_size(), h, 1, NUM_CORES});
-    const int64_t elems_mlp = chunk.len * (intermediate_size() / NUM_CORES);
-    if (cold_silu_mul_) {
-        append(
-            FmbRouteFamily::ACTIVATION, HYVLA_VLM_MLP_SILU_MUL_SITE,
-            static_cast<int64_t>(HyVlaVlmActivationRoute::SILU_MUL_FUSED),
-            {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES});
+    if (gateup_swiglu_enabled(chunk.len, position)) {
+        append(FmbRouteFamily::GRAPH_SCHEDULE, HYVLA_VLM_GATEUP_SWIGLU_SITE,
+               1, gateup_swiglu_arguments());
     } else {
-        append(
-            FmbRouteFamily::ACTIVATION, HYVLA_VLM_MLP_SILU_SITE,
-            static_cast<int64_t>(HyVlaVlmActivationRoute::SILU_UNARY),
-            {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES});
-        append(
-            FmbRouteFamily::ACTIVATION, HYVLA_VLM_MLP_MUL_SITE,
-            static_cast<int64_t>(HyVlaVlmActivationRoute::MUL),
-            {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES});
+        append_linear(
+            HYVLA_VLM_MLP_GATE_LINEAR_SITE,
+            {chunk.len, intermediate_size(), h, 1, NUM_CORES});
+        append_linear(
+            HYVLA_VLM_MLP_UP_LINEAR_SITE,
+            {chunk.len, intermediate_size(), h, 1, NUM_CORES});
+        const int64_t elems_mlp = chunk.len * (intermediate_size() / NUM_CORES);
+        if (cold_silu_mul_) {
+            append(
+                FmbRouteFamily::ACTIVATION, HYVLA_VLM_MLP_SILU_MUL_SITE,
+                static_cast<int64_t>(HyVlaVlmActivationRoute::SILU_MUL_FUSED),
+                {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES});
+        } else {
+            append(
+                FmbRouteFamily::ACTIVATION, HYVLA_VLM_MLP_SILU_SITE,
+                static_cast<int64_t>(HyVlaVlmActivationRoute::SILU_UNARY),
+                {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES});
+            append(
+                FmbRouteFamily::ACTIVATION, HYVLA_VLM_MLP_MUL_SITE,
+                static_cast<int64_t>(HyVlaVlmActivationRoute::MUL),
+                {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES});
+        }
     }
+    if (vision_gu176_enabled(chunk.len, position))
+        append(FmbRouteFamily::GRAPH_SCHEDULE, HYVLA_VLM_VISION_GU176_SITE,
+               1, vision_gu176_arguments());
     append_linear(
         HYVLA_VLM_MLP_DOWN_LINEAR_SITE,
         {chunk.len, h, intermediate_size(), 0, NUM_CORES});
@@ -479,7 +643,105 @@ FmbPhysicalExecutionManifest HyVlaVlmModel::physical_manifest_for_candidate(
 
 FmbPhysicalManifestForwardCapability
 HyVlaVlmModel::physical_manifest_forward_capability(
-    const FmbPhysicalExecutionManifest& /*manifest*/) const {
+    const FmbPhysicalExecutionManifest& manifest) const {
+    size_t kv_only_routes = 0, gateup_routes = 0, row_merge_routes = 0, paired_norm_routes = 0;
+    size_t vision_gu176_routes = 0;
+    std::array<size_t, 5> vision_text_routes{};
+    const bool vision_gu176 = vision_gu176_enabled(
+        manifest.logical_length, manifest.kv_logical_length - manifest.logical_length);
+    const bool paired_norm = paired_rmsnorm_enabled(
+        manifest.logical_length, manifest.kv_logical_length - manifest.logical_length);
+    const bool fused_merge = row_merge_enabled(
+        manifest.logical_length, manifest.kv_logical_length - manifest.logical_length);
+    const bool fused_gateup = gateup_swiglu_enabled(
+        manifest.logical_length, manifest.kv_logical_length - manifest.logical_length);
+    for (const auto& route : manifest.routes) {
+        if (route.site_id == HYVLA_VLM_VISION_GU176_SITE) {
+            TORCH_CHECK(vision_gu176 && manifest.physical_length == moe_chunk_size_ &&
+                            route.family == FmbRouteFamily::GRAPH_SCHEDULE &&
+                            route.selector == 1 && route.flags == 0 && route.invocation == 0 &&
+                            route.arguments == vision_gu176_arguments(),
+                        "HyVlaVlmModel vision GU176 mask/schedule/owner mismatch");
+            ++vision_gu176_routes;
+        }
+        if (vision_gu176) {
+            const std::array<int64_t, 5> sites{{HYVLA_VLM_MLP_GATE_LINEAR_SITE,
+                HYVLA_VLM_MLP_UP_LINEAR_SITE, HYVLA_VLM_MLP_SILU_SITE,
+                HYVLA_VLM_MLP_MUL_SITE, HYVLA_VLM_MLP_DOWN_LINEAR_SITE}};
+            for (size_t i = 0; i < sites.size(); ++i) if (route.site_id == sites[i]) {
+                const bool activation = i == 2 || i == 3;
+                const auto family = activation ? FmbRouteFamily::ACTIVATION : FmbRouteFamily::LINEAR;
+                const int64_t selector = activation ? (i == 2 ?
+                    static_cast<int64_t>(HyVlaVlmActivationRoute::SILU_UNARY) :
+                    static_cast<int64_t>(HyVlaVlmActivationRoute::MUL)) :
+                    static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE);
+                const std::vector<int64_t> args = activation ?
+                    std::vector<int64_t>{0, moe_chunk_size_*768, 8} : (i == 4 ?
+                    std::vector<int64_t>{moe_chunk_size_,2048,6144,0,8} :
+                    std::vector<int64_t>{moe_chunk_size_,6144,2048,1,8});
+                TORCH_CHECK(route.family == family && route.selector == selector &&
+                                route.flags == 0 && route.invocation == 0 && route.arguments == args,
+                            "HyVlaVlmModel GU176 requires full-S text MLP and Down receipts");
+                ++vision_text_routes[i];
+            }
+            TORCH_CHECK(route.site_id != HYVLA_VLM_MLP_SILU_MUL_SITE,
+                        "HyVlaVlmModel GU176 requires separate SiLU/Mul");
+        }
+        if (route.site_id == HYVLA_VLM_PAIRED_RMSNORM_SITE) {
+            TORCH_CHECK(paired_norm && manifest.physical_length == moe_chunk_size_ &&
+                            route.family == FmbRouteFamily::GRAPH_SCHEDULE &&
+                            route.selector == 1 && route.flags == 0 && route.invocation == 0 &&
+                            route.arguments == paired_rmsnorm_arguments(),
+                        "HyVlaVlmModel paired RMSNorm schedule/owner mismatch");
+            ++paired_norm_routes;
+        }
+        TORCH_CHECK(!paired_norm || route.site_id != kHyVlaVlmRmsNormFullRowsSite,
+                    "HyVlaVlmModel paired RMSNorm cannot claim standalone full norms");
+        if (route.site_id == HYVLA_VLM_ROW_MERGE_SITE) {
+            TORCH_CHECK(fused_merge && manifest.physical_length == moe_chunk_size_ &&
+                            route.family == FmbRouteFamily::GRAPH_SCHEDULE &&
+                            route.selector == 1 && route.flags == 0 && route.invocation == 0 &&
+                            route.arguments == row_merge_arguments(),
+                        "HyVlaVlmModel fused row merge schedule/owner mismatch");
+            ++row_merge_routes;
+        }
+        if (route.site_id == HYVLA_VLM_GATEUP_SWIGLU_SITE) {
+            TORCH_CHECK(fused_gateup && manifest.physical_length == 240 &&
+                            route.family == FmbRouteFamily::GRAPH_SCHEDULE &&
+                            route.selector == 1 && route.flags == 0 && route.invocation == 0 &&
+                            route.arguments == gateup_swiglu_arguments(),
+                        "HyVlaVlmModel fused Gate/Up schedule/owner mismatch");
+            ++gateup_routes;
+        }
+        if (fused_gateup) {
+            TORCH_CHECK(route.site_id != HYVLA_VLM_MLP_GATE_LINEAR_SITE &&
+                            route.site_id != HYVLA_VLM_MLP_UP_LINEAR_SITE &&
+                            route.site_id != HYVLA_VLM_MLP_SILU_MUL_SITE &&
+                            route.site_id != HYVLA_VLM_MLP_SILU_SITE &&
+                            route.site_id != HYVLA_VLM_MLP_MUL_SITE,
+                        "HyVlaVlmModel fused Gate/Up cannot claim decomposed routes");
+        }
+        if (route.site_id != HYVLA_VLM_PREFILL_KV_ONLY_SITE) continue;
+        TORCH_CHECK(cold_prefill_kv_only_ &&
+                        route.family == FmbRouteFamily::GRAPH_SCHEDULE &&
+                        route.selector == 1 && route.flags == 0 &&
+                        route.invocation == 0 &&
+                        route.arguments == prefill_kv_only_arguments(moe_chunk_size_),
+                    "HyVlaVlmModel KV-only schedule/owner mismatch");
+        ++kv_only_routes;
+    }
+    TORCH_CHECK(vision_gu176_routes == (vision_gu176 ? 1u : 0u),
+                "HyVlaVlmModel vision GU176 schedule missing or duplicated");
+    if (vision_gu176) for (size_t count : vision_text_routes)
+        TORCH_CHECK(count == 1, "HyVlaVlmModel GU176 text/Down receipt missing or duplicated");
+    TORCH_CHECK(kv_only_routes == (cold_prefill_kv_only_ ? 1u : 0u),
+                "HyVlaVlmModel KV-only schedule missing or duplicated");
+    TORCH_CHECK(gateup_routes == (fused_gateup ? 1u : 0u),
+                "HyVlaVlmModel fused Gate/Up schedule missing or duplicated");
+    TORCH_CHECK(row_merge_routes == (fused_merge ? 1u : 0u),
+                "HyVlaVlmModel fused row merge schedule missing or duplicated");
+    TORCH_CHECK(paired_norm_routes == (paired_norm ? 1u : 0u),
+                "HyVlaVlmModel paired RMSNorm schedule missing or duplicated");
     return {true, FmbGraphLifecycle::COMPOSITE_CHILD};
 }
 
@@ -605,7 +867,7 @@ void HyVlaVlmModel::set_moe_weights(
                         && list[i].device().type() == at::kPrivateUse1
                         && list[i].is_contiguous(),
                         "hyvla set_moe_weights: ", name, "[", i,
-                        "] must be fp16 contiguous RPU tensor, got dtype=",
+                        "] must be fp16 contiguous device tensor, got dtype=",
                         list[i].scalar_type(), " device=", list[i].device().type(),
                         " contiguous=", list[i].is_contiguous());
         }
@@ -636,7 +898,7 @@ void HyVlaVlmModel::set_moe_weights(
                         && w[i].device().type() == at::kPrivateUse1
                         && w[i].is_contiguous(),
                         "hyvla set_moe_weights: ", name, "[", i,
-                        "] must be 2D contiguous RPU tensor");
+                        "] must be 2D contiguous device tensor");
             // 给了 scale ⇒ 权重必须是量化的：int8 [N,K] (W8A16) 或
             // nibble-packed uint8 [N,K/2] (W4A16)。launcher 按 dtype 派发。
             TORCH_CHECK(moe_quantized ? (w[i].scalar_type() == at::kChar
@@ -650,7 +912,7 @@ void HyVlaVlmModel::set_moe_weights(
                             && sc[i].device().type() == at::kPrivateUse1
                             && sc[i].is_contiguous(),
                             "hyvla set_moe_weights: ", name, "_scale[", i,
-                            "] must be a contiguous fp16 RPU tensor");
+                            "] must be a contiguous fp16 device tensor");
                 if (w[i].scalar_type() == at::kChar) {
                     TORCH_CHECK(sc[i].dim() == 1 &&
                                     sc[i].numel() == w[i].size(0),
@@ -690,7 +952,7 @@ void HyVlaVlmModel::set_moe_weights(
                 && final_norm_moe_w.device().type() == at::kPrivateUse1
                 && final_norm_moe_w.is_contiguous(),
                 "hyvla set_moe_weights: final_norm_moe_w must be 1D [hidden=",
-                hidden_size(), "] fp16 contig RPU, got ", final_norm_moe_w.sizes(),
+                hidden_size(), "] fp16 contig device, got ", final_norm_moe_w.sizes(),
                 " dtype=", final_norm_moe_w.scalar_type());
     // ⚠️ Hy-VLA 的 ckpt 无 norm_v.weight ⇒ final norm 两塔共享。步 7 据此**单算**,
     // 不再双算 + merge。若调用方在这里传了一个不同的 γ, 那个 γ 会被完全忽略 ——
@@ -702,17 +964,19 @@ void HyVlaVlmModel::set_moe_weights(
                 "the text-side final_norm_w (Hy-VLA has no norm_v; step 7 computes it "
                 "once). Pass the identical tensor object.");
 
-    // 行掩码: [chunk_size] fp16 RPU contig, 取值 {0,1}。
+    // 行掩码: [chunk_size] fp16 device contig, 取值 {0,1}。
     TORCH_CHECK(text_row_mask.defined() && text_row_mask.dim() == 1
                 && text_row_mask.size(0) == chunk_size
                 && text_row_mask.scalar_type() == at::kHalf
                 && text_row_mask.is_contiguous()
                 && text_row_mask.device().type() == at::kPrivateUse1,
                 "hyvla set_moe_weights: text_row_mask must be [", chunk_size,
-                "] fp16 contig RPU");
+                "] fp16 contig device");
     at::Tensor mask_cpu = text_row_mask.to(at::kCPU).to(at::kFloat);
     TORCH_CHECK(((mask_cpu == 0.0f) | (mask_cpu == 1.0f)).all().item<bool>(),
                 "hyvla set_moe_weights: text_row_mask values must be exactly 0/1");
+    const bool standard_three_camera_mask =
+        hyvla_standard_three_camera_mask(mask_cpu.data_ptr<float>(), chunk_size);
 
     // ── 掩码常量化: [cs, 1] fp16 行向量 (act = 1 - text) ──
     // 掩码逐行恒定, 只有 cs 个不同的值。历史版本按 3 个 merge 宽度各展开成
@@ -722,7 +986,7 @@ void HyVlaVlmModel::set_moe_weights(
     // merge 侧用 `rpu_launch_eltwise_binary_Nx1_NxC_spm_kernel` 做行广播乘,
     // **位精确**: 掩码恒 0/1, fp16 下 x*1.0 / x*0.0 / x+0.0 都是精确的。
     // ⚠️ 不要为了省掉一个掩码而改写成 `b + m*(a-b)` —— 那个不是位精确的。
-    // 展开在 host (CPU) 完成后整体复制到 RPU DDR — 不在 device 上做常量填充 (Pitfall B-1)。
+    // 展开在 host (CPU) 完成后整体复制到 device DDR — 不在 device 上做常量填充 (Pitfall B-1)。
     const at::Tensor text_cpu = mask_cpu.to(at::kHalf);
     const auto rpu_opts =
         at::TensorOptions().dtype(at::kHalf).device(at::kPrivateUse1);
@@ -753,6 +1017,7 @@ void HyVlaVlmModel::set_moe_weights(
     }
     text_row_mask_    = text_row_mask;
     moe_chunk_size_   = chunk_size;
+    standard_three_camera_mask_ = standard_three_camera_mask;
 
     invalidate_model_state();   // D-503: set_moe_weights 末非空语句
 }
@@ -923,7 +1188,16 @@ void HyVlaVlmModel::emit_row_merge(
     uint32_t text_mask_addr, uint32_t act_mask_addr,
     int64_t rows, int64_t cols, int num_cores)
 {
-    // 两次行广播 MUL (掩码 [rows,1]) + 一次全尺寸 ADD。掩码恒 0/1 ⇒ 逐位精确。
+    if (row_merge_enabled(rows, ctx().position)) {
+        TORCH_CHECK(ctx().has_complete_physical_manifest(),
+                    "HyVLA fused row merge requires a COMPLETE descriptor");
+        ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+            HYVLA_VLM_ROW_MERGE_SITE, 1, 0, row_merge_arguments(), 0);
+        launch_hyvla_row_merge_spm(text_addr, act_addr, out_addr,
+            text_mask_addr, act_mask_addr, rows, cols, num_cores);
+        return;
+    }
+    // Two separately rounded row products followed by FP16 ADD.
     rpu_launch_eltwise_binary_Nx1_NxC_spm_kernel(
         text_mask_addr, text_addr, text_addr, rows, cols,
         c10::Half(1.0f), ValuOpType::MUL, /*is_bopa=*/false, num_cores);
@@ -962,6 +1236,12 @@ void HyVlaVlmModel::build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) 
     const int64_t seq_len = chunk.len;
     const int64_t cos_sin_start = ctx().position + chunk.offset;
     const bool is_last_layer = (layer_idx == num_layers() - 1);
+    const bool kv_only_tail = cold_prefill_kv_only_ && is_last_layer;
+    if (kv_only_tail) {
+        ctx().consume_physical_route(
+            FmbRouteFamily::GRAPH_SCHEDULE, HYVLA_VLM_PREFILL_KV_ONLY_SITE,
+            1, 0, prefill_kv_only_arguments(chunk.len), chunk.idx);
+    }
     const int64_t h   = hidden_size();
     const int64_t nq  = num_q_heads();
     const int64_t nkv = num_kv_heads();
@@ -994,10 +1274,30 @@ void HyVlaVlmModel::build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) 
         }
         return route;
     };
-    const RpuRmsNormSpmRoute full_rmsnorm_route = consume_rmsnorm(
-        kHyVlaVlmRmsNormFullRowsSite, seq_len, h);
-    const RpuRmsNormSpmRoute q_head_rmsnorm_route = consume_rmsnorm(
-        kHyVlaVlmRmsNormQHeadRowsSite, seq_len * local_q, hd);
+    const bool paired_norm = paired_rmsnorm_enabled(seq_len, ctx().position);
+    const RpuRmsNormSpmRoute full_rmsnorm_route = paired_norm
+        ? cold_rmsnorm_spm_contract_.resolve(seq_len, h)
+        : consume_rmsnorm(kHyVlaVlmRmsNormFullRowsSite, seq_len, h);
+    const auto norm_pair = [&](uint32_t input, uint32_t text_out, uint32_t act_out,
+                               uint32_t text_gamma, uint32_t act_gamma) {
+        if (paired_norm) {
+            TORCH_CHECK(ctx().has_complete_physical_manifest(),
+                        "HyVlaVlmModel paired RMSNorm requires COMPLETE manifest");
+            ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+                HYVLA_VLM_PAIRED_RMSNORM_SITE, 1, 0, paired_rmsnorm_arguments(), chunk.idx);
+            launch_hyvla_paired_rmsnorm_spm(input, text_out, act_out,
+                text_gamma, act_gamma, seq_len, h, eps_hyvla_, NUM_CORES,
+                full_rmsnorm_route);
+        } else {
+            rpu_launch_rmsnorm_spm_kernel(input, text_out, text_gamma,
+                seq_len, h, eps_hyvla_, full_rmsnorm_route);
+            rpu_launch_rmsnorm_spm_kernel(input, act_out, act_gamma,
+                seq_len, h, eps_hyvla_, full_rmsnorm_route);
+        }
+    };
+    const RpuRmsNormSpmRoute q_head_rmsnorm_route = kv_only_tail
+        ? RpuRmsNormSpmRoute::BASE
+        : consume_rmsnorm(kHyVlaVlmRmsNormQHeadRowsSite, seq_len * local_q, hd);
     const RpuRmsNormSpmRoute k_head_rmsnorm_route = consume_rmsnorm(
         kHyVlaVlmRmsNormKHeadRowsSite,
         seq_len * (nkv / tp), hd);
@@ -1039,14 +1339,8 @@ void HyVlaVlmModel::build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) 
              (cold_mot_norm_nomerge_ & MOT_NOMERGE_QKV) ? 1 : 0,
              seq_len, h}, chunk.idx);
     }
-    rpu_launch_rmsnorm_spm_kernel(
-        addr(0, "residual1"), addr(0, "input_norm"),
-        layer_addr(layer_idx, 0, "norm_w"), seq_len, h, eps_hyvla_,
-        full_rmsnorm_route);
-    rpu_launch_rmsnorm_spm_kernel(
-        addr(0, "residual1"), addr(0, "norm_a1"),
-        layer_addr(layer_idx, 0, "norm_w_act"), seq_len, h, eps_hyvla_,
-        full_rmsnorm_route);
+    norm_pair(addr(0, "residual1"), addr(0, "input_norm"), addr(0, "norm_a1"),
+        layer_addr(layer_idx, 0, "norm_w"), layer_addr(layer_idx, 0, "norm_w_act"));
     if (!(nomerge & MOT_NOMERGE_QKV))
         emit_row_merge(addr(0, "input_norm"), addr(0, "norm_a1"), addr(0, "input_norm"),
                        m_txt, m_act, seq_len, cols_h, NUM_CORES);
@@ -1070,20 +1364,23 @@ void HyVlaVlmModel::build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) 
     const uint32_t in_txt = addr(0, "input_norm");
     const uint32_t in_act = (nomerge & MOT_NOMERGE_QKV) ? addr(0, "norm_a1")
                                                         : addr(0, "input_norm");
-    qkv(in_txt, lw.q_w, lw.q_ws, "q",   "q_bias",     nq * hd);
+    if (!kv_only_tail)
+        qkv(in_txt, lw.q_w, lw.q_ws, "q",   "q_bias",     nq * hd);
     qkv(in_txt, lw.k_w, lw.k_ws, "k",   "k_bias",     nkv * hd);
     qkv(in_txt, lw.v_w, lw.v_ws, "v",   "v_bias",     nkv * hd);
-    qkv(in_act, mw.q_w, mw.q_ws, "q_a", "q_bias_act", nq * hd);
+    if (!kv_only_tail)
+        qkv(in_act, mw.q_w, mw.q_ws, "q_a", "q_bias_act", nq * hd);
     qkv(in_act, mw.k_w, mw.k_ws, "k_a", "k_bias_act", nkv * hd);
     qkv(in_act, mw.v_w, mw.v_ws, "v_a", "v_bias_act", nkv * hd);
-    emit_row_merge(addr(0, "q"), addr(0, "q_a"), addr(0, "q"), m_txt, m_act, seq_len, cols_q,  tp);
+    if (!kv_only_tail)
+        emit_row_merge(addr(0, "q"), addr(0, "q_a"), addr(0, "q"), m_txt, m_act, seq_len, cols_q, tp);
     emit_row_merge(addr(0, "k"), addr(0, "k_a"), addr(0, "k"), m_txt, m_act, seq_len, cols_kv, tp);
     emit_row_merge(addr(0, "v"), addr(0, "v_a"), addr(0, "v"), m_txt, m_act, seq_len, cols_kv, tp);
 
     // ── 步 3: **先 RoPE，再 q/k head-norm**（与 HALO 相反），norm 为两塔共享 ──
     // Hy-VLA 的 HyDualTower.forward:456-469 先对拼接后的 q/k 施 RoPE，再按塔切分做
     // head-dim RMSNorm；且该 norm 只有一份（query_layernorm / key_layernorm 非 _v）。
-    // 现有 7 个 RPU emitter（gemma4 / halo_* / qwen3_5 / qwenpi05 / rhino_vla / qwen3）
+    // 现有 7 个 device emitter（gemma4 / halo_* / qwen3_5 / qwenpi05 / rhino_vla / qwen3）
     // 全是 norm→rope，本文件是**唯一** rope→norm 的。
     // 可行性依据：两个 kernel 都是 src/dst 分离、无隐藏状态的独立 SPM launch
     //   rpu_launch_rope_spm_kernel(x_addr, y_addr, cos, sin, seq, heads, hd, start)
@@ -1100,36 +1397,38 @@ void HyVlaVlmModel::build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) 
     const bool prope = cold_partial_rope_;
     const int64_t local_kv_heads = nkv / tp;
 
-    if (prope) {
-        if (ctx().has_complete_physical_manifest()) {
-            ctx().consume_physical_route(
-                FmbRouteFamily::ROPE,
-                HYVLA_VLM_Q_PARTIAL_ROPE_SITE,
-                static_cast<int64_t>(HyVlaVlmRopeRoute::PARTIAL_MROPE),
-                /*resolved_flags=*/0,
-                {cold_partial_rope_ ? 1 : 0, cos_sin_start,
-                 seq_len, local_q, hd, tp}, chunk.idx);
+    if (!kv_only_tail) {
+        if (prope) {
+            if (ctx().has_complete_physical_manifest()) {
+                ctx().consume_physical_route(
+                    FmbRouteFamily::ROPE,
+                    HYVLA_VLM_Q_PARTIAL_ROPE_SITE,
+                    static_cast<int64_t>(HyVlaVlmRopeRoute::PARTIAL_MROPE),
+                    /*resolved_flags=*/0,
+                    {cold_partial_rope_ ? 1 : 0, cos_sin_start,
+                     seq_len, local_q, hd, tp}, chunk.idx);
+            }
+            rpu_launch_partial_mrope_spm_kernel(
+                addr(0, "q"), addr(0, "output"), cos_ptr, sin_ptr,
+                cos_sin_start, seq_len, local_q, hd, /*rotary_dim=*/hd, tp);
+        } else {
+            if (ctx().has_complete_physical_manifest()) {
+                ctx().consume_physical_route(
+                    FmbRouteFamily::ROPE, HYVLA_VLM_Q_ROPE_SITE,
+                    static_cast<int64_t>(HyVlaVlmRopeRoute::ROPE_1D),
+                    /*resolved_flags=*/0,
+                    {cold_partial_rope_ ? 1 : 0, cos_sin_start,
+                     seq_len, local_q, hd, tp}, chunk.idx);
+            }
+            rpu_launch_rope_spm_kernel(addr(0, "q"), addr(0, "output"),
+                                       cos_ptr, sin_ptr, seq_len, local_q, hd,
+                                       cos_sin_start, tp);
         }
-        rpu_launch_partial_mrope_spm_kernel(
-            addr(0, "q"), addr(0, "output"), cos_ptr, sin_ptr,
-            cos_sin_start, seq_len, local_q, hd, /*rotary_dim=*/hd, tp);
-    } else {
-        if (ctx().has_complete_physical_manifest()) {
-            ctx().consume_physical_route(
-                FmbRouteFamily::ROPE, HYVLA_VLM_Q_ROPE_SITE,
-                static_cast<int64_t>(HyVlaVlmRopeRoute::ROPE_1D),
-                /*resolved_flags=*/0,
-                {cold_partial_rope_ ? 1 : 0, cos_sin_start,
-                 seq_len, local_q, hd, tp}, chunk.idx);
-        }
-        rpu_launch_rope_spm_kernel(addr(0, "q"), addr(0, "output"),
-                                   cos_ptr, sin_ptr, seq_len, local_q, hd,
-                                   cos_sin_start, tp);
+        rpu_launch_rmsnorm_spm_kernel(
+            addr(0, "output"), addr(0, "q"),
+            layer_addr(layer_idx, 0, "q_norm_w"), seq_len * local_q, hd,
+            eps_hyvla_, q_head_rmsnorm_route);
     }
-    rpu_launch_rmsnorm_spm_kernel(
-        addr(0, "output"), addr(0, "q"),
-        layer_addr(layer_idx, 0, "q_norm_w"), seq_len * local_q, hd,
-        eps_hyvla_, q_head_rmsnorm_route);
 
     if (prope) {
         if (ctx().has_complete_physical_manifest()) {
@@ -1190,6 +1489,9 @@ void HyVlaVlmModel::build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) 
         /*k_cache_batch_offset_elems=*/0,
         /*v_cache_batch_offset_elems=*/0,
         /*spm_rows=*/0, kv_plan);
+    // The action expert consumes only cache history. All preceding layers
+    // remain complete; the terminal layer has no hidden-state consumer.
+    if (kv_only_tail) return;
     const uint32_t mask_off = addr_offset("sdpa_mask").value;
     // mask 逐层恒定；槽撑满相位后只需在层 0 灌一次（见 MASK_ONCE）。
     if (!cold_mask_once_ || layer_idx == 0) {
@@ -1277,14 +1579,8 @@ void HyVlaVlmModel::build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) 
              (cold_mot_norm_nomerge_ & MOT_NOMERGE_MLP) ? 1 : 0,
              seq_len, h}, chunk.idx);
     }
-    rpu_launch_rmsnorm_spm_kernel(
-        addr(0, "residual2"), addr(0, "residual1"),
-        layer_addr(layer_idx, 0, "post_norm_w"), seq_len, h, eps_hyvla_,
-        full_rmsnorm_route);
-    rpu_launch_rmsnorm_spm_kernel(
-        addr(0, "residual2"), addr(0, "norm_a2"),
-        layer_addr(layer_idx, 0, "post_norm_w_act"), seq_len, h, eps_hyvla_,
-        full_rmsnorm_route);
+    norm_pair(addr(0, "residual2"), addr(0, "residual1"), addr(0, "norm_a2"),
+        layer_addr(layer_idx, 0, "post_norm_w"), layer_addr(layer_idx, 0, "post_norm_w_act"));
     if (!(nomerge & MOT_NOMERGE_MLP))
         emit_row_merge(addr(0, "residual1"), addr(0, "norm_a2"), addr(0, "residual1"),
                        m_txt, m_act, seq_len, cols_h, NUM_CORES);
@@ -1296,70 +1592,88 @@ void HyVlaVlmModel::build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) 
                         const at::Tensor& gate_w, const at::Tensor& up_w,
                         const at::Tensor& down_w, const at::Tensor& gate_ws,
                         const at::Tensor& up_ws, const at::Tensor& down_ws,
-                        const char* g, const char* u, const char* dn) {
-        if (ctx().has_complete_physical_manifest()) {
+                        const char* g, const char* u, const char* dn, bool vision) {
+        if (vision && vision_gu176_enabled(seq_len, ctx().position)) {
             ctx().consume_physical_route(
-                FmbRouteFamily::LINEAR, HYVLA_VLM_MLP_GATE_LINEAR_SITE,
-                static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
-                /*resolved_flags=*/0,
-                {seq_len, intermediate_size(), h, 1, NUM_CORES}, chunk.idx);
-        }
-        rpu_launch_linear_spm_to_spm_acc16_kernel(
-            in_addr, gate_w, addr(0, g),
-            seq_len, intermediate_size(), h, /*partition=*/1, NUM_CORES,
-            /*bias_spm_addr=*/0u, /*scale=*/gate_ws);
-        if (!cold_silu_mul_) {
-            if (ctx().has_complete_physical_manifest()) {
-                ctx().consume_physical_route(
-                    FmbRouteFamily::ACTIVATION,
-                    HYVLA_VLM_MLP_SILU_SITE,
-                    static_cast<int64_t>(
-                        HyVlaVlmActivationRoute::SILU_UNARY),
-                    /*resolved_flags=*/0,
-                    {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES},
-                    chunk.idx);
-            }
-            rpu_launch_eltwise_unary_spm_kernel(
-                addr(0, g), addr(0, g), elems_mlp, ValuOpType::SILU,
-                /*is_gelu=*/false, NUM_CORES);
-        }
-        if (ctx().has_complete_physical_manifest()) {
+                FmbRouteFamily::GRAPH_SCHEDULE, HYVLA_VLM_VISION_GU176_SITE,
+                1, 0, vision_gu176_arguments(), chunk.idx);
+            launch_hyvla_vlm_vision_gu176_w8(in_addr, addr(0, g), addr(0, u),
+                seq_len, gate_w, up_w, gate_ws, up_ws);
+        } else if (gateup_swiglu_enabled(seq_len, ctx().position)) {
             ctx().consume_physical_route(
-                FmbRouteFamily::LINEAR, HYVLA_VLM_MLP_UP_LINEAR_SITE,
-                static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
-                /*resolved_flags=*/0,
-                {seq_len, intermediate_size(), h, 1, NUM_CORES}, chunk.idx);
-        }
-        rpu_launch_linear_spm_to_spm_acc16_kernel(
-            in_addr, up_w, addr(0, u),
-            seq_len, intermediate_size(), h, /*partition=*/1, NUM_CORES,
-            /*bias_spm_addr=*/0u, /*scale=*/up_ws);
-        if (cold_silu_mul_) {
-            if (ctx().has_complete_physical_manifest()) {
-                ctx().consume_physical_route(
-                    FmbRouteFamily::ACTIVATION,
-                    HYVLA_VLM_MLP_SILU_MUL_SITE,
-                    static_cast<int64_t>(
-                        HyVlaVlmActivationRoute::SILU_MUL_FUSED),
-                    /*resolved_flags=*/0,
-                    {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES},
-                    chunk.idx);
-            }
-            rpu_launch_silu_mul_spm_kernel(
-                addr(0, g), addr(0, u), addr(0, g), elems_mlp, NUM_CORES);
+                FmbRouteFamily::GRAPH_SCHEDULE, HYVLA_VLM_GATEUP_SWIGLU_SITE,
+                1, 0, gateup_swiglu_arguments(), chunk.idx);
+            if (gate_w.scalar_type() == at::kChar)
+                launch_hyvla_vlm_gateup_w8(in_addr, addr(0, g), seq_len,
+                    gate_w, up_w, gate_ws, up_ws);
+            else
+                rpu_launch_hyvla_vlm_gateup_swiglu_fp16_spm_kernel(
+                    in_addr, gate_w, up_w, addr(0, g), seq_len);
         } else {
             if (ctx().has_complete_physical_manifest()) {
                 ctx().consume_physical_route(
-                    FmbRouteFamily::ACTIVATION,
-                    HYVLA_VLM_MLP_MUL_SITE,
-                    static_cast<int64_t>(HyVlaVlmActivationRoute::MUL),
+                    FmbRouteFamily::LINEAR, HYVLA_VLM_MLP_GATE_LINEAR_SITE,
+                    static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
                     /*resolved_flags=*/0,
-                    {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES},
-                    chunk.idx);
+                    {seq_len, intermediate_size(), h, 1, NUM_CORES}, chunk.idx);
             }
-            rpu_launch_eltwise_binary_spm_kernel(
-                addr(0, g), addr(0, u), addr(0, g),
-                elems_mlp, ValuOpType::MUL, c10::Half(1.0f), NUM_CORES);
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                in_addr, gate_w, addr(0, g),
+                seq_len, intermediate_size(), h, /*partition=*/1, NUM_CORES,
+                /*bias_spm_addr=*/0u, /*scale=*/gate_ws);
+            if (!cold_silu_mul_) {
+                if (ctx().has_complete_physical_manifest()) {
+                    ctx().consume_physical_route(
+                        FmbRouteFamily::ACTIVATION,
+                        HYVLA_VLM_MLP_SILU_SITE,
+                        static_cast<int64_t>(
+                            HyVlaVlmActivationRoute::SILU_UNARY),
+                        /*resolved_flags=*/0,
+                        {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES},
+                        chunk.idx);
+                }
+                rpu_launch_eltwise_unary_spm_kernel(
+                    addr(0, g), addr(0, g), elems_mlp, ValuOpType::SILU,
+                    /*is_gelu=*/false, NUM_CORES);
+            }
+            if (ctx().has_complete_physical_manifest()) {
+                ctx().consume_physical_route(
+                    FmbRouteFamily::LINEAR, HYVLA_VLM_MLP_UP_LINEAR_SITE,
+                    static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
+                    /*resolved_flags=*/0,
+                    {seq_len, intermediate_size(), h, 1, NUM_CORES}, chunk.idx);
+            }
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                in_addr, up_w, addr(0, u),
+                seq_len, intermediate_size(), h, /*partition=*/1, NUM_CORES,
+                /*bias_spm_addr=*/0u, /*scale=*/up_ws);
+            if (cold_silu_mul_) {
+                if (ctx().has_complete_physical_manifest()) {
+                    ctx().consume_physical_route(
+                        FmbRouteFamily::ACTIVATION,
+                        HYVLA_VLM_MLP_SILU_MUL_SITE,
+                        static_cast<int64_t>(
+                            HyVlaVlmActivationRoute::SILU_MUL_FUSED),
+                        /*resolved_flags=*/0,
+                        {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES},
+                        chunk.idx);
+                }
+                rpu_launch_silu_mul_spm_kernel(
+                    addr(0, g), addr(0, u), addr(0, g), elems_mlp, NUM_CORES);
+            } else {
+                if (ctx().has_complete_physical_manifest()) {
+                    ctx().consume_physical_route(
+                        FmbRouteFamily::ACTIVATION,
+                        HYVLA_VLM_MLP_MUL_SITE,
+                        static_cast<int64_t>(HyVlaVlmActivationRoute::MUL),
+                        /*resolved_flags=*/0,
+                        {cold_silu_mul_ ? 1 : 0, elems_mlp, NUM_CORES},
+                        chunk.idx);
+                }
+                rpu_launch_eltwise_binary_spm_kernel(
+                    addr(0, g), addr(0, u), addr(0, g),
+                    elems_mlp, ValuOpType::MUL, c10::Half(1.0f), NUM_CORES);
+            }
         }
         if (ctx().has_complete_physical_manifest()) {
             ctx().consume_physical_route(
@@ -1375,14 +1689,14 @@ void HyVlaVlmModel::build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) 
     };
     mlp_half(addr(0, "residual1"),
              lw.gate_w, lw.up_w, lw.down_w,
-             lw.gate_ws, lw.up_ws, lw.down_ws, "gate", "up", "down");
+             lw.gate_ws, lw.up_ws, lw.down_ws, "gate", "up", "down", false);
     // 孪生分支复用 text 的 gate/up 暂存 (见 declare_buffers 的说明): 此刻 text
     // 的 SwiGLU 中间量已消费完, 其结果在 "down" 里等着 merge。
     // ⚠️ NOMERGE 时它的输入是 "norm_a2"（自己那一路的 post-norm 输出），
     //    不是 "residual1" —— residual1 此时持的是 **text** 那一路的 norm 输出。
     mlp_half((nomerge & MOT_NOMERGE_MLP) ? addr(0, "norm_a2") : addr(0, "residual1"),
              mw.gate_w, mw.up_w, mw.down_w,
-             mw.gate_ws, mw.up_ws, mw.down_ws, "gate", "up", "down_a");
+             mw.gate_ws, mw.up_ws, mw.down_ws, "gate", "up", "down_a", true);
     emit_row_merge(addr(0, "down"), addr(0, "down_a"), addr(0, "down"),
                    m_txt, m_act, seq_len, cols_h, NUM_CORES);
     if (ctx().has_complete_physical_manifest()) {
@@ -1424,7 +1738,37 @@ at::Tensor HyVlaVlmModel::step_forward(
     std::vector<at::Tensor>& v_caches,
     const at::Tensor& cos, const at::Tensor& sin,
     const at::Tensor& attn_mask_4d, int64_t prefix_len,
-    at::IntArrayRef planned_stage_descriptor)
+    at::IntArrayRef planned_stage_descriptor, bool inputs_published)
+{
+    TORCH_CHECK(!cold_prefill_kv_only_,
+                "hyvla step_forward cannot return hidden output from a KV-only owner");
+    return run_prefill(x_emb, k_caches, v_caches, cos, sin, attn_mask_4d,
+                       prefix_len, planned_stage_descriptor, inputs_published);
+}
+
+void HyVlaVlmModel::prefill_kv_only(
+    const at::Tensor& x_emb, std::vector<at::Tensor>& k_caches,
+    std::vector<at::Tensor>& v_caches,
+    const at::Tensor& cos, const at::Tensor& sin,
+    const at::Tensor& attn_mask_4d, int64_t prefix_len,
+    at::IntArrayRef planned_stage_descriptor, bool inputs_published)
+{
+    TORCH_CHECK(cold_prefill_kv_only_,
+                "hyvla prefill_kv_only requires a KV-only owner");
+    TORCH_CHECK(prefix_len == 0,
+                "hyvla prefill_kv_only requires an initial prefix");
+    // FMB retains its output allocation for its internal ABI, but the terminal
+    // output DMA is absent and this allocation must never escape to callers.
+    (void)run_prefill(x_emb, k_caches, v_caches, cos, sin, attn_mask_4d,
+                      prefix_len, planned_stage_descriptor, inputs_published);
+}
+
+at::Tensor HyVlaVlmModel::run_prefill(
+    const at::Tensor& x_emb, std::vector<at::Tensor>& k_caches,
+    std::vector<at::Tensor>& v_caches,
+    const at::Tensor& cos, const at::Tensor& sin,
+    const at::Tensor& attn_mask_4d, int64_t prefix_len,
+    at::IntArrayRef planned_stage_descriptor, bool inputs_published)
 {
     TORCH_CHECK(!text_layers_.empty() && moe_chunk_size_ > 0,
                 "hyvla step_forward before set_weights_hyvla / set_moe_weights");
@@ -1435,7 +1779,7 @@ at::Tensor HyVlaVlmModel::step_forward(
                 && x_emb.is_contiguous()
                 && x_emb.device().type() == at::kPrivateUse1,
                 "hyvla step_forward: x_emb must be [1,", cs, ",", h,
-                "] fp16 contig RPU");
+                "] fp16 contig device");
     TORCH_CHECK(attn_mask_4d.defined(),
                 "hyvla step_forward: explicit attention mask required");
     TORCH_CHECK(prefix_len >= 0, "hyvla step_forward: prefix_len must be >= 0");
@@ -1448,7 +1792,7 @@ at::Tensor HyVlaVlmModel::step_forward(
                 "hyvla step_forward: cos/sin must be defined");
     TORCH_CHECK(cos.device().type() == at::kPrivateUse1
                 && sin.device().type() == at::kPrivateUse1,
-                "hyvla step_forward: cos/sin must be on RPU");
+                "hyvla step_forward: cos/sin must be on device");
     TORCH_CHECK(cos.scalar_type() == at::kHalf && sin.scalar_type() == at::kHalf,
                 "hyvla step_forward: cos/sin must be fp16");
     TORCH_CHECK(cos.is_contiguous() && sin.is_contiguous(),
@@ -1474,8 +1818,11 @@ at::Tensor HyVlaVlmModel::step_forward(
                     ") exceeds k_cache capacity ", kc.size(1) * kc.size(5));
     }
 
-    // host 侧合成的 x_emb 可能带脏 cache 行; BUILD 前显式 flush。
-    rpu_ddr_flush_force(x_emb.data_ptr<c10::Half>());
+    // Only an explicitly published adapter upload can skip the public-input
+    // boundary: a normal caller may have mutated a CPU alias of x_emb.
+    if (!inputs_published) {
+        rpu_ddr_flush_force(x_emb.data_ptr<c10::Half>());
+    }
 
     // 基类 forward 持有掩码准备 + run_all_layers; 行位置恒定 → 1D RoPE,
     // position_ids/deepstack 均空。返回基类 output_tensor_ (graph 写目标): 在
@@ -1537,6 +1884,10 @@ std::string rpu_hyvla_vlm_kvinsert_cost_catalog_sha256(int64_t handle) {
 // =============================================================================
 int64_t rpu_hyvla_vlm_create() {
     return HyVlaVlmRegistry::create();
+}
+
+int64_t rpu_hyvla_vlm_create_kv_only() {
+    return HyVlaVlmRegistry::create(true);
 }
 
 void rpu_hyvla_vlm_set_runtime_config(
@@ -1643,11 +1994,23 @@ at::Tensor rpu_hyvla_vlm_step_forward(
     std::vector<at::Tensor> k_caches, std::vector<at::Tensor> v_caches,
     const at::Tensor& cos, const at::Tensor& sin,
     const at::Tensor& attn_mask_4d, int64_t prefix_len,
-    at::IntArrayRef planned_stage_descriptor)
+    at::IntArrayRef planned_stage_descriptor, bool inputs_published)
 {
     return HyVlaVlmRegistry::get(handle, "rpu_hyvla_vlm_step_forward")
         ->step_forward(x_emb, k_caches, v_caches, cos, sin, attn_mask_4d,
-                       prefix_len, planned_stage_descriptor);
+                       prefix_len, planned_stage_descriptor, inputs_published);
+}
+
+void rpu_hyvla_vlm_prefill_kv_only(
+    int64_t handle, const at::Tensor& x_emb,
+    std::vector<at::Tensor> k_caches, std::vector<at::Tensor> v_caches,
+    const at::Tensor& cos, const at::Tensor& sin,
+    const at::Tensor& attn_mask_4d, int64_t prefix_len,
+    at::IntArrayRef planned_stage_descriptor, bool inputs_published)
+{
+    HyVlaVlmRegistry::get(handle, "rpu_hyvla_vlm_prefill_kv_only")
+        ->prefill_kv_only(x_emb, k_caches, v_caches, cos, sin, attn_mask_4d,
+                          prefix_len, planned_stage_descriptor, inputs_published);
 }
 
 std::vector<int64_t> rpu_hyvla_vlm_resolve_stage_domain(

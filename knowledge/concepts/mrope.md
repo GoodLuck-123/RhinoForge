@@ -10,34 +10,27 @@ admission checks; the presence of this helper does not widen them. See
 ## Public boundary
 
 - The host precomputation helper accepts non-negative integer
-  `position_ids` with shape `[sequence, 3]`.
-  [Position-table helper](../../python/rpu_backend/runtime/rope_partial.py)
+  `position_ids` with shape `[sequence, 3]`. [Position-table helper](../../python/rpu_backend/runtime/rope_partial.py)
 - `mrope_section` contains exactly three non-negative integer section sizes.
   Their sum must equal half of the configured rotary dimension. Read it from
-  the model configuration; do not hardcode another model's values.
-  [Qwen3-VL text installation](../../python/rpu_backend/adapters/qwen3_vl/text.py)
+  the model configuration; do not hardcode another model's values. [Qwen3-VL text installation](../../python/rpu_backend/adapters/qwen3_vl/text.py)
 - The Qwen3-VL causal-prefill boundary accepts the Hugging Face form
   `[3, batch, sequence]` and the token-major form `[sequence, 3]`. Preserve the
-  axis order when adapting another model.
-  [Qwen3-VL adapter](../../python/rpu_backend/adapters/qwen3_vl/__init__.py)
+  axis order when adapting another model. [Qwen3-VL adapter](../../python/rpu_backend/adapters/qwen3_vl/__init__.py)
 - Padding rows need valid position rows, but they must not change the logical
   output length or KV-cache position. The adapter pads positions consistently,
-  slices the returned output, and preserves logical cache ownership.
-  [Architecture](../../docs/architecture.md#spm-design)
+  slices the returned output, and preserves logical cache ownership. [Architecture](../../docs/architecture.md#spm-design)
 - Position coordinates are semantic inputs. A retained Graph must either key
   on every result-changing position property or update the live position data
-  through its reviewed mutable-data contract.
-  [GraphCache capture](graphcache-capture.md)
+  through its reviewed mutable-data contract. [GraphCache capture](graphcache-capture.md)
 - A stable source address does not prove unchanged position or partial cos/sin
   contents. Sources without a tensor version counter, including inference
   tensors, refresh the native keepalive before every forward. Version-tracked
-  sources may reuse unchanged contents.
-  [Native decoder](../../src/fused/rpu_qwen3_model.h)
+  sources may reuse unchanged contents. [Native decoder](../../src/fused/rpu_qwen3_model.h)
 
 Automatic text-position slots contain logical P rows and are reused only when
 P equals the execution length E. Padded prefill keeps its E-row position tensor
-in the general stable slots, including valid repeated-last-position padding.
-[Qwen3-VL adapter](../../python/rpu_backend/adapters/qwen3_vl/__init__.py)
+in the general stable slots, including valid repeated-last-position padding. [Qwen3-VL adapter](../../python/rpu_backend/adapters/qwen3_vl/__init__.py)
 
 When all three coordinates for a token are equal, each rotary section uses the
 same logical position. This is useful for checking text-only suffixes, but it

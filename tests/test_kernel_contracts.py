@@ -18,6 +18,36 @@ from rpu_backend.api.errors import RPUBackendError, UnsupportedModelError
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_wall_and_mixed_precision_ids_have_expansion_preload_routes() -> None:
+    header = (ROOT / "src/core/rpu_kernel_cache.h").read_text()
+    cache = (ROOT / "src/core/rpu_kernel_cache.inc").read_text()
+    enum = header.split("enum class KernelId : uint16_t {", 1)[1].split("};", 1)[0]
+    enum = re.sub(r"//[^\n]*|/\*.*?\*/", "", enum, flags=re.DOTALL)
+    ids = [item.split("=", 1)[0].strip() for item in enum.split(",")
+           if item.strip() and item.strip() != "_COUNT"]
+    names = re.findall(
+        r'"([^"\n]+)"',
+        header.split("KERNEL_ID_NAMES[] = {", 1)[1].split("};", 1)[0],
+    )
+    assert len(ids) == len(names)
+    wall = {name for kernel_id, name in zip(ids, names)
+            if kernel_id.startswith(("WALL_", "PL_ACC32_OUT_BF16_"))
+            or ("BF16" in kernel_id and kernel_id.startswith(("LLM_ALL_REDUCE_", "RMS_NORM_BF16IN_")))}
+    fixed = cache.split("KERNEL_LIST = {", 1)[1].split("};", 1)[0]
+    routes = dict(re.findall(r'\{"([^"\n]+)",\s*(\w+)\}', fixed))
+    mixed = cache.split("kMixedNames[] = {", 1)[1].split("};", 1)[0]
+    for name in re.findall(r'"([^"\n]+)"', mixed):
+        if name in wall:
+            assert routes.get(name, "RHINO_EXPANSION_OP_LIB_PATH") == "RHINO_EXPANSION_OP_LIB_PATH"
+        routes[name] = "RHINO_EXPANSION_OP_LIB_PATH"
+    # These paths select fixed IDs, including names shared with projection
+    # helpers. Every declared route must reach its designated preload source.
+    assert wall
+    assert {name: routes.get(name) for name in wall} == {
+        name: "RHINO_EXPANSION_OP_LIB_PATH" for name in wall
+    }
+
+
 
 def test_operator_kernel_manifest_is_strict_and_asset_stays_opaque(
     tmp_path: Path,
@@ -116,7 +146,7 @@ def test_operator_kernel_manifest_is_strict_and_asset_stays_opaque(
 
 
 @pytest.mark.parametrize("dims", [(64, 128), (128, 64)])
-def test_qwen3_5_gdn_head_dims_fail_before_mutation(dims) -> None:
+def test_qwen3_5_gdn_projection_validation_precedes_mutation(dims, monkeypatch) -> None:
     model = SimpleNamespace(
         norm=SimpleNamespace(weight=torch.ones(1, dtype=torch.float16))
     )
@@ -127,7 +157,15 @@ def test_qwen3_5_gdn_head_dims_fail_before_mutation(dims) -> None:
         linear_value_head_dim=dims[1],
     )
 
-    with pytest.raises(UnsupportedModelError, match="GDN requires"):
+    def reject_projection(inner, is_full, quant_config):
+        assert inner is model
+        assert is_full == [False]
+        assert quant_config is None
+        assert not hasattr(model, "_rpu_qwen3_5_text_install_started")
+        raise UnsupportedModelError("invalid projection fixture")
+
+    monkeypatch.setattr(qwen3_5_text, "_validate_projection_specs", reject_projection)
+    with pytest.raises(UnsupportedModelError, match="invalid projection fixture"):
         qwen3_5_text._install_qwen3_5_text_for_rpu_impl(
             model,
             config,
@@ -180,45 +218,32 @@ def test_qwen3_5_vision_gate_precedes_handle_and_weight_mutation() -> None:
     assert gate < install.index("torch.ops.rpu.qwen3_5_vision_create()")
     assert gate < install.index("_convert_vision_block_weights_for_rpu(")
 
-    example = (ROOT / "examples/qwen3_5_vision.py").read_text(encoding="utf-8")
-    assert example.index("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") < example.index(
-        "    import torch"
-    )
 
 
-def test_qwen3_14b_requires_exact_lm_head_quantization_metadata() -> None:
+def test_qwen3_14b_admits_w8a16_and_validates_int8_head_scale() -> None:
     profile = {
         "hidden_size": 5120,
         "intermediate_size": 17408,
         "num_hidden_layers": 40,
         "num_key_value_heads": 8,
     }
-    incomplete = SimpleNamespace(
-        **profile,
-        quant_config={"method": "w8a16"},
-    )
-    with pytest.raises(UnsupportedModelError, match="untied INT8 lm_head"):
-        qwen3._check_profile(incomplete)
-
-    exact = SimpleNamespace(
-        **profile,
-        quant_config={
-            "method": "w8a16",
-            "quantized_lm_head": True,
-            "lm_head_untied": True,
-            "quantized_embed_tokens": False,
-        },
-    )
-    qwen3._check_profile(exact)
+    with pytest.raises(UnsupportedModelError, match="no certified device execution"):
+        qwen3._check_profile(SimpleNamespace(**profile))
+    quantized = SimpleNamespace(**profile, quant_config={"method": "w8a16"})
+    qwen3._check_profile(quantized)
 
     model = torch.nn.Module()
-    model.config = exact
+    model.config = quantized
     model.model = torch.nn.Module()
     model.model.layers = torch.nn.ModuleList()
     model.model.embed_tokens = torch.nn.Embedding(2, 2).half()
     model.lm_head = torch.nn.Linear(2, 2).half()
-    with pytest.raises(RPUBackendError, match="checkpoint tensors do not match"):
+    model.lm_head.weight = torch.nn.Parameter(
+        torch.ones(2, 2, dtype=torch.int8), requires_grad=False)
+    original_to = model.to
+    with pytest.raises(RPUBackendError, match="requires fp16 lm_head.weight_scale"):
         qwen3.Qwen3Adapter(model)
+    assert model.to == original_to
 
 
 def test_qwen3_32b_requires_exact_quantized_metadata_before_admission() -> None:
@@ -232,7 +257,7 @@ def test_qwen3_32b_requires_exact_quantized_metadata_before_admission() -> None:
     )
     before = vars(config).copy()
 
-    with pytest.raises(UnsupportedModelError, match="no certified RPU execution"):
+    with pytest.raises(UnsupportedModelError, match="no certified device execution"):
         qwen3.Qwen3Adapter.preflight(config)
 
     assert vars(config) == before
@@ -253,18 +278,18 @@ def test_qwen3_32b_requires_exact_quantized_metadata_before_admission() -> None:
     with pytest.raises(UnsupportedModelError, match="num_cores=8"):
         qwen3.Qwen3Adapter.preflight_execution(config, {"model": {"num_cores": 4}})
     config.quant_config["qaxis"] = False
-    with pytest.raises(UnsupportedModelError, match="no certified RPU execution"):
+    with pytest.raises(UnsupportedModelError, match="no certified device execution"):
         qwen3.Qwen3Adapter.preflight(config)
 
 
 def test_dinov3_example_preflights_before_weight_loading() -> None:
-    source = (ROOT / "examples/dinov3.py").read_text(encoding="utf-8")
-    assert source.index("DINOv3Adapter.preflight(model_hf_config)") < source.index(
+    source = (ROOT / "examples/runners/dinov3/runner.py").read_text(encoding="utf-8")
+    assert source.index("DINOv3Adapter.preflight(hf_config)") < source.index(
         "DINOv3ViTModel.from_pretrained("
     )
 
 
-def test_public_release_has_no_activation_export_path() -> None:
+def test_public_release_limits_debug_exports_to_tensors() -> None:
     python_debug = (
         ROOT / "python/rpu_backend/runtime/debug.py"
     ).read_text(encoding="utf-8")
@@ -294,24 +319,35 @@ def test_public_release_has_no_activation_export_path() -> None:
         "list_debug_tensors",
         "clear_debug_tensors",
     ):
-        assert f"def {symbol}" not in python_debug
-        assert f'"{symbol}"' not in torch_namespace
-        assert f'm.def("{symbol}"' not in pybind
-    assert "void set_debug_export(" not in runtime_state
+        assert f"def {symbol}" in python_debug
+        assert symbol in torch_namespace
+        assert f'm.def("{symbol}"' in pybind
+    assert "void set_debug_export(" in runtime_state
     runtime_header = (ROOT / "src/core/rpu_runtime_state.h").read_text()
-    assert "inline constexpr bool get_debug_export() noexcept { return false; }" in runtime_header
-    assert "RPU_GRAPH_HCB_CHECKSUM" not in graph_execute
-    assert "[HCB-CK]" not in graph_execute
-    assert "RPU_PI05_PROBE_DIR" not in pi05
-    assert "torch.save(" not in pi05
-    # The shared forward implementations retain dormant capture branches, but
-    # the public runtime has no switch, operator binding, or environment reader
-    # that can activate or retrieve them.
+    assert "bool                      get_debug_export();" in runtime_header
+    assert 'std::getenv("RPU_GRAPH_HCB_CHECKSUM")' in graph_execute
+    checksum = graph_execute.split("auto hcb_checksum_str =", 1)[1].split("const char* hcb_state", 1)[0]
+    assert "data_ptr" not in checksum
+    assert '" dev=' not in checksum
+    assert "RPU_PI05_PROBE_DIR" in pi05
+    assert "torch.save(" in pi05
+    # Logical Tensor getters are public; raw memory and program inspection are not.
     bindings = (ROOT / "src/core/rpu_dispatch_registrations.inc").read_text()
     for name in re.findall(r'm\.(?:def|impl)\("([^"(]+)', bindings):
-        assert not any(part in name for part in ("debug_", "_dbg_", "flush_dumps"))
+        allowed = {"internvla_nextdit_set_debug_export",
+                   "qwen3_5_vision_get_dbg_hidden", "qwen3_5_vision_get_dbg_q",
+                   "qwenpi05_debug_flush_dumps", "rhino_vla_debug_flush_dumps",
+                   *("lingbot_v2_moe_debug_" + suffix for suffix in (
+                       "l0_out", "innorm", "router_h", "layer_in", "attn_resid",
+                       "rw_stage", "wtm_stage", "gcap", "acap", "scap", "ccap",
+                       "sparse_route_stage", "packed"))}
+        assert name in allowed or not any(part in name for part in ("debug_", "_dbg_", "flush_dumps"))
     native_lingbot = (ROOT / "src/fused/rpu_lingbot_v2_moe_model.cpp").read_text()
-    assert not re.search(r'getenv\("(?:RPU_L2_(?:CAP|STAGES|DBG)|RPU_LINGBOT2_DEBUG)', native_lingbot)
+    tensor_capture = {"RPU_LINGBOT2_DEBUG_DUMP_ROUTER_H", "RPU_L2_CAP_RESID",
+                      "RPU_L2_CAPTURE_L0", "RPU_L2_CAPTURE_INNORM", "RPU_L2_STAGES",
+                      "RPU_L2_CAPTURE_GATE", "RPU_L2_DBG_PACKED"}
+    controls = set(re.findall(r'getenv\("((?:RPU_L2_|RPU_LINGBOT2_DEBUG)[^"]+)"', native_lingbot))
+    assert controls == tensor_capture
 
     ignored = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
     for pattern in ("*.pth", "*.ckpt", "*.safetensors", "*.npz", "*.onnx"):

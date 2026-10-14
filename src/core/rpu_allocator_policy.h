@@ -78,7 +78,7 @@ class RpuTensorDdrLifecycle final {
   decltype(auto) run_allocation(Operation&& operation) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (shutdown_started_) {
-      throw std::runtime_error("RPU tensor DDR allocator is shut down");
+      throw std::runtime_error("device tensor DDR allocator is shut down");
     }
     return std::forward<Operation>(operation)();
   }

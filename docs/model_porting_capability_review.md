@@ -20,7 +20,7 @@ Record these fields in the port proposal:
 - precision and quantization metadata;
 - batch, sequence, cache, image, video, and action-horizon limits;
 - preprocessing and returned-output contract;
-- RhinoForge, PyTorch, Rhino Launch, and combined operator-asset versions; and
+- RhinoForge, PyTorch, Rhino Launch, and main/expansion operator-asset versions; and
 - one final outcome from the five defined below.
 
 An unknown value is a review gap, not permission to inherit a nearby profile.
@@ -74,8 +74,8 @@ Map every reference step to the smallest existing RhinoForge path:
 |---|---|
 | Existing adapter | The exact profile and input envelope already pass its preflight |
 | Shared causal decoder | The target math matches the `llama` or `qwen3` branch used by the checked-in template |
-| Existing RPU operation | Its public schema covers the exact shapes, dtypes, layouts, and state update |
-| Checked CPU fallback | Correctness is preserved, but the fallback is listed explicitly and is not treated as RPU support evidence |
+| Existing device operation | Its public schema covers the exact shapes, dtypes, layouts, and state update |
+| Checked CPU fallback | Correctness is preserved, but the fallback is listed explicitly and is not treated as device support evidence |
 | New host operation | Mathematical definition, tensor contract, validation, registration, and release-matched operator availability are all specified |
 | New fused subsystem | Repeated execution needs a new `FusedModelBase` SPM manifest and layer subgraph |
 
@@ -134,7 +134,7 @@ Write the gates that the port must pass:
 8. the maximum admitted envelope and the public TOML example run in a clean
    process.
 
-Use [Model execution and profiling](model_testing.md) for runnable entry points.
+Use [Run and debug models](model_testing.md) for runnable entry points.
 Profiling output is diagnostic evidence, not a numerical gate.
 
 **Done when:** every gate names an input, reference, expected result, and place

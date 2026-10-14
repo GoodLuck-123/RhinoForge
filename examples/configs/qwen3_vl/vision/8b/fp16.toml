@@ -1,5 +1,3 @@
-# Public configuration; provide your own checkpoint and input assets.
-
 [example]
 profile_id = "qwen3-vl-8b.fp16.vision"
 registry_alias = "qwen3-vl-8b"
@@ -13,7 +11,7 @@ architecture = "Qwen3VLForConditionalGeneration"
 component = "vision"
 prompt = "Describe the image."
 decode_steps = 4
-images = ["assets/example.ppm"]
+images = ["/path/to/image.png"]
 
 [run]
 warmup = 2

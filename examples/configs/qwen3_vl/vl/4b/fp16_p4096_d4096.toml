@@ -1,5 +1,4 @@
-# Public configuration; provide your own checkpoint and input assets.
-
+# Requested fixed-length input; this file is not new hardware certification.
 [example]
 profile_id = "qwen3-vl-4b.fp16.multimodal"
 registry_alias = "qwen3-vl-4b"
@@ -15,7 +14,7 @@ prompt = "Describe this image in one sentence."
 prefill_tokens = 4096
 decode_steps = 4096
 stop_on_eos = false
-images = ["assets/example.ppm"]
+images = ["/path/to/image.png"]
 
 [run]
 warmup = 2

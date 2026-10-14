@@ -66,7 +66,7 @@ def _validate_dtype_and_kwargs(dtype: torch.dtype, hf_kwargs: dict[str, Any]) ->
     if collisions:
         raise ValueError(
             "PaliGemmaPolicy.from_pretrained: hf_kwargs cannot include "
-            f"reserved key(s) {sorted(collisions)}; RPU loads on CPU as FP16 "
+            f"reserved key(s) {sorted(collisions)}; device loads on CPU as FP16 "
             "and owns placement, dtype, and quantization decisions."
         )
     unsupported = hf_keys - _CONFIG_KWARGS

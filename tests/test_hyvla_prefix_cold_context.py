@@ -15,6 +15,7 @@ def test_prefix_template_reuses_mutable_storage_and_snapshots_tokens(images):
              tok_vision_start=2, tok_vision_split=3, tok_vision_end=4)
     tokens = torch.arange(48, dtype=torch.float32).reshape(16, 3)
     runner.w = NS(cfg=cfg, tok_emb=tokens)
+    runner.prefix_len = 2 + images * 8 + 2
     runner._prefix_template = True
     runner._prefix_key = runner._prefix_val = None
     lang = torch.tensor([5, 6])
@@ -38,7 +39,7 @@ def test_prefix_template_reuses_mutable_storage_and_snapshots_tokens(images):
     assert third is not second
     assert torch.equal(third[0, -2:], tokens[lang].half())
     assert torch.equal(second[0, -2:], tokens[torch.tensor([5, 6])].half())
-    # Compare with the existing uncached assembly path, without new math.
+    # Compare with the existing uncached composition path, without new math.
     runner._prefix_template = False
     with torch.no_grad():
         uncached = runner.assemble_prefix(second_images, lang)

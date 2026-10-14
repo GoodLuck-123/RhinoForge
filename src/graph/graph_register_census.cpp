@@ -63,8 +63,11 @@ bool ddr_register_role_accepts_dtype(
     case GraphDdrRegisterRole::PackedFp4ModelWeight:
     case GraphDdrRegisterRole::Fp8BlockScale:
     case GraphDdrRegisterRole::PackedInt4ModelWeight:
+    case GraphDdrRegisterRole::PackedUint4ModelWeight:
         return dtype == at::kByte;
     case GraphDdrRegisterRole::PerChannelScale:
+    case GraphDdrRegisterRole::PerGroupScale:
+    case GraphDdrRegisterRole::NegativeZeroPoint:
         return dtype == at::kHalf;
     case GraphDdrRegisterRole::Fp32PerChannelScale:
         return dtype == at::kFloat;
@@ -80,9 +83,9 @@ void validate_ddr_register_role_dtype(
         ddr_register_role_accepts_dtype(role, dtype),
         "typed DDR-register role/dtype mismatch: role=",
         static_cast<unsigned>(role), ", dtype=", dtype,
-        "; ModelWeight/KeyCache/ValueCache/PerChannelScale require FP16, "
+        "; ModelWeight/KeyCache/ValueCache/PerChannelScale/PerGroupScale/NegativeZeroPoint require FP16, "
         "Fp32PerChannelScale requires FP32, Int8ModelWeight requires signed int8, Fp8ModelWeight requires "
-        "raw uint8, PackedInt4ModelWeight/PackedFp4ModelWeight/Fp8BlockScale require uint8, while SemanticInput "
+        "raw uint8, PackedInt4ModelWeight/PackedUint4ModelWeight/PackedFp4ModelWeight/Fp8BlockScale require uint8, while SemanticInput "
         "additionally admits int16/int32");
 }
 
@@ -250,7 +253,7 @@ void validate_ddr_register_operand(
     TORCH_CHECK(spec.tensor.defined(),
                 "typed DDR-register operand is undefined");
     TORCH_CHECK(spec.tensor.device().type() == c10::DeviceType::PrivateUse1,
-                "typed DDR-register operand must be RPU-resident; got ",
+                "typed DDR-register operand must be device-resident; got ",
                 spec.tensor.device());
     validate_ddr_register_role_dtype(
         spec.abi.role, spec.tensor.scalar_type());
@@ -268,7 +271,7 @@ void validate_ddr_register_operand(
 
 void validate_ddr_register_device_address(uint64_t dev_addr) {
     TORCH_CHECK(dev_addr != 0,
-                "typed DDR-register operand has no RPU device address");
+                "typed DDR-register operand has no device address");
     TORCH_CHECK((dev_addr & UINT64_C(0xff)) == 0,
                 "typed DDR-register device address must be 256-byte aligned; "
                 "got 0x", std::hex, dev_addr, std::dec);
@@ -277,6 +280,36 @@ void validate_ddr_register_device_address(uint64_t dev_addr) {
                 "typed DDR-register device address cannot be represented by "
                 "DevAddrShift8LoHi; got 0x", std::hex, dev_addr,
                 std::dec);
+}
+
+void validate_grouped_uint4_metadata_address(
+        const GraphDdrRegisterOperandSpec& spec, uint64_t dev_addr) {
+    if (spec.abi.role != GraphDdrRegisterRole::PerGroupScale &&
+        spec.abi.role != GraphDdrRegisterRole::NegativeZeroPoint)
+        return;
+    const auto shape = spec.tensor.sizes();
+    if (shape.size() == 2) {
+        // Dense shared W4 carries group size in its 2D view. Exact physical
+        // element count and core_count*512 alignment belong to its launcher,
+        // which knows N/K/TP. Keep grouped experts' stricter 6D rule below.
+        TORCH_CHECK(spec.tensor.is_contiguous() &&
+                        (shape[0] == 32 || shape[0] == 64 || shape[0] == 128) &&
+                        shape[1] > 0,
+                    "Dense W4 metadata requires contiguous [group_size, payload] "
+                    "with group_size 32/64/128");
+        return;
+    }
+    TORCH_CHECK(shape.size() == 6 && spec.tensor.is_contiguous() &&
+                    shape[0] > 0 && shape[1] > 0 && shape[2] > 0 &&
+                    shape[3] >= 1 && shape[3] <= 8 &&
+                    shape[4] == 4 && shape[5] == 64,
+                "grouped UINT4 metadata requires contiguous "
+                "[E,Qblock4,Nblock64,core,4,64] storage");
+    const uint64_t alignment = static_cast<uint64_t>(shape[3]) * 512;
+    TORCH_CHECK(dev_addr % alignment == 0,
+                "grouped UINT4 metadata device address must be core_count*512 "
+                "aligned (", alignment, " bytes); got 0x", std::hex,
+                dev_addr, std::dec);
 }
 
 uint64_t resolve_ddr_register_address(
@@ -295,6 +328,7 @@ uint64_t resolve_ddr_register_address(
     const uint64_t dev_addr = rhino_lkn::RpuGetDevAddr(
         const_cast<void*>(data_ptr));
     validate_ddr_register_device_address(dev_addr);
+    validate_grouped_uint4_metadata_address(spec, dev_addr);
     return dev_addr;
 }
 
@@ -334,6 +368,7 @@ GraphDdrRegisterOccurrence snapshot_operand(
     occurrence.dev_addr = rhino_lkn::RpuGetDevAddr(
         const_cast<void*>(occurrence.data_ptr));
     validate_ddr_register_device_address(occurrence.dev_addr);
+    validate_grouped_uint4_metadata_address(spec, occurrence.dev_addr);
     return occurrence;
 }
 
@@ -572,7 +607,10 @@ void validate_policy(const GraphKernelRegisterPolicy& policy) {
                                      GraphDdrRegisterRole::Fp8ModelWeight ||
                                  abi.role ==
                                      GraphDdrRegisterRole::PerChannelScale ||
-                                 abi.role == GraphDdrRegisterRole::Fp32PerChannelScale) &&
+                                 abi.role == GraphDdrRegisterRole::Fp32PerChannelScale ||
+                                 abi.role == GraphDdrRegisterRole::PackedUint4ModelWeight ||
+                                 abi.role == GraphDdrRegisterRole::PerGroupScale ||
+                                 abi.role == GraphDdrRegisterRole::NegativeZeroPoint) &&
                                 (abi.access ==
                                      GraphDdrRegisterAccess::Read ||
                                  abi.access ==
@@ -587,6 +625,9 @@ void validate_policy(const GraphKernelRegisterPolicy& policy) {
                                   abi.role !=
                                       GraphDdrRegisterRole::PerChannelScale &&
                                   abi.role != GraphDdrRegisterRole::Fp32PerChannelScale &&
+                                  abi.role != GraphDdrRegisterRole::PackedUint4ModelWeight &&
+                                  abi.role != GraphDdrRegisterRole::PerGroupScale &&
+                                  abi.role != GraphDdrRegisterRole::NegativeZeroPoint &&
                                   abi.role !=
                                       GraphDdrRegisterRole::Fp8ModelWeight) ||
                                  abi.access ==
@@ -608,6 +649,9 @@ void validate_policy(const GraphKernelRegisterPolicy& policy) {
                 case GraphDdrRegisterRole::PackedInt4ModelWeight:
                 case GraphDdrRegisterRole::PerChannelScale:
                 case GraphDdrRegisterRole::Fp32PerChannelScale:
+                case GraphDdrRegisterRole::PackedUint4ModelWeight:
+                case GraphDdrRegisterRole::PerGroupScale:
+                case GraphDdrRegisterRole::NegativeZeroPoint:
                 case GraphDdrRegisterRole::Fp8ModelWeight:
                     rule_weight_total += rule.expected_count;
                     break;
@@ -739,7 +783,7 @@ RpuKernelGraph::snapshot_kernel_register_outer_fast_tensor(
     TORCH_CHECK(tensor.defined(),
                 "outer fast replay tensor owner is undefined");
     TORCH_CHECK(tensor.device().type() == c10::DeviceType::PrivateUse1,
-                "outer fast replay tensor owner must be RPU-resident; got ",
+                "outer fast replay tensor owner must be device-resident; got ",
                 tensor.device());
     TORCH_CHECK(tensor.layout() == c10::Layout::Strided,
                 "outer fast replay tensor owner must use strided layout");
@@ -772,7 +816,7 @@ RpuKernelGraph::snapshot_kernel_register_outer_fast_tensor(
     snapshot.dev_addr = rhino_lkn::RpuGetDevAddr(
         const_cast<void*>(snapshot.data_ptr));
     TORCH_CHECK(snapshot.dev_addr != 0,
-                "outer fast replay tensor owner has no RPU device address");
+                "outer fast replay tensor owner has no device address");
     return snapshot;
 }
 
@@ -1489,6 +1533,9 @@ void RpuKernelGraph::consume_pending_kernel_register_census(
             case GraphDdrRegisterRole::PackedInt4ModelWeight:
             case GraphDdrRegisterRole::PerChannelScale:
             case GraphDdrRegisterRole::Fp32PerChannelScale:
+            case GraphDdrRegisterRole::PackedUint4ModelWeight:
+            case GraphDdrRegisterRole::PerGroupScale:
+            case GraphDdrRegisterRole::NegativeZeroPoint:
             case GraphDdrRegisterRole::Fp8ModelWeight:
                 ++kernel_register_census_stats_.weight_operand_count;
                 break;
@@ -3136,9 +3183,126 @@ void RpuKernelGraph::flush_kernel_register_outer_fast_force_visibility()
         !g_rpu_ddr_flush_force_enabled) {
         return;
     }
-    for (void* ptr :
-         kernel_register_outer_fast_invocation_force_visibility_) {
+    struct SourceSpan {
+        const OuterFastTensorSnapshot* owner = nullptr;
+        uintptr_t begin = 0;
+        uintptr_t end = 0;
+    };
+    // end() has already validated the held owners. Use only snapshot fields
+    // here: this noexcept boundary must not allocate or query tensor state.
+    const auto source_span = [&](void* ptr, SourceSpan& span) noexcept {
+        const OuterFastTensorSnapshot* owner = nullptr;
+        for (const auto& candidate :
+             kernel_register_outer_fast_force_visibility_owners_) {
+            if (candidate.data_ptr != ptr) continue;
+            if (owner != nullptr &&
+                (candidate.tensor_impl != owner->tensor_impl ||
+                 candidate.storage_impl != owner->storage_impl ||
+                 candidate.storage_data_ptr != owner->storage_data_ptr ||
+                 candidate.storage_offset != owner->storage_offset ||
+                 candidate.tensor_nbytes != owner->tensor_nbytes ||
+                 candidate.storage_nbytes != owner->storage_nbytes ||
+                 candidate.sizes != owner->sizes ||
+                 candidate.strides != owner->strides)) {
+                return false;
+            }
+            owner = &candidate;
+        }
+        if (owner == nullptr || owner->tensor_impl == nullptr ||
+            owner->storage_impl == nullptr || ptr == nullptr ||
+            owner->storage_data_ptr == nullptr || owner->storage_offset < 0 ||
+            owner->tensor_nbytes == 0 || owner->storage_nbytes == 0 ||
+            owner->sizes.size() != owner->strides.size()) {
+            return false;
+        }
+        size_t stride = 1;
+        for (size_t dim = owner->sizes.size(); dim-- > 0;) {
+            const int64_t size = owner->sizes[dim];
+            if (size <= 0 ||
+                (size != 1 &&
+                 (owner->strides[dim] < 0 ||
+                  static_cast<uint64_t>(owner->strides[dim]) != stride)) ||
+                static_cast<uint64_t>(size) >
+                    std::numeric_limits<size_t>::max() / stride) {
+                return false;
+            }
+            stride *= static_cast<size_t>(size);
+        }
+        const uintptr_t begin = reinterpret_cast<uintptr_t>(ptr);
+        const uintptr_t base =
+            reinterpret_cast<uintptr_t>(owner->storage_data_ptr);
+        const uintptr_t limit = std::numeric_limits<uintptr_t>::max();
+        if (owner->storage_nbytes > limit - base ||
+            owner->tensor_nbytes > limit - begin || begin < base ||
+            begin + owner->tensor_nbytes > base + owner->storage_nbytes) {
+            return false;
+        }
+        span = {owner, begin, begin + owner->tensor_nbytes};
+        return true;
+    };
+    const auto& pointers =
+        kernel_register_outer_fast_invocation_force_visibility_;
+    for (size_t index = 0; index < pointers.size();) {
+        void* ptr = pointers[index];
+        // end() just flushed and sorted this boundary set for the same pass.
+        // A disabled normal flush leaves the force publication necessary.
+        if (g_rpu_ddr_flush_enabled &&
+            std::binary_search(boundary_flush_ptrs_.begin(),
+                               boundary_flush_ptrs_.end(), ptr)) {
+            ++index;
+            continue;
+        }
+        SourceSpan first;
+        if (source_span(ptr, first)) {
+            size_t end_index = index + 1;
+            uintptr_t end = first.end;
+            while (end_index < pointers.size()) {
+                SourceSpan next;
+                if (!source_span(pointers[end_index], next) ||
+                    next.owner->storage_impl != first.owner->storage_impl ||
+                    next.owner->storage_data_ptr !=
+                        first.owner->storage_data_ptr ||
+                    next.owner->storage_nbytes != first.owner->storage_nbytes ||
+                    next.begin != end) {
+                    break;
+                }
+                end = next.end;
+                ++end_index;
+            }
+            bool merge = end_index - index > 1;
+            // Admit the entire source storage, never a partial group across a
+            // gap, overlap, ambiguous owner, or normal-covered publication.
+            for (const auto& owner :
+                 kernel_register_outer_fast_force_visibility_owners_) {
+                if (owner.storage_impl != first.owner->storage_impl) continue;
+                void* owner_ptr = const_cast<void*>(owner.data_ptr);
+                if (!std::binary_search(pointers.begin() + index,
+                                        pointers.begin() + end_index,
+                                        owner_ptr) ||
+                    (g_rpu_ddr_flush_enabled &&
+                     std::binary_search(boundary_flush_ptrs_.begin(),
+                                        boundary_flush_ptrs_.end(), owner_ptr))) {
+                    merge = false;
+                    break;
+                }
+            }
+            // Destinations need both execution boundaries. Do not narrow any
+            // storage that also participates in the post-execution force pass.
+            for (const auto& owner :
+                 kernel_register_outer_fast_force_post_visibility_owners_) {
+                if (owner.storage_impl == first.owner->storage_impl) {
+                    merge = false;
+                    break;
+                }
+            }
+            if (merge) {
+                rhino_lkn::RpuDdrFlush(ptr, static_cast<size_t>(end - first.begin));
+                index = end_index;
+                continue;
+            }
+        }
         rhino_lkn::RpuDdrFlush(ptr);
+        ++index;
     }
 }
 
@@ -3152,6 +3316,12 @@ void RpuKernelGraph::flush_kernel_register_outer_fast_force_post_visibility()
     }
     for (void* ptr :
          kernel_register_outer_fast_invocation_force_post_visibility_) {
+        // Only reuse the normal publication from this post-execution pass.
+        if (g_rpu_ddr_flush_enabled &&
+            std::binary_search(boundary_flush_ptrs_.begin(),
+                               boundary_flush_ptrs_.end(), ptr)) {
+            continue;
+        }
         rhino_lkn::RpuDdrFlush(ptr);
     }
 }

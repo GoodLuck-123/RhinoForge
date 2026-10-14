@@ -1,4 +1,4 @@
-// graph_spm_reset_guard.cpp — 支线 S (docs/graph_rules.md §12.4)
+// graph_spm_reset_guard.cpp — 支线 S (docs/architecture.md)
 //
 // spm_alloc_reset_temporary 的 graph-aware 入口。从 rpu_backend.cpp 的
 // `m.def("spm_alloc_reset_temporary", ...)` 转入这里,按 active() graph state
@@ -11,7 +11,7 @@
 //   RECORDING:
 //     仍执行 SPM_ALLOC.reset_temporary() — Python 侧 ensure_allocated 需要靠
 //     gen_changed 触发 Path 2 重 alloc temp buffers (`fused_model_base.cpp:331`)。
-//     但 RECORDING 期 RPU kernel 还在 nodes_ 没跑,subsystem 边界 SPM 已被 host
+//     但 RECORDING 期 device kernel 还在 nodes_ 没跑,subsystem 边界 SPM 已被 host
 //     侧"释放"却仍被后续 graph kernel 引用(同一段 SPM 地址会被下一 subsystem
 //     的 ensure_allocated 重 alloc 并 bake 进 kernel set_regs)。kernel 真正执行
 //     时,SigLIP / Gemma / AdaRMS 各自的 SPM 区可能 overlap。
@@ -75,7 +75,7 @@ void graph_aware_spm_alloc_reset_temporary() {
         }
         g.mark_non_replayable("spm_alloc_reset_temporary during RECORDING");
         // Q2 (task #63):Pi0.5 adapter 模式是 fused_op → reset_temporary →
-        // output.to(cpu)。RPU→CPU copy 走 PyTorch CompositeImplicitAutograd 分解
+        // output.to(cpu)。device→CPU copy 走 PyTorch CompositeImplicitAutograd 分解
         // (empty + copy_),copy_ 按 dst 设备分派到 CPU side → 直接 memcpy 共享
         // DDR,完全绕过我们 PrivateUse1 的 rpu_to_copy / rpu_to_cpu_zerocopy 实现。
         // 所以无法在 to_copy 路径上 hook sync。改在 reset_temporary 这里做 sync
@@ -97,7 +97,7 @@ void graph_aware_spm_alloc_reset_temporary() {
             "spm_alloc_reset_temporary called during graph REPLAYING. "
             "This indicates a graph state machine bug — RECORDING should "
             "have marked the graph non_replayable on the first reset call, "
-            "preventing subsequent REPLAYING entry. Check graph_rules.md "
+            "preventing subsequent REPLAYING entry. Check docs/architecture.md "
             "§12.4 支线 S.");
     }
 }
@@ -112,7 +112,14 @@ void process_guarded_spm_alloc_reset_all() {
     SPM_ALLOC.reset_all();
 }
 
-// Q2 验证 (task #63): RPU→CPU zero-copy 在 graph RECORDING 期需要先 sync。
+// Keep the graph-state check outside the storage/dispatcher translation unit.
+void graph_require_vision_input_copy_passthrough(const char* operation) {
+    TORCH_CHECK(
+        RpuKernelGraph::active().state() == RpuKernelGraph::State::PASSTHROUGH,
+        operation, ": requires PASSTHROUGH outside Graph");
+}
+
+// Q2 验证 (task #63): device→CPU zero-copy 在 graph RECORDING 期需要先 sync。
 // rpu_to_cpu_zerocopy (rpu_backend.cpp:804) 返回的是共享 DDR view,绕过任何
 // 等待/同步;Python adapter (e.g. adapters/pi05/adarms.py:399) 在 graph
 // RECORDING 期调 output.to(cpu) 会拿到 stale DDR (kernels 还在 nodes_ 没跑)。
@@ -138,7 +145,7 @@ bool graph_aware_rpu_to_cpu_zerocopy_sync() {
     static thread_local size_t sync_count = 0;
     ++sync_count;
     if (sync_count <= 5 && log_at(4)) {
-        std::cerr << "[RpuKernelGraph] sync_point triggered by RPU→CPU "
+        std::cerr << "[RpuKernelGraph] sync_point triggered by device→CPU "
                      "zero-copy during RECORDING (call #" << sync_count
                   << ", graph_size=" << g.graph_size() << ")\n";
     }

@@ -756,7 +756,7 @@ def _validate_qwen3_vl_2b_w8a16_model(model) -> bool:
 
 
 def _validate_qwen3_vl_32b_w8a16_model(model) -> bool:
-    """Validate the loaded 32B tensor inventory before RPU ownership/mutation."""
+    """Validate the loaded 32B tensor inventory before device ownership/mutation."""
     if not _is_qwen3_vl_32b_w8a16_config(model.config):
         return False
 
@@ -840,7 +840,7 @@ def _validate_qwen3_vl_32b_w8a16_model(model) -> bool:
     for name, parameter in model.named_parameters():
         if parameter.is_meta or parameter.device.type != "cpu":
             raise RPUBackendError(
-                "Qwen3-VL-32B W8A16 validation failed before RPU ownership: "
+                "Qwen3-VL-32B W8A16 validation failed before device ownership: "
                 f"parameter {name!r} must be materialized on CPU."
             )
         is_projection = name.endswith(tuple(
@@ -856,7 +856,7 @@ def _validate_qwen3_vl_32b_w8a16_model(model) -> bool:
     for name, buffer in model.named_buffers():
         if buffer.is_meta or buffer.device.type != "cpu":
             raise RPUBackendError(
-                "Qwen3-VL-32B W8A16 validation failed before RPU ownership: "
+                "Qwen3-VL-32B W8A16 validation failed before device ownership: "
                 f"buffer {name!r} must be materialized on CPU."
             )
     return True
@@ -1180,7 +1180,7 @@ def _deepstack_text_layer_indices(vision_config) -> list[int]:
 class Qwen3VLAdapter:
     """Per-instance adapter for `Qwen3VLForConditionalGeneration`.
 
-    Lifecycle (D-01 two-step + RPU shortcut):
+    Lifecycle (D-01 two-step + device shortcut):
       1. `__init__(model)` — preflight, install `.to('rpu')` interceptor.
       2. `to_rpu()` — irreversible swizzle + install vision/text C++ handles +
          patch top-level forward. Returns the same model object.
@@ -1390,7 +1390,7 @@ class Qwen3VLAdapter:
                 or getattr(self.model, "_rpu_swizzle_started", False)
             ):
                 raise RPUBackendError(
-                    f"model.to({target!r}) rejected: weights swizzled for RPU "
+                    f"model.to({target!r}) rejected: weights swizzled for device "
                     "(irreversible). Reload via RPUModelForConditionalGeneration.from_pretrained(...)."
                 )
             return original_to(*args, **kwargs)
@@ -1725,13 +1725,13 @@ class Qwen3VLAdapter:
         return staged_plan
 
     def to_rpu(self):
-        """Run the full RPU enablement sequence. Idempotent for the same model.
+        """Run the full device enablement sequence. Idempotent for the same model.
 
         Order (intentional — see findings F31 P1):
           A. For ordinary checkpoints, swizzle and transfer each text decoder
              layer in turn. Staged W8A16 uses its dedicated materializer.
           B. Untie + col-swizzle `lm_head` on CPU.
-          C. Move the remaining text_model modules + lm_head to RPU.
+          C. Move the remaining text_model modules + lm_head to device.
           D. Install vision encoder (does its own fused-QKV split + swizzle).
           E. Install text decoder C++ handle with DeepStack outputs injected
              into the leading text layers in list order.
@@ -1746,7 +1746,7 @@ class Qwen3VLAdapter:
             if not _qwen3_vl_runtime_complete(self.model):
                 raise RPUBackendError(
                     "Qwen3VLAdapter.to_rpu(): model is marked swizzled but its "
-                    "RPU runtime is incomplete; reload from_pretrained."
+                    "device runtime is incomplete; reload from_pretrained."
                 )
             self._rpu_is_ready = True
             return self.model
@@ -1808,7 +1808,7 @@ class Qwen3VLAdapter:
                 if not _qwen3_vl_runtime_complete(self.model):
                     raise RPUBackendError(
                         "Qwen3VLAdapter.to_rpu(): model is marked swizzled but "
-                        "its RPU runtime is incomplete; reload from_pretrained."
+                        "its device runtime is incomplete; reload from_pretrained."
                     )
                 self._rpu_is_ready = True
                 return self.model
@@ -1895,7 +1895,7 @@ class Qwen3VLAdapter:
             claim_acquired = True
             try:
                 # Reuse HostDDR mappings for weights and request temporaries.
-                # This process policy must precede the first RPU allocation,
+                # This process policy must precede the first device allocation,
                 # but follow the exclusive-model claim so a rejected install
                 # cannot alter the live owner's allocator.
                 torch.rpu.set_caching_allocator(True)
@@ -1956,7 +1956,7 @@ class Qwen3VLAdapter:
                             text_cfg.intermediate_size, topology.mlp_tp))
                     del view
                 # Swizzling an entire decoder first retains all transformed CPU
-                # weights while RPU copies are allocated. Bound that overlap for
+                # weights while device copies are allocated. Bound that overlap for
                 # every admitted non-staged profile by converting and moving one
                 # layer at a time. The final text_model.to() below moves only the
                 # embedding, final norm, and any other remaining weights.
@@ -2017,7 +2017,7 @@ class Qwen3VLAdapter:
                 swizzled = self.model.lm_head.weight.data
                 del head_view
 
-            # ---------- Step C: move text + lm_head to RPU -------------------
+            # ---------- Step C: move text + lm_head to device -------------------
             text_model.to("rpu")
             self.model.lm_head.to("rpu")
             # These locals still own the old CPU storages after Module.to()
@@ -2309,7 +2309,7 @@ def _split_image_embeds_per_image(
     expected_rows = sum(int(size) for size in split_sizes)
     if pooler_output.shape[0] != expected_rows:
         raise RuntimeError(
-            f"Qwen3VL RPU visual rows {pooler_output.shape[0]} "
+            f"Qwen3VL device visual rows {pooler_output.shape[0]} "
             f"!= grid-derived rows {expected_rows}"
         )
     return pooler_output
@@ -2328,13 +2328,13 @@ def _mrope_position_ids_cpu_il(position_ids: torch.Tensor) -> torch.Tensor:
     if position_ids_cpu.dim() == 3:
         if position_ids_cpu.size(0) != 3 or position_ids_cpu.size(1) != 1:
             raise ValueError(
-                "Qwen3VL RPU position_ids must be [3, batch=1, seq_len], "
+                "Qwen3VL device position_ids must be [3, batch=1, seq_len], "
                 f"got {tuple(position_ids_cpu.shape)}"
             )
         position_ids_cpu = position_ids_cpu.squeeze(1).transpose(0, 1)
     elif position_ids_cpu.dim() != 2 or position_ids_cpu.size(1) != 3:
         raise ValueError(
-            "Qwen3VL RPU position_ids must normalize to [seq_len, 3], "
+            "Qwen3VL device position_ids must normalize to [seq_len, 3], "
             f"got {tuple(position_ids_cpu.shape)}"
         )
     return position_ids_cpu.to(torch.int32).contiguous()
@@ -2462,7 +2462,7 @@ def _rpu_qwen3vl_forward(
     return_dict: bool | None = None,
     **kwargs,
 ):
-    """RPU-dispatching forward for Qwen3VLForConditionalGeneration.
+    """device-dispatching forward for Qwen3VLForConditionalGeneration.
 
     Mirrors HF semantics:
       - prefill with `pixel_values` → run vision encoder, scatter image embeds
@@ -2495,23 +2495,23 @@ def _rpu_qwen3vl_forward(
 
     if labels is not None:
         raise NotImplementedError(
-            "Qwen3VL RPU forward: `labels` (loss) not supported."
+            "Qwen3VL device forward: `labels` (loss) not supported."
         )
     if output_attentions:
         raise NotImplementedError(
-            "Qwen3VL RPU forward: output_attentions=True not supported."
+            "Qwen3VL device forward: output_attentions=True not supported."
         )
     if output_hidden_states:
         raise NotImplementedError(
-            "Qwen3VL RPU forward: output_hidden_states=True not supported."
+            "Qwen3VL device forward: output_hidden_states=True not supported."
         )
     if use_cache is False:
         raise NotImplementedError(
-            "Qwen3VL RPU forward requires use_cache=True."
+            "Qwen3VL device forward requires use_cache=True."
         )
     if return_dict is False:
         raise NotImplementedError(
-            "Qwen3VL RPU forward requires return_dict=True."
+            "Qwen3VL device forward requires return_dict=True."
         )
 
     integer_dtypes = {
@@ -2520,27 +2520,27 @@ def _rpu_qwen3vl_forward(
     if input_ids is not None:
         if not isinstance(input_ids, torch.Tensor):
             raise TypeError(
-                "Qwen3VL RPU forward: input_ids must be a torch.Tensor."
+                "Qwen3VL device forward: input_ids must be a torch.Tensor."
             )
         if input_ids.ndim != 2 or input_ids.shape[0] != 1 or input_ids.shape[1] < 1:
             raise ValueError(
-                "Qwen3VL RPU forward: input_ids must have shape [1, seq] "
+                "Qwen3VL device forward: input_ids must have shape [1, seq] "
                 "with seq >= 1."
             )
         if input_ids.dtype not in integer_dtypes:
             raise TypeError(
-                "Qwen3VL RPU forward: input_ids must use an integer dtype, "
+                "Qwen3VL device forward: input_ids must use an integer dtype, "
                 f"got {input_ids.dtype}."
             )
     if inputs_embeds is not None:
         if not isinstance(inputs_embeds, torch.Tensor):
             raise TypeError(
-                "Qwen3VL RPU forward: inputs_embeds must be a torch.Tensor."
+                "Qwen3VL device forward: inputs_embeds must be a torch.Tensor."
             )
         if (inputs_embeds.ndim != 3 or inputs_embeds.shape[0] != 1
                 or inputs_embeds.shape[1] < 1):
             raise ValueError(
-                "Qwen3VL RPU forward: inputs_embeds must have shape "
+                "Qwen3VL device forward: inputs_embeds must have shape "
                 "[1, seq, hidden] with seq >= 1."
             )
 
@@ -2552,42 +2552,42 @@ def _rpu_qwen3vl_forward(
     if attention_mask is not None:
         if not isinstance(attention_mask, torch.Tensor):
             raise TypeError(
-                "Qwen3VL RPU forward: attention_mask must be a torch.Tensor."
+                "Qwen3VL device forward: attention_mask must be a torch.Tensor."
             )
         if attention_mask.ndim != 2:
             raise NotImplementedError(
-                "Qwen3VL RPU forward supports only a 2D all-ones "
+                "Qwen3VL device forward supports only a 2D all-ones "
                 "attention_mask; additive/4D masks are not consumed by the "
                 "causal fused decoder."
             )
         if input_ids is not None and tuple(attention_mask.shape) != tuple(input_ids.shape):
             raise ValueError(
-                "Qwen3VL RPU forward: attention_mask shape "
+                "Qwen3VL device forward: attention_mask shape "
                 f"{tuple(attention_mask.shape)} != input_ids shape "
                 f"{tuple(input_ids.shape)}."
             )
         if not bool(torch.all(attention_mask != 0).item()):
             raise NotImplementedError(
-                "Qwen3VL RPU forward supports only an all-ones caller "
+                "Qwen3VL device forward supports only an all-ones caller "
                 "attention_mask; masked/padded caller tokens would be "
                 "silently ignored by the causal fused decoder."
             )
 
     if not isinstance(past_key_values, RPUCache):
         raise TypeError(
-            "Qwen3VL RPU forward: past_key_values must be an RPUCache instance. "
+            "Qwen3VL device forward: past_key_values must be an RPUCache instance. "
             "Use RPUCache.from_model(model.model.language_model, ...) or build manually."
         )
     if pixel_values is not None and pixel_values_videos is not None:
         raise NotImplementedError(
-            "Qwen3VL RPU forward: simultaneous image + video inputs not "
+            "Qwen3VL device forward: simultaneous image + video inputs not "
             "supported.  Pass only one modality per forward."
         )
     if precomputed_vision is not None and (
         pixel_values is not None or pixel_values_videos is not None
     ):
         raise ValueError(
-            "Qwen3VL RPU forward: rpu_precomputed_vision is mutually exclusive "
+            "Qwen3VL device forward: rpu_precomputed_vision is mutually exclusive "
             "with pixel_values and pixel_values_videos."
         )
 
@@ -2621,7 +2621,7 @@ def _rpu_qwen3vl_forward(
     if pixel_values is not None:
         if image_grid_thw is None:
             raise ValueError(
-                "Qwen3VL RPU forward: image_grid_thw must accompany pixel_values."
+                "Qwen3VL device forward: image_grid_thw must accompany pixel_values."
             )
         pix_in = pixel_values
         grid_in = image_grid_thw
@@ -2629,7 +2629,7 @@ def _rpu_qwen3vl_forward(
     elif pixel_values_videos is not None:
         if video_grid_thw is None:
             raise ValueError(
-                "Qwen3VL RPU forward: video_grid_thw must accompany pixel_values_videos."
+                "Qwen3VL device forward: video_grid_thw must accompany pixel_values_videos."
             )
         pix_in = pixel_values_videos
         grid_in = video_grid_thw
@@ -2643,11 +2643,21 @@ def _rpu_qwen3vl_forward(
             vision_kwargs = ({"_rpu_keep_merged_fp16": True}
                              if getattr(vision_model, "_rpu_vision_merger_on_device", False)
                              else {})
-            vision_output = vision_model(pix_in, grid_thw=grid_in, **vision_kwargs)
-        # RPU mergers keep their FP16 values for the following text scatter;
+            if (getattr(vision_model, "_rpu_vision_chunked_merger_fp16", False)
+                    or getattr(vision_model, "_rpu_vision_fused_merger_w8a16", False)):
+                # Adaptive mergers already return fresh CPU snapshots. This
+                # consumer needs only pooler/DS; shared Vision decides whether
+                # the actual fused group can omit its unused raw snapshot.
+                pooler, deepstack_features = vision_model(
+                    pix_in, grid_thw=grid_in, **vision_kwargs,
+                    _rpu_merged_consumer=lambda merged, ds: (merged, ds))
+            else:
+                vision_output = vision_model(pix_in, grid_thw=grid_in, **vision_kwargs)
+                pooler = vision_output.pooler_output
+                deepstack_features = vision_output.deepstack_features
+        # device mergers keep their FP16 values for the following text scatter;
         # CPU-only mergers retain their original FP32 output until that cast.
-        pooler = vision_output.pooler_output
-        deepstack_features = list(vision_output.deepstack_features)
+        deepstack_features = list(deepstack_features)
         # Per-item split (single image / single video → identity).
         visual_embeds_flat = _split_image_embeds_per_image(
             pooler, grid_in.detach().cpu(), spatial_merge_size,
@@ -2655,12 +2665,12 @@ def _rpu_qwen3vl_forward(
     elif precomputed_vision is not None:
         if image_grid_thw is None:
             raise ValueError(
-                "Qwen3VL RPU forward: image_grid_thw must accompany "
+                "Qwen3VL device forward: image_grid_thw must accompany "
                 "rpu_precomputed_vision."
             )
         if not isinstance(precomputed_vision, dict):
             raise TypeError(
-                "Qwen3VL RPU forward: rpu_precomputed_vision must be a dict."
+                "Qwen3VL device forward: rpu_precomputed_vision must be a dict."
             )
         standard_keys = {"pooler_output", "deepstack_features"}
         parts_keys = {"pooler_output_parts", "deepstack_feature_parts"}
@@ -2668,7 +2678,7 @@ def _rpu_qwen3vl_forward(
         has_parts = parts_keys <= set(precomputed_vision)
         if has_standard == has_parts:
             raise ValueError(
-                "Qwen3VL RPU forward: rpu_precomputed_vision requires exactly "
+                "Qwen3VL device forward: rpu_precomputed_vision requires exactly "
                 "one of pooler_output/deepstack_features or "
                 "pooler_output_parts/deepstack_feature_parts."
             )
@@ -2685,11 +2695,11 @@ def _rpu_qwen3vl_forward(
             ]
             if not visual_embeds_flat:
                 raise ValueError(
-                    "Qwen3VL RPU pooler_output_parts must be non-empty."
+                    "Qwen3VL device pooler_output_parts must be non-empty."
                 )
             if not 0 <= cached_prefix_parts < len(visual_embeds_flat):
                 raise ValueError(
-                    "Qwen3VL RPU cached_prefix_parts must be in "
+                    "Qwen3VL device cached_prefix_parts must be in "
                     "[0, len(pooler_output_parts))"
                 )
             expected_rows = int((
@@ -2701,7 +2711,7 @@ def _rpu_qwen3vl_forward(
             )
             if actual_rows != expected_rows:
                 raise RuntimeError(
-                    f"Qwen3VL RPU visual part rows {actual_rows} "
+                    f"Qwen3VL device visual part rows {actual_rows} "
                     f"!= grid-derived rows {expected_rows}"
                 )
         else:
@@ -2726,7 +2736,7 @@ def _rpu_qwen3vl_forward(
     if inputs_embeds is None:
         if input_ids is None:
             raise ValueError(
-                "Qwen3VL RPU forward: must provide input_ids or inputs_embeds."
+                "Qwen3VL device forward: must provide input_ids or inputs_embeds."
             )
         embed_tokens = self.get_input_embeddings()
         input_slot_key = (
@@ -2764,7 +2774,7 @@ def _rpu_qwen3vl_forward(
 
     if inputs_embeds.shape[-1] != hidden_size:
         raise ValueError(
-            "Qwen3VL RPU forward: inputs_embeds hidden dimension "
+            "Qwen3VL device forward: inputs_embeds hidden dimension "
             f"{inputs_embeds.shape[-1]} != model hidden_size {hidden_size}."
         )
 
@@ -2796,7 +2806,7 @@ def _rpu_qwen3vl_forward(
     if visual_embeds_flat is not None:
         if input_ids is None:
             raise ValueError(
-                "Qwen3VL RPU forward: visual scatter requires input_ids "
+                "Qwen3VL device forward: visual scatter requires input_ids "
                 "(needed to locate image/video token positions)."
             )
         if input_ids_cpu is None:
@@ -2814,7 +2824,7 @@ def _rpu_qwen3vl_forward(
             visual_rows = sum(int(part.shape[0]) for part in visual_parts)
             if visual_rows != n_visual_tokens:
                 raise RuntimeError(
-                    f"Qwen3VL RPU visual part rows {visual_rows} "
+                    f"Qwen3VL device visual part rows {visual_rows} "
                     f"!= visual token count {n_visual_tokens}"
                 )
             scatter_parts = visual_parts
@@ -2859,7 +2869,7 @@ def _rpu_qwen3vl_forward(
             ).contiguous()
             if visual_embeds_cpu.shape[0] != n_visual_tokens:
                 raise RuntimeError(
-                    f"Qwen3VL RPU forward: visual_embeds rows "
+                    f"Qwen3VL device forward: visual_embeds rows "
                     f"{visual_embeds_cpu.shape[0]} != visual token count "
                     f"{n_visual_tokens}"
                 )
@@ -2874,7 +2884,7 @@ def _rpu_qwen3vl_forward(
         if (not isinstance(cache_position, torch.Tensor)
                 or cache_position.dtype not in integer_dtypes):
             raise TypeError(
-                "Qwen3VL RPU forward: cache_position must be an integer tensor."
+                "Qwen3VL device forward: cache_position must be an integer tensor."
             )
         got_cache_position = cache_position.reshape(-1).to(
             "cpu", dtype=torch.long
@@ -2886,13 +2896,13 @@ def _rpu_qwen3vl_forward(
         )
         if not torch.equal(got_cache_position, expected_cache_position):
             raise NotImplementedError(
-                "Qwen3VL RPU forward: cache_position disagrees with the RPU "
+                "Qwen3VL device forward: cache_position disagrees with the device "
                 f"cache; expected {expected_cache_position.tolist()}, got "
                 f"{got_cache_position.tolist()}."
             )
     if start_position + logical_seq_len > int(past_key_values.max_seq_len):
         raise ValueError(
-            "Qwen3VL RPU forward: logical sequence exceeds KV-cache horizon: "
+            "Qwen3VL device forward: logical sequence exceeds KV-cache horizon: "
             f"position={start_position}, seq_len={logical_seq_len}, "
             f"max_seq_len={past_key_values.max_seq_len}"
         )
@@ -2986,7 +2996,7 @@ def _rpu_qwen3vl_forward(
             prefill_position_cache = getattr(
                 text_model, "_rpu_qwen3vl_prefill_position_cache", None
             )
-            if prefill_position_cache is None \
+            if prefill_position_cache is None\
                     or prefill_position_cache["key"] != position_key:
                 pos_ids_cpu, rope_deltas = self.model.get_rope_index(
                     input_ids_position_cpu,
@@ -3079,7 +3089,7 @@ def _rpu_qwen3vl_forward(
         )
     seq_len = execution_seq_len
 
-    # ----- Run text decoder (RPU) ------------------------------------------
+    # ----- Run text decoder (device) ------------------------------------------
     # Bypass `rpu_decoder_model_forward` (the base patch installed by
     # `_install_causal_decoder_forward`) and call the runner directly. The
     # base patch asserts `raw.last_dim == hidden_size`, but with fused
@@ -3087,7 +3097,7 @@ def _rpu_qwen3vl_forward(
     # returns `[B, 1, vocab_size]` logits for decode (seq_len=1). Pattern
     # matches qwen3.py:`_apply_fused_lm_head_for_rpu`.
     #
-    # R-Phase 7 (perf): wrap in graph_cache.capture(sig) so all RPU
+    # R-Phase 7 (perf): wrap in graph_cache.capture(sig) so all device
     # kernel dispatches inside `_run_causal_decoder_forward` batch into
     # one queue execution. Position is deliberately absent only for single-token
     # decode: the generic decoder refreshes every position-derived register/DMA
@@ -3106,8 +3116,13 @@ def _rpu_qwen3vl_forward(
             _mrope_position_ids_cpu_il(position_ids)
             if position_ids is not None else None
         )
+    partial_mrope_enabled = getattr(text_model, "_qwen3_vl_delivery_profile", None) == _QWEN3_VL_DELIVERY_PROFILE
     if position_ids_cpu_il is None:
         pos_rpu = None
+    elif not partial_mrope_enabled:
+        # Native copies these CPU rows directly into its stable keepalive.
+        # Keep the fixed delivery/partial-MRoPE transport unchanged below.
+        pos_rpu = position_ids_cpu_il
     elif prefill_position_cache is not None:
         position_slots = getattr(
             text_model, "_rpu_qwen3vl_prefill_position_slots", None
@@ -3177,7 +3192,6 @@ def _rpu_qwen3vl_forward(
 
     rope_cos_il = None
     rope_sin_il = None
-    partial_mrope_enabled = getattr(text_model, "_qwen3_vl_delivery_profile", None) == _QWEN3_VL_DELIVERY_PROFILE
 
     if position_ids_cpu_il is not None and partial_mrope_enabled:
         if decode_position_prepared is not None:
@@ -3397,7 +3411,7 @@ def _rpu_qwen3vl_forward(
         logits = _apply_prefill_lm_head(self, raw, slice_indices)
     else:
         raise RuntimeError(
-            f"Qwen3VL RPU forward: unexpected raw last-dim {raw.size(-1)}, "
+            f"Qwen3VL device forward: unexpected raw last-dim {raw.size(-1)}, "
             f"expected hidden_size={hidden_dim}, vocab_size={vocab_size}, or "
             f"vocab_size+hidden_size={vocab_size + hidden_dim}"
         )

@@ -1,4 +1,4 @@
-// rpu_tile.cpp - Tile/repeat kernel implementation for RPU
+// rpu_tile.cpp - Tile/repeat kernel implementation for device
 #include "rhino_launch_buffer.h"
 #include "rhino_launch_program.h"
 #include "rhino_launch_queue.h"
@@ -22,7 +22,7 @@ void rpu_launch_tile_kernel(const at::Tensor &input,
                             const std::vector<int64_t> &repeats) {
 
     TORCH_CHECK(input.device().type() == c10::DeviceType::PrivateUse1,
-                "input not on RPU");
+                "input not on device");
 
     // Ensure output has same dtype as input
     if (output.scalar_type() != input.scalar_type())
@@ -235,7 +235,7 @@ void rpu_launch_tile_kernel(const at::Tensor &input,
 
       wq->enqueu_kernel(*kernel, {(uint16_t)blk_cnt, (uint16_t)1, (uint16_t)1}, {0});
 
-      // Flush output, 确保 CPU 能读到 RPU 写入的最新数据
+      // Flush output, 确保 CPU 能读到 device 写入的最新数据
       rpu_ddr_flush(out_ptr);
 
       // ==================== SPM 版本 (注释保留) ====================
@@ -387,7 +387,7 @@ void rpu_launch_tile_kernel(const at::Tensor &input,
 
         wq->enqueu_kernel(*kernel, {(uint16_t)blkcnt_x, (uint16_t)blkcnt_y, (uint16_t)1}, {0});
 
-        // Flush output, 确保 CPU 能读到 RPU 写入的最新数据
+        // Flush output, 确保 CPU 能读到 device 写入的最新数据
         rpu_ddr_flush(out_ptr);
 
         // ==================== SPM 版本 (注释保留) ====================
@@ -516,7 +516,7 @@ void rpu_launch_tile_spm_kernel(uint32_t input_spm_addr, uint32_t output_spm_add
 at::Tensor rpu_tile_spm_test(const at::Tensor& input, c10::IntArrayRef repeats) {
     TORCH_CHECK(input.scalar_type() == at::kHalf, "tile_spm_test: input must be fp16");
     TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                "tile_spm_test: input must be on RPU");
+                "tile_spm_test: input must be on device");
     TORCH_CHECK(input.dim() == 3 && (int64_t)repeats.size() == 3,
                 "tile_spm_test: only 3D input + 3-elem repeats supported");
     if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();

@@ -48,6 +48,10 @@ def quantize_int4_group_wise(
     """
     if weight.dim() != 2:
         raise ValueError(f"expected 2-D Linear weight, got {tuple(weight.shape)}")
+    if type(group_size) is not int or group_size not in (32, 64, 128):
+        raise ValueError("group_size must be 32, 64, or 128")
+    if not weight.is_floating_point() or not torch.isfinite(weight).all():
+        raise ValueError("group INT4 requires finite floating-point weights")
     N, K = weight.shape
     if K % group_size != 0:
         raise ValueError(f"K={K} not divisible by group_size={group_size}")

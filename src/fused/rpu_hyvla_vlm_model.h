@@ -32,7 +32,7 @@ namespace v3 {
 
 class HyVlaVlmModel : public CausalDecoderModel {
 public:
-    HyVlaVlmModel();
+    explicit HyVlaVlmModel(bool prefill_kv_only = false);
     ~HyVlaVlmModel() override;
 
     void set_runtime_config(
@@ -41,7 +41,7 @@ public:
         int64_t rmsnorm_capability);
 
     // 单层 vision (*_v) 孪生权重 (布局与基类 LayerWeights 主权重逐一对应):
-    //   q/k/v/o_w     [out, in]  col/row-partition 预 swizzle fp16 (RPU DDR)
+    //   q/k/v/o_w     [out, in]  col/row-partition 预 swizzle fp16 (device DDR)
     //   q/k_norm_w    [head_dim] fp16
     //   input/post_norm_w [hidden] fp16
     //   gate/up/down_w [out, in] fp16
@@ -97,7 +97,7 @@ public:
         at::TensorList down_ws_list = {});
 
     // 绑定 vision 孪生权重 + 行掩码。必须在基类 set_weights 之后调用。
-    //   text_row_mask: [chunk_size] fp16 RPU contig, 取值 {0,1}; 1 = text 行
+    //   text_row_mask: [chunk_size] fp16 device contig, 取值 {0,1}; 1 = text 行
     //                  (走基类权重), 0 = vision 行 (走 *_v 孪生权重)。本函数在
     //                  host 侧展开成 3 个宽度的常量掩码张量 (vis = 1 - text)。
     //   chunk_size:    固定 prefix 长度 (Hy-VLA UMI: 192 = ceil16(181 有效行));
@@ -122,16 +122,16 @@ public:
         at::TensorList down_ws_list = {});
 
     // 一次 VLM prefill。I/O 契约:
-    //   x_emb       [1, chunk_size, hidden=2048] fp16 RPU contig — host 已把
+    //   x_emb       [1, chunk_size, hidden=2048] fp16 device contig — host 已把
     //               vision embedding 与 text embedding 混排好的 prefix。
     //   k/v_caches  基类 7-D swizzled KV cache; 本步在 prefix_len 处追加。
     //               prefill 后即为 action expert (P3) 消费的 prefix KV。
     //   attn_mask_4d 显式 additive mask, 末两维 [chunk_size, prefix+cs]
     //               (基类 sdpa_prepare_mask 降维 + MASK_2D)。⚠️ 整行 masked 的
-    //               padding 行在 CPU softmax 下退化成均匀分布, RPU kernel 未必 —
+    //               padding 行在 CPU softmax 下退化成均匀分布, device kernel 未必 —
     //               调用方须给这类行开对角口 (因果 mask 保证它们流不回有效行)。
     //   prefix_len  KV prefix 起始位置 (VLM prefill = 0)。
-    // 返回: 末隐藏 [1, chunk_size, hidden] fp16 RPU (含 final_norm) —— 基类
+    // 返回: 末隐藏 [1, chunk_size, hidden] fp16 device (含 final_norm) —— 基类
     //   output DMA 的 output_tensor_ (graph 写目标)。调用方须在 capture 作用域
     //   **退出后**读 (此时图已 end() 执行写入); 切勿在作用域内提前 copy —— 那会
     //   读到尚未执行的全 0 output_tensor_ (见 fused_model_base.cpp:1066-1086 契约)。
@@ -147,7 +147,16 @@ public:
         const at::Tensor& sin,
         const at::Tensor& attn_mask_4d,
         int64_t prefix_len,
-        at::IntArrayRef planned_stage_descriptor = {});
+        at::IntArrayRef planned_stage_descriptor = {}, bool inputs_published = false);
+
+    // Cache-only owners never expose FMB's unwritten final hidden allocation.
+    void prefill_kv_only(
+        const at::Tensor& x_emb,
+        std::vector<at::Tensor>& k_caches,
+        std::vector<at::Tensor>& v_caches,
+        const at::Tensor& cos, const at::Tensor& sin,
+        const at::Tensor& attn_mask_4d, int64_t prefix_len,
+        at::IntArrayRef planned_stage_descriptor = {}, bool inputs_published = false);
 
     std::vector<int64_t> resolve_stage_domain(
         int64_t seq_len, int64_t prefix_len, int64_t mask_kv_len);
@@ -180,8 +189,34 @@ protected:
         const FmbPhysicalExecutionManifest& manifest) const override;
 
 private:
+    at::Tensor run_prefill(
+        const at::Tensor& x_emb,
+        std::vector<at::Tensor>& k_caches,
+        std::vector<at::Tensor>& v_caches,
+        const at::Tensor& cos, const at::Tensor& sin,
+        const at::Tensor& attn_mask_4d, int64_t prefix_len,
+        at::IntArrayRef planned_stage_descriptor, bool inputs_published);
+    std::vector<int64_t> prefill_kv_only_arguments(int64_t rows) const;
+    const bool cold_prefill_kv_only_;
+    bool cold_gateup_swiglu_available_ = false;
+    bool cold_w8_optimizations_available_ = false;
+    bool cold_w8_vlm_gateup_available_ = false;
+    bool cold_row_merge_available_ = false;
+    bool cold_paired_rmsnorm_available_ = false;
+    bool cold_paired_rmsnorm_v32_available_ = false;
+    bool cold_vision_gu176_available_ = false;
+    bool standard_three_camera_mask_ = false;
+    bool vision_gu176_enabled(int64_t rows, int64_t position) const;
+    std::vector<int64_t> vision_gu176_arguments() const;
+    bool paired_rmsnorm_enabled(int64_t rows, int64_t position) const;
+    std::vector<int64_t> paired_rmsnorm_arguments() const;
+    bool row_merge_enabled(int64_t rows, int64_t position) const;
+    std::vector<int64_t> row_merge_arguments() const;
+    bool gateup_swiglu_enabled(int64_t rows, int64_t position) const;
+    std::vector<int64_t> gateup_swiglu_arguments() const;
+
     // 行掩码 merge: out = text*text_mask + vis*vis_mask。
-    // 前置: text/vis 位于不同 SPM 槽; MUL 就地破坏两者, out 可与 text 同槽。
+    // 前置: text/vis 位于不同 SPM 槽; 输入均可被破坏, out 可与 text 同槽。
     // 掩码是 [rows,1] 的**行向量**, 两次 MUL 走 Nx1_NxC 行广播 (见 declare_buffers)。
     void emit_row_merge(uint32_t text_addr, uint32_t act_addr, uint32_t out_addr,
                         uint32_t text_mask_addr, uint32_t act_mask_addr,
@@ -201,6 +236,16 @@ private:
         if (identity.empty()) return {};
         append_kvinsert_cost_scalar_identity(identity, eps_hyvla_);
         identity.insert(identity.end(), {
+            moe_chunk_size_,
+            static_cast<int64_t>(cold_prefill_kv_only_),
+            static_cast<int64_t>(cold_gateup_swiglu_available_),
+            static_cast<int64_t>(cold_w8_optimizations_available_),
+            static_cast<int64_t>(cold_w8_vlm_gateup_available_),
+            static_cast<int64_t>(cold_row_merge_available_),
+            static_cast<int64_t>(cold_paired_rmsnorm_available_),
+            static_cast<int64_t>(cold_paired_rmsnorm_v32_available_),
+            static_cast<int64_t>(cold_vision_gu176_available_),
+            static_cast<int64_t>(standard_three_camera_mask_),
             static_cast<int64_t>(cold_fast_replay_),
             static_cast<int64_t>(cold_fast_replay_preload_),
             static_cast<int64_t>(cold_mask_once_),
@@ -248,7 +293,7 @@ private:
                                                 // 断言孪生侧传的是**同一张量** —— 步 7 据此
                                                 // 单算不双算, 传了不同的 γ 会静默算错。
     at::Tensor text_row_mask_;                  // [chunk_size] 原始行掩码 (keepalive)
-    // [chunk_size, 1] fp16 RPU 常量行掩码 (Persistent 槽 preload 源)。
+    // [chunk_size, 1] fp16 device 常量行掩码 (Persistent 槽 preload 源)。
     at::Tensor text_mask_ddr_, act_mask_ddr_;
     int64_t moe_chunk_size_ = 0;                // 掩码/槽固化的 chunk_size (0 = 未设)
 };

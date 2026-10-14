@@ -1,0 +1,4 @@
+# Device cases sharing a file with host tests.
+python/rpu_backend/tests/acceptance/test_device_rng_protocol.py::test_seeding_still_reaches_device_tensors
+python/rpu_backend/tests/acceptance/test_internal_smoke.py::test_internal_ops_calls
+python/rpu_backend/tests/acceptance/test_two_live_instances_raises.py::test_api08_two_live_models_raises_e2e

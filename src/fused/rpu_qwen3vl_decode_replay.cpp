@@ -427,7 +427,7 @@ bool CausalDecoderModel::begin_qwen3vl_decode_replay(
           chunk_envelope().chunk == (num_layers() == 28 ? 320 : 256);
     if (typeid(*this) != typeid(CausalDecoderModel) || !RpuKernelGraph::has_active() ||
         !ordinary || !geometry || !is_causal || mask.has_value() || partial_mrope_active_ ||
-        adarms_ || planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
+        decoder_mixed_precision_ || adarms_ || planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
         qwen3vl_pooler_z1_dispatch_ || qwen3vl_multiview_text_composite_dispatch_ ||
         !has_qk_norm_ || !has_mrope_ || num_kv_heads() != 8 || head_dim() != 128 ||
         layer_weights_.size() != size_t(num_layers()) ||
@@ -436,6 +436,7 @@ bool CausalDecoderModel::begin_qwen3vl_decode_replay(
         !use_silu_ || nvfp4_ || has_qkv_bias_ || norm_slab_active() ||
         equal_two_prefill_ || configured_chunk_size_cap_ ||
         adarms_mutable_ || adarms_unroll_ || adarms_schedule_select_ || adarms_fused_bcast_enabled_ ||
+        wall_prefill_staged_mlp_ || wall_prefill_mixed_requested_ || wall_prefill_staged_requested_ ||
         sdpa_kernel_ != SdpaKernelType::FLASH_ATTN_SPM ||
         mrope_section_ != std::vector<int32_t>({24, 20, 20}) ||
         deepstack_lang_layers_ != std::vector<int64_t>({0, 1, 2}) ||

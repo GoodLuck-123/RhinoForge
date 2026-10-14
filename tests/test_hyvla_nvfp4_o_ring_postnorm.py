@@ -1,0 +1,126 @@
+"""Exercise the actual fused collective launcher at its memory/ABI boundaries."""
+import pytest
+
+from test_hyvla_paired_kv import COMMON, ROOT, block, compile_run
+
+
+@pytest.mark.parametrize('n128,overlap', [(False, False), (True, False), (True, True)])
+def test_actual_launcher_ranges_aliases_typed_registers_and_peer_table(tmp_path, n128, overlap):
+    launch=block((ROOT/'src/fused/hyvla_nvfp4_o_ring_postnorm.h').read_text(), 'inline void launch_hyvla_nvfp4_o_ring_postnorm_spm(')
+    source=COMMON+r'''
+#include "ops/rpu_linear_tiling.h"
+enum class KernelId {HYVLA_EXPERT_O_RING_POSTNORM_NVFP4_S51,HYVLA_EXPERT_O_RING_POSTNORM_NVFP4_S51_N128,HYVLA_EXPERT_O_RING_POSTNORM_NVFP4_S51_N128_OVERLAP};
+constexpr auto expected_id=KernelId::CANDIDATE_KERNEL;
+enum class GraphDdrRegisterRole {PackedFp4ModelWeight,Fp8BlockScale};
+enum class GraphDdrRegisterAccess {Read};
+enum class GraphDdrRegisterEncoding {DevAddrShift8LoHi};
+struct GraphDdrRegisterAbi {GraphDdrRegisterRole role;GraphDdrRegisterAccess access;GraphDdrRegisterEncoding encoding;int lo,hi;};
+struct GraphDdrRegisterOperandSpec {GraphDdrRegisterAbi abi;at::Tensor tensor;};
+struct SpmAllocator {static constexpr uint32_t SPM_USABLE=8387584;
+ bool ready=true;uint32_t base=0x20000000;
+ bool is_initialized()const{return ready;}
+ uint32_t addr(int c,uint32_t o)const{return base+uint32_t(c)*0x1000000u+o;}
+} spm;
+#define SPM_ALLOC spm
+struct Kernel {std::array<uint16_t,4160> regs{};uint32_t phase=99;
+ void reset_regs(){regs.fill(0);phase=99;}
+ void set_regs(uint32_t i,uint16_t v){assert(i<=66 || (i>=4096 && i<4160));regs.at(i)=v;}
+ void set_regs(uint32_t i,uint32_t v){assert(i==128);phase=v;}
+ void set_regs(uint32_t,int)=delete;
+} kernel;
+void rpu_set_legacy_scm_u16_checked(Kernel* k,uint32_t i,uint16_t v,const char*){k->set_regs(i,v);}
+int fetched=0,queued=0,staged=0,flushed=0;
+Kernel* get_kernel(KernelId id){assert(id==expected_id);++fetched;return &kernel;}
+#define GET_KERNEL(id) get_kernel(id)
+struct Writer {std::vector<GraphDdrRegisterOperandSpec> ops;
+ void write(Kernel& k){for(const auto& o:ops){assert(o.abi.lo>=0 && o.abi.hi<64);const uint64_t a=o.tensor.address>>8;
+  k.set_regs(o.abi.lo,uint16_t(a));k.set_regs(o.abi.hi,uint16_t(a>>16));}}};
+struct RpuKernelGraph {static RpuKernelGraph& active(){static RpuKernelGraph g;return g;}
+ Writer stage_kernel_ddr_registers(KernelId id,std::vector<GraphDdrRegisterOperandSpec> v){
+  assert(id==expected_id && v.size()==2);++staged;
+  assert(v[0].abi.role==GraphDdrRegisterRole::PackedFp4ModelWeight && v[0].abi.access==GraphDdrRegisterAccess::Read);
+  assert(v[0].abi.encoding==GraphDdrRegisterEncoding::DevAddrShift8LoHi && v[0].abi.lo==2 && v[0].abi.hi==3);
+  assert(v[0].tensor.nbytes()==1024*1024);
+  assert(v[1].abi.role==GraphDdrRegisterRole::Fp8BlockScale && v[1].abi.access==GraphDdrRegisterAccess::Read);
+  assert(v[1].abi.encoding==GraphDdrRegisterEncoding::DevAddrShift8LoHi && v[1].abi.lo==20 && v[1].abi.hi==21);
+  assert(v[1].tensor.nbytes()==128*1024);return {v};}};
+void rpu_ddr_flush(void*){++flushed;}
+namespace rhino_lkn {uint64_t RpuGetDevAddr(void* p){return reinterpret_cast<uintptr_t>(p);}}
+struct Queue {bool broadcast=false;
+ void set_broadcast_mode(bool b){broadcast=b;}
+ void enqueu_kernel(Kernel&,std::vector<uint16_t> grid,std::vector<uint8_t> cores){
+  assert(broadcast && grid==std::vector<uint16_t>({8,1,1}));
+  assert(cores==std::vector<uint8_t>({0,1,2,3,4,5,6,7}));++queued;}
+} queue;
+#define GET_QUEUE(n) (&::queue)
+LAUNCH
+int main(){
+ const uint32_t base=spm.base;
+ const std::array<uint32_t,6> good{base+0x10000,base+0x200000,base+0x400000,base,base+0x600000,base+0x700000};
+ at::Tensor weight;weight.shape={1024,1024};weight.dtype=at::kByte;
+ at::Tensor scale;scale.shape={128,1024};scale.dtype=at::kByte;scale.address=weight.address+1024*1024;
+ auto run=[&](std::array<uint32_t,6> a,bool pass,int rows=51,int cols=1024,int nr=64,double eps=1e-5,int cores=8,int layer=0){
+  int before=fetched,previous=queued;bool ok=true;
+  try{launch_hyvla_nvfp4_o_ring_postnorm_spm(a[4],weight,scale,a[5],uint16_t(layer),a[0],a[1],a[2],a[3],rows,cols,nr,eps,cores EXTRA_ARG);}
+  catch(const std::exception&){ok=false;}
+  assert(ok==pass && fetched==before+int(pass) && queued==previous+int(pass));
+  assert(staged==queued && flushed==2*queued);
+ };
+ {bool rejected=false;try{launch_hyvla_nvfp4_o_ring_postnorm_spm(good[4],weight,scale,good[5],0,good[0],good[1],good[2],good[3],51,1024,64,1e-5,8,false,true);}catch(const std::exception&){rejected=true;}assert(rejected && queued==0 && staged==0);}
+ run(good,true);
+ auto pair=[&](int i,int step=1){return uint32_t(kernel.regs[i])|(uint32_t(kernel.regs[i+step])<<16);};
+ assert(pair(0)==good[4] && pair(4)==good[0] && pair(2)==weight.address>>8);
+ assert(pair(8)==51 && pair(10)==1024 && kernel.regs[12]==256 && kernel.regs[13]==4);
+ assert(pair(16)==512 && pair(18)==2048 && pair(22)==16384 && kernel.regs[26]==0 && kernel.regs[27]==0);
+ assert(pair(20)==scale.address>>8 && pair(24)==good[5]);
+ assert(pair(36)==good[1]-base && pair(44)==good[2] && pair(46)==good[1] && pair(48)==good[3]);
+ assert(kernel.regs[32]==8 && kernel.regs[33]==1 && pair(34)==63488 && kernel.regs[38]==0);
+ assert(kernel.regs[40]==1024 && kernel.regs[41]==c10::Half(1.f/1024).x && kernel.regs[42]==2048);
+ assert(kernel.regs[43]==8 && kernel.regs[50]==c10::Half(1e-5).x && kernel.phase==0);
+ for(int c=0;c<8;++c){
+  assert(pair(4096+c,8)==spm.addr(c,good[0]-base)-base);
+  assert(pair(4112+c,8)==spm.addr(c,good[2]-base)-base);
+  assert(pair(4128+c,8)==uint32_t(c*6528*2) && pair(4144+c,8)==6528);
+ }
+ const std::array<uint32_t,6> bytes{51*1024*2,64*1024*2,64*1024*2,2048,51*256*2,128};
+ for(int i=0;i<6;++i){
+  for(auto b:{base-256,good[i]+1}){auto a=good;a[i]=b;run(a,false);}
+  for(int j=0;j<6;++j)if(i!=j){auto a=good;a[i]=good[j];run(a,false);
+   if(bytes[j]>256){a[i]=good[j]+256;run(a,false);}}
+  auto a=good;a[i]=base+((SpmAllocator::SPM_USABLE-bytes[i])&~255u);run(a,true);
+  a[i]+=256;run(a,false);
+ }
+ for(int li:{0,1,7,8,31})run(good,true,51,1024,64,1e-5,8,li);
+ for(int li:{32,65535})run(good,false,51,1024,64,1e-5,8,li);
+ for(int r:{0,50,52,64})run(good,false,r);
+ for(int c:{0,128,1023,1025,2048})run(good,false,51,c);
+ for(int n:{0,51,63,65})run(good,false,51,1024,n);
+ for(double e:{0.,1e-6,-1e-5})run(good,false,51,1024,64,e);
+ for(int n:{0,1,4,9})run(good,false,51,1024,64,1e-5,n);
+ const auto good_weight=weight;
+ for(int failure=0;failure<9;++failure){weight=good_weight;
+  switch(failure){case 0:weight.present=false;break;case 1:weight.contiguous=false;break;
+   case 2:weight.dtype=at::kHalf;break;case 3:weight.where.kind=c10::DeviceType::CPU;break;
+   case 4:weight.shape={1024,1023};break;case 5:weight.shape={1023,1024};break;
+   case 6:weight.shape={1,1024,1024};break;case 7:weight.address+=128;break;
+   case 8:weight.address=(uint64_t{1}<<40)-256;break;}
+  run(good,false);
+ }
+ weight=good_weight;
+ const auto good_scale=scale;
+ for(int failure=0;failure<10;++failure){scale=good_scale;
+  switch(failure){case 0:scale.present=false;break;case 1:scale.contiguous=false;break;
+   case 2:scale.dtype=at::kHalf;break;case 3:scale.where.kind=c10::DeviceType::CPU;break;
+   case 4:scale.shape={127,1024};break;case 5:scale.shape={128,1023};break;
+   case 6:scale.shape={1,128,1024};break;case 7:scale.address+=128;break;
+   case 8:scale.address=(uint64_t{1}<<40)-256;break;case 9:scale.where.index=1;break;}
+  run(good,false);
+ }
+ scale=good_scale;
+ spm.ready=false;run(good,false);spm.ready=true;
+ spm.base=0xf8ff0000;auto high=good;for(auto& a:high)a+=spm.base-base;run(high,false);
+}
+'''
+    symbol = 'HYVLA_EXPERT_O_RING_POSTNORM_NVFP4_S51' + ('_N128' if n128 else '') + ('_OVERLAP' if overlap else '')
+    source = source.replace('CANDIDATE_KERNEL', symbol).replace('EXTRA_ARG', ', true, true' if overlap else (', true' if n128 else ''))
+    compile_run(tmp_path,'ring_postnorm_launcher',source.replace('LAUNCH',launch))

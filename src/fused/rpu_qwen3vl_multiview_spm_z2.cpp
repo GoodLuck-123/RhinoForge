@@ -311,7 +311,7 @@ void validate_position_ids(const at::Tensor& position_ids,
             position_ids.device().type() == at::kPrivateUse1 &&
             position_ids.scalar_type() == at::kInt &&
             position_ids.is_contiguous(),
-        operation, ": position_ids must be contiguous RPU int32 [225,3]");
+        operation, ": position_ids must be contiguous device int32 [225,3]");
     TORCH_CHECK(
         position_ids.unsafeGetTensorImpl()->version_counter().enabled(),
         operation,
@@ -333,7 +333,7 @@ void validate_rope_il(const at::Tensor& rope_cos_il,
             rope_sin_il.scalar_type() == at::kHalf &&
             rope_cos_il.is_contiguous() && rope_sin_il.is_contiguous(),
         operation,
-        ": rope_cos_il/rope_sin_il must be matching contiguous RPU FP16 "
+        ": rope_cos_il/rope_sin_il must be matching contiguous device FP16 "
         "[225,64]");
     TORCH_CHECK(
         rope_cos_il.unsafeGetTensorImpl()->version_counter().enabled() &&
@@ -395,7 +395,7 @@ void validate_invocation(
                 input.device().type() == at::kPrivateUse1 &&
                 input.scalar_type() == at::kHalf && input.is_contiguous(),
             operation, ": Vision input ", image,
-            " must be contiguous RPU FP16 [1,256,1024]");
+            " must be contiguous device FP16 [1,256,1024]");
     }
     TORCH_CHECK(
         vision_k_caches.size() == kVisionLayers &&
@@ -411,7 +411,7 @@ void validate_invocation(
             text_hidden.device().type() == at::kPrivateUse1 &&
             text_hidden.scalar_type() == at::kHalf &&
             text_hidden.is_contiguous(),
-        operation, ": Text carrier must be contiguous RPU FP16 [1,225,2560]");
+        operation, ": Text carrier must be contiguous device FP16 [1,225,2560]");
     validate_position_ids(position_ids, operation);
     TORCH_CHECK(
         rope_cos_il.has_value() == rope_sin_il.has_value() &&

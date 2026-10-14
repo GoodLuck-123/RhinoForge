@@ -9,13 +9,16 @@
 //     param4 (reg4/5): ids>>8      param6 (reg6/7): vocab>>8
 //     param8 (reg8/9): output addr param10 (reg10): hidden  param21 (reg21): tp
 //     grid (reg64-66): {ceil(ids/32),1,1}
-// The CPU-vs-RPU cos-gate (tests/ops/test_embedding_gather_isolated.py) is the
+// The CPU-vs-device cos-gate (tests/ops/test_embedding_gather_isolated.py) is the
 // oracle that this packing is correct.
 
 #include <ATen/ATen.h>
 #include <ATen/record_function.h>
 #include <c10/util/Half.h>
+#include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <utility>
 #include <vector>
 
 #include "rpu_ops.h"
@@ -82,7 +85,7 @@ void rpu_launch_gather_embedding_kernel(
     wq->enqueu_kernel(*kernel, {(uint16_t)blk_cnt, (uint16_t)1, (uint16_t)1}, core_list);
 }
 
-// torch op: gather_embedding(vocab[V,H] fp16, ids[N] int32) -> [N,H] fp16, all RPU.
+// torch op: gather_embedding(vocab[V,H] fp16, ids[N] int32) -> [N,H] fp16, all device.
 // Stages through SPM (gather writes SPM, then DMA SPM→DDR) — see the file header
 // for why a direct >4 GB DDR output can't work with this kernel's g1b store.
 at::Tensor rpu_gather_embedding(const at::Tensor &vocab, const at::Tensor &ids)
@@ -98,7 +101,7 @@ at::Tensor rpu_gather_embedding(const at::Tensor &vocab, const at::Tensor &ids)
                 "gather_embedding: vocab and ids must be contiguous");
     TORCH_CHECK(vocab.device().type() == at::kPrivateUse1
                 && ids.device().type() == at::kPrivateUse1,
-                "gather_embedding: vocab and ids must be on RPU device");
+                "gather_embedding: vocab and ids must be on device");
 
     const int64_t H = vocab.size(1);
     const int64_t N = ids.size(0);
@@ -108,12 +111,12 @@ at::Tensor rpu_gather_embedding(const at::Tensor &vocab, const at::Tensor &ids)
     const int64_t n_elem = N * H;
     const int64_t out_bytes = n_elem * 2;
 
-    // No flushes here. Flushes are CPU<->RPU cache-coherency ops, needed only at host
+    // No flushes here. Flushes are CPU<->device cache-coherency ops, needed only at host
     // boundaries — this op is pure device→device (kernel reads vocab/ids from DDR,
     // writes SPM, DMAs SPM→DDR). Coherency contract: (1) vocab + ids were flushed by
-    // their .to('rpu') upload (rpu_copy_ flushes CPU→RPU) and the CPU never rewrites
+    // their .to('rpu') upload (rpu_copy_ flushes CPU→device) and the CPU never rewrites
     // them; (2) the output is consumed on-device by the next kernel (no CPU read) — or,
-    // if a caller reads it back, the .cpu() copy (rpu_copy_ RPU→CPU) flushes it.
+    // if a caller reads it back, the .cpu() copy (rpu_copy_ device→CPU) flushes it.
     if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
     using AR = SpmAllocator::AllocRequest;
     auto offsets = SPM_ALLOC.alloc_temporary_aliased({
@@ -134,7 +137,7 @@ at::Tensor rpu_gather_embedding(const at::Tensor &vocab, const at::Tensor &ids)
 }
 
 // torch op: assemble_inputs_embeds(vocab[V,H] fp16, ids[N] int32, merged[M,H] fp16,
-// img_start) -> [N,H] fp16, all RPU. Fully on-device inputs_embeds assembly for a
+// img_start) -> [N,H] fp16, all device. Fully on-device inputs_embeds composition for a
 // SINGLE contiguous image-token block: gather token embeddings into an SPM scratch,
 // scatter the M vision rows into [img_start, img_start+M) via a DDR→SPM DMA, then one
 // SPM→DDR copy. NO host memcpy and NO coherency flushes — every step is device→device
@@ -157,7 +160,7 @@ at::Tensor rpu_assemble_inputs_embeds(const at::Tensor &vocab, const at::Tensor 
     TORCH_CHECK(vocab.device().type() == at::kPrivateUse1
                 && ids.device().type() == at::kPrivateUse1
                 && merged.device().type() == at::kPrivateUse1,
-                "assemble_inputs_embeds: inputs must be on RPU device");
+                "assemble_inputs_embeds: inputs must be on device");
     const int64_t H = vocab.size(1);
     const int64_t N = ids.size(0);
     const int64_t M = merged.size(0);
@@ -174,7 +177,7 @@ at::Tensor rpu_assemble_inputs_embeds(const at::Tensor &vocab, const at::Tensor 
     if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
     using AR = SpmAllocator::AllocRequest;
     auto offsets = SPM_ALLOC.alloc_temporary_aliased({
-        AR{n_elem * 2, 1, 3},   // assembly scratch (gather-write → merge-write → DMA-out)
+        AR{n_elem * 2, 1, 3},   // composition scratch (gather-write → merge-write → DMA-out)
     });
     const uint32_t spm = SPM_ALLOC.addr(0, offsets[0]);
 
@@ -194,9 +197,128 @@ at::Tensor rpu_assemble_inputs_embeds(const at::Tensor &vocab, const at::Tensor 
     return out;
 }
 
+// Internal synchronous DMA helper implemented in rpu_memcpy.cpp. All input
+// owners and the caller's ScopedTemporary remain live until its batch completes;
+// this is not a public operator or a replayable Graph API.
+void rpu_launch_assembled_prefix_parts_dma_immediate(
+    const at::Tensor& prefix, at::TensorList parts, const at::Tensor& runs,
+    const at::Tensor& output, uint32_t spm, int64_t chunk_rows);
+
+// Multi-run counterpart of assemble_inputs_embeds. Each published vision part
+// has its own DDR owner; a row slice may share that owner without a host copy.
+// Token IDs keep gather_embedding's caller-owned in-range-value contract.
+at::Tensor rpu_assemble_inputs_embeds_parts(
+    const at::Tensor& vocab, const at::Tensor& ids,
+    at::TensorList merged_parts, const at::Tensor& runs,
+    bool prefix_is_embeddings)
+{
+    RECORD_FUNCTION("rpu::assemble_inputs_embeds_parts", {});
+    TORCH_CHECK(vocab.dim() == 2 && vocab.scalar_type() == at::kHalf &&
+                vocab.device().type() == at::kPrivateUse1 && vocab.is_contiguous(),
+                "assemble_inputs_embeds_parts: vocab must be contiguous device fp16 [V,H]");
+    TORCH_CHECK(ids.dim() == 1 && ids.scalar_type() == at::kInt &&
+                ids.device() == vocab.device() && ids.is_contiguous(),
+                "assemble_inputs_embeds_parts: ids must be contiguous device int32 [N] on the vocab device");
+    TORCH_CHECK(runs.dim() == 2 && runs.size(1) == 2 &&
+                runs.scalar_type() == at::kLong && runs.device().is_cpu() &&
+                runs.is_contiguous(),
+                "assemble_inputs_embeds_parts: runs must be contiguous CPU int64 [n_parts,2]");
+    TORCH_CHECK(!vocab.requires_grad() && !ids.requires_grad(),
+                "assemble_inputs_embeds_parts: inference tensors only");
+    TORCH_CHECK(static_cast<uint64_t>(runs.size(0)) == merged_parts.size(),
+                "assemble_inputs_embeds_parts: parts and runs must have equal lengths");
+    const int64_t H = vocab.size(1);
+    const int64_t N = ids.size(0);
+    TORCH_CHECK(!prefix_is_embeddings || vocab.size(0) == N,
+                "assemble_inputs_embeds_parts: preassembled prefix rows must equal the ids length");
+    TORCH_CHECK(vocab.size(0) > 0 && H > 0 && H % 16 == 0 &&
+                H <= std::numeric_limits<uint16_t>::max() && N > 0,
+                "assemble_inputs_embeds_parts: positive V/N and 16-aligned H within the gather register range required");
+    const int64_t row_bytes = H * static_cast<int64_t>(sizeof(c10::Half));
+    TORCH_CHECK(N <= std::numeric_limits<int64_t>::max() / row_bytes,
+                "assemble_inputs_embeds_parts: assembled tensor byte count overflows");
+    TORCH_CHECK(prefix_is_embeddings ||
+                N <= static_cast<int64_t>(SpmAllocator::SPM_PLANNING_BUDGET) / row_bytes,
+                "assemble_inputs_embeds_parts: assembled tensor exceeds the SPM planning budget");
+    const int64_t out_bytes = N * row_bytes;
+    const int64_t n_elem = N * H;
+    const int64_t* run_data = runs.data_ptr<int64_t>();
+    std::vector<std::pair<int64_t, int64_t>> intervals;
+    intervals.reserve(merged_parts.size());
+    for (size_t index = 0; index < merged_parts.size(); ++index) {
+        const auto& part = merged_parts[index];
+        TORCH_CHECK(part.dim() == 2 && part.scalar_type() == at::kHalf &&
+                    part.device() == vocab.device() && part.is_contiguous() &&
+                    !part.requires_grad(),
+                    "assemble_inputs_embeds_parts: every part must be contiguous inference device fp16 [rows,H]");
+        const int64_t start = run_data[2 * index];
+        const int64_t length = run_data[2 * index + 1];
+        TORCH_CHECK(start >= 0 && start <= N && length > 0 && length <= N - start,
+                    "assemble_inputs_embeds_parts: run outside token rows");
+        TORCH_CHECK(part.size(0) == length && part.size(1) == H,
+                    "assemble_inputs_embeds_parts: part shape must match its run length and vocab hidden size");
+        intervals.emplace_back(start, start + length);
+    }
+    std::sort(intervals.begin(), intervals.end());
+    for (size_t index = 1; index < intervals.size(); ++index) {
+        TORCH_CHECK(intervals[index - 1].second <= intervals[index].first,
+                    "assemble_inputs_embeds_parts: image runs must not overlap");
+    }
+    TORCH_CHECK((RpuGetDevAddr(vocab.data_ptr()) & 255u) == 0 &&
+                (RpuGetDevAddr(ids.data_ptr()) & 255u) == 0,
+                "assemble_inputs_embeds_parts: vocab and ids must be 256-byte aligned");
+    for (const auto& part : merged_parts) {
+        TORCH_CHECK((RpuGetDevAddr(part.data_ptr()) & 15u) == 0,
+                    "assemble_inputs_embeds_parts: part DMA source must be 16-byte aligned");
+    }
+    RpuKernelGraph::check_direct_immediate_dma_allowed("assemble_inputs_embeds_parts");
+    const size_t aligned_bytes = (static_cast<size_t>(out_bytes) + SpmAllocator::ALIGN - 1)
+                                / SpmAllocator::ALIGN * SpmAllocator::ALIGN;
+    int64_t chunk_rows = N;
+    if (prefix_is_embeddings) {
+        const size_t aligned_free = std::min(SPM_ALLOC.free_space(),
+                                            SpmAllocator::SPM_PLANNING_BUDGET) / SpmAllocator::ALIGN
+                                    * SpmAllocator::ALIGN;
+        chunk_rows = std::min(N, static_cast<int64_t>(aligned_free / row_bytes));
+        TORCH_CHECK(chunk_rows > 0,
+                    "assemble_inputs_embeds_parts: insufficient free SPM for one assembly row");
+    } else {
+        TORCH_CHECK(aligned_bytes <= SPM_ALLOC.free_space(),
+                    "assemble_inputs_embeds_parts: insufficient free SPM for assembly");
+    }
+
+    // All data/geometry admission precedes allocation and the first device work.
+    auto out = at::empty({N, H}, vocab.options());
+    if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
+    SpmAllocator::ScopedTemporary temporary;
+    using AR = SpmAllocator::AllocRequest;
+    auto offsets = SPM_ALLOC.alloc_temporary_aliased({AR{chunk_rows * row_bytes, 1, 3}});
+    const uint32_t spm = SPM_ALLOC.addr(0, offsets[0]);
+    if (prefix_is_embeddings) {
+        // Reuse one bounded scratch region across row chunks. All chunks and
+        // their part intersections remain one ordered synchronous core-0 batch.
+        rpu_launch_assembled_prefix_parts_dma_immediate(
+            vocab, merged_parts, runs, out, spm, chunk_rows);
+        return out;
+    } else {
+        rpu_launch_gather_embedding_kernel(
+            const_cast<c10::Half*>(vocab.data_ptr<c10::Half>()),
+            const_cast<int32_t*>(ids.data_ptr<int32_t>()), spm, N, H, /*num_cores=*/1);
+    }
+    for (size_t index = 0; index < merged_parts.size(); ++index) {
+        const int64_t start = run_data[2 * index];
+        const int64_t length = run_data[2 * index + 1];
+        rpu_launch_ddr_broadcast_spm_dma_immediate(
+            const_cast<c10::Half*>(merged_parts[index].data_ptr<c10::Half>()),
+            length * H, spm + static_cast<uint32_t>(start * row_bytes), /*num_cores=*/1);
+    }
+    rpu_launch_spm_copy_ddr_dma_immediate(spm, out.data_ptr<c10::Half>(), n_elem);
+    return out;
+}
+
 // torch op: assemble_inputs_embeds_rev(vocab[V,H], ids[N], merged_window[M,H],
 //   rev_idx[M] int32, runs[n_runs,2] int64 CPU) -> [N,H] fp16, all-device.
-// Folds the vision window-REVERSE into the embed assembly: gather token embeddings
+// Folds the vision window-REVERSE into the embed composition: gather token embeddings
 // into SPM, then for each image run gather merged_window[rev_idx[off:off+len]]
 // DIRECTLY into that run's SPM slot (off accumulates across runs). This replaces the
 // separate vision reverse-gather (gather_embedding(merged_window, rev_idx) → a merged
@@ -223,7 +345,7 @@ at::Tensor rpu_assemble_inputs_embeds_rev(const at::Tensor &vocab, const at::Ten
     TORCH_CHECK(vocab.device().type() == at::kPrivateUse1 && ids.device().type() == at::kPrivateUse1
                 && merged_window.device().type() == at::kPrivateUse1
                 && rev_idx.device().type() == at::kPrivateUse1,
-                "assemble_inputs_embeds_rev: vocab/ids/merged_window/rev_idx must be on RPU");
+                "assemble_inputs_embeds_rev: vocab/ids/merged_window/rev_idx must be on device");
     TORCH_CHECK(runs.dim() == 2 && runs.size(1) == 2 && runs.scalar_type() == at::kLong
                 && runs.device().type() == at::kCPU && runs.is_contiguous(),
                 "assemble_inputs_embeds_rev: runs must be a contiguous CPU int64 [n_runs,2]");
@@ -240,7 +362,7 @@ at::Tensor rpu_assemble_inputs_embeds_rev(const at::Tensor &vocab, const at::Ten
     if (!SPM_ALLOC.is_initialized()) SPM_ALLOC.init();
     using AR = SpmAllocator::AllocRequest;
     auto offsets = SPM_ALLOC.alloc_temporary_aliased({
-        AR{n_elem * 2, 1, 3},   // assembly scratch (token-gather → per-run reverse-gather → DMA-out)
+        AR{n_elem * 2, 1, 3},   // composition scratch (token-gather → per-run reverse-gather → DMA-out)
     });
     const uint32_t spm = SPM_ALLOC.addr(0, offsets[0]);
 

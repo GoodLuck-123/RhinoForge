@@ -1,7 +1,7 @@
-"""NavDP fused runtime — INCREMENT 2 (RPU runs the 16 decoder layers; host does glue+DDPM).
+"""NavDP fused runtime — INCREMENT 2 (device runs the 16 decoder layers; host does glue+DDPM).
 
 Weight source: extracted `navdp_head.safetensors` (`model.navdp.*`). The 16-layer
-`nn.TransformerDecoder` runs on RPU (`torch.ops.rpu.navdp_forward`); the small glue
+`nn.TransformerDecoder` runs on device (`torch.ops.rpu.navdp_forward`); the small glue
 (input_embed, out_pos_embed, final LayerNorm, action_head, time_emb, cond_pos_embed) and
 the DDPM 20-step loop run host-side (torch) — numerically verifiable, folded into hooks later.
 
@@ -46,19 +46,6 @@ _NAVDP_EXECUTION_COMPONENTS = {
 _NAVDP_DDR_ROUTE_REASONS = {
     "cross_attention": "MEMORY_CROSS_DDR_REQUIRED_NO_RAW_RESIDENCY_ABI",
 }
-
-
-def _initial_action_noise(sample_num, seed, init_noise):
-    """Return init plus one stream; explicit init leaves it at the seed start."""
-    generator = torch.Generator().manual_seed(seed)
-    initial = (
-        init_noise.clone()
-        if init_noise is not None
-        else torch.randn(
-            sample_num, PREDICT_SIZE, ACTION_DIM, generator=generator
-        )
-    )
-    return initial, generator
 
 
 def _resolve_navdp_execution(value, *, entry_point: str):
@@ -204,13 +191,13 @@ class NavdpRuntime:
             self._native_resource.cleanup_failure(error, self)
             raise
 
-    def _decoder_rpu(self, tgt_f32, memory_f32):
-        """Run the 16 decoder layers on RPU. tgt[1,S,H], memory[1,M,H] fp32 -> hidden[1,S,H] fp32."""
+    def _decoder_rpu(self, tgt_f32, memory_f32, *, output=None, output_published=False):
+        """Run one trajectory; an explicit device output defers the CPU readback."""
         self._require_execution_session()
         torch.ops.rpu.navdp_validate_execution_admission(
             self._handle, int(tgt_f32.shape[1]), 0)
         tgt_r = _hr(tgt_f32)          # [1,S,H]
-        mem_r = _hr(memory_f32)       # [1,M,H]
+        mem_r = _hr(memory_f32)       # [1,M,H]; no-op for the shared FP16 device input
         # Shared GraphCache + stable op_id → graph replay (memory drifts per step but the MUTABLE
         # broadcast rewrites its src from the device addr each replay; see rpu_navdp_model.cpp).
         generation = int(self._fmb_execution_generation)
@@ -235,7 +222,7 @@ class NavdpRuntime:
             hidden = torch.ops.rpu.navdp_forward(
                 self._handle, tgt_r, mem_r, self._cache.k_caches,
                 self._cache.v_caches, None,
-                plan.selected.stage_tuple.physical_descriptor)
+                plan.selected.stage_tuple.physical_descriptor, output, output_published)
         resolved = int(torch.ops.rpu.navdp_get_resolved_chunk_size(self._handle))
         if resolved != chunk:
             raise RuntimeError(
@@ -248,18 +235,46 @@ class NavdpRuntime:
             logical_len=PREDICT_SIZE,
             resolved_chunk_size=resolved,
         )
-        return hidden.float().cpu()
+        return hidden if output is not None else hidden.to(device="cpu", dtype=torch.float32)
 
-    def _predict_noise(self, last_actions, timestep, goal_embed, rgbd_embed):
-        """NavDP predict_noise: RPU decoder + host glue. Mirrors navdp.py predict_noise."""
+    def _predict_noise(self, last_actions, timestep, goal_embed, rgbd_embed,
+                       *, _action_input_bank=None):
+        """NavDP predict_noise: device decoder + host glue. Mirrors navdp.py predict_noise."""
         g = self._glue
         action_embeds = F.linear(last_actions, g["ie_w"], g["ie_b"])            # input_embed 3->384 [B,32,384]
         time_embeds = self._time_emb(timestep).unsqueeze(1).to(last_actions.dtype)  # [1,1,384]
         # cond (memory) is SHARED across the B sampled trajectories: [1,34,384].
         cond = torch.cat([time_embeds, goal_embed[0:1], rgbd_embed[0:1]], dim=1) + g["cond_pos"][:, :MEMORY_LEN, :]
         inp = action_embeds + g["out_pos"][:, :PREDICT_SIZE, :]                 # [B,32,384]
-        # RPU 16 layers, batch=1 per trajectory (host loops the sampler); memory `cond` shared.
-        hidden = torch.cat([self._decoder_rpu(inp[b:b+1], cond) for b in range(inp.shape[0])], 0)
+        torch.ops.rpu.navdp_validate_execution_admission(
+            self._handle, int(inp.shape[1]), 0)
+        if _action_input_bank is None:
+            # Public predict_noise publishes every input afresh, including
+            # caller-owned conditioning that may have changed through aliases.
+            inputs_r = _hr(torch.cat((cond.reshape(-1, HIDDEN), inp.reshape(-1, HIDDEN)), dim=0))
+            cond_r = inputs_r[:MEMORY_LEN].view(1, MEMORY_LEN, HIDDEN)
+            targets_r = inputs_r[MEMORY_LEN:].view(inp.shape[0], PREDICT_SIZE, HIDDEN)
+        else:
+            # Within one CPU action, only targets and the first conditioning
+            # row (timestep) change. Put those rows in one contiguous prefix;
+            # goal/rgbd + cond_pos stay published in the final 33 rows.
+            target_rows = inp.shape[0] * PREDICT_SIZE
+            inputs_r = _action_input_bank[0]
+            if inputs_r is None:
+                inputs_r = _hr(torch.cat((inp.reshape(-1, HIDDEN), cond.reshape(-1, HIDDEN)), dim=0))
+                _action_input_bank[0] = inputs_r
+            else:
+                dynamic = torch.cat((inp.reshape(-1, HIDDEN), cond[:, :1].reshape(-1, HIDDEN)), dim=0)
+                inputs_r[:target_rows + 1].copy_(dynamic.to(torch.float16).contiguous())
+            cond_r = inputs_r[target_rows:].view(1, MEMORY_LEN, HIDDEN)
+            targets_r = inputs_r[:target_rows].view(inp.shape[0], PREDICT_SIZE, HIDDEN)
+        # Keep the exact per-trajectory graph and arithmetic, but DMA each result
+        # into a fresh bank and publish the complete bank to the CPU only once.
+        hidden_r = torch.empty(inp.shape, device="rpu", dtype=torch.float16)
+        for b in range(inp.shape[0]):
+            self._decoder_rpu(targets_r[b:b+1], cond_r,
+                              output=hidden_r[b:b+1], output_published=True)
+        hidden = hidden_r.to(device="cpu", dtype=torch.float32)
         out = F.layer_norm(hidden, (HIDDEN,), g["ln_w"], g["ln_b"], EPS)         # final layernorm
         return F.linear(out, g["ah_w"], g["ah_b"])                              # action_head 384->3
 
@@ -272,11 +287,11 @@ class NavdpRuntime:
 
     @execution_serialized
     def predict_action(self, goal_embed, rgbd_embed, sample_num=4, seed=20260706, init_noise=None):
-        """Full System-1 denoise: DDPM 20-step reverse loop over the RPU decoder.
+        """Full System-1 denoise: DDPM 20-step reverse loop over the device decoder.
 
         goal_embed[1,1,384], rgbd_embed[1,32,384] -> action[sample_num,32,3].
         Mirrors navdp.py predict_pointgoal_action_async. Scheduler host-side; each step's
-        predict_noise runs the 16 decoder layers on RPU (per trajectory).
+        predict_noise runs the 16 decoder layers on device (per trajectory).
         """
         self._require_execution_session()
         if self._denoise_unroll:
@@ -285,10 +300,21 @@ class NavdpRuntime:
         sched = DDPMScheduler(num_train_timesteps=DDPM_STEPS, beta_schedule="squaredcos_cap_v2",
                               clip_sample=True, prediction_type="epsilon")
         sched.set_timesteps(DDPM_STEPS)
-        naction, step_gen = _initial_action_noise(sample_num, seed, init_noise)
+        step_gen = torch.Generator().manual_seed(seed)  # deterministic DDPM step noise
+        if init_noise is not None:
+            naction = init_noise.clone()
+        else:
+            naction = torch.randn(sample_num, PREDICT_SIZE, ACTION_DIM, generator=torch.Generator().manual_seed(seed))
+        # This owner is local to one action. The next call fully republishes
+        # conditioning; non-CPU inputs retain the fresh-input path.
+        input_bank = [None] if all(
+            torch.is_tensor(value) and value.device.type == "cpu"
+            for value in (naction, goal_embed, rgbd_embed)
+        ) else None
         for k in sched.timesteps:  # goal/rgbd stay batch-1 (shared memory); predict_noise loops trajectories
             noise_pred = self._predict_noise(
-                naction, k.unsqueeze(0), goal_embed, rgbd_embed
+                naction, k.unsqueeze(0), goal_embed, rgbd_embed,
+                _action_input_bank=input_bank,
             )
             naction = sched.step(model_output=noise_pred, timestep=k, sample=naction, generator=step_gen).prev_sample
         return naction
@@ -344,7 +370,7 @@ class NavdpRuntime:
                               clip_sample=True, prediction_type="epsilon")
         sched.set_timesteps(DDPM_STEPS)
         ac = sched.alphas_cumprod
-        init, zg = _initial_action_noise(sample_num, seed, init_noise)
+        zg = torch.Generator().manual_seed(seed)
         coeff = torch.zeros(DDPM_STEPS, 4)                                   # A,B,C,D (CPU fp32, baked at BUILD)
         sigz = torch.zeros(sample_num, DDPM_STEPS, PREDICT_SIZE, AD16)       # padded action_dim
         mems = []
@@ -361,6 +387,8 @@ class NavdpRuntime:
             mems.append(torch.cat([te, goal_embed[0:1], rgbd_embed[0:1]], 1) + g["cond_pos"][:, :MEMORY_LEN, :])
         mem_all = torch.cat(mems, 0).to(torch.float16).to("rpu").contiguous()  # [N,34,384]
         coeff = coeff.contiguous()
+        init = (init_noise.clone() if init_noise is not None
+                else torch.randn(sample_num, PREDICT_SIZE, ACTION_DIM, generator=torch.Generator().manual_seed(seed)))
         init = F.pad(init, (0, AD16 - ACTION_DIM))                          # [sample_num,32,16]
         # batch=B trajectory batching (default on): fold the B trajectories into one unrolled graph.
         # C++ runs M=B*PS batched for every row-wise op; only the two attentions loop per-trajectory
@@ -374,7 +402,7 @@ class NavdpRuntime:
                     self._native_resource.keepalive, self._batch_cache)
                 self._batch_n = sample_num
             x0 = init.reshape(BPS, AD16).to(torch.float16).to("rpu").contiguous()             # [BPS,16] traj-major
-            sz = sigz.permute(1, 0, 2, 3).reshape(DDPM_STEPS, BPS, AD16).contiguous() \
+            sz = sigz.permute(1, 0, 2, 3).reshape(DDPM_STEPS, BPS, AD16).contiguous()\
                      .to(torch.float16).to("rpu").contiguous()                                # [N,BPS,16]
             out = torch.empty(BPS, AD16, dtype=torch.float16, device="rpu")
             generation = int(self._fmb_execution_generation)
@@ -415,7 +443,7 @@ class NavdpRuntime:
                 logical_len=BPS,
                 resolved_chunk_size=resolved,
             )
-            return r.reshape(sample_num, PREDICT_SIZE, AD16)[:, :, :ACTION_DIM].float().cpu()  # [B,PS,3]
+            return r.reshape(sample_num, PREDICT_SIZE, AD16)[:, :, :ACTION_DIM].to(device="cpu", dtype=torch.float32)  # [B,PS,3]
 
         outs = []   # serial fallback (RPU_NAVDP_BATCH=0)
         for b in range(sample_num):
@@ -460,7 +488,7 @@ class NavdpRuntime:
                 logical_len=PREDICT_SIZE,
                 resolved_chunk_size=resolved,
             )
-            outs.append(r[:, :ACTION_DIM].float().cpu())
+            outs.append(r[:, :ACTION_DIM].to(device="cpu", dtype=torch.float32))
         return torch.stack(outs, 0)
 
     def _require_execution_session(self):

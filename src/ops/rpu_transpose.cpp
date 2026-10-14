@@ -1,4 +1,4 @@
-// rpu_transpose.cpp — Transpose kernel launch wrapper for RPU.
+// rpu_transpose.cpp — Transpose kernel launch wrapper for device.
 //
 // Transposes a 3D tensor [b, n, c] → [n, c, b] (order "120") in SPM.
 // Used for NCHW→NHWC by collapsing batch: [C, H, W] → [H, W, C].

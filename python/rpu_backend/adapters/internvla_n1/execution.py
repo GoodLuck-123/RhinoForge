@@ -409,7 +409,7 @@ def gc_close_internvla_runtime(owner):
 
 
 class InternVLAExecutionController:
-    """One serialized session for independently planned RPU children.
+    """One serialized session for independently planned device children.
 
     CPU-only goal/scheduler glue is intentionally absent: it has no native
     chunk, SPM, KV, or Graph authority and is therefore NOT_APPLICABLE.
@@ -427,7 +427,7 @@ class InternVLAExecutionController:
                 f"InternVLA execution has unknown child IDs {sorted(unknown)}"
             )
         if not children:
-            raise ValueError("InternVLA execution requires at least one RPU child")
+            raise ValueError("InternVLA execution requires at least one device child")
         if vars(owner).get("_internvla_execution_controller") is not None:
             raise ValueError("InternVLA owner already has its execution controller")
         for component, child in children.items():
@@ -557,7 +557,7 @@ class InternVLAExecutionController:
             generations[component] += 1
         self._journal = (old_resolved, dict(self._component_generations), changed)
         # Even descriptor-only changes participate in the native stop-the-world
-        # transaction so publication cannot race a live RPU graph.
+        # transaction so publication cannot race a live device graph.
         with native_execution_reconfigure():
             for component in changed:
                 _clear_graphs(self.children[component])

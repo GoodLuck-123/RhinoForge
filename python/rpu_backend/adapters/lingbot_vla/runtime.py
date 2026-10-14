@@ -1,8 +1,8 @@
 """LingBot-VLA (robbyant/lingbot-vla-4b) 的 image+text → action 运行时。
 
 CPU FP32 Qwen2.5-VL ViT 产生视觉 embedding，与语言 embedding 拼接后，
-RPU Qwen2 decoder 以双向 attention 写入共享 prefix KV。
-state/noise 经 encoder 与逐步 AdaRMS 变换，交给 RPU action expert
+device Qwen2 decoder 以双向 attention 写入共享 prefix KV。
+state/noise 经 encoder 与逐步 AdaRMS 变换，交给 device action expert
 执行 Euler denoise。该 checkpoint 的 vision 保持 CPU FP32 以避免
 FP16 溢出。
 
@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from numbers import Integral
 import torch
 import torch.nn.functional as F
+from rpu_backend.runtime.masks import versioned_cpu_mask
 from safetensors import safe_open
 
 import rpu_backend
@@ -133,7 +134,7 @@ def _cleanup_lingbot_pending_handle(handle, attr, keep, error):
 
 
 def _h(t):
-    """fp32/any → fp16 RPU contiguous."""
+    """fp32/any → fp16 device contiguous."""
     return t.detach().to(torch.float16).to("rpu").contiguous()
 
 
@@ -335,7 +336,7 @@ def embed_suffix_step(x_t, state_emb, time_emb, W):
 
 def fold_scale_shift(norm_W, cond):
     """Per-(layer,norm-slot): scale=(1+gamma(cond))*rms_w, shift=beta(cond). cond [1,768].
-    Returns 4 lists (input_scale, input_shift, post_scale, post_shift) of [768] fp16 RPU vectors."""
+    Returns 4 lists (input_scale, input_shift, post_scale, post_shift) of [768] fp16 device vectors."""
     in_s, in_sh, po_s, po_sh = [], [], [], []
     for L in range(EXP_LAYERS):
         for slot, sc, sh in (("input_layernorm", in_s, in_sh),
@@ -350,12 +351,12 @@ def fold_scale_shift(norm_W, cond):
 
 
 def precompute_fold_all(norm_W, times):
-    """Lever 1 (PERF_ROADMAP.md): batch the AdaRMS fold across all Euler steps.
-    cond=sinusoidal(t) depends only on t (NOT x_t), so all steps precompute once and
-    ship in 4 big `.to("rpu")` transfers instead of 36*2*2*num_steps tiny [768] ones
-    (~1440 → 4, was ~2.9 s/call). Returns 4 rpu tensors [S, EXP_LAYERS, 768];
-    slice `t[k]` per step → 36 contiguous [768] views for causal_decoder_set_adarms_step.
-    Bit-identical to per-step fold_scale_shift (same math, same fp16 cast)."""
+    """Precompute the AdaRMS fold for all Euler steps from sinusoidal(t).
+
+    Returns four device tensors [S, EXP_LAYERS, 768], transferred once. Each
+    t[k] supplies EXP_LAYERS contiguous [768] views to
+    causal_decoder_set_adarms_step. Uses the per-step fold math and FP16 cast.
+    """
     S = len(times)
     in_s = torch.empty(S, EXP_LAYERS, EXP_HID, dtype=torch.float16)
     in_sh, po_s, po_sh = (torch.empty_like(in_s) for _ in range(3))
@@ -374,7 +375,7 @@ def precompute_fold_all(norm_W, times):
 
 
 # =============================================================================
-# RPU handle builders (copied from verify_p1_decoder.build_rpu_decoder /
+# device handle builders (copied from verify_p1_decoder.build_rpu_decoder /
 # verify_p3_expert.build_rpu_expert; consume the checkpoint's projection weights).
 # =============================================================================
 def _build_rope_tables(head_dim, theta, max_seq):
@@ -456,7 +457,7 @@ def _validate_resolved_execution(vlm, action, *, entry_point):
 
 
 def _build_vlm_decoder(gw, max_seq, chunk_size=0):
-    """RPU plain-Qwen2 VLM decoder (1D RoPE base 10000, mrope=[], bidirectional). → (handle, keep)."""
+    """device plain-Qwen2 VLM decoder (1D RoPE base 10000, mrope=[], bidirectional). → (handle, keep)."""
     q_w, k_w, v_w, o_w = [], [], [], []
     q_b, k_b, v_b = [], [], []
     gate_l, up_l, down_l = [], [], []
@@ -501,7 +502,7 @@ def _build_vlm_decoder(gw, max_seq, chunk_size=0):
 
 
 def _build_expert(gw, max_seq, chunk_size=0):
-    """RPU AdaRMS Qwen2 action-expert (768-d, mlp-pad 2816, 1D RoPE base 10000). → (handle, keep).
+    """device AdaRMS Qwen2 action-expert (768-d, mlp-pad 2816, 1D RoPE base 10000). → (handle, keep).
     AdaRMS scale/shift are set per Euler step via causal_decoder_set_adarms_step."""
     q_w, k_w, v_w, o_w = [], [], [], []
     q_b, k_b, v_b = [], [], []
@@ -532,6 +533,7 @@ def _build_expert(gw, max_seq, chunk_size=0):
     handle = torch.ops.rpu.causal_decoder_create(
         False, rpu_env_bool("RPU_ADARMS_FUSED_BCAST"))
     try:
+        torch.ops.rpu.causal_decoder_set_explicit_mask_spm_residency(handle, True)
         torch.ops.rpu.causal_decoder_set_weights(
             handle, q_w, k_w, v_w, o_w, [], [], in_norm, post_norm,
             gate_l, up_l, down_l, cos, sin, final_norm_w,
@@ -558,7 +560,7 @@ def _build_suffix_mask(prefix_len):
     prefix_2d = torch.ones(B, S, prefix_len, dtype=torch.bool)   # [1,51,prefix_len]
     full = torch.cat([prefix_2d, suffix_2d], dim=2)[0]           # [51, prefix_len+51] bool
     add = torch.where(full, torch.tensor(0.0), torch.tensor(-50000.0)).half()
-    return add.to("rpu").contiguous()
+    return versioned_cpu_mask(add)
 
 
 # =============================================================================
@@ -644,10 +646,8 @@ class LingbotVlaPolicy:
             if _runtime_options is None
             else _runtime_options
         )
-        # Lever 1 (PERF_ROADMAP.md): the AdaRMS fold is CALL-INVARIANT — cond=sinusoidal(t)
-        # for the fixed NUM_STEPS timestep schedule, over fixed weights — so precompute it
-        # ONCE at build and reuse every get_action. Removes ~2.9 s/call (2880 tiny host
-        # F.linear that used to run per call). self._fold_all = 4 rpu tensors [NUM_STEPS,36,768].
+        # Precompute AdaRMS for the fixed timestep schedule and weights.
+        # Reuse four device tensors [NUM_STEPS,36,768] across get_action calls.
         self._times, _t = [], 1.0
         for _ in range(NUM_STEPS):        # repeated add, matches the Euler loop's time schedule bit-for-bit
             self._times.append(_t)
@@ -688,7 +688,7 @@ class LingbotVlaPolicy:
         self._enc_W_comp = (_A @ _Win).contiguous()                  # [768, action_dim]: h_action = x_t @ Wcompᵀ
         _bias_const = _bin @ _A.t() + _bmi                           # [768]
         self._enc_time_parts = [(_te @ _B.t() + _bias_const) for _te in self._time_embs]  # per step [1,768]
-        # 设备 encoder 路径将 suffix encoder、out_proj 与 Euler 放到 RPU，
+        # 设备 encoder 路径将 suffix encoder、out_proj 与 Euler 放到 device，
         # 使 x_t 在循环间保留于设备。权重采用 col-swizzle；8 核布局要求输出
         # 按 128、K 按 16 对齐，逻辑维 75 分别补到 128/80。
         # 设备 FP16 与 host FP32 encoder 的数值路径不同。
@@ -703,7 +703,7 @@ class LingbotVlaPolicy:
             self._od_wc_w = tp_col_swizzle_mc_weight(F.pad(self._enc_W_comp, (0, self._od_kd - self._enc_W_comp.shape[1])).half(), MLP_CORES).to("rpu").contiguous()
             self._od_mo_w = tp_col_swizzle_mc_weight(head_W["model.action_time_mlp_out.weight"].half(), MLP_CORES).to("rpu").contiguous()
             self._od_mo_b = _h(head_W["model.action_time_mlp_out.bias"])
-            self._od_time_parts = [_h(_tp) for _tp in self._enc_time_parts]   # [1,768] RPU
+            self._od_time_parts = [_h(_tp) for _tp in self._enc_time_parts]   # [1,768] device
             self._od_xt_pad = torch.zeros(1, N_ACTION, self._od_kd, dtype=torch.float16, device="rpu")  # x_t padded, cols[ad:]=0
 
         # 图内 unroll 将 Euler 循环、suffix encoder 与 out_proj 合并执行。
@@ -1057,7 +1057,7 @@ class LingbotVlaPolicy:
         self._execution_reconfigure_journal = None
 
     def _drop_device_state(self) -> None:
-        """Drop all policy-owned RPU tensors after confirmed native cleanup."""
+        """Drop all policy-owned device tensors after confirmed native cleanup."""
         for attr in (
             "_cache", "_vgc", "_egc", "_dgc",
             "_vlm_keep", "_exp_keep", "_fold_all",
@@ -1192,7 +1192,7 @@ class LingbotVlaPolicy:
         op = _h(tp_col_swizzle_mc_weight(F.pad(aow, (0, 0, 0, npad - aow.shape[0])).half(), 1))   # [80,768]
         op_b = _h(F.pad(aob, (0, npad - aob.shape[0])))                 # [80]
         time_all = _h(torch.stack([tp.reshape(-1) for tp in self._enc_time_parts]))   # [num_steps,768]
-        in_s, in_sh, po_s, po_sh = self._fold_all                        # 4× [num_steps,36,768] RPU fp16
+        in_s, in_sh, po_s, po_sh = self._fold_all                        # 4× [num_steps,36,768] device fp16
         self._du_ad = ad                                                 # 75, output slice width
         self._du_x0 = torch.zeros(1, N_ACTION + 1, kp, dtype=torch.float16, device="rpu")     # stable
         self._du_x_traj = torch.empty(NUM_STEPS, N_ACTION + 1, kp, dtype=torch.float16, device="rpu")  # stable
@@ -1433,9 +1433,9 @@ class LingbotVlaPolicy:
 
     def _denoise_ondevice(self, noise, state_emb, dt, mask_r, S, sig,
                           in_s, in_sh, po_s, po_sh, num_steps, action_plan):
-        """On-device denoise loop: out_proj + Euler + fused encoder all run on RPU (eager F.linear),
+        """On-device denoise loop: out_proj + Euler + fused encoder all run on device (eager F.linear),
         so x_t never leaves the device — no per-step CPU matmuls, no D2H/H2D. fp16 throughout."""
-        x_t = _h(noise)                                            # [1,50,75] RPU fp16
+        x_t = _h(noise)                                            # [1,50,75] device fp16
         self._suffix_buf[:, 0].copy_(_h(state_emb))                # state token (constant → write once)
         for k in range(num_steps):
             self._od_xt_pad[:, :, :self._od_ad].copy_(x_t)         # x_t into padded [1,50,80] (cols[75:]=0)
@@ -1445,9 +1445,9 @@ class LingbotVlaPolicy:
             torch.ops.rpu.causal_decoder_set_adarms_step_mutable(self._exp, in_s[k], in_sh[k], po_s[k], po_sh[k])
             out = self._exp_run(
                 self._suffix_buf, mask_r, S, sig, action_plan
-            )                                                            # [1,51,768] RPU
+            )                                                            # [1,51,768] device
             v_t = F.linear(out[:, -N_ACTION:], self._od_op_w, self._od_op_b)[..., :self._od_ad]  # [1,50,75]
-            x_t = x_t + dt * v_t                                          # RPU add/mul (DDR, safe)
+            x_t = x_t + dt * v_t                                          # device add/mul (DDR, safe)
         return x_t.to("cpu").float()
 
     def _exp_run(self, suffix_r, mask_r, S, sig, action_plan):
@@ -1532,7 +1532,7 @@ class LingbotVlaPolicy:
         # else: keep self._egc persistent ⇒ the expert graph replays across calls (stable mask + suffix
         # buffers below). set_adarms_step_mutable doesn't invalidate on the 2nd+ step, so call 2+ finds
         # the cached graph and REPLAYs all NUM_STEPS steps (no per-call step-0 rebuild).
-        # --- prefix assembly (host) ---
+        # --- prefix composition (host) ---
         img_emb = self._vit_towers(images, img_masks)                             # [1, n_img_tok, 2048]
         lang_emb = F.embedding(lang_ids, self._embed_w)                           # [1, L, 2048]
         prefix_embs = torch.cat([img_emb.float(), lang_emb], dim=1)               # [1, S, 2048]
@@ -1611,7 +1611,7 @@ class LingbotVlaPolicy:
                     # Mutable AdaRMS: pass the [EXP_LAYERS, EXP_HID] fold slices directly (no per-layer list).
                     torch.ops.rpu.causal_decoder_set_adarms_step_mutable(
                         self._exp, in_s_all[k], in_sh_all[k], po_s_all[k], po_sh_all[k])
-                    self._suffix_buf.copy_(suffix.half())                        # refresh STABLE input (direct CPU→RPU)
+                    self._suffix_buf.copy_(suffix.half())                        # refresh STABLE input (direct CPU→device)
                     out = self._exp_run(
                         self._suffix_buf, mask_r, S, denoise_sig, action_plan
                     )  # step 0 BUILD, k>0 REPLAY
@@ -1675,7 +1675,7 @@ def build_lingbot_vla(
     max_seq=DEFAULT_MAX_SEQ,
     rpu_execution=None,
 ):
-    """Build the LingBot-VLA RPU runtime.
+    """Build the LingBot-VLA device runtime.
 
     Args:
         ckpt:      path to the lingbot-vla-4b checkpoint dir (fp32 model.safetensors).
@@ -1714,9 +1714,9 @@ def build_lingbot_vla(
         _release_live_instance,
     )
 
-    # Claim before any RPU tensor/handle exists. A CPU-only preflight failure
+    # Claim before any device tensor/handle exists. A CPU-only preflight failure
     # releases immediately; once materialization starts, a failed owner stays
-    # claimed until GC so traceback-held RPU tensors cannot overlap a new policy.
+    # claimed until GC so traceback-held device tensors cannot overlap a new policy.
     policy = LingbotVlaPolicy.__new__(LingbotVlaPolicy)
     policy._rpu_execution = execution_config
     _claim_live_instance(policy)

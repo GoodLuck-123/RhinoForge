@@ -8,10 +8,10 @@ payloads.
 ## Fast triage order
 
 1. **Bind the exact profile.** Record source revision, model/checkpoint revision,
-   dtype, input envelope, TOML, Launch package, combined operator asset, and
+   dtype, input envelope, TOML, Launch package, main and expansion operator assets, and
    compatibility identifiers. Stop on any mismatch.
-   [Release-quality checks](../../docs/model_testing.md#what-a-release-quality-model-check-still-needs)
-2. **Reproduce both references and one RPU result.** Use the exact same-dtype
+   [Release-quality checks](../../docs/validation_policy.md#acceptance-contracts)
+2. **Reproduce both references and one device result.** Use the exact same-dtype
    executable for implementation parity and CPU FP32 as the precision anchor.
    Preserve output hashes and top-level numerical/task metrics before adding
    probes. Only if top-level evidence fails, compare the smallest divergent
@@ -35,7 +35,7 @@ payloads.
    DMA address lifetime, Graph signature completeness, model-state
    invalidation, then profile-specific computation.
    [Pitfalls overview](pitfalls-overview.md)
-6. **Localize one boundary at a time.** Compare CPU and RPU at a stable public
+6. **Localize one boundary at a time.** Compare CPU and device at a stable public
    stage, identify the first transition, and split only that stage. A stage that
    receives different inputs may be an amplifier rather than the originating
    defect; use a shared-input A/B before changing product code.
@@ -44,7 +44,7 @@ payloads.
 
 For Pi0.5, RhinoVLA, and other visual-language-action policies, keep the
 preprocessed request and any stochastic starting state identical between the
-reference and RPU paths. Check the visual output, prefix/text state, cache
+reference and device paths. Check the visual output, prefix/text state, cache
 progression, and action path independently before relying on the final action
 chunk. A downstream component can consume the same wrong upstream state on two
 comparison paths, so final-output agreement alone does not localize every
@@ -65,7 +65,7 @@ Choose one mechanism according to the question:
 | Where is host/operator time spent? | `torch.profiler.profile(...)` | Profile a bounded call; keep warmup separate and expect tracing overhead. |
 
 See [runtime profiling controls](../../docs/runtime_config.md#profiling-mechanisms)
-and the [TOML profiling guide](../../docs/model_testing.md#torch-profile).
+and the [TOML profiling guide](../../docs/model_testing.md#diagnose-a-call).
 
 Profiler-on latency does not represent normal inference. Torch traces may contain
 tensor shapes and source paths. Review locally and keep traces and measurement
@@ -83,7 +83,7 @@ summaries outside the repository and release artifacts.
 
 ## Sources
 
-- [Model execution and profiling](../../docs/model_testing.md)
+- [Run and debug models](../../docs/model_testing.md)
 - [Runtime configuration](../../docs/runtime_config.md)
 - [Graph API](../../docs/api_reference.md#graph-api)
 - [Porting pitfalls](../../docs/pitfalls.md)

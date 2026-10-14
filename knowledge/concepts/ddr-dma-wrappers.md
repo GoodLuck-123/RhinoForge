@@ -10,26 +10,22 @@ address captured during the first build. [Architecture](../../docs/architecture.
 | Mutable | A caller input or newly allocated output may move between forwards | Update the live address before replay |
 | Immediate | The transfer intentionally runs outside graph capture | Execute one synchronous transfer |
 
-These three contracts are declared by the public host wrappers.
-[DMA declarations](../../src/core/rpu_kernel_decls.h)
+These three contracts are declared by the public host wrappers. [DMA declarations](../../src/core/rpu_kernel_decls.h)
 
 ## Rules
 
 - Do not use fixed DMA for caller-owned inputs or fresh outputs unless their
-  storage address is guaranteed stable across forwards.
-  [Architecture](../../docs/architecture.md#dma-ownership)
+  storage address is guaranteed stable across forwards. [Architecture](../../docs/architecture.md#dma-ownership)
 - A mutable wrapper changes the replay address; it does not remove the physical
-  transfer. The caller also owns coherency for the live buffer.
-  [DMA declarations](../../src/core/rpu_kernel_decls.h)
+  transfer. The caller also owns coherency for the live buffer. [DMA declarations](../../src/core/rpu_kernel_decls.h)
 - Python-visible outputs that callers may retain or concatenate need independent
-  storage on every forward.
-  [FusedModelBase contract](../../docs/architecture.md#fusedmodelbase-contract)
+  storage on every forward. [FusedModelBase contract](../../docs/architecture.md#fusedmodelbase-contract)
 - Copying directly from SPM into the final DDR tensor can remove host staging,
-  but it is not zero-copy.
-  [Architecture](../../docs/architecture.md#dma-ownership)
+  but it is not zero-copy. [Architecture](../../docs/architecture.md#dma-ownership)
 - Recording or enqueueing a transfer is not completion. Keep every captured
-  tensor and its storage alive until the submitted execution has completed.
-  [Architecture](../../docs/architecture.md#dma-ownership)
+  tensor and its storage alive until the submitted execution has completed. [Architecture](../../docs/architecture.md#dma-ownership)
+
+CPU/device synchronization covers the tensor's live byte range, including view offsets. Reused upload caches check content and owner identity, so in-place request changes refresh the destination. Device-only handoffs need no CPU publication; host-backed copies retain both boundaries. [Memory controls](../../docs/runtime_config.md#memory-and-coherency-controls).
 
 ## Sources
 

@@ -28,6 +28,9 @@ import types
 import weakref
 
 import torch
+
+from rpu_backend.api.qwen3_5_inputs import _ordinary_decode_embedding_cpu
+
 from transformers.models.qwen3_5.modeling_qwen3_5 import (
     Qwen3_5CausalLMOutputWithPast,
 )
@@ -49,7 +52,10 @@ from rpu_backend.api.qwen3_5_cache import (
 )
 from rpu_backend.runtime.registry import register_adapter
 from rpu_backend.runtime.weights import transform_linear_weight
-from rpu_backend.adapters.qwen3_5.quant_scope import validate_legacy_text_profile
+from rpu_backend.adapters.qwen3_5.quant_scope import (
+    validate_legacy_text_profile, validate_modern_27b_profile,
+    resolve_quant_config, quanttrio_awq_config, is_mlp_only_text_profile,
+)
 
 # Text backbone (== HF Qwen3_5TextModel). `layer_types_to_is_full` is re-exported
 # here for backward-compat: ~8 tests import it from `adapters.qwen3_5`.
@@ -527,6 +533,22 @@ def _check_quant_checkpoint_loaded(model) -> None:
     Qwen3.5 loader stamps the model after installing the checkpoint's declared
     projection layouts.
     """
+    if quanttrio_awq_config(model.config) is not None:
+        # Installation retires the raw CPU owners. A complete live runtime
+        # owns the transformed tensors and can be wrapped again unchanged.
+        if _qwen3_5_text_runtime_state(model) is not None:
+            return
+        fusion = getattr(model, "model", None)
+        inner = getattr(fusion, "language_model", fusion)
+        if (getattr(model, "_rpu_swizzled", False)
+                or getattr(model, "_rpu_swizzle_started", False)
+                or hasattr(inner, "_rpu_qwen3_5")
+                or getattr(inner, "_rpu_qwen3_5_text_install_started", False)):
+            raise RPUBackendError(
+                "QuantTrio AWQ installation is incomplete; reload the checkpoint")
+        from .loader import validate_awq_loaded_model
+        validate_awq_loaded_model(model)
+        return
     quant = getattr(model.config, "quant_config", None)
     if not isinstance(quant, dict) or not quant:
         return
@@ -541,7 +563,9 @@ def _check_quant_checkpoint_loaded(model) -> None:
 
 
 def _check_quant_policy(config) -> None:
-    quant = getattr(config, "quant_config", None)
+    if not getattr(config, "quant_config", None) and getattr(config, "quantization_config", None) is None:
+        return
+    quant = resolve_quant_config(config)
     if not quant or os.environ.get("QWEN3_5_QUANT_ALLOW_UNCERTIFIED") == "1":
         return
     raise UnsupportedModelError(
@@ -558,7 +582,7 @@ def _check_profile(config) -> None:
     if n_experts > 0:
         raise UnsupportedModelError(
             f"Qwen3.5 MoE (num_experts={n_experts}) is out of scope; only dense "
-            "small models (0.8B/2B/4B/9B) are supported by the RPU graph-building port."
+            "small models (0.8B/2B/4B/9B) are supported by the device graph-building port."
         )
     profile = _config_profile(config)
     if profile not in _SUPPORTED_PROFILES:
@@ -568,12 +592,13 @@ def _check_profile(config) -> None:
         )
     try:
         legacy = validate_legacy_text_profile(config)
+        modern27 = validate_modern_27b_profile(config)
     except ValueError as exc:
         raise UnsupportedModelError(str(exc)) from exc
-    if profile == (5120, 17408, 64, 4) and not legacy:
+    if profile == (5120, 17408, 64, 4) and not (legacy or modern27):
         raise UnsupportedModelError(
-            "Qwen3.8-27B requires the exact legacy W8A16 text-only bundle; "
-            "BF16, uniform W8, W4, Vision and MTP are not admitted.")
+            "Qwen3.5-27B requires the official uniform W8/W4-group32 profile "
+            "or the separate legacy text-only bundle.")
 
 
 class Qwen3_5Adapter:
@@ -696,7 +721,7 @@ class Qwen3_5Adapter:
                 or getattr(self.model, "_rpu_swizzle_started", False)
             ):
                 raise RPUBackendError(
-                    f"model.to({target!r}) rejected: weights are swizzled for RPU "
+                    f"model.to({target!r}) rejected: weights are swizzled for device "
                     "(irreversible). Reload the model to use another device."
                 )
             return original_to(*args, **kwargs)
@@ -713,15 +738,20 @@ class Qwen3_5Adapter:
     @classmethod
     def preflight_execution(cls, config, execution_config) -> None:
         from rpu_backend.adapters.qwen3_5.cores import (
-            validate_core_profile, is_dense_9b_vl_candidate, validate_dense_9b_vl_profile,
+            validate_core_profile, is_dense_large_vl_candidate, validate_dense_large_vl_profile,
         )
         validate_core_profile(config, execution_config)
+        awq = quanttrio_awq_config(config)
+        if (awq is not None or is_mlp_only_text_profile(config)) and (execution_config.get("vision")
+                or os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") == "1"):
+            recipe = "QuantTrio AWQ" if awq is not None else "Qwen3.5 MLP-only W4"
+            raise UnsupportedModelError(f"{recipe} supports pure text only; Vision is not admitted")
         from .text import _validate_qwen35_linear_accumulation
         _validate_qwen35_linear_accumulation(config, execution_config)
-        if (is_dense_9b_vl_candidate(config)
-                and (not getattr(config, "quant_config", None)
+        if (is_dense_large_vl_candidate(config)
+                and (not resolve_quant_config(config)
                      or os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") == "1")):
-            validate_dense_9b_vl_profile(config)
+            validate_dense_large_vl_profile(config)
         if validate_legacy_text_profile(config) and execution_config.get("vision"):
             raise UnsupportedModelError(
                 "Qwen3.8-27B legacy W8A16 supports only text execution")
@@ -790,7 +820,7 @@ class Qwen3_5Adapter:
         model = self.model
         from rpu_backend.adapters.qwen3_5.cores import (
             validate_core_profile, validate_text_weight_geometry, topology_tuple,
-            is_dense_9b_vl_candidate, validate_dense_9b_vl_weights, validate_cold_weight_dtype,
+            is_dense_large_vl_candidate, validate_dense_large_vl_weights, validate_cold_weight_dtype,
             validate_text_mlp_padding_storage,
         )
         topology = validate_core_profile(getattr(model, "config", None), getattr(model, "_rpu_execution", None))
@@ -814,7 +844,17 @@ class Qwen3_5Adapter:
                 "Qwen3_5Adapter.to_rpu(): a prior install failed after mutation; "
                 "reload the model before retrying."
             )
-        arena_candidate = is_dense_9b_vl_candidate(getattr(model, "config", None))
+        modern27 = validate_modern_27b_profile(getattr(model, "config", None))
+        awq = quanttrio_awq_config(getattr(model, "config", None))
+        if awq is not None:
+            from .loader import validate_awq_loaded_model
+            from .text import require_quanttrio_awq_native, _validate_projection_specs
+            validate_awq_loaded_model(model)
+            require_quanttrio_awq_native()
+            _validate_projection_specs(
+                model.model.language_model, layer_types_to_is_full(model.config),
+                resolve_quant_config(model.config))
+        arena_candidate = is_dense_large_vl_candidate(getattr(model, "config", None))
         arena_opt_in = (arena_candidate
                         and os.environ.get("QWEN3_5_VISION_ALLOW_NUMERIC_BLOCKED") == "1")
         # The Session chooses this lifecycle before installation. Recheck cold
@@ -834,9 +874,9 @@ class Qwen3_5Adapter:
         # weights consume the PC-addressable allocation range. This exact
         # FP16 resource plan is independent of the controlled Vision gate.
         arena_required = (arena_candidate
-                          and (arena_opt_in or not getattr(model.config, "quant_config", None)))
+                          and (modern27 or arena_opt_in or not resolve_quant_config(model.config)))
         if arena_required:
-            validate_dense_9b_vl_weights(model)
+            validate_dense_large_vl_weights(model)
         if topology.num_cores != 8:
             for name in ("qwen3_5_set_execution_cores", "qwen3_5_get_execution_topology",
                          "qwen3_5_vision_set_execution_cores", "qwen3_5_vision_get_execution_topology",
@@ -844,7 +884,7 @@ class Qwen3_5Adapter:
                 if not hasattr(torch.ops.rpu, name):
                     raise RuntimeError(f"Qwen3.5 binary lacks reduced-core op {name}; rebuild before installing")
             inner = getattr(model.model, "language_model", model.model)
-            validate_core_profile(inner.config, getattr(model, "_rpu_execution", None))
+            validate_core_profile(model.config, getattr(model, "_rpu_execution", None))
             validate_text_weight_geometry(inner, model.config, topology)
             validate_text_mlp_padding_storage(inner, model.config, topology, cold_cpu=True)
             output = model.get_output_embeddings()
@@ -906,20 +946,22 @@ class Qwen3_5Adapter:
                 from rpu_backend.graph import GraphRuntimePolicy
 
                 graph_policy = GraphRuntimePolicy.from_environment(
-                    execution_core_count=topology.num_cores, graph_arena_count=4)
+                    execution_core_count=topology.num_cores, graph_arena_count=4,
+                    qwen35_dense_27b_sdk_budget=modern27)
                 graph_options["_graph_runtime_policy"] = graph_policy
             _claim_live_instance(model)
             claimed = True
             try:
-                # The legacy 27B path requires direct allocations: recycled
-                # mappings can corrupt full-prefill rows. Claim the
-                # immutable native policy at the exclusive-owner boundary;
+                # Legacy 27B retains direct allocations after MR56. Official
+                # 27B reuses transient storage through the shared cache: fresh
+                # decode mappings can exhaust the SDK table despite freed FDs.
+                # Claim the immutable policy at the exclusive-owner boundary;
                 # reading it first leaves a check-to-allocation race.
-                if is_legacy_text:
-                    torch.rpu.set_caching_allocator(False)
+                if is_legacy_text or modern27:
+                    torch.rpu.set_caching_allocator(modern27)
                     if not graph_policy.prepare_arenas():
                         raise RPUBackendError(
-                            "Qwen3.8-27B requires accessible RPU hardware to "
+                            "Qwen3.5 27B requires accessible device hardware to "
                             "prepare its SDK graph arenas before weight upload"
                         )
                 elif not arena_required:
@@ -928,12 +970,13 @@ class Qwen3_5Adapter:
                     # the separate FP16 arena plan or direct tensor allocations.
                     torch.rpu.set_caching_allocator(True)
                 elif arena_required:
-                    # Dense 9B reuses transient tensors for FP16 and W8 alike;
-                    # its cold graph arenas have an independent lifecycle.
-                    torch.rpu.set_caching_allocator(True)
+                    # FP16 9B needs the same transient tensor reuse as the
+                    # smaller dense owners, independently of its cold arenas.
+                    if not getattr(model.config, "quant_config", None):
+                        torch.rpu.set_caching_allocator(True)
                     if not graph_policy.prepare_arenas():
                         raise RPUBackendError(
-                            "Qwen3.5 9B text requires accessible RPU hardware to prepare "
+                            "Qwen3.5 9B text requires accessible device hardware to prepare "
                             "its cold graph arenas before weight upload"
                         )
             except BaseException:
@@ -954,7 +997,7 @@ class Qwen3_5Adapter:
             # Legacy direct allocations may retain physical pages after the
             # source tensor dies. Upload only the installer's finalized large
             # projections instead of creating a second raw device copy.
-            if not is_legacy_text:
+            if not (is_legacy_text or modern27 or awq is not None):
                 inner.to("rpu")
 
             # ── Step A: text backbone (swizzle + create + set_weights) ──
@@ -990,11 +1033,9 @@ class Qwen3_5Adapter:
             # lm_head uses the explicit per-model Linear accumulation policy.
             # tie_word_embeddings=True → lm_head weight is the tied
             # embedding matrix. embed_tokens is an nn.Embedding so it is NOT swizzled
-            # by convert_linear_weights_inplace; the RPU GEMM kernel expects a
+            # by convert_linear_weights_inplace; the device GEMM kernel expects a
             # col-partition swizzled weight (get_linear_partition(hidden,vocab)=1).
-            # Feeding the raw weight to rpu_linear yields garbage (cos≈0) — that was
-            # an earlier misdiagnosis of "RPU matmul is broken". Swizzle once here;
-            # the matmul then runs on-device for both prefill and (non-fused) decode.
+            # Swizzle once here for device prefill and non-fused decode.
             # get_output_embeddings() returns the tied embedding when tie_word_embeddings
             # (0.8B/2B/4B) and the SEPARATE lm_head weight when NOT tied (9B). Using
             # embed.weight directly is wrong for untied models (garbage logits).
@@ -1043,9 +1084,18 @@ def _rpu_qwen3_5_forward(self, input_ids=None, inputs_embeds=None,
     """Top forward for Qwen3_5ForConditionalGeneration (fusion-shaped).
 
     embed → optional vision fuse (direct merger DMA + 3D M-RoPE) → text
-    decoder (RPU) → lm_head. Fragmented image-token layouts fall back to a
+    decoder (device) → lm_head. Fragmented image-token layouts fall back to a
     host scatter; text-only skips the vision branch entirely.
     """
+    awq = quanttrio_awq_config(getattr(self, "config", None))
+    if awq is not None or is_mlp_only_text_profile(getattr(self, "config", None)):
+        recipe = "QuantTrio AWQ" if awq is not None else "Qwen3.5 MLP-only W4"
+        request = input_ids if input_ids is not None else inputs_embeds
+        if any(value is not None for value in
+               (pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw, mm_token_type_ids)):
+            raise NotImplementedError(f"{recipe} supports pure text only")
+        if not isinstance(request, torch.Tensor) or request.ndim not in (2, 3) or request.shape[0] != 1:
+            raise NotImplementedError(f"{recipe} requires batch size 1")
     if getattr(self, "_qwen3_5_legacy_text_only", False) and any(
         value is not None for value in
         (pixel_values, image_grid_thw, pixel_values_videos, video_grid_thw)
@@ -1056,38 +1106,38 @@ def _rpu_qwen3_5_forward(self, input_ids=None, inputs_embeds=None,
 
     if (input_ids is None) == (inputs_embeds is None):
         raise ValueError(
-            "Qwen3.5 RPU forward requires exactly one of input_ids or "
+            "Qwen3.5 device forward requires exactly one of input_ids or "
             "inputs_embeds.")
     if not isinstance(past_key_values, Qwen3_5Cache):
         raise TypeError(
-            "Qwen3.5 RPU forward requires Qwen3_5Cache.from_config(...); "
+            "Qwen3.5 device forward requires Qwen3_5Cache.from_config(...); "
             "past_key_values=None and generic HF caches are not supported.")
     if labels is not None:
         raise NotImplementedError(
-            "Qwen3.5 RPU inference does not support labels/loss computation.")
+            "Qwen3.5 device inference does not support labels/loss computation.")
     if use_cache is False:
         raise NotImplementedError(
-            "Qwen3.5 RPU inference requires use_cache=True.")
+            "Qwen3.5 device inference requires use_cache=True.")
     if return_dict is False:
         raise NotImplementedError(
-            "Qwen3.5 RPU inference requires return_dict=True.")
+            "Qwen3.5 device inference requires return_dict=True.")
     if output_attentions:
         raise NotImplementedError(
-            "Qwen3.5 RPU inference does not support output_attentions=True.")
+            "Qwen3.5 device inference does not support output_attentions=True.")
     if output_hidden_states:
         raise NotImplementedError(
-            "Qwen3.5 RPU inference does not support output_hidden_states=True; "
+            "Qwen3.5 device inference does not support output_hidden_states=True; "
             "the fused output buffer is reused across forwards.")
     if pixel_values_videos is not None or video_grid_thw is not None:
         raise NotImplementedError(
-            "Qwen3.5 RPU inference does not support video inputs.")
+            "Qwen3.5 device inference does not support video inputs.")
     if kw:
         raise TypeError(
-            "Qwen3.5 RPU forward received unsupported keyword argument(s): "
+            "Qwen3.5 device forward received unsupported keyword argument(s): "
             + ", ".join(sorted(kw)))
     if not isinstance(logits_to_keep, int) or logits_to_keep < 0:
         raise NotImplementedError(
-            "Qwen3.5 RPU forward supports only a non-negative integer "
+            "Qwen3.5 device forward supports only a non-negative integer "
             "logits_to_keep.")
 
     cache = past_key_values
@@ -1118,7 +1168,7 @@ def _rpu_qwen3_5_forward(self, input_ids=None, inputs_embeds=None,
         mask_cpu = attention_mask.detach().to("cpu")
         if not bool(mask_cpu.bool().all().item()):
             raise NotImplementedError(
-                "Qwen3.5 RPU forward does not support padding/zero entries in "
+                "Qwen3.5 device forward does not support padding/zero entries in "
                 "attention_mask.")
         attention_mask = None
 
@@ -1149,14 +1199,24 @@ def _rpu_qwen3_5_forward(self, input_ids=None, inputs_embeds=None,
         text_preflight_plan = _preflight_qwen3_5_text(
             inner, cache, request_len, multimodal_prefill=True)
 
-    # 1. embed (CPU→RPU prep stays OUTSIDE any capture scope).
+    # 1. embed (CPU→device prep stays OUTSIDE any capture scope).
     caller_embeds = inputs_embeds is not None
+    private_cpu_prefill = False
     if caller_embeds:
         hidden = inputs_embeds.to(device="rpu", dtype=torch.float16).contiguous()
     else:
-        ids_rpu = (input_ids if input_ids.device.type == "rpu"
-                   else input_ids.to("rpu"))
-        hidden = inner.embed_tokens(ids_rpu).to(dtype=torch.float16).contiguous()
+        hidden = (_ordinary_decode_embedding_cpu(
+            fusion, inner.embed_tokens, input_ids, cache.position)
+            if not getattr(self, "_qwen3_5_legacy_text_only", False)
+            and all(value is None for value in
+                   (pixel_values, image_grid_thw, mm_token_type_ids)) else None)
+        private_cpu_prefill = hidden is not None and request_len > 1
+        if hidden is None:
+            # Custom producers and hooks retain their original device input device.
+            # Only the admitted private gather may bypass this upload.
+            embedding_ids = (input_ids if input_ids.device.type == "rpu"
+                             else input_ids.to("rpu"))
+            hidden = inner.embed_tokens(embedding_ids).to(dtype=torch.float16).contiguous()
 
     # A new text-only conversation must not inherit the decode offset installed
     # by an earlier image prefill on the same C++ model. Decode-after-image keeps
@@ -1176,14 +1236,15 @@ def _rpu_qwen3_5_forward(self, input_ids=None, inputs_embeds=None,
             mm_token_type_ids=mm_token_type_ids,
             past_key_values=cache)
 
-    # 3. text decoder (RPU): returns [B, real_len, hidden].
+    # 3. text decoder (device): returns [B, real_len, hidden].
     out = run_qwen3_5_text(
         inner, hidden, cache, attention_mask=attention_mask,
         position_ids=position_ids,
         multimodal_prefill=pixel_values is not None,
-        preflight_plan=text_preflight_plan)
+        preflight_plan=text_preflight_plan,
+        _private_cpu_prefill=private_cpu_prefill)
 
-    # 4. lm_head runs on RPU with the swizzled weight. Only project the last
+    # 4. lm_head runs on device with the swizzled weight. Only project the last
     # `logits_to_keep` positions; 0 keeps every prefill position for parity tests.
     if isinstance(logits_to_keep, int) and logits_to_keep > 0:
         head_in = out[:, -logits_to_keep:, :].contiguous()

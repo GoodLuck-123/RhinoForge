@@ -75,6 +75,7 @@ constexpr int64_t QWEN3VL_VISION_LARGE_IMAGE_CHUNK_CAP = 608;
 // staging DMAs, and BufferDecl-driven data movement implement fixed model
 // math/dataflow. Conditional RoPE-table preloads and the other choices below
 // are descriptor routes.
+constexpr int64_t QWEN3VL_LINGBOT_QKV_JOINT_SITE = 4369374497212981261LL;
 constexpr int64_t QWEN3VL_Q_LINEAR_SITE = 1427990588395672103LL;
 constexpr int64_t QWEN3VL_K_LINEAR_SITE = 6011173041503464904LL;
 constexpr int64_t QWEN3VL_V_LINEAR_SITE = 3337936004446054324LL;
@@ -89,9 +90,13 @@ constexpr int64_t QWEN3VL_MINIBATCH_ATTN_SITE = 7299740951628094462LL;
 constexpr int64_t QWEN3VL_UNIFIED_ATTN_SITE = 5297603665400356094LL;
 constexpr int64_t QWEN3VL_N1200_TM160_ATTN_SITE = 139704655818769LL;
 constexpr int64_t QWEN3VL_RAW_SPM_ATTN_SITE = 6757430431325841851LL;
+constexpr int64_t QWEN3VL_SPLIT_RAW_SPM_ATTN_SITE = 7813628821644519931LL;
+constexpr int64_t QWEN3VL_LINGBOT_SPM_KV_ATTN_SITE = 8954631883521718547LL;
 constexpr int64_t QWEN3VL_O_LINEAR_SITE = 7749931284684938753LL;
 constexpr int64_t QWEN3VL_ATTN_ALL_REDUCE_SITE = 6328608535873931861LL;
 constexpr int64_t QWEN3VL_FC1_LINEAR_SITE = 6682031402431228349LL;
+constexpr int64_t QWEN3VL_LINGBOT_RESIDUAL_RESIDENT_SITE = 4167632354394299218LL;
+constexpr int64_t QWEN3VL_LINGBOT_FC1_GELU_SITE = 8936994709389393846LL;
 constexpr int64_t QWEN3VL_FC2_LINEAR_SITE = 886301000936414295LL;
 constexpr int64_t QWEN3VL_MLP_ALL_REDUCE_SITE = 3565420092428644692LL;
 constexpr int64_t QWEN3VL_MERGER_M0_LINEAR_SITE = 7854280711758341275LL;
@@ -132,6 +137,8 @@ inline constexpr int64_t QWEN3VL_COMPACT_MLP_ALL_REDUCE_SITE = 86055166275987042
 inline constexpr int64_t QWEN3VL_W8_COMPACT_SCHEDULE_SITE = 872985762413057128LL;
 
 inline constexpr int64_t QWEN3VL_DELIVERY_VISION_SCHEDULE_SITE = 1309103528283123878LL;
+inline constexpr int64_t QWEN3VL_TAP_MERGER_SCHEDULE_SITE = 496521368559001895LL;
+inline constexpr int64_t QWEN3VL_TAP_MERGER_COPY_SITE = 9084199251880758087LL;
 
 enum class Qwen3VLVisionRopeRoute : int64_t {
     ROPE_2D_SPM = 1,
@@ -191,7 +198,7 @@ constexpr uint64_t QWEN3VL_MULTIVIEW_OCCURRENCE_POLICY =
 
 // W8A16 per-projection scale validation. Same four checks as the already-strong
 // sites (rpu_siglip_model.cpp:227, rpu_pi05_denoise_step_model.cpp:68): list
-// length, int8 weight dtype, 1D contiguous fp16 RPU scale, and
+// length, int8 weight dtype, 1D contiguous fp16 device scale, and
 // scale.numel() == output channels. Checking only the list length is not enough —
 // a wrong-length or wrong-dtype scale reaches the generated W8A16 family as garbage
 // per-channel multipliers, i.e. a silent numeric corruption rather than a crash.
@@ -220,7 +227,7 @@ static void check_qwen3vl_vision_w8a16_scale_list(int64_t n_layers,
                         && s.device().type() == at::kPrivateUse1
                         && s.is_contiguous(),
                         ctx, ": ", name, "_scale[", i,
-                        "] must be 1D contiguous fp16 RPU tensor");
+                        "] must be 1D contiguous fp16 device tensor");
             TORCH_CHECK(s.numel() == w.size(0),
                         ctx, ": ", name, "_scale[", i, "].numel()=", s.numel(),
                         " != output dim=", w.size(0));
@@ -237,7 +244,7 @@ static void check_qwen3vl_merger_vector(
     TORCH_CHECK(tensor.defined() && tensor.scalar_type() == at::kHalf &&
                     tensor.device().type() == at::kPrivateUse1 &&
                     tensor.is_contiguous() && tensor.dim() == 1 && tensor.numel() == size,
-                "Qwen3-VL merger ", name, " must be contiguous FP16 RPU [", size, "]");
+                "Qwen3-VL merger ", name, " must be contiguous FP16 device [", size, "]");
 }
 
 static void check_qwen3vl_merger_projection(
@@ -247,7 +254,7 @@ static void check_qwen3vl_merger_projection(
                     weight.is_contiguous() && weight.dim() == 2 &&
                     weight.size(0) == rows && weight.size(1) == cols &&
                     (weight.scalar_type() == at::kHalf || weight.scalar_type() == at::kChar),
-                "Qwen3-VL merger ", name, " must be contiguous FP16/int8 RPU [", rows, ",", cols, "]");
+                "Qwen3-VL merger ", name, " must be contiguous FP16/int8 device [", rows, ",", cols, "]");
     if (weight.scalar_type() == at::kChar) {
         check_qwen3vl_merger_vector(scale, rows, name);
         rpu_ddr_flush_force(scale.data_ptr<c10::Half>());
@@ -446,61 +453,41 @@ public:
                     TORCH_CHECK(tensor.scalar_type() == at::kHalf &&
                                     tensor.device().type() == at::kPrivateUse1 &&
                                     tensor.is_contiguous(),
-                                "four-core Vision requires contiguous FP16 RPU weights and biases");
+                                "four-core Vision requires contiguous FP16 device weights and biases");
                 }
             }
         }
 
-        // Vision encoder is MHA (no GQA): num_kv_heads == num_q_heads.
-        set_model_params(num_heads, num_heads, head_dim,
-                         hidden_size, intermediate_size);
-        set_num_layers(N);
-        eps_ = eps;
-
-        // Keep logical attention math separate from the physical RPU stride.
-        // The controlled 32B tower pads each head 72->80 and its MLP
-        // 4304->4352 at the Python conversion boundary; 2B/4B remain exact.
-        orig_head_dim_ = logical_head_dim;
-
         // DeepStack snapshot indices (GAP-B7). Empty list → no snapshots emitted.
-        deepstack_visual_indexes_.clear();
+        std::vector<int64_t> validated_deepstack_indexes;
         for (auto idx : deepstack_visual_indexes) {
             TORCH_CHECK(idx >= 0 && idx < N,
                         "qwen3vl_vision_set_weights: deepstack_visual_indexes entry ",
                         idx, " out of range [0,", N, ")");
-            deepstack_visual_indexes_.push_back(static_cast<int64_t>(idx));
+            validated_deepstack_indexes.push_back(static_cast<int64_t>(idx));
         }
         // Distinct check.
         {
-            std::set<int64_t> seen(deepstack_visual_indexes_.begin(),
-                                   deepstack_visual_indexes_.end());
-            TORCH_CHECK(seen.size() == deepstack_visual_indexes_.size(),
+            std::set<int64_t> seen(validated_deepstack_indexes.begin(),
+                                   validated_deepstack_indexes.end());
+            TORCH_CHECK(seen.size() == validated_deepstack_indexes.size(),
                         "qwen3vl_vision_set_weights: deepstack_visual_indexes must be distinct");
         }
         if (padded_32b) {
-            TORCH_CHECK(deepstack_visual_indexes_ ==
+            TORCH_CHECK(validated_deepstack_indexes ==
                             std::vector<int64_t>({8, 16, 24}),
                         "qwen3vl_vision_set_weights: the controlled 32B profile "
                         "requires DeepStack indexes [8,16,24]");
         }
 
-        layer_weights_.clear();
-        layer_weights_.reserve(N);
-        for (int64_t i = 0; i < N; i++) {
-            layer_weights_.push_back({
-                q_w_list[i], k_w_list[i], v_w_list[i], o_w_list[i],
-                fc1_w_list[i], fc2_w_list[i],
-            });
-        }
-
-        // W8A16: attach per-output-channel scales for the 6 quantized GEMMs (empty = fp16).
+        // Validate all scale metadata before publishing model dimensions or owners.
         check_qwen3vl_vision_w8a16_scale_list(N, q_w_list,   q_scale_list,   "q_w");
         check_qwen3vl_vision_w8a16_scale_list(N, k_w_list,   k_scale_list,   "k_w");
         check_qwen3vl_vision_w8a16_scale_list(N, v_w_list,   v_scale_list,   "v_w");
         check_qwen3vl_vision_w8a16_scale_list(N, o_w_list,   o_scale_list,   "o_w");
         check_qwen3vl_vision_w8a16_scale_list(N, fc1_w_list, fc1_scale_list, "fc1_w");
         check_qwen3vl_vision_w8a16_scale_list(N, fc2_w_list, fc2_scale_list, "fc2_w");
-        // W8A16: attach per-output-channel scales for all 6 quantized GEMMs
+        // W8A16: require a complete inventory for all 6 quantized GEMMs
         // (all empty = fp16).  Reject a partial inventory before indexing any
         // TensorList; the multiview profile validator checks tensor details.
         const bool any_scale =
@@ -516,6 +503,32 @@ public:
             check_list(o_scale_list, "o_scale_list");
             check_list(fc1_scale_list, "fc1_scale_list");
             check_list(fc2_scale_list, "fc2_scale_list");
+        }
+
+        // Vision encoder is MHA (no GQA): num_kv_heads == num_q_heads.
+        set_model_params(num_heads, num_heads, head_dim,
+                         hidden_size, intermediate_size);
+        set_num_layers(N);
+        eps_ = eps;
+
+        // Keep logical attention math separate from the physical device stride.
+        // The controlled 32B tower pads each head 72->80 and its MLP
+        // 4304->4352 at the Python conversion boundary; 2B/4B remain exact.
+        orig_head_dim_ = logical_head_dim;
+
+        deepstack_visual_indexes_ = std::move(validated_deepstack_indexes);
+
+        layer_weights_.clear();
+        layer_weights_.reserve(N);
+        for (int64_t i = 0; i < N; i++) {
+            layer_weights_.push_back({
+                q_w_list[i], k_w_list[i], v_w_list[i], o_w_list[i],
+                fc1_w_list[i], fc2_w_list[i],
+            });
+        }
+
+        // Publish the already validated scale inventory (all empty = fp16).
+        if (any_scale) {
             for (int64_t i = 0; i < N; i++) {
                 layer_weights_[i].q_ws   = q_scale_list[i];
                 layer_weights_[i].k_ws   = k_scale_list[i];
@@ -539,6 +552,11 @@ public:
 
         rhinovla_high_precision_ = false;
         rhinovla_precision_bound_ = false;
+        // A successful weight rebind requires a new cold optional-payload decision.
+        lingbot_fc1_gelu_mode_ = 0;
+        lingbot_qkv_joint_mode_ = 0;
+        lingbot_residual_resident_mode_ = 0;
+        lingbot_spm_kv_mode_ = 0;
         invalidate_model_state();
     }
 
@@ -587,7 +605,7 @@ public:
                     "qwen3vl_vision_set_rope: freq_cos / freq_sin must be fp16");
         TORCH_CHECK(freq_cos.device().type() == at::kPrivateUse1
                     && freq_sin.device().type() == at::kPrivateUse1,
-                    "qwen3vl_vision_set_rope: freq_cos / freq_sin must be on RPU device");
+                    "qwen3vl_vision_set_rope: freq_cos / freq_sin must be on device");
         TORCH_CHECK(freq_cos.is_contiguous() && freq_sin.is_contiguous(),
                     "qwen3vl_vision_set_rope: freq_cos / freq_sin must be contiguous");
         TORCH_CHECK(orig_head_dim_ > 0 && orig_head_dim_ % 4 == 0,
@@ -667,6 +685,9 @@ public:
         merger_out_hidden_ = out_hidden;
         merger_ln_eps_     = ln_eps;
         fused_merger_enabled_ = true;
+        lingbot_qkv_joint_mode_ = 0;
+        lingbot_residual_resident_mode_ = 0;
+        lingbot_spm_kv_mode_ = 0;
         invalidate_model_state();
     }
 
@@ -724,6 +745,9 @@ public:
             ds_merger_m0_scale_.push_back(m0_scale.empty() ? at::Tensor{} : m0_scale[k]);
             ds_merger_m2_scale_.push_back(m2_scale.empty() ? at::Tensor{} : m2_scale[k]);
         }
+        lingbot_qkv_joint_mode_ = 0;
+        lingbot_residual_resident_mode_ = 0;
+        lingbot_spm_kv_mode_ = 0;
         invalidate_model_state();
     }
 
@@ -822,6 +846,7 @@ public:
     }
 
     void set_fp16_chunked_merger(bool enabled) {
+        TORCH_CHECK(!enabled || !tap_merger_enabled_, "chunked merger conflicts with LingBot tap merger");
         TORCH_CHECK(get_last_resolved_chunk_size() == 0,
                     "Qwen3-VL FP16 chunked merger must be set before the first forward");
         TORCH_CHECK(!enabled || ordinary_fp16_chunked_merger_profile(),
@@ -832,6 +857,7 @@ public:
     }
 
     void set_fp16_compact_encoder(bool enabled) {
+        TORCH_CHECK(!enabled || !tap_merger_enabled_, "compact encoder conflicts with LingBot tap merger");
         TORCH_CHECK(get_last_resolved_chunk_size() == 0,
                     "Qwen3-VL FP16 compact encoder must be set before the first forward");
         TORCH_CHECK(!enabled || (fp16_chunked_merger_enabled_ &&
@@ -843,6 +869,7 @@ public:
     }
 
     void set_w8_compact_encoder(bool enabled) {
+        TORCH_CHECK(!enabled || !tap_merger_enabled_, "compact encoder conflicts with LingBot tap merger");
         TORCH_CHECK(get_last_resolved_chunk_size() == 0,
                     "Qwen3-VL W8 compact encoder must be set before the first forward");
         TORCH_CHECK(!enabled || ordinary_w8_compact_encoder_profile(),
@@ -940,9 +967,9 @@ public:
     // ========================================================================
     // forward — drive the 24-block encoder.
     //
-    // Input  : [num_patches, hidden_size] fp16 RPU (Python adapter must have
+    // Input  : [num_patches, hidden_size] fp16 device (Python adapter must have
     //          already added pos_embed and folded patch_embed).
-    // Output : [num_patches, hidden_size] fp16 RPU (final hidden state).
+    // Output : [num_patches, hidden_size] fp16 device (final hidden state).
     //          DeepStack snapshots are accessible via `pop_deepstack_snapshots()`
     //          after forward returns — Python adapter pulls them out for the
     //          merger pass.
@@ -1004,7 +1031,7 @@ public:
         auto restore_rope_route = c10::make_scope_exit(
             [&] { rope_spm_enabled_ = previous_rope_spm; });
         TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                    "Qwen3VLVisionModel::forward: input must be on RPU device");
+                    "Qwen3VLVisionModel::forward: input must be on device");
         TORCH_CHECK(input.is_contiguous(),
                     "Qwen3VLVisionModel::forward: input must be contiguous");
         TORCH_CHECK(input.dim() == 3,
@@ -1031,7 +1058,7 @@ public:
                     TORCH_CHECK(cache.defined() && cache.device() == input.device() &&
                                     cache.scalar_type() == at::kHalf && cache.is_contiguous() &&
                                     cache.dim() == 7,
-                                "four-core Vision requires contiguous FP16 RPU 7D caches");
+                                "four-core Vision requires contiguous FP16 device 7D caches");
                     if (blocks == 0) blocks = cache.size(1);
                     TORCH_CHECK(blocks > 0 && blocks <= std::numeric_limits<int64_t>::max() / 16 &&
                                     cache.sizes().vec() == std::vector<int64_t>(
@@ -1077,7 +1104,7 @@ public:
                     "Qwen3VLVisionModel::forward: k_caches must not be empty");
         const at::Tensor& k0 = k_caches.front();
         TORCH_CHECK(k0.dim() == 7,
-                    "Qwen3VLVisionModel::forward: k_cache must use 7-D RPU layout, got ",
+                    "Qwen3VLVisionModel::forward: k_cache must use 7-D device layout, got ",
                     k0.dim(), "D");
         const int64_t cache_max_seq = k0.size(1) * k0.size(5);
         TORCH_CHECK(num_patches_in <= cache_max_seq,
@@ -1527,7 +1554,7 @@ public:
                     QWEN3VL_POOLER_Z1_NUM_PATCHES &&
                 position_idx_keepalive_.size(1) == 2,
             "Qwen3VLVisionModel multiview position owner must be contiguous "
-            "int16 RPU [>=256,2]");
+            "int16 device [>=256,2]");
         rpu_ddr_flush_force_sized(
             position_idx_keepalive_.data_ptr<int16_t>(),
             QWEN3VL_POOLER_Z1_NUM_PATCHES * 2 * sizeof(int16_t));
@@ -1593,7 +1620,7 @@ public:
                 input.layout() == c10::Layout::Strided &&
                 input.is_contiguous(),
             "Qwen3VLVisionModel multiview outer-fast input must be one of "
-            "three contiguous FP16 RPU [1,256,1024] tensors");
+            "three contiguous FP16 device [1,256,1024] tensors");
         bind_spm_outer_fast_composite_input(guard, input, ordinal);
     }
 
@@ -1636,7 +1663,7 @@ public:
                         position_idx_keepalive_.dim() == 2 &&
                         position_idx_keepalive_.size(0) >= num_patches &&
                         position_idx_keepalive_.size(1) == 2,
-                    "Qwen3VLVisionModel pooler Z1 requires a contiguous RPU "
+                    "Qwen3VLVisionModel pooler Z1 requires a contiguous device "
                     "int16 position keepalive [>=256,2]");
 
         rpu_ddr_flush_force_sized(
@@ -1914,7 +1941,7 @@ public:
                         input.layout() == c10::Layout::Strided &&
                         input.is_contiguous(),
                     "Qwen3VLVisionModel pooler Z1 outer-fast input must be "
-                    "contiguous FP16 RPU [1,256,1024]");
+                    "contiguous FP16 device [1,256,1024]");
         bind_spm_outer_fast_input(guard, input);
     }
 
@@ -2016,8 +2043,10 @@ public:
     // hidden state. Caller MUST consume the tensors before issuing the next
     // forward (REPLAY at a different shape would route to a different slot
     // but same-shape REPLAY would overwrite). These are device-only views;
-    // an eventual RPU-to-CPU copy synchronizes before reading their contents.
+    // an eventual device-to-CPU copy synchronizes before reading their contents.
     std::vector<at::Tensor> pop_deepstack_snapshots() {
+        TORCH_CHECK(!tap_merger_for_plan(ctx().stage_plan),
+                    "LingBot tap merger produces merged DeepStack features; raw snapshots are unavailable");
         std::vector<at::Tensor> out;
         out.reserve(deepstack_visual_indexes_.size());
         for (int64_t layer_idx : deepstack_visual_indexes_) {
@@ -2099,6 +2128,23 @@ protected:
         int64_t hash = rhinovla_high_precision_
             ? detail::layout_mix(0, RHINOVLA_VISION_HIGH_ACTIVATION_SITE) : 0;
         if (rhinovla_high_precision_) hash = detail::layout_mix(hash, 2);
+        if (lingbot_fc1_gelu_mode_) {
+            hash = detail::layout_mix(hash, QWEN3VL_LINGBOT_FC1_GELU_SITE);
+            hash = detail::layout_mix(hash, lingbot_fc1_gelu_mode_);
+        }
+        if (lingbot_qkv_joint_mode_) {
+            hash = detail::layout_mix(hash, QWEN3VL_LINGBOT_QKV_JOINT_SITE);
+            for (const auto value : lingbot_qkv_joint_arguments()) hash = detail::layout_mix(hash, value);
+        }
+        if (lingbot_residual_resident_mode_) {
+            hash = detail::layout_mix(hash, QWEN3VL_LINGBOT_RESIDUAL_RESIDENT_SITE);
+            hash = detail::layout_mix(hash, 2);  // SEQUENTIAL plus resident Q
+            hash = detail::layout_mix(hash, lingbot_residual_resident_mode_);
+        }
+        if (lingbot_spm_kv_mode_) {
+            hash = detail::layout_mix(hash, QWEN3VL_LINGBOT_SPM_KV_ATTN_SITE);
+            for (const auto value : lingbot_spm_kv_arguments()) hash = detail::layout_mix(hash, value);
+        }
         if (num_cores() == 8) return hash;
         hash = detail::layout_mix(hash, 2);
         for (const int value : {num_cores(), attn_tp(), mlp_tp(), 8}) {
@@ -2197,15 +2243,31 @@ protected:
         return cfg;
     }
 
-    // Ordinary 2B/4B W8 capability. This is independent of the fixed 2B
-    // delivery and typed composite contracts, including their SDPA tiling.
+    bool ordinary_w8_split_raw_geometry() const {
+        if ((image_batch_count_ != 2 && image_batch_count_ != 3) ||
+            current_num_patches_ <= 0 || current_num_patches_ % image_batch_count_ != 0)
+            return false;
+        const int64_t rows = current_num_patches_ / image_batch_count_;
+        return rows <= 256 && rows % 4 == 0 && rows % 16 != 0;
+    }
+
+    // Keep the original W8 entry/route identity. Packed ordinary FP16 ACC16
+    // reuses the same activation layout only with its FP16 fused merger.
+    // This does not expand the fixed delivery, composite or N1200 profiles.
     bool ordinary_w8_resident_profile() const {
+        const bool packed_fp16_merger = merger_active() &&
+            merger_m0_w_.scalar_type() == at::kHalf &&
+            merger_m2_w_.scalar_type() == at::kHalf &&
+            (ordinary_w8_split_raw_geometry() ||
+             ((image_batch_count_ == 2 || image_batch_count_ == 3) &&
+              current_num_patches_ == image_batch_count_ * 256));
         if (pipeline_dispatch_active() || qwen3vl_2b_delivery_profile_active() ||
-            !adaptive_w8_merger() || linear_acc32_ ||
+            (!adaptive_w8_merger() && !packed_fp16_merger) || linear_acc32_ ||
             (image_batch_count_ != 1 &&
              !(image_batch_count_ == 2 &&
                (current_num_patches_ == 512 || current_num_patches_ == 1024)) &&
-             !(image_batch_count_ == 3 && current_num_patches_ == 768)) ||
+             !(image_batch_count_ == 3 && current_num_patches_ == 768) &&
+             !ordinary_w8_split_raw_geometry()) ||
             num_cores() != 8 || num_layers() != 24 || hidden_size() != 1024 ||
             intermediate_size() != 4096 || num_q_heads() != 16 ||
             head_dim() != 64 || orig_head_dim_ != 64 ||
@@ -2213,12 +2275,15 @@ protected:
             layer_weights_.size() != 24) {
             return false;
         }
+        const auto dtype = layer_weights_.front().q_w.scalar_type();
+        if (dtype != at::kChar && !(dtype == at::kHalf && packed_fp16_merger))
+            return false;
         return std::all_of(layer_weights_.begin(), layer_weights_.end(),
-            [](const auto& weights) {
+            [dtype](const auto& weights) {
                 for (const at::Tensor* weight : {
                         &weights.q_w, &weights.k_w, &weights.v_w,
                         &weights.o_w, &weights.fc1_w, &weights.fc2_w}) {
-                    if (weight->scalar_type() != at::kChar) return false;
+                    if (weight->scalar_type() != dtype) return false;
                 }
                 return true;
             });
@@ -2229,6 +2294,19 @@ protected:
         return sequence_length > 0 && chunk_size >= sequence_length &&
             (image_batch_count_ == 1 || sequence_length == current_num_patches_) &&
             ordinary_w8_resident_profile();
+    }
+
+    bool ordinary_w8_resident_schedule_for_plan(
+        const FmbThreeStageChunkPlan& plan, int64_t sequence_length) const {
+        // The exact LingBot residency contract owns its full-layer schedule.
+        // Do not also declare the generic resident schedule for that same plan.
+        return !compact_encoder_active() &&
+            !lingbot_residual_resident_for_plan(plan) &&
+            ordinary_w8_resident_chunk(plan.compute.plan.chunk_size, sequence_length);
+    }
+
+    bool ordinary_w8_split_raw_profile() const {
+        return ordinary_w8_split_raw_geometry() && ordinary_w8_resident_profile();
     }
 
     bool ordinary_n1200_tm160_profile() const {
@@ -2279,6 +2357,14 @@ protected:
             return false;
         const int64_t image_rows = sequence_length / image_batch_count_;
         const int64_t query_rows = image_rows == 768 ? 384 : image_rows;
+        if (ordinary_w8_split_raw_profile()) {
+            return sequence_length == current_num_patches_ &&
+                (chunk_size == sequence_length ||
+                 chunk_size == CeilDiv(sequence_length, int64_t{16}) * 16) &&
+                sdpa_by_mha_spm_is_valid(
+                    /*batch=*/1, image_rows, image_rows, num_q_heads(), num_q_heads(),
+                    head_dim(), num_cores(), /*MASK_NONE=*/0);
+        }
         return ((image_batch_count_ == 1 &&
                  (sequence_length == 256 || sequence_length == 512 || sequence_length == 768)) ||
                 (image_batch_count_ == 2 &&
@@ -2294,6 +2380,7 @@ protected:
         const FmbThreeStageChunkPlan& plan,
         const LayoutContext& layout,
         int64_t position) const override {
+        if (lingbot_spm_kv_for_plan(plan) && lingbot_spm_kv_layout(layout) && position == 0) return true;
         if (!(ordinary_w8_raw_chunk(layout.chunk_size, current_num_patches_) ||
               compact_encoder_chunk(layout.chunk_size, current_num_patches_)) ||
             position != 0 ||
@@ -2308,7 +2395,10 @@ protected:
         // Bounded ordinary 2B/4B W8 route; larger images retain the DDR candidate.
         // This is separate from the fixed 2B delivery schedule and tiling.
         const int64_t rows = current_num_patches_;
-        if (layout.effective_kv_cs() != rows || layout.max_kv_seq_len != rows) {
+        const bool split_raw = ordinary_w8_split_raw_profile();
+        if ((layout.effective_kv_cs() != rows &&
+             !(split_raw && layout.effective_kv_cs() == CeilDiv(rows, int64_t{16}) * 16)) ||
+            layout.max_kv_seq_len != rows) {
             return false;
         }
         const int64_t image_rows = rows / image_batch_count_;
@@ -2325,11 +2415,21 @@ protected:
         return true;
     }
 
+    std::vector<int64_t> ordinary_resident_schedule_arguments() const {
+        std::vector<int64_t> arguments{
+            current_num_patches_, image_batch_count_, 24, 1024, 4096, 16, 64, 8, merger_out_hidden_};
+        // Preserve recorded W8 descriptors; the new FP16 route additionally
+        // binds its weight and accumulator precision in the COMPLETE stream.
+        if (layer_weights_.front().q_w.scalar_type() == at::kHalf)
+            arguments.insert(arguments.end(), {16, 16});
+        return arguments;
+    }
+
     void consume_ordinary_w8_resident_schedule() {
         ctx().consume_physical_route(
             FmbRouteFamily::GRAPH_SCHEDULE, QWEN3VL_W8_RESIDENT_SCHEDULE_SITE,
             /*selector=*/1, /*resolved_flags=*/0,
-            {current_num_patches_, image_batch_count_, 24, 1024, 4096, 16, 64, 8, merger_out_hidden_});
+            ordinary_resident_schedule_arguments());
     }
 
     ModelDynamicConfig dynamic_config(const ChunkPlan& plan) override {
@@ -2347,7 +2447,8 @@ protected:
         const bool resident = delivery ||
             (plan.num_chunks == 1 &&
              (ordinary_w8_resident_chunk(plan.chunk_size, current_num_patches_) ||
-              compact_encoder_chunk(plan.chunk_size, current_num_patches_)));
+              compact_encoder_chunk(plan.chunk_size, current_num_patches_) ||
+              lingbot_residual_resident_chunk(plan.chunk_size)));
         cfg.chunk_mode = resident
             ? ChunkMode::SEQUENTIAL
             : ChunkMode::KV_FIRST;
@@ -2356,10 +2457,11 @@ protected:
             : InterLayerIO::DDR_PINGPONG;
         // AUTO admits both descriptor-owned physical routes only where the
         // same shape/profile predicate used by the raw capability allows it.
-        cfg.attention_policy = compact_encoder_chunk(plan.chunk_size, current_num_patches_)
+        cfg.attention_policy = (compact_encoder_chunk(plan.chunk_size, current_num_patches_) ||
+            (resident && ordinary_w8_split_raw_profile()))
             ? AttentionExecutionPolicy::SPM_KV_BY_MHA
-            : plan.num_chunks == 1 && ordinary_w8_raw_chunk(
-                plan.chunk_size, current_num_patches_)
+            : plan.num_chunks == 1 && (ordinary_w8_raw_chunk(
+                plan.chunk_size, current_num_patches_) || lingbot_spm_kv_chunk(plan.chunk_size))
             ? AttentionExecutionPolicy::AUTO
             : AttentionExecutionPolicy::DDR_KV;
         return cfg;
@@ -2399,6 +2501,10 @@ protected:
             : FmbLinearAccumulationPolicy::ACC16;
         const bool raw_spm =
             layout.attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA;
+        TORCH_CHECK(!ordinary_w8_split_raw_profile() || raw_spm,
+                    "Qwen3-VL unaligned packed images require per-image B1 raw attention");
+        const bool lingbot_spm_kv = raw_spm && lingbot_spm_kv_for_plan(plan) &&
+            lingbot_spm_kv_layout(layout) && position == 0;
         const bool n1200_tm160 = !raw_spm && !layout.is_causal && !layout.use_attn_mask &&
             n1200_tm160_eligible(plan, physical_len, logical_len, position);
         TORCH_CHECK(!raw_spm ||
@@ -2453,14 +2559,22 @@ protected:
             append(FmbRouteFamily::GRAPH_SCHEDULE, QWEN3VL_DELIVERY_VISION_SCHEDULE_SITE,
                    1, {current_num_patches_, 24, 1024, 4096, 16, 64, 1});
         }
-        if (!compact && ordinary_w8_resident_chunk(plan.compute.plan.chunk_size, physical_len)) {
+        if (ordinary_w8_resident_schedule_for_plan(plan, physical_len)) {
             TORCH_CHECK(plan.chunk_mode == ChunkMode::SEQUENTIAL &&
                             plan.compute.chunks.size() == 1 &&
                             physical_len == logical_len,
-                        "ordinary W8 Vision resident descriptor schedule drift");
+                        "ordinary Vision resident descriptor schedule drift");
             append(FmbRouteFamily::GRAPH_SCHEDULE,
                    QWEN3VL_W8_RESIDENT_SCHEDULE_SITE, 1,
-                   {physical_len, image_batch_count_, 24, 1024, 4096, 16, 64, 8, merger_out_hidden_});
+                   ordinary_resident_schedule_arguments());
+        }
+        if (lingbot_residual_resident_chunk(plan.compute.plan.chunk_size)) {
+            TORCH_CHECK(lingbot_residual_resident_for_plan(plan) && physical_len == 768 && logical_len == 768 && position == 0 &&
+                            !layout.is_causal && !layout.use_attn_mask && layout.batch_size == 1 &&
+                            (layout.attention_policy == AttentionExecutionPolicy::DDR_KV || lingbot_spm_kv),
+                        "LingBot residual residency requires its exact unpadded attention descriptor");
+            append(FmbRouteFamily::GRAPH_SCHEDULE, QWEN3VL_LINGBOT_RESIDUAL_RESIDENT_SITE,
+                   1, lingbot_residual_resident_arguments(layout.attention_policy));
         }
         if (rope_spm && max_hw_ > 0) {
             const int64_t selector = static_cast<int64_t>(
@@ -2479,9 +2593,14 @@ protected:
                 {rope_spm ? 1 : 0, max_hw_, orig_head_dim_});
         }
         for (const ChunkInfo& chunk : plan.qkv.chunks) {
-            append_linear(QWEN3VL_Q_LINEAR_SITE, chunk.idx);
-            append_linear(QWEN3VL_K_LINEAR_SITE, chunk.idx);
-            append_linear(QWEN3VL_V_LINEAR_SITE, chunk.idx);
+            if (lingbot_qkv_joint_for_plan(plan)) {
+                append(FmbRouteFamily::LINEAR, QWEN3VL_LINGBOT_QKV_JOINT_SITE,
+                       1, lingbot_qkv_joint_arguments(), chunk.idx);
+            } else {
+                append_linear(QWEN3VL_Q_LINEAR_SITE, chunk.idx);
+                append_linear(QWEN3VL_K_LINEAR_SITE, chunk.idx);
+                append_linear(QWEN3VL_V_LINEAR_SITE, chunk.idx);
+            }
             append(
                 FmbRouteFamily::ROPE,
                 rope_spm
@@ -2532,10 +2651,20 @@ protected:
                 kv_plan.physical_rows());
         }
         for (const ChunkInfo& chunk : plan.compute.chunks) {
-            if (raw_spm) {
+            if (lingbot_spm_kv) {
+                append(FmbRouteFamily::ATTENTION, QWEN3VL_LINGBOT_SPM_KV_ATTN_SITE,
+                       static_cast<int64_t>(AttentionExecutionPolicy::SPM_KV_BY_MHA),
+                       lingbot_spm_kv_arguments(), chunk.idx);
+            } else if (raw_spm) {
                 const int64_t image_rows = chunk.len / image_batch_count_;
                 const int64_t query_rows = vision_raw_query_chunk_size(image_rows);
-                for (int64_t query_offset = 0; query_offset < image_rows;
+                if (ordinary_w8_split_raw_profile()) {
+                    for (int64_t image = 0; image < image_batch_count_; ++image) {
+                        append(FmbRouteFamily::ATTENTION, QWEN3VL_SPLIT_RAW_SPM_ATTN_SITE,
+                               static_cast<int64_t>(AttentionExecutionPolicy::SPM_KV_BY_MHA),
+                               vision_split_raw_attention_arguments(chunk.len, image), image);
+                    }
+                } else for (int64_t query_offset = 0; query_offset < image_rows;
                      query_offset += query_rows) {
                     append(FmbRouteFamily::ATTENTION, QWEN3VL_RAW_SPM_ATTN_SITE,
                            static_cast<int64_t>(AttentionExecutionPolicy::SPM_KV_BY_MHA),
@@ -2562,7 +2691,12 @@ protected:
                 vision_ring_route(
                     chunk.len, hidden_size()),
                 compact ? fp16_compact_residual_arguments() : std::vector<int64_t>{}, chunk.idx);
-            append_linear(QWEN3VL_FC1_LINEAR_SITE, chunk.idx);
+            if (lingbot_fc1_gelu_for_plan(plan)) {
+                append(FmbRouteFamily::LINEAR, QWEN3VL_LINGBOT_FC1_GELU_SITE,
+                       1, lingbot_fc1_gelu_arguments(), chunk.idx);
+            } else {
+                append_linear(QWEN3VL_FC1_LINEAR_SITE, chunk.idx);
+            }
             append_linear(QWEN3VL_FC2_LINEAR_SITE, chunk.idx);
             append(
                 FmbRouteFamily::ALL_REDUCE,
@@ -2572,7 +2706,12 @@ protected:
                     chunk.len, hidden_size()),
                 compact ? fp16_compact_residual_arguments() : std::vector<int64_t>{}, chunk.idx);
         }
-        if (!pipeline_dispatch_active()) {
+        if (tap_merger_enabled_) {
+            append(FmbRouteFamily::GRAPH_SCHEDULE, QWEN3VL_TAP_MERGER_SCHEDULE_SITE,
+                   tap_merger_for_plan(plan) ? 1 : 2,
+                   {logical_len, image_batch_count_, merger_out_hidden_});
+        }
+        if (!pipeline_dispatch_active() && !tap_merger_for_plan(plan)) {
             const int64_t num_compute_chunks =
                 static_cast<int64_t>(plan.compute.chunks.size());
             for (int64_t layer_idx : deepstack_visual_indexes_) {
@@ -2671,7 +2810,7 @@ protected:
                          k < deepstack_visual_indexes_.size(); ++k) {
                         append(
                             FmbRouteFamily::MUTABLE_DMA,
-                            QWEN3VL_DEEPSTACK_MERGED_COPY_SITE,
+                            tap_merger_for_plan(plan) ? QWEN3VL_TAP_MERGER_COPY_SITE : QWEN3VL_DEEPSTACK_MERGED_COPY_SITE,
                             static_cast<int64_t>(
                                 Qwen3VLVisionMutableDmaRoute::SPM_COPY_TO_DDR),
                             copy_arguments, static_cast<int64_t>(k) + 1);
@@ -2742,7 +2881,8 @@ protected:
         };
         LayoutContext ddr_layout = layout;
         ddr_layout.attention_policy = AttentionExecutionPolicy::DDR_KV;
-        if (!compact_encoder_active()) append_rope_domain(ddr_layout);
+        if (!compact_encoder_active() && !ordinary_w8_split_raw_profile())
+            append_rope_domain(ddr_layout);
         LayoutContext raw_layout = layout;
         raw_layout.attention_policy = AttentionExecutionPolicy::SPM_KV_BY_MHA;
         if (physical_len == logical_len &&
@@ -2825,6 +2965,7 @@ protected:
         int64_t kv_cs   = ctx.effective_kv_cs();
         int64_t wide_cs = std::max(comp_cs, kv_cs);
         const bool compact = compact_encoder_chunk(comp_cs, ctx.max_kv_seq_len);
+        const bool lingbot_spm_kv = lingbot_spm_kv_layout(ctx);
         int64_t cs      = compact ? 608 : comp_cs;  // independent post-merger tile
         int64_t h  = hidden_size();
         int64_t nq = num_q_heads();
@@ -2841,9 +2982,25 @@ protected:
 
         int64_t res    = A(wide_cs * h * DWIDTH);
         int64_t q_kv   = A(kv_cs * local_q_dim * DWIDTH);
+        const bool split_raw = ordinary_w8_split_raw_profile() &&
+            ordinary_w8_raw_chunk(comp_cs, ctx.max_kv_seq_len);
+        // The last B1 attention may read pad16(S) K rows. Earlier images read
+        // the next image's valid backing; the final image needs an explicit
+        // tail. V gets the same safe backing for its transpose input.
+        const int64_t split_image_rows = split_raw
+            ? current_num_patches_ / image_batch_count_ : 0;
+        const int64_t kv_raw = split_raw ? A((current_num_patches_ +
+            CeilDiv(split_image_rows, int64_t{16}) * 16 - split_image_rows) *
+            local_q_dim * DWIDTH) : q_kv;
         int64_t q_comp = A(comp_cs * local_q_dim * DWIDTH);
         int64_t oproj  = A(comp_cs * h * DWIDTH);
         int64_t fc1    = A(comp_cs * local_inter * DWIDTH);
+        // A tap merger must preserve residual1 for the next Vision block.
+        // M2 has finished reading fc1 before the merger ring writes its result,
+        // so the dead fc1 allocation can hold the larger postmerge output.
+        if (tap_merger_enabled_ && comp_cs >= current_num_patches_) {
+            fc1 = std::max(fc1, A((comp_cs / 4) * merger_out_hidden_ * DWIDTH));
+        }
 
         SdpaConfig sdpa_cfg{SdpaKernelType::FLASH_ATTN_SPM,
                             hd, /*nq*/nq, /*nkv*/nq,
@@ -2856,7 +3013,11 @@ protected:
             TORCH_CHECK(sdpa_tmp == QWEN3VL_N1200_SDPA_TMP_BYTES,
                         "Qwen3-VL N1200 Tm160 must preserve the declared baseline workspace");
         }
-        if (compact || ctx.attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA) {
+        if (split_raw) {
+            // B1 transposes are consumed before the next image overwrites Vt.
+            sdpa_tmp = A(CeilDiv(split_image_rows, int64_t{16}) * 16 *
+                         local_q_dim * DWIDTH);
+        } else if (compact || (ctx.attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA && !lingbot_spm_kv)) {
             // Vt is [B, local_heads, head_dim, align16(N/B)] per core. The
             // bounded B2 route has aligned N/B=256, so total rows suffice. It
             // overlaps neither V nor Q/K/output during attention (phase 3).
@@ -2878,7 +3039,7 @@ protected:
         constexpr BufferScope KVIN = BufferScope::KvInsert;
         constexpr BufferScope COMP = BufferScope::Compute;
         const bool ordinary_resident = compact || ordinary_w8_resident_chunk(
-            comp_cs, ctx.max_kv_seq_len);
+            comp_cs, ctx.max_kv_seq_len) || lingbot_residual_resident_chunk(comp_cs);
         const BufferScope qkv_scope =
             qwen3vl_2b_delivery_profile_active() || ordinary_resident
             ? COMP
@@ -2900,8 +3061,8 @@ protected:
             // share phases 2..3 lifecycle (Phase 2: linear; Phase 2.5: rope;
             // Phase 3: KV insert / SDPA read).
             {"q",            q_kv,      2, 3, StorageClass::Temp, 0, nullptr, qkv_scope},
-            {"k",            q_kv,      2, 3, StorageClass::Temp, 0, nullptr, qkv_scope},
-            {"v",            q_kv,      2, 3, StorageClass::Temp, 0, nullptr, qkv_scope},
+            {"k",            kv_raw,    2, 3, StorageClass::Temp, 0, nullptr, qkv_scope},
+            {"v",            kv_raw,    2, 3, StorageClass::Temp, 0, nullptr, qkv_scope},
             {"q_comp",       q_comp,    3, 4, StorageClass::Temp, 0, nullptr, COMP},
             {"sdpa_out",     q_comp,    3, 4, StorageClass::Temp, 0, nullptr, COMP},
             {"sdpa_tmp",     sdpa_tmp,  3, 3, StorageClass::Temp, 0, nullptr, COMP},
@@ -3036,7 +3197,9 @@ protected:
                 decls.push_back({"merger_normed", A(cs * h * DWIDTH),           0, 0, StorageClass::Temp, 0, "oproj",      COMP});
                 decls.push_back({"merger_mid",    A(mrows * local_mh * DWIDTH), 0, 0, StorageClass::Temp, 0, "fc1",        COMP});
                 decls.push_back({"merger_zero",   A(mrows * oh * DWIDTH),       0, 0, StorageClass::Temp, 0, "input_norm", ALL});
-                decls.push_back({"merger_out",    A(mrows * oh * DWIDTH),       0, 0, StorageClass::Temp, 0, "residual1",  ALL});
+                decls.push_back({"merger_out",    A(mrows * oh * DWIDTH),       0, 0, StorageClass::Temp, 0,
+                    tap_merger_enabled_ && cs >= current_num_patches_ ? "fc1" : "residual1",
+                    tap_merger_enabled_ && cs >= current_num_patches_ ? COMP : ALL});
                 // Multiview taps and pooler consume residual1 in place; only the
                 // ordinary fused-merger path reloads a DDR snapshot into merger_in.
                 // Omitting that unreachable logical alias also keeps it from
@@ -3049,10 +3212,35 @@ protected:
             }
             // Cold merger residency is identical for single- and multi-chunk
             // plans. Chunked ordinary W8 mergers reuse these same weight slots.
-            decls.push_back({"merger_ln_q_w",  merger_norm_w_sz,   0, 0, StorageClass::Persistent, 0, nullptr});
-            decls.push_back({"merger_ln_q_b",  merger_norm_w_sz,   0, 0, StorageClass::Persistent, 0, nullptr});
-            decls.push_back({"merger_m0_bias", dma_safe(local_mh), 0, 0, StorageClass::Persistent, 0, nullptr});
-            decls.push_back({"merger_m2_bias", dma_safe(oh),       0, 0, StorageClass::Persistent, 0, nullptr});
+            if (resident_preloads_enabled()) {
+                for (int ordinal = 0; ordinal < 4; ++ordinal) {
+                    const int64_t norm_bytes = dma_safe(ordinal == 0 ? h : merge_hidden_);
+                    for (int role = 0; role < 4; ++role) {
+                        BufferDecl weight;
+                        weight.name = resident_merger_name(ordinal, role);
+                        weight.size = role < 2 ? norm_bytes : dma_safe(role == 2 ? local_mh : oh);
+                        weight.storage = StorageClass::Persistent;
+                        if (role == 0) {
+                            weight.preload_callback = [this, ordinal](FusedModelBase&, int, uint32_t) {
+                                preload_resident_merger(ordinal);
+                            };
+                        }
+                        decls.push_back(weight);
+                    }
+                }
+            } else {
+                decls.push_back({"merger_ln_q_w",  merger_norm_w_sz,   0, 0, StorageClass::Persistent, 0, nullptr});
+                decls.push_back({"merger_ln_q_b",  merger_norm_w_sz,   0, 0, StorageClass::Persistent, 0, nullptr});
+                decls.push_back({"merger_m0_bias", dma_safe(local_mh), 0, 0, StorageClass::Persistent, 0, nullptr});
+                decls.push_back({"merger_m2_bias", dma_safe(oh),       0, 0, StorageClass::Persistent, 0, nullptr});
+            }
+        }
+        if (lingbot_spm_kv) {
+            // The original 32b minibatch body keeps its K256 scratch. Vt is
+            // independent and can reuse the later O-projection phase's space.
+            TORCH_CHECK(sdpa_tmp == 393216 && q_kv == 196608,
+                        "LingBot SPM-KV scratch/operand geometry drift");
+            decls.push_back({"lingbot_vt", 196608, 3, 3, StorageClass::Temp, 0, nullptr, COMP});
         }
         return decls;
     }
@@ -3216,6 +3404,9 @@ protected:
     }
 
     void emit_kv_first_body(int layer_idx, const ChunkInfo& chunk) {
+        const bool joint_qkv = validate_lingbot_qkv_joint_route(layer_idx, chunk);
+        (void)consume_lingbot_residual_resident_schedule(layer_idx, chunk);
+        (void)validate_lingbot_spm_kv_route(chunk);
         const auto& lw = layer_weights_[layer_idx];
         int64_t seq_len = chunk.len;
         int64_t h = hidden_size();
@@ -3231,39 +3422,51 @@ protected:
             layer_addr(layer_idx, 0, "ln1_gamma"), layer_addr(layer_idx, 0, "ln1_beta"),
             seq_len, h, eps_, false, 0, num_cores());
 
-        // Phase 2: Q / K / V Linear with bias (SPM→SPM ACC16, col-partition).
-        // Python adapter pre-splits the fused [3*dim, dim] HF qkv into three
-        // [dim, dim] tensors — we use the SigLIP three-Linear pattern.
-        consume_manifest_route(
-            FmbRouteFamily::LINEAR, QWEN3VL_Q_LINEAR_SITE,
-            static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
-            chunk.idx);
-        rpu_launch_linear_spm_to_spm_acc16_kernel(
-            addr(0, "input_norm"), lw.q_w, addr(0, "q"),
-            seq_len, nq * hd, h, 1, num_cores(),
-            layer_addr(layer_idx, 0, "q_bias"), lw.q_ws,
-            /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
-            /*force_acc32=*/linear_acc32_);
-        consume_manifest_route(
-            FmbRouteFamily::LINEAR, QWEN3VL_K_LINEAR_SITE,
-            static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
-            chunk.idx);
-        rpu_launch_linear_spm_to_spm_acc16_kernel(
-            addr(0, "input_norm"), lw.k_w, addr(0, "k"),
-            seq_len, nq * hd, h, 1, num_cores(),
-            layer_addr(layer_idx, 0, "k_bias"), lw.k_ws,
-            /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
-            /*force_acc32=*/linear_acc32_);
-        consume_manifest_route(
-            FmbRouteFamily::LINEAR, QWEN3VL_V_LINEAR_SITE,
-            static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
-            chunk.idx);
-        rpu_launch_linear_spm_to_spm_acc16_kernel(
-            addr(0, "input_norm"), lw.v_w, addr(0, "v"),
-            seq_len, nq * hd, h, 1, num_cores(),
-            layer_addr(layer_idx, 0, "v_bias"), lw.v_ws,
-            /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
-            /*force_acc32=*/linear_acc32_);
+        // Identical independent projection owners and bias retirement, jointly
+        // scheduled only for the cold-admitted exact LingBot three-view profile.
+        if (joint_qkv) {
+            ctx().consume_physical_route(FmbRouteFamily::LINEAR,
+                QWEN3VL_LINGBOT_QKV_JOINT_SITE, 1, 0,
+                lingbot_qkv_joint_arguments(), chunk.idx);
+            rpu_launch_lingbot2_vision_qkv_joint_spm_kernel(
+                addr(0, "input_norm"), lw.q_w, lw.k_w, lw.v_w,
+                addr(0, "q"), addr(0, "k"), addr(0, "v"),
+                layer_addr(layer_idx, 0, "q_bias"),
+                layer_addr(layer_idx, 0, "k_bias"),
+                layer_addr(layer_idx, 0, "v_bias"),
+                lw.q_ws, lw.k_ws, lw.v_ws);
+        } else {
+            consume_manifest_route(
+                FmbRouteFamily::LINEAR, QWEN3VL_Q_LINEAR_SITE,
+                static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
+                chunk.idx);
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                addr(0, "input_norm"), lw.q_w, addr(0, "q"),
+                seq_len, nq * hd, h, 1, num_cores(),
+                layer_addr(layer_idx, 0, "q_bias"), lw.q_ws,
+                /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
+                /*force_acc32=*/linear_acc32_);
+            consume_manifest_route(
+                FmbRouteFamily::LINEAR, QWEN3VL_K_LINEAR_SITE,
+                static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
+                chunk.idx);
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                addr(0, "input_norm"), lw.k_w, addr(0, "k"),
+                seq_len, nq * hd, h, 1, num_cores(),
+                layer_addr(layer_idx, 0, "k_bias"), lw.k_ws,
+                /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
+                /*force_acc32=*/linear_acc32_);
+            consume_manifest_route(
+                FmbRouteFamily::LINEAR, QWEN3VL_V_LINEAR_SITE,
+                static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
+                chunk.idx);
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                addr(0, "input_norm"), lw.v_w, addr(0, "v"),
+                seq_len, nq * hd, h, 1, num_cores(),
+                layer_addr(layer_idx, 0, "v_bias"), lw.v_ws,
+                /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
+                /*force_acc32=*/linear_acc32_);
+        }
 
         // Phase 2.5: 2D RoPE on Q and K (in-place SPM read/write).
         //
@@ -3436,6 +3639,8 @@ protected:
     }
 
     void build_layer_subgraph(int layer_idx, const ChunkInfo& chunk) override {
+        const bool lingbot_residual = consume_lingbot_residual_resident_schedule(layer_idx, chunk);
+        const bool lingbot_spm_kv = validate_lingbot_spm_kv_route(chunk);
         const auto& lw = layer_weights_[layer_idx];
         int64_t seq_len = chunk.len;
         int64_t h = hidden_size();
@@ -3448,7 +3653,7 @@ protected:
         const bool delivery = qwen3vl_2b_delivery_profile_active();
         const bool compact = compact_encoder_active();
         const bool sequential = ctx().stage_plan.chunk_mode == ChunkMode::SEQUENTIAL;
-        TORCH_CHECK(!sequential || delivery || compact || ordinary_w8_resident_chunk(
+        TORCH_CHECK(!sequential || delivery || compact || lingbot_residual || ordinary_w8_resident_chunk(
                         chunk.len, current_num_patches_),
                     "Qwen3-VL Vision sequential body requires its admitted resident profile");
         if (sequential && !delivery && layer_idx == 0 && chunk.idx == 0) {
@@ -3456,7 +3661,8 @@ protected:
                 ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
                     compact_encoder_schedule_site(), 1, 0,
                     compact_encoder_schedule_arguments());
-            } else {
+            } else if (ordinary_w8_resident_schedule_for_plan(
+                           ctx().stage_plan, current_num_patches_)) {
                 consume_ordinary_w8_resident_schedule();
             }
         }
@@ -3493,7 +3699,20 @@ protected:
         }
 
         double attn_scale = 1.0 / std::sqrt(static_cast<double>(orig_head_dim_));
-        if (ctx().attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA) {
+        if (lingbot_spm_kv) {
+            ctx().consume_physical_route(
+                FmbRouteFamily::ATTENTION, QWEN3VL_LINGBOT_SPM_KV_ATTN_SITE,
+                static_cast<int64_t>(AttentionExecutionPolicy::SPM_KV_BY_MHA),
+                /*resolved_flags=*/0, lingbot_spm_kv_arguments(), chunk.idx);
+            rpu_launch_v_transpose_spm(
+                addr(0, "v"), addr(0, "lingbot_vt"), 3, 256, 16, 64, 8);
+            rpu_launch_lingbot2_vision_sdpa_spm_kernel(
+                addr(0, "q"), addr(0, "k"), addr(0, "lingbot_vt"),
+                addr(0, "sdpa_out"), addr(0, "sdpa_tmp"));
+        } else if (ctx().attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA &&
+            ordinary_w8_split_raw_profile()) {
+            emit_split_raw_attention(seq_len, attn_scale);
+        } else if (ctx().attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA) {
             const int64_t image_rows = seq_len / image_batch_count_;
             const int64_t query_rows = vision_raw_query_chunk_size(image_rows);
             for (int64_t query_offset = 0; query_offset < image_rows;
@@ -3630,26 +3849,37 @@ protected:
             addr(0, compact ? "residual1" : "input_norm"), addr(0, "oproj"),
             layer_addr(layer_idx, 0, "ln2_gamma"), layer_addr(layer_idx, 0, "ln2_beta"),
             seq_len, h, eps_, false, 0, num_cores());
-        consume_manifest_route(
-            FmbRouteFamily::LINEAR, QWEN3VL_FC1_LINEAR_SITE,
-            static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
-            chunk.idx);
-        rpu_launch_linear_spm_to_spm_acc16_kernel(
-            addr(0, "oproj"), lw.fc1_w, addr(0, "fc1"),
-            seq_len, is_, h, 1, num_cores(),
-            layer_addr(layer_idx, 0, "fc1_bias"), lw.fc1_ws,
-            /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
-            /*force_acc32=*/linear_acc32_);
-        if (rhinovla_high_precision_) {
-            ctx().consume_physical_route(
-                FmbRouteFamily::GRAPH_SCHEDULE, RHINOVLA_VISION_HIGH_ENCODER_ACTIVATION_SITE,
-                1, 0, {2, 1024, 4096, 2048, 4, 8});
+        if (lingbot_fc1_gelu_for_plan(ctx().stage_plan)) {
+            TORCH_CHECK(ctx().has_complete_physical_manifest() && seq_len == 768,
+                        "LingBot Vision FC1+GELU requires its complete M768 descriptor");
+            consume_manifest_route(
+                FmbRouteFamily::LINEAR, QWEN3VL_LINGBOT_FC1_GELU_SITE,
+                1, chunk.idx, lingbot_fc1_gelu_arguments());
+            rpu_launch_lingbot2_vision_fc1_gelu_spm_kernel(
+                addr(0, "oproj"), lw.fc1_w, addr(0, "fc1"),
+                layer_addr(layer_idx, 0, "fc1_bias"), lw.fc1_ws);
+        } else {
+            consume_manifest_route(
+                FmbRouteFamily::LINEAR, QWEN3VL_FC1_LINEAR_SITE,
+                static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
+                chunk.idx);
+            rpu_launch_linear_spm_to_spm_acc16_kernel(
+                addr(0, "oproj"), lw.fc1_w, addr(0, "fc1"),
+                seq_len, is_, h, 1, num_cores(),
+                layer_addr(layer_idx, 0, "fc1_bias"), lw.fc1_ws,
+                /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
+                /*force_acc32=*/linear_acc32_);
+            if (rhinovla_high_precision_) {
+                ctx().consume_physical_route(
+                    FmbRouteFamily::GRAPH_SCHEDULE, RHINOVLA_VISION_HIGH_ENCODER_ACTIVATION_SITE,
+                    1, 0, {2, 1024, 4096, 2048, 4, 8});
+            }
+            rpu_launch_eltwise_unary_spm_kernel(
+                addr(0, "fc1"), addr(0, "fc1"),
+                seq_len * local_inter, ValuOpType::ADD,
+                GeluMode::TANH, num_cores(), rhinovla_high_precision_
+                    ? RpuUnaryPrecision::HIGH : RpuUnaryPrecision::BASE);
         }
-        rpu_launch_eltwise_unary_spm_kernel(
-            addr(0, "fc1"), addr(0, "fc1"),
-            seq_len * local_inter, ValuOpType::ADD,
-            GeluMode::TANH, num_cores(), rhinovla_high_precision_
-                ? RpuUnaryPrecision::HIGH : RpuUnaryPrecision::BASE);
 
         // Phase 6: fc2 + AllReduce + Residual (writes back to residual1 in
         // SPM_RESIDENT mode so the next layer's Phase 1 LN1 reads directly).
@@ -3756,7 +3986,36 @@ protected:
             deepstack_visual_indexes_.begin(),
             deepstack_visual_indexes_.end(),
             static_cast<int64_t>(layer_idx));
-        if (!pipeline_dispatch_active() &&
+        const bool tap_merger = tap_merger_for_plan(ctx().stage_plan);
+        if (tap_merger_enabled_ && layer_idx == 0 && chunk.idx == 0) {
+            ctx().consume_physical_route(
+                FmbRouteFamily::GRAPH_SCHEDULE, QWEN3VL_TAP_MERGER_SCHEDULE_SITE,
+                tap_merger ? 1 : 2, 0,
+                {current_num_patches_, image_batch_count_, merger_out_hidden_});
+        }
+        if (tap_merger && deepstack_it != deepstack_visual_indexes_.end()) {
+            const size_t ordinal = deepstack_it - deepstack_visual_indexes_.begin();
+            emit_one_merger(addr(0, "residual1"), addr(0, "merger_out"),
+                ds_merger_ln_q_w_.at(ordinal), ds_merger_ln_q_b_.at(ordinal),
+                ds_merger_m0_w_.at(ordinal), ds_merger_m0_b_.at(ordinal),
+                ds_merger_m2_w_.at(ordinal), ds_merger_m2_b_.at(ordinal),
+                true, static_cast<int64_t>(ordinal) + 1,
+                ds_merger_m0_scale_.at(ordinal), ds_merger_m2_scale_.at(ordinal));
+            if (prefix_scatter_active_) {
+                scatter_merger_out_to_prefix(merger_out_hidden_, prefix_dense_ptrs_.at(ordinal));
+            } else {
+                ctx().consume_physical_route(FmbRouteFamily::MUTABLE_DMA,
+                    QWEN3VL_TAP_MERGER_COPY_SITE,
+                    static_cast<int64_t>(Qwen3VLVisionMutableDmaRoute::SPM_COPY_TO_DDR),
+                    0, {seq_len / 4, merger_out_hidden_, 0},
+                    static_cast<int64_t>(ordinal) + 1);
+                const auto key = std::make_pair(layer_idx, current_num_patches_);
+                rpu_launch_spm_copy_ddr_dma(addr(0, "merger_out"),
+                    deepstack_merged_ddr_slots_.at(key).data_ptr<c10::Half>(),
+                    seq_len / 4 * merger_out_hidden_);
+            }
+        }
+        if (!pipeline_dispatch_active() && !tap_merger &&
             deepstack_it != deepstack_visual_indexes_.end())
         {
             auto key = std::make_pair(static_cast<int64_t>(layer_idx), current_num_patches_);
@@ -4047,6 +4306,51 @@ protected:
         if (image_rows == 768 || compact_encoder_active()) arguments.push_back(query_offset);
         return arguments;
     }
+
+    std::vector<int64_t> vision_split_raw_attention_arguments(
+        int64_t rows, int64_t image) const {
+        TORCH_CHECK(ordinary_w8_split_raw_profile() && rows == current_num_patches_ &&
+                        image >= 0 && image < image_batch_count_,
+                    "Qwen3-VL split raw attention image geometry drift");
+        const int64_t image_rows = rows / image_batch_count_;
+        return {/*kernel batch=*/1, image_rows, image_rows, num_q_heads(), num_q_heads(),
+                head_dim(), num_cores(), /*MASK_NONE=*/0, orig_head_dim_,
+                image_batch_count_, image, image * image_rows, rows,
+                CeilDiv(image_rows, int64_t{16}) * 16};
+    }
+
+    void emit_split_raw_attention(int64_t rows, double scale) {
+        TORCH_CHECK(ctx().has_complete_physical_manifest() &&
+                        ctx().attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA,
+                    "Qwen3-VL split raw attention requires a COMPLETE raw descriptor");
+        const int64_t image_rows = rows / image_batch_count_;
+        const int64_t row_elements = num_q_heads() / num_cores() * head_dim();
+        for (int64_t image = 0; image < image_batch_count_; ++image) {
+            ctx().consume_physical_route(
+                FmbRouteFamily::ATTENTION, QWEN3VL_SPLIT_RAW_SPM_ATTN_SITE,
+                static_cast<int64_t>(AttentionExecutionPolicy::SPM_KV_BY_MHA),
+                /*resolved_flags=*/0, vision_split_raw_attention_arguments(rows, image), image);
+            if (image == 0) {
+                const int64_t tail_elements =
+                    (CeilDiv(image_rows, int64_t{16}) * 16 - image_rows) * row_elements;
+                const uint32_t tail_bytes = static_cast<uint32_t>(rows * row_elements * DWIDTH);
+                zero_owner_spm(addr(0, "k") + tail_bytes, tail_elements);
+                zero_owner_spm(addr(0, "v") + tail_bytes, tail_elements);
+            }
+            const uint32_t byte_offset = static_cast<uint32_t>(
+                image * image_rows * row_elements * DWIDTH);
+            rpu_launch_v_transpose_spm(
+                addr(0, "v") + byte_offset, addr(0, "sdpa_tmp"),
+                /*batch=*/1, image_rows, num_q_heads(), head_dim(), num_cores());
+            rpu_launch_sdpa_by_mha_spm(
+                addr(0, "q") + byte_offset, addr(0, "k") + byte_offset,
+                addr(0, "sdpa_tmp"), addr(0, "sdpa_out") + byte_offset,
+                /*mask_spm=*/0, /*MASK_NONE=*/0, scale,
+                /*batch=*/1, image_rows, image_rows, num_q_heads(), num_q_heads(),
+                head_dim(), num_cores());
+        }
+    }
+
     bool qwen3vl_2b_delivery_profile_active() const {
         return !pipeline_dispatch_active() &&
             delivery_compatibility_ && !linear_acc32_ &&
@@ -4105,7 +4409,18 @@ protected:
         const int64_t mrows = seq / 4, local_mh = mh / num_cores();
         const int64_t norm_rows = postshuffle_norm ? mrows : seq;
         const int64_t norm_hidden = postshuffle_norm ? mh : h;
-        // weights → shared SPM slots (ln_q γ/β broadcast; m0 bias col-scatter; m2 bias row).
+        const int64_t parameter_ordinal = sequence_rows == 0 ? invocation :
+            invocation / static_cast<int64_t>(merger_compute_chunks(ctx().stage_plan).size());
+        const auto parameter = [&](int role, const char* shared) {
+            return addr(0, resident_preloads_enabled() ? resident_merger_name(parameter_ordinal, role) : shared);
+        };
+        const uint32_t norm_w = parameter(0, "merger_ln_q_w");
+        const uint32_t norm_b = parameter(1, "merger_ln_q_b");
+        const uint32_t m0_bias = parameter(2, "merger_m0_bias");
+        const uint32_t m2_bias = parameter(3, "merger_m2_bias");
+        // Resident banks were initialized by the owner's validated cold prime.
+        // Legacy paths retain their per-merger shared-slot refresh.
+        if (!resident_preloads_enabled()) {
         if (pipeline_dispatch_active()) {
             rpu_launch_ddr_broadcast_spm_dma(
                 ln_q_w, /*src_offset_elements=*/0, norm_hidden,
@@ -4137,17 +4452,18 @@ protected:
                 m2_b.data_ptr<c10::Half>(), oh,
                 addr(0, "merger_m2_bias"), /*num_cores=*/1);
         }
+        }
         // LN + reshape order is selected above; both paths present [mrows,mh]
         // to m0, then run GELU → m2 row → all-reduce.
         rpu_launch_layernorm_spm_kernel(in_addr, addr(0, "merger_normed"),
-            addr(0, "merger_ln_q_w"), addr(0, "merger_ln_q_b"),
+            norm_w, norm_b,
             norm_rows, norm_hidden, merger_ln_eps_, false, 0, num_cores());
         consume_manifest_route(
             FmbRouteFamily::LINEAR, QWEN3VL_MERGER_M0_LINEAR_SITE,
             static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
             invocation);
         rpu_launch_linear_spm_to_spm_acc16_kernel(addr(0, "merger_normed"), m0_w, addr(0, "merger_mid"),
-            mrows, mh, mh, /*col*/1, num_cores(), addr(0, "merger_m0_bias"), m0_scale,
+            mrows, mh, mh, /*col*/1, num_cores(), m0_bias, m0_scale,
             /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
             /*force_acc32=*/linear_acc32_);
         if (rhinovla_high_precision_) {
@@ -4168,7 +4484,7 @@ protected:
             static_cast<int64_t>(FmbLinearRouteSelector::AUTO_TILE),
             invocation);
         rpu_launch_linear_spm_to_spm_acc16_kernel(addr(0, "merger_mid"), m2_w, addr(0, "merger_normed"),
-            mrows, oh, mh, /*row*/0, num_cores(), addr(0, "merger_m2_bias"), m2_scale,
+            mrows, oh, mh, /*row*/0, num_cores(), m2_bias, m2_scale,
             /*nvfp4_tensor_scale_spm_addr=*/0, /*nvfp4_layer_id=*/0,
             /*force_acc32=*/linear_acc32_);
         zero_owner_spm(addr(0, "merger_zero"), mrows * oh);
@@ -4358,8 +4674,8 @@ protected:
 
         // inc-2: deepstack mergers. Each reads its layer's snapshot (DMA DDR→"merger_in") and
         // writes a STABLE merged slot (fixed DMA → deterministic, no post_output drift). Replaces
-        // the eager CPU-LN + RPU-GEMM deepstack mergers (kills 3 CPU LNs + 6 eager GEMMs + bounces).
-        if (deepstack_merger_active()) {
+        // the eager CPU-LN + device-GEMM deepstack mergers (kills 3 CPU LNs + 6 eager GEMMs + bounces).
+        if (deepstack_merger_active() && !tap_merger_for_plan(ctx().stage_plan)) {
             for (size_t k = 0; k < deepstack_visual_indexes_.size(); ++k) {
                 auto key = std::make_pair(deepstack_visual_indexes_[k], seq);
                 rpu_launch_ddr_broadcast_spm_dma(
@@ -4607,7 +4923,7 @@ private:
                     weight.size(1) == in_cols &&
                     weight.numel() == out_rows * in_cols,
                 "Qwen3VLVisionModel multiview ", name,
-                " must be a contiguous 2D RPU [", out_rows, ",",
+                " must be a contiguous 2D device [", out_rows, ",",
                 in_cols, "] weight at layer ", layer);
             if (weight.scalar_type() == at::kHalf) {
                 TORCH_CHECK(
@@ -4628,7 +4944,7 @@ private:
                     scale.is_contiguous() && scale.dim() == 1 &&
                     scale.numel() == out_rows,
                 "Qwen3VLVisionModel multiview ", name,
-                " W8 scale must be contiguous per-channel FP16 RPU [",
+                " W8 scale must be contiguous per-channel FP16 device [",
                 out_rows, "] at layer ", layer);
             return MultiviewLinearProfile::W8A16;
         };
@@ -4712,7 +5028,7 @@ private:
                     tensor.device().type() == at::kPrivateUse1 &&
                     tensor.layout() == c10::Layout::Strided &&
                     tensor.is_contiguous() && tensor.numel() >= min_numel,
-                "Qwen3VLVisionModel pooler Z1 requires contiguous FP16 RPU ",
+                "Qwen3VLVisionModel pooler Z1 requires contiguous FP16 device ",
                 name, " with at least ", min_numel, " elements at layer ",
                 layer);
         };
@@ -4790,7 +5106,7 @@ private:
                             QWEN3VL_POOLER_Z1_NUM_PATCHES &&
                         position_idx_keepalive_.size(1) == 2,
                     "Qwen3VLVisionModel pooler Z1 position owner must be "
-                    "contiguous int16 RPU [>=256,2]");
+                    "contiguous int16 device [>=256,2]");
 
         const int64_t mh = merge_hidden_;
         const int64_t oh = merger_out_hidden_;
@@ -4842,7 +5158,7 @@ private:
                     tensor.layout() == c10::Layout::Strided &&
                     tensor.is_contiguous() && tensor.numel() >= min_numel,
                 "Qwen3VLVisionModel pooler Z1 retained DeepStack requires "
-                "contiguous FP16 RPU ", name, " at ordinal ", ordinal,
+                "contiguous FP16 device ", name, " at ordinal ", ordinal,
                 " with at least ", min_numel, " elements");
         };
         auto require_vector = [&require_fp16_owner](
@@ -4910,6 +5226,25 @@ private:
     std::vector<int64_t> kvinsert_cost_weight_identity() const override {
         if (layer_weights_.empty()) return {};
         std::vector<int64_t> identity{1};
+        if (tap_merger_enabled_) {
+            identity.insert(identity.end(), {QWEN3VL_TAP_MERGER_SCHEDULE_SITE, 1});
+        }
+        if (lingbot_fc1_gelu_mode_) {
+            identity.insert(identity.end(), {QWEN3VL_LINGBOT_FC1_GELU_SITE, lingbot_fc1_gelu_mode_});
+        }
+        if (lingbot_qkv_joint_mode_) {
+            identity.push_back(QWEN3VL_LINGBOT_QKV_JOINT_SITE);
+            const auto arguments = lingbot_qkv_joint_arguments();
+            identity.insert(identity.end(), arguments.begin(), arguments.end());
+        }
+        if (lingbot_residual_resident_mode_) {
+            identity.insert(identity.end(), {QWEN3VL_LINGBOT_RESIDUAL_RESIDENT_SITE, 2, lingbot_residual_resident_mode_});
+        }
+        if (lingbot_spm_kv_mode_) {
+            identity.push_back(QWEN3VL_LINGBOT_SPM_KV_ATTN_SITE);
+            const auto arguments = lingbot_spm_kv_arguments();
+            identity.insert(identity.end(), arguments.begin(), arguments.end());
+        }
         if (rhinovla_high_precision_) {
             identity.insert(identity.end(), {RHINOVLA_VISION_HIGH_ACTIVATION_SITE, 2});
         }
@@ -5031,6 +5366,90 @@ private:
     void set_fast_replay_skip_layer_loop(bool e) { if (fast_replay_skip_layer_loop_ != e) { fast_replay_skip_layer_loop_ = e; invalidate_model_state(); } }
     void set_preload_replay_skip(bool e) { if (preload_replay_skip_ != e) { preload_replay_skip_ = e; invalidate_model_state(); } }
     void set_bake_merger(bool e) { if (bake_merger_ != e) { bake_merger_ = e; invalidate_model_state(); } }
+    static const char* resident_merger_name(int64_t ordinal, int role) {
+        static const char* const names[4][4] = {
+            {"merger_p_norm_w", "merger_p_norm_b", "merger_p_m0_bias", "merger_p_m2_bias"},
+            {"merger_d0_norm_w", "merger_d0_norm_b", "merger_d0_m0_bias", "merger_d0_m2_bias"},
+            {"merger_d1_norm_w", "merger_d1_norm_b", "merger_d1_m0_bias", "merger_d1_m2_bias"},
+            {"merger_d2_norm_w", "merger_d2_norm_b", "merger_d2_m0_bias", "merger_d2_m2_bias"}};
+        TORCH_CHECK(ordinal >= 0 && ordinal < 4 && role >= 0 && role < 4,
+                    "resident Vision merger ordinal/parameter is out of range");
+        return names[ordinal][role];
+    }
+    void preload_resident_merger(int ordinal) {
+        const int64_t norm_hidden = ordinal == 0 ? hidden_size() : merge_hidden_;
+        const int64_t local_mh = merge_hidden_ / num_cores();
+        const auto& nw = ordinal == 0 ? merger_ln_q_w_ : ds_merger_ln_q_w_.at(ordinal - 1);
+        const auto& nb = ordinal == 0 ? merger_ln_q_b_ : ds_merger_ln_q_b_.at(ordinal - 1);
+        const auto& b0 = ordinal == 0 ? merger_m0_b_ : ds_merger_m0_b_.at(ordinal - 1);
+        const auto& b2 = ordinal == 0 ? merger_m2_b_ : ds_merger_m2_b_.at(ordinal - 1);
+        rpu_launch_ddr_broadcast_spm_dma(nw, 0, norm_hidden,
+            addr(0, resident_merger_name(ordinal, 0)), num_cores());
+        rpu_launch_ddr_broadcast_spm_dma(nb, 0, norm_hidden,
+            addr(0, resident_merger_name(ordinal, 1)), num_cores());
+        rpu_launch_ddr_scatter_spm_dma(b0, 0, local_mh, local_mh * DWIDTH,
+            addr(0, resident_merger_name(ordinal, 2)), num_cores());
+        const auto row_bias = addr(0, resident_merger_name(ordinal, 3));
+        zero_owner_spm(row_bias, merger_out_hidden_);
+        rpu_launch_ddr_broadcast_spm_dma(b2, 0, merger_out_hidden_, row_bias, 1);
+    }
+    void enable_resident_preloads() {
+        TORCH_CHECK(!pipeline_dispatch_active() && num_cores() == 8 &&
+                        num_layers() == 24 && hidden_size() == 1024 &&
+                        intermediate_size() == 4096 && merge_hidden_ == 4096 &&
+                        merger_out_hidden_ == 2560 && deepstack_merger_active() &&
+                        deepstack_visual_indexes_ == std::vector<int64_t>({5, 11, 17}) &&
+                        !fp16_chunked_merger_enabled_ && !fp16_compact_encoder_enabled_ &&
+                        !w8_compact_encoder_enabled_,
+                    "resident Vision preloads require the ordinary LingBot 4B TP8 owner");
+        std::vector<std::string> names{"ln1_gamma"};
+        for (int ordinal = 0; ordinal < 4; ++ordinal)
+            names.emplace_back(resident_merger_name(ordinal, 0));
+        configure_resident_preloads(std::move(names));
+    }
+    void prepare_resident_spm(int64_t num_patches, int64_t image_batch_count) {
+        TORCH_CHECK(resident_preloads_enabled() && num_patches > 0 &&
+                        num_patches <= QWEN3VL_VISION_MAX_KEEPALIVE_SEQ &&
+                        image_batch_count > 0 && num_patches % image_batch_count == 0 &&
+                        (num_patches / image_batch_count) % 4 == 0,
+                    "resident Vision reservation requires complete per-image patch groups");
+        const auto saved_rows = current_num_patches_;
+        const auto saved_batch = image_batch_count_;
+        auto restore = c10::make_scope_exit([&] {
+            current_num_patches_ = saved_rows;
+            image_batch_count_ = saved_batch;
+        });
+        current_num_patches_ = num_patches;
+        image_batch_count_ = image_batch_count;
+        prepare_persistent_spm(num_patches, 0, false, 0);
+    }
+    void set_lingbot_tap_merger(bool enabled) {
+        RpuExecutionCoordinator::require_graph_quiescent("lingbot_vision_tap_merger");
+        TORCH_CHECK(get_last_resolved_chunk_size() == 0 && !pipeline_dispatch_active() &&
+                        !multiview_composite_prepared_ && !z1_adopted_,
+                    "LingBot tap merger requires a cold ordinary Vision owner");
+        TORCH_CHECK(!enabled || (num_cores() == 8 && num_layers() == 24 &&
+                        hidden_size() == 1024 && intermediate_size() == 4096 &&
+                        merge_hidden_ == 4096 && merger_out_hidden_ == 2560 &&
+                        deepstack_merger_active() &&
+                        deepstack_visual_indexes_ == std::vector<int64_t>({5, 11, 17}) &&
+                        !fp16_chunked_merger_enabled_ && !w8_compact_encoder_enabled_ &&
+                        !fp16_compact_encoder_enabled_),
+                    "LingBot tap merger requires complete 4B TP8 Vision/merger weights");
+        const int64_t fc1_gelu_mode = enabled ? select_lingbot_fc1_gelu_mode() : 0;
+        const int64_t residual_mode = enabled ? select_lingbot_residual_resident_mode() : 0;
+        const int64_t qkv_joint_mode = enabled ? select_lingbot_qkv_joint_mode() : 0;
+        // V_TRANSPOSE_SPM_VCTXLEN is mandatory MAIN and already loaded before
+        // optional capability publication; has_loaded only accepts optional IDs.
+        const int64_t spm_kv_mode = residual_mode &&
+            KernelCache::instance().has_loaded(KernelId::LINGBOT2_VISION_SDPA_SPM_B3S256H16D64_32B) ? residual_mode : 0;
+        tap_merger_enabled_ = enabled;
+        lingbot_fc1_gelu_mode_ = fc1_gelu_mode;
+        lingbot_qkv_joint_mode_ = qkv_joint_mode;
+        lingbot_residual_resident_mode_ = residual_mode;
+        lingbot_spm_kv_mode_ = spm_kv_mode;
+        invalidate_model_state();
+    }
     // MR-C / T31 (B3): takes the target TENSORS, not integer addresses. See the
     // keepalive members for why. Validation is now possible at all — an integer
     // could only be checked against 0, whereas a Tensor can be checked for
@@ -5044,7 +5463,7 @@ private:
         auto check_target = [](const at::Tensor& t, const char* what) {
             TORCH_CHECK(t.defined(), "set_prefix_scatter: ", what, " is undefined");
             TORCH_CHECK(t.device().type() == at::kPrivateUse1,
-                        "set_prefix_scatter: ", what, " must be on the RPU device, got ",
+                        "set_prefix_scatter: ", what, " must be on the device, got ",
                         t.device());
             TORCH_CHECK(t.scalar_type() == at::kHalf,
                         "set_prefix_scatter: ", what, " must be fp16, got ", t.scalar_type());
@@ -5084,6 +5503,291 @@ private:
         }
     }
    private:
+    bool tap_merger_enabled_ = false;
+    // 0=ordinary pair, 1=W8A16, 2=FP16. Bound only by the LingBot cold setter.
+    int64_t lingbot_fc1_gelu_mode_ = 0;
+    int64_t lingbot_qkv_joint_mode_ = 0;
+    int64_t lingbot_residual_resident_mode_ = 0;
+    int64_t lingbot_spm_kv_mode_ = 0;
+    // Cold, model-local admission. Residual residency changes no arithmetic,
+    // Q staging, attention route, or BufferDecl; all four mergers remain FP16.
+    int64_t select_lingbot_residual_resident_mode() const {
+        if (linear_acc32_ || rhinovla_high_precision_ || num_cores() != 8 ||
+            num_layers() != 24 || hidden_size() != 1024 || intermediate_size() != 4096 ||
+            num_q_heads() != 16 || head_dim() != 64 || orig_head_dim_ != 64 ||
+            !fused_merger_enabled_ || merge_hidden_ != 4096 || merger_out_hidden_ != 2560 ||
+            deepstack_visual_indexes_ != std::vector<int64_t>{5, 11, 17} ||
+            layer_weights_.size() != 24 || !layer_weights_.front().q_w.defined()) return 0;
+        const auto dtype = layer_weights_.front().q_w.scalar_type();
+        if (dtype != at::kHalf && dtype != at::kChar) return 0;
+        const auto valid = [](const at::Tensor& tensor, at::ScalarType type,
+                              std::initializer_list<int64_t> shape) {
+            return tensor.defined() && tensor.scalar_type() == type &&
+                tensor.device().type() == at::kPrivateUse1 && tensor.is_contiguous() &&
+                tensor.sizes() == at::IntArrayRef(shape);
+        };
+        for (const auto& weights : layer_weights_) {
+            const at::Tensor* matrices[] = {&weights.q_w, &weights.k_w, &weights.v_w,
+                &weights.o_w, &weights.fc1_w, &weights.fc2_w};
+            const at::Tensor* scales[] = {&weights.q_ws, &weights.k_ws, &weights.v_ws,
+                &weights.o_ws, &weights.fc1_ws, &weights.fc2_ws};
+            for (int role = 0; role < 6; ++role) {
+                const int64_t rows = role == 4 ? 4096 : 1024;
+                const int64_t cols = role == 5 ? 4096 : 1024;
+                if (!valid(*matrices[role], dtype, {rows, cols}) ||
+                    (dtype == at::kChar ? !valid(*scales[role], at::kHalf, {rows})
+                                       : scales[role]->defined())) return 0;
+            }
+        }
+        for (const auto* list : {&ds_merger_ln_q_w_, &ds_merger_ln_q_b_,
+                &ds_merger_m0_w_, &ds_merger_m0_b_, &ds_merger_m2_w_, &ds_merger_m2_b_,
+                &ds_merger_m0_scale_, &ds_merger_m2_scale_}) {
+            if (list->size() != 3) return 0;
+        }
+        for (int ordinal = -1; ordinal < 3; ++ordinal) {
+            const auto& norm_w = ordinal < 0 ? merger_ln_q_w_ : ds_merger_ln_q_w_[ordinal];
+            const auto& norm_b = ordinal < 0 ? merger_ln_q_b_ : ds_merger_ln_q_b_[ordinal];
+            const auto& m0 = ordinal < 0 ? merger_m0_w_ : ds_merger_m0_w_[ordinal];
+            const auto& b0 = ordinal < 0 ? merger_m0_b_ : ds_merger_m0_b_[ordinal];
+            const auto& m2 = ordinal < 0 ? merger_m2_w_ : ds_merger_m2_w_[ordinal];
+            const auto& b2 = ordinal < 0 ? merger_m2_b_ : ds_merger_m2_b_[ordinal];
+            const auto& s0 = ordinal < 0 ? merger_m0_scale_ : ds_merger_m0_scale_[ordinal];
+            const auto& s2 = ordinal < 0 ? merger_m2_scale_ : ds_merger_m2_scale_[ordinal];
+            if (!valid(norm_w, at::kHalf, {ordinal < 0 ? 1024 : 4096}) ||
+                !valid(norm_b, at::kHalf, {ordinal < 0 ? 1024 : 4096}) ||
+                !valid(m0, at::kHalf, {4096, 4096}) || !valid(b0, at::kHalf, {4096}) ||
+                !valid(m2, at::kHalf, {2560, 4096}) || !valid(b2, at::kHalf, {2560}) ||
+                s0.defined() || s2.defined()) return 0;
+        }
+        return dtype == at::kChar ? 1 : 2;
+    }
+    bool lingbot_residual_resident_chunk(int64_t chunk_size) const {
+        return tap_merger_enabled_ && lingbot_residual_resident_mode_ != 0 &&
+            !linear_acc32_ && !rhinovla_high_precision_ && !delivery_compatibility_ &&
+            !pipeline_dispatch_active() && !z1_adopted_ && !z1_bound_ && !z1_dispatch_ &&
+            z1_prepared_num_patches_ == 0 && !native_composite_prepare_active_ &&
+            !multiview_dry_prepared_ && !multiview_composite_prepared_ && !multiview_composite_dispatch_ &&
+            !fp16_chunked_merger_enabled_ && !fp16_compact_encoder_enabled_ && !w8_compact_encoder_enabled_ &&
+            image_batch_count_ == 3 && current_num_patches_ == 768 && chunk_size == 768 &&
+            num_cores() == 8 && num_layers() == 24 && hidden_size() == 1024 &&
+            intermediate_size() == 4096 && num_q_heads() == 16 && head_dim() == 64 &&
+            orig_head_dim_ == 64 && fused_merger_enabled_ &&
+            merge_hidden_ == 4096 && merger_out_hidden_ == 2560;
+    }
+    bool lingbot_residual_resident_for_plan(const FmbThreeStageChunkPlan& plan) const {
+        if (!lingbot_residual_resident_chunk(plan.compute.plan.chunk_size) ||
+            plan.chunk_mode != ChunkMode::SEQUENTIAL || plan.spans.size() != 3) return false;
+        for (const auto* stage : {&plan.input, &plan.qkv, &plan.compute}) {
+            if (stage->plan.chunk_size != 768 || stage->chunks.size() != 1) return false;
+            const auto& chunk = stage->chunks.front();
+            if (chunk.idx != 0 || chunk.offset != 0 || chunk.len != 768 || chunk.kv_seq_len != 768) return false;
+        }
+        for (int64_t image = 0; image < 3; ++image) {
+            const auto& span = plan.spans[image];
+            if (span.offset != image * 256 || span.len != 256 || span.group_id != image) return false;
+        }
+        return true;
+    }
+    std::vector<int64_t> lingbot_residual_resident_arguments(
+        AttentionExecutionPolicy attention = AttentionExecutionPolicy::DDR_KV) const {
+        std::vector<int64_t> arguments{2, lingbot_residual_resident_mode_, 768, 3, 256, 24, 1024, 4096, 16, 64, 8,
+                2560, 5, 11, 17, static_cast<int64_t>(ChunkMode::SEQUENTIAL),
+                static_cast<int64_t>(InterLayerIO::SPM_RESIDENT), /*Q resident=*/1};
+        if (attention == AttentionExecutionPolicy::SPM_KV_BY_MHA) {
+            arguments[0] = 3;
+            arguments.push_back(static_cast<int64_t>(attention));
+        }
+        return arguments;
+    }
+    bool lingbot_spm_kv_chunk(int64_t chunk_size) const {
+        return lingbot_spm_kv_mode_ != 0 && lingbot_spm_kv_mode_ == lingbot_residual_resident_mode_ &&
+            lingbot_residual_resident_chunk(chunk_size);
+    }
+    bool lingbot_spm_kv_for_plan(const FmbThreeStageChunkPlan& plan) const {
+        return lingbot_spm_kv_chunk(plan.compute.plan.chunk_size) && lingbot_residual_resident_for_plan(plan);
+    }
+    bool lingbot_spm_kv_layout(const LayoutContext& layout) const {
+        return lingbot_spm_kv_chunk(layout.chunk_size) && layout.effective_kv_cs() == 768 &&
+            layout.max_kv_seq_len == 768 && !layout.is_causal && !layout.use_attn_mask &&
+            layout.batch_size == 1 && layout.attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA;
+    }
+    std::vector<int64_t> lingbot_spm_kv_arguments() const {
+        // Version, precision owner, packed shape, exact original 32b tiling,
+        // grid, scratch/Vt, mask, float32(.125) bits and arithmetic width.
+        return {1, lingbot_spm_kv_mode_, 768, 3, 256, 16, 16, 64, 8,
+                128, 64, 256, 6, 2, 1, 393216, 196608, 0, 1040187392, 32};
+    }
+    bool validate_lingbot_spm_kv_route(const ChunkInfo& chunk) {
+        const bool selected = lingbot_spm_kv_chunk(ctx().stage_plan.compute.plan.chunk_size) &&
+            ctx().attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA;
+        bool recorded = false;
+        if (ctx().has_complete_physical_manifest()) {
+            const auto& routes = ctx().physical_manifest().routes;
+            recorded = std::any_of(routes.begin(), routes.end(), [](const auto& route) {
+                return route.site_id == QWEN3VL_LINGBOT_SPM_KV_ATTN_SITE;
+            });
+        }
+        TORCH_CHECK(selected == recorded, "LingBot SPM-KV differs from its COMPLETE descriptor");
+        if (!selected) return false;
+        TORCH_CHECK(lingbot_spm_kv_for_plan(ctx().stage_plan) && chunk.idx == 0 && chunk.offset == 0 &&
+                        chunk.len == 768 && chunk.kv_seq_len == 768 && ctx().position == 0 &&
+                        ctx().batch_size == 1 && !ctx().is_causal && !ctx().attention_mask.has_value(),
+                    "LingBot SPM-KV requires its exact unmasked three-image plan");
+        const auto& route = ctx().find_physical_route(
+            FmbRouteFamily::ATTENTION, QWEN3VL_LINGBOT_SPM_KV_ATTN_SITE, chunk.idx);
+        TORCH_CHECK(route.selector == static_cast<int64_t>(AttentionExecutionPolicy::SPM_KV_BY_MHA) &&
+                        route.flags == 0 && route.arguments == lingbot_spm_kv_arguments(),
+                    "LingBot SPM-KV exact 32b K256 descriptor drift");
+        return true;
+    }
+    bool consume_lingbot_residual_resident_schedule(int layer_idx, const ChunkInfo& chunk) {
+        const bool selected = lingbot_residual_resident_for_plan(ctx().stage_plan);
+        TORCH_CHECK(!lingbot_residual_resident_chunk(ctx().stage_plan.compute.plan.chunk_size) || selected,
+                    "LingBot residual residency requires one exact chunk in every stage");
+        bool recorded = false;
+        if (ctx().has_complete_physical_manifest()) {
+            const auto& routes = ctx().physical_manifest().routes;
+            recorded = std::any_of(routes.begin(), routes.end(), [](const auto& route) {
+                return route.site_id == QWEN3VL_LINGBOT_RESIDUAL_RESIDENT_SITE;
+            });
+        }
+        TORCH_CHECK(selected == recorded,
+                    "LingBot residual residency differs from its COMPLETE descriptor");
+        if (!selected) return false;
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < 24 && chunk.idx == 0 && chunk.offset == 0 &&
+                        chunk.len == 768 && chunk.kv_seq_len == 768 &&
+                        ctx().position == 0 && ctx().batch_size == 1 && !ctx().is_causal && !ctx().attention_mask.has_value() &&
+                        (ctx().attention_policy == AttentionExecutionPolicy::DDR_KV ||
+                         (ctx().attention_policy == AttentionExecutionPolicy::SPM_KV_BY_MHA &&
+                          lingbot_spm_kv_for_plan(ctx().stage_plan))) &&
+                        ctx().input_in_spm == (layer_idx != 0) && ctx().output_to_spm == (layer_idx != 23),
+                    "LingBot residual/Q residency requires its exact SEQUENTIAL traversal and SPM handoff");
+        ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
+            QWEN3VL_LINGBOT_RESIDUAL_RESIDENT_SITE, 1, 0,
+            lingbot_residual_resident_arguments(ctx().attention_policy));
+        return true;
+    }
+    int64_t select_lingbot_qkv_joint_mode() const {
+        if (linear_acc32_ || rhinovla_high_precision_ || num_cores() != 8 ||
+            num_layers() != 24 || hidden_size() != 1024 || intermediate_size() != 4096 ||
+            num_q_heads() != 16 || head_dim() != 64 || orig_head_dim_ != 64 ||
+            layer_weights_.size() != 24 || layer_bias_norm_.size() != 24 ||
+            !layer_weights_.front().q_w.defined()) return 0;
+        const auto dtype = layer_weights_.front().q_w.scalar_type();
+        if (dtype != at::kHalf && dtype != at::kChar) return 0;
+        const auto valid = [](const at::Tensor& tensor, at::ScalarType type,
+                              at::IntArrayRef shape) {
+            return tensor.defined() && tensor.device().type() == at::kPrivateUse1 &&
+                tensor.scalar_type() == type && tensor.is_contiguous() && tensor.sizes() == shape;
+        };
+        for (size_t layer = 0; layer < layer_weights_.size(); ++layer) {
+            const auto& weight = layer_weights_[layer];
+            const auto& bias = layer_bias_norm_[layer];
+            const at::Tensor* matrices[] = {&weight.q_w, &weight.k_w, &weight.v_w};
+            const at::Tensor* scales[] = {&weight.q_ws, &weight.k_ws, &weight.v_ws};
+            const at::Tensor* biases[] = {&bias.q_b, &bias.k_b, &bias.v_b};
+            for (int role = 0; role < 3; ++role) {
+                if (!valid(*matrices[role], dtype, {1024, 1024}) ||
+                    !valid(*biases[role], at::kHalf, {1024}) ||
+                    (dtype == at::kChar ? !valid(*scales[role], at::kHalf, {1024})
+                                       : scales[role]->defined())) return 0;
+            }
+        }
+        const auto id = dtype == at::kChar ? KernelId::LINGBOT2_VISION_QKV_JOINT_W8_M768
+                                         : KernelId::LINGBOT2_VISION_QKV_JOINT_FP16_M768;
+        return KernelCache::instance().has_loaded(id) ? (dtype == at::kChar ? 1 : 2) : 0;
+    }
+    bool lingbot_qkv_joint_for_plan(const FmbThreeStageChunkPlan& plan) const {
+        return lingbot_qkv_joint_mode_ != 0 &&
+            lingbot_qkv_joint_mode_ == lingbot_residual_resident_mode_ &&
+            lingbot_residual_resident_for_plan(plan);
+    }
+    std::vector<int64_t> lingbot_qkv_joint_arguments() const {
+        // Version, precision, M/N/K, local N, TP, col partition, bias,
+        // unchanged tile M/N/K and the joint projection grid.
+        return {1, lingbot_qkv_joint_mode_, 768, 1024, 1024, 128, 8, 1, 1,
+                lingbot_qkv_joint_mode_ == 1 ? 288 : 480,
+                lingbot_qkv_joint_mode_ == 1 ? 128 : 64, 128,
+                lingbot_qkv_joint_mode_ == 1 ? 3 : 6,
+                lingbot_qkv_joint_mode_ == 1 ? 3 : 2};
+    }
+    bool validate_lingbot_qkv_joint_route(int layer_idx, const ChunkInfo& chunk) {
+        const bool selected = lingbot_qkv_joint_for_plan(ctx().stage_plan);
+        bool recorded = false;
+        if (ctx().has_complete_physical_manifest()) {
+            const auto& routes = ctx().physical_manifest().routes;
+            recorded = std::any_of(routes.begin(), routes.end(), [](const auto& route) {
+                return route.site_id == QWEN3VL_LINGBOT_QKV_JOINT_SITE;
+            });
+        }
+        TORCH_CHECK(selected == recorded, "LingBot joint QKV differs from its COMPLETE descriptor");
+        if (!selected) return false;
+        TORCH_CHECK(layer_idx >= 0 && layer_idx < 24 && chunk.idx == 0 && chunk.offset == 0 &&
+                        chunk.len == 768 && chunk.kv_seq_len == 768 && ctx().position == 0 &&
+                        ctx().batch_size == 1 && !ctx().is_causal && !ctx().attention_mask.has_value(),
+                    "LingBot joint QKV requires its exact unmasked three-image plan");
+        const auto& route = ctx().find_physical_route(
+            FmbRouteFamily::LINEAR, QWEN3VL_LINGBOT_QKV_JOINT_SITE, chunk.idx);
+        TORCH_CHECK(route.selector == 1 && route.flags == 0 &&
+                        route.arguments == lingbot_qkv_joint_arguments(),
+                    "LingBot joint QKV descriptor drift");
+        return true;
+    }
+    int64_t select_lingbot_fc1_gelu_mode() const {
+        if (linear_acc32_ || rhinovla_high_precision_ || num_cores() != 8 ||
+            num_layers() != 24 || hidden_size() != 1024 || intermediate_size() != 4096 ||
+            num_q_heads() != 16 || head_dim() != 64 ||
+            layer_weights_.size() != 24 || layer_bias_norm_.size() != 24 ||
+            !layer_weights_.front().fc1_w.defined()) return 0;
+        const auto dtype = layer_weights_.front().fc1_w.scalar_type();
+        if (dtype != at::kHalf && dtype != at::kChar) return 0;
+        for (size_t i = 0; i < layer_weights_.size(); ++i) {
+            const auto& weight = layer_weights_[i].fc1_w;
+            const auto& scale = layer_weights_[i].fc1_ws;
+            const auto& bias = layer_bias_norm_[i].fc1_b;
+            if (!weight.defined() || weight.device().type() != at::kPrivateUse1 ||
+                weight.scalar_type() != dtype || !weight.is_contiguous() ||
+                weight.dim() != 2 || weight.size(0) != 4096 || weight.size(1) != 1024 ||
+                !bias.defined() || bias.device().type() != at::kPrivateUse1 ||
+                bias.scalar_type() != at::kHalf || !bias.is_contiguous() ||
+                bias.dim() != 1 || bias.size(0) != 4096) return 0;
+            if (dtype == at::kChar) {
+                if (!scale.defined() || scale.device().type() != at::kPrivateUse1 ||
+                    scale.scalar_type() != at::kHalf || !scale.is_contiguous() ||
+                    scale.dim() != 1 || scale.size(0) != 4096) return 0;
+            } else if (scale.defined()) return 0;
+        }
+        const auto id = dtype == at::kChar ? KernelId::LINGBOT2_VISION_FC1_GELU_W8
+                                         : KernelId::LINGBOT2_VISION_FC1_GELU_FP16;
+        return KernelCache::instance().has_loaded(id) ? (dtype == at::kChar ? 1 : 2) : 0;
+    }
+    bool lingbot_fc1_gelu_for_plan(const FmbThreeStageChunkPlan& plan) const {
+        if (!tap_merger_enabled_ || !lingbot_fc1_gelu_mode_ || linear_acc32_ ||
+            rhinovla_high_precision_ || pipeline_dispatch_active() || z1_adopted_ ||
+            z1_bound_ || z1_dispatch_ || native_composite_prepare_active_ ||
+            multiview_dry_prepared_ || multiview_composite_prepared_ || multiview_composite_dispatch_ ||
+            image_batch_count_ != 3 || current_num_patches_ != 768 ||
+            num_cores() != 8 || num_layers() != 24 || hidden_size() != 1024 ||
+            intermediate_size() != 4096 || num_q_heads() != 16 || head_dim() != 64) return false;
+        for (const auto* stage : {&plan.input, &plan.qkv, &plan.compute}) {
+            if (stage->plan.chunk_size != 768 || stage->chunks.size() != 1 ||
+                stage->chunks.front().idx != 0 || stage->chunks.front().offset != 0 ||
+                stage->chunks.front().len != 768) return false;
+        }
+        return true;
+    }
+    std::vector<int64_t> lingbot_fc1_gelu_arguments() const {
+        return {lingbot_fc1_gelu_mode_, 768, 4096, 512, 1024, 8, 1,
+                lingbot_fc1_gelu_mode_ == 1 ? 400 : 384,
+                lingbot_fc1_gelu_mode_ == 1 ? 80 : 96, 128};
+    }
+    bool tap_merger_for_plan(const FmbThreeStageChunkPlan& plan) const {
+        return tap_merger_enabled_ && !pipeline_dispatch_active() &&
+            deepstack_merger_active() && plan.compute.chunks.size() == 1 &&
+            plan.compute.chunks.front().offset == 0 &&
+            plan.compute.chunks.front().len == current_num_patches_ &&
+            current_num_patches_ > 0 && current_num_patches_ % 4 == 0;
+    }
     int64_t current_num_patches_ = 0;
     uint64_t chunked_merger_raw_src_base_ = 0;
     std::map<std::pair<int64_t, int64_t>, at::Tensor> q_ddr_slots_;
@@ -5168,7 +5872,7 @@ private:
     // Bounded, NOT evictable for the same reason as deepstack_ddr_slots_: the
     // slot address is baked into merger_post_fn's fixed DMA at BUILD. Keyed on
     // num_patches alone (one entry per distinct image shape), so it needs no
-    // per-layer multiplier — measured high-water 2 on the gr00t 1img+2img run.
+    // per-layer multiplier.
     rpu::BoundedShapeMap<int64_t, at::Tensor>
         pooler_merged_ddr_slots_{kMaxSlotShapes, rpu::ShapeMapPolicy::Reject,
                                  "Qwen3VLVisionModel::pooler_merged_ddr_slots_"};
@@ -5425,6 +6129,26 @@ std::vector<int64_t> rpu_qwen3vl_vision_resolve_stage_domain(
 void rpu_qwen3vl_vision_set_bake_merger(int64_t handle, bool enabled) {
     Qwen3VLVisionRegistry::get(handle, "rpu_qwen3vl_vision")
         ->set_bake_merger(enabled);
+}
+
+void rpu_qwen3vl_vision_set_lingbot_tap_merger(int64_t handle, bool enabled) {
+    Qwen3VLVisionRegistry::get(handle, "rpu_qwen3vl_vision_set_lingbot_tap_merger")
+        ->set_lingbot_tap_merger(enabled);
+}
+
+void rpu_qwen3vl_vision_enable_resident_preloads(int64_t handle) {
+    Qwen3VLVisionRegistry::get(handle, "qwen3vl_vision_enable_resident_preloads")
+        ->enable_resident_preloads();
+}
+void rpu_qwen3vl_vision_prepare_resident_spm(
+    int64_t handle, int64_t num_patches, int64_t image_batch_count) {
+    Qwen3VLVisionRegistry::get(handle, "qwen3vl_vision_prepare_resident_spm")
+        ->prepare_resident_spm(num_patches, image_batch_count);
+}
+void rpu_qwen3vl_vision_prime_resident_preloads(
+    int64_t handle, at::IntArrayRef descriptor) {
+    Qwen3VLVisionRegistry::get(handle, "qwen3vl_vision_prime_resident_preloads")
+        ->prime_resident_preloads(descriptor);
 }
 
 void rpu_qwen3vl_vision_set_prefix_scatter(
@@ -5754,4 +6478,9 @@ at::Tensor rpu_qwen3vl_vision_pop_pooler_merged(int64_t handle) {
 std::vector<at::Tensor> rpu_qwen3vl_vision_pop_merged(int64_t handle) {
     return Qwen3VLVisionRegistry::get(handle, "rpu_qwen3vl_vision")
         ->pop_merged();
+}
+
+void rpu_qwen3vl_vision_prepare_persistent_spm(int64_t handle, int64_t execution_len) {
+    Qwen3VLVisionRegistry::get(handle, "rpu_qwen3vl_vision_prepare_persistent_spm")
+        ->prepare_persistent_spm(execution_len, 0, false);
 }

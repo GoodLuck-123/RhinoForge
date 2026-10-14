@@ -1,6 +1,6 @@
 """GR00T-N1.7-3B image → action runtime.
 
-The RPU Qwen3-VL backbone produces [1,S,2048] hidden states. The visual-language
+The device Qwen3-VL backbone produces [1,S,2048] hidden states. The visual-language
 encoder applies normalization and self-attention, then a graph-owned Euler
 denoise loop combines state/action encoders, DiT and the action decoder.
 
@@ -9,7 +9,6 @@ subsets have independent prepared native slots. The standalone runtime does
 not require importing the upstream GR00T package."""
 from __future__ import annotations
 import os, math, glob
-import inspect
 from contextlib import nullcontext
 from types import SimpleNamespace
 import torch
@@ -83,30 +82,11 @@ _EXECUTION_COMPONENTS = {
 }
 
 
-def _get_gr00t_rope_index(
-    get_rope_index,
-    *,
-    input_ids,
-    mm_token_type_ids,
-    image_grid_thw,
-    attention_mask,
-):
-    """Call the Qwen3-VL 4.57/5.x M-RoPE API without masking real errors."""
-    kwargs = {
-        "input_ids": input_ids.cpu(),
-        "image_grid_thw": image_grid_thw.cpu(),
-        "video_grid_thw": None,
-        "attention_mask": attention_mask.cpu(),
-    }
-    if "mm_token_type_ids" in inspect.signature(get_rope_index).parameters:
-        kwargs["mm_token_type_ids"] = mm_token_type_ids.cpu()
-    return get_rope_index(**kwargs)
-
-
 def _resolve_gr00t_execution(
     rpu_execution, *, entry_point="build_gr00t_vla", qwen_z1=False,
-    fused_merger=None,
+    fused_merger=None, max_prefix_len=256,
 ):
+    max_prefix_len = _validate_gr00t_max_prefix_len(max_prefix_len, qwen_z1=qwen_z1)
     root = normalize_rpu_execution(
         rpu_execution,
         entry_point=entry_point,
@@ -142,7 +122,7 @@ def _resolve_gr00t_execution(
     )
     _validate_gr00t_execution_geometry(
         text, vision, vl, action, entry_point=entry_point, qwen_z1=qwen_z1,
-        fused_merger=fused_merger,
+        fused_merger=fused_merger, max_prefix_len=max_prefix_len,
     )
     if qwen_z1:
         # AUTO and the admitted exact values name the same frozen native Z1
@@ -167,8 +147,10 @@ def _normalize_gr00t_execution(rpu_execution):
 
 def _validate_gr00t_execution_geometry(
     text, vision, vl, action, *, entry_point, qwen_z1, fused_merger=None,
+    max_prefix_len=256,
 ) -> None:
     """Reject fixed-stage requests that do not match GR00T's real geometry."""
+    max_prefix_len = _validate_gr00t_max_prefix_len(max_prefix_len, qwen_z1=qwen_z1)
     prefill_chunk = text.get("prefill", {}).get(
         "chunk_size", "auto"
     )
@@ -199,10 +181,10 @@ def _validate_gr00t_execution_geometry(
             "loading model weights."
         )
     vl_chunk = vl.get("prefill", {}).get("chunk_size", "auto")
-    if isinstance(vl_chunk, int) and vl_chunk > 256:
+    if isinstance(vl_chunk, int) and vl_chunk > max_prefix_len:
         raise ValueError(
             f"{entry_point}: vl_encoder prefill.chunk_size exceeds its "
-            f"256-row cache/envelope; got {vl_chunk}."
+            f"{max_prefix_len}-row cache/envelope; got {vl_chunk}."
         )
     action_chunk = action.get("action", {}).get("chunk_size", "auto")
     if isinstance(action_chunk, int) and action_chunk != _ACTION_CHUNK_SIZE:
@@ -332,6 +314,22 @@ def _w8a16_on():
     return rpu_env_bool("RPU_GR00T_W8A16")
 
 
+def _precompute_adaln_on():
+    """Cold builder policy; the installed native table owns forward selection."""
+    value = os.environ.get("RPU_GR00T_PRECOMPUTE_ADALN", "")
+    if value not in ("", "0", "1"):
+        raise ValueError("RPU_GR00T_PRECOMPUTE_ADALN must be 0 or 1")
+    return value == "1"
+
+
+def _precompute_time_glue_on():
+    """Cold fixed-timestep projections, independent of the AdaLN opt-in."""
+    value = os.environ.get("RPU_GR00T_PRECOMPUTE_TIME_GLUE", "")
+    if value not in ("", "0", "1"):
+        raise ValueError("RPU_GR00T_PRECOMPUTE_TIME_GLUE must be 0 or 1")
+    return value == "1"
+
+
 def _qwen3vl_spm_z1_on():
     return os.environ.get("RPU_GR00T_QWEN3VL_SPM_Z1", "") in ("1", "true")
 
@@ -344,6 +342,14 @@ def _partial_mrope_on():
     (RPU_WALL_OSS_PARTIAL_MROPE) + tests/model/wall_oss/test_partial_mrope_interleave_equiv.py.
     Default off → legacy path, byte-identical."""
     return rpu_env_bool("RPU_GR00T_PARTIAL_MROPE")
+
+
+def _native_position_cache_on():
+    """Cold adapter policy; the cache keeps the decoder's existing int32 ABI."""
+    value = os.environ.get("RPU_GR00T_NATIVE_POSITION_CACHE", "")
+    if value not in ("", "0", "1"):
+        raise ValueError("RPU_GR00T_NATIVE_POSITION_CACHE must be 0 or 1")
+    return value == "1"
 
 
 def _extract_mrope_params(text_config):
@@ -454,6 +460,8 @@ def _configure_gr00t_denoise_handle(
 ):
     from rpu_backend.api._execution import _require_execution_process_safe
     _require_execution_process_safe()
+    precompute_adaln = _precompute_adaln_on()
+    precompute_time_glue = _precompute_time_glue_on()
     handle = torch.ops.rpu.gr00t_dit_create()
     try:
         if w8a16:
@@ -463,6 +471,12 @@ def _configure_gr00t_denoise_handle(
         else:
             torch.ops.rpu.gr00t_dit_set_weights(handle, *dit_args)
         torch.ops.rpu.gr00t_denoise_set_weights(handle, *denoise_args)
+        if precompute_adaln:
+            # The cold native program uses the installed M1 ACC16 weights,
+            # ring reduction and FP16 +1, preserving the original arithmetic.
+            torch.ops.rpu.gr00t_dit_prepare_adaln_table(handle)
+        if precompute_time_glue:
+            torch.ops.rpu.gr00t_dit_prepare_time_tables(handle)
         return handle
     except BaseException as error:
         _cleanup_gr00t_build_failure(error, (handle, dit_args, dit_scale_args, denoise_args),
@@ -476,6 +490,25 @@ def _clear_graph_cache(owner, attr: str) -> None:
         cache.clear()
         if not cache.cache_invariant_ok():
             raise RuntimeError("GR00T GraphCache invariant failed during close")
+
+
+def _prepare_gr00t_persistent_spm(vision_handle, text_handle, vl_handle, dit_handle):
+    """Reserve the composite's actual fixed declarations before cold planning."""
+    names = ("qwen3vl_vision_prepare_persistent_spm",
+             "gr00t_vl_encoder_prepare_persistent_spm",
+             "gr00t_dit_prepare_persistent_spm")
+    prepare = tuple(getattr(torch.ops.rpu, name, None) for name in names)
+    # Historical task binaries predate automatic FF1 capacity selection and
+    # expose none of this composite barrier. Keep their existing entrypoints
+    # usable; a partially installed barrier must fail before allocating peers.
+    if all(op is None for op in prepare):
+        return
+    if any(op is None for op in prepare):
+        raise RuntimeError("GR00T native Persistent preparation API is incomplete")
+    prepare[0](vision_handle, 256)
+    torch.ops.rpu.causal_decoder_prepare_persistent_spm(text_handle, 256, 0, True)
+    prepare[1](vl_handle, 256)
+    prepare[2](dit_handle, _ACTION_QUERY_ROWS)
 
 
 def _unprepare_qwen3vl_spm_z1(
@@ -669,16 +702,36 @@ def _cleanup_gr00t_partial_build(
         raise
 
 
+def _validate_gr00t_max_prefix_len(max_prefix_len, *, qwen_z1=False):
+    if type(max_prefix_len) is not int or not (0 < max_prefix_len <= 512) or max_prefix_len % 16:
+        raise ValueError("GR00T max_prefix_len must be a positive multiple of 16 no larger than 512")
+    if qwen_z1 and max_prefix_len != 256:
+        raise ValueError("GR00T Qwen3-VL SPM Z1 requires max_prefix_len=256")
+    return max_prefix_len
+
+
+def _validate_gr00t_num_steps(num_steps):
+    if type(num_steps) is not int or num_steps not in (4, 10):
+        raise ValueError("GR00T num_steps must be the integer 4 or 10")
+    return num_steps
+
+
 class Gr00tN1d7VLA:
     """Image→action runtime (fully on-device glue). Build via `build_gr00t_vla(...)`."""
 
     def __init__(self, *, backbone, cfg, text_model, vision_model,
                  a_handle, a_keep, a_cache, d_handle, d_keep, d_cache, image_token_id,
-                 execution_config=None, embodiment_id=20,
-                 qwen_z1_plan_hash=None,
+                 execution_config=None, embodiment_id=20, num_steps=_NSTEPS,
+                 max_prefix_len=256, qwen_z1_plan_hash=None,
                  qwen_z1_vision_stage_descriptor=None):
+        self._num_steps = _validate_gr00t_num_steps(num_steps)
+        self._max_prefix_len = _validate_gr00t_max_prefix_len(
+            max_prefix_len, qwen_z1=qwen_z1_plan_hash is not None)
         self._gc_retirement_enabled = False
         self._closed = False
+        self._native_position_cache = (
+            False if qwen_z1_plan_hash is not None else _native_position_cache_on()
+        )
         self._bb = backbone
         self._cfg = cfg
         self._text = text_model
@@ -699,6 +752,7 @@ class Gr00tN1d7VLA:
             entry_point="Gr00tN1d7VLA",
             qwen_z1=qwen_z1_plan_hash is not None,
             fused_merger=self._vision_fused_merger,
+            max_prefix_len=self._max_prefix_len,
         )
         self._execution_generation = 0
         self._component_generations = {
@@ -737,16 +791,19 @@ class Gr00tN1d7VLA:
                                   max_seq_len=512, num_kv_heads=cfg.text_config.num_key_value_heads,
                                   head_dim=cfg.text_config.head_dim)
         # Opt2/3: per-prompt memo slots (keyed on input_ids identity). rope = CPU M-RoPE index math;
-        # masks = the two cross-attn MASK_2D subsets (cached RPU tensors also pin denoise REPLAY addrs).
+        # masks = the two cross-attn MASK_2D subsets (cached device tensors also pin denoise REPLAY addrs).
         self._rope_key = self._rope_ids = None
-        self._pos_rpu = self._attn_rpu = None   # Strategy-2: RPU position_ids/attention_mask, memoized w/ _rope_ids
+        self._pos_rpu = self._attn_rpu = None   # Strategy-2: device position_ids/attention_mask, memoized w/ _rope_ids
+        self._pos_native_rpu = None
+        self._pos_native_ready = False
         self._mask_key = self._masks = None
-        # Opt-a: inputs_embeds kept RESIDENT on RPU. The base text embedding is prompt-constant; the
-        # image tokens form contiguous runs (1 per image), so each forward overwrites only those
-        # slices with the (per-image) visual embeds on-device — no CPU masked_scatter, no RPU↔CPU
-        # bounce, stable REPLAY address. Memoized on input_ids: the RPU text-embed buffer + the runs.
+        # Private prompt skeletons stay immutable. Each request assembles fresh
+        # text/DeepStack inputs through device DMA before Text capture; its
+        # mutable source bindings retain those owners through synchronous end().
         self._emb_key = self._emb_text_rpu = self._img_runs = None
-        # Opt #2: persistent deepstack dense buffers (one per merger), memoized on input_ids.
+        self._emb_prefix_rpu = None
+        self._emb_assembly_ids = self._img_runs_cpu = None
+        # Zero skeletons keep non-image DeepStack rows zero on every request.
         self._ds_dense = None
         # partial_mrope (opt-in RPU_GR00T_PARTIAL_MROPE): host-bake the per-token interleaved
         # M-RoPE cos/sin ONCE per prompt (memoized on input_ids alongside _rope_ids) and stream it
@@ -929,6 +986,7 @@ class Gr00tN1d7VLA:
             entry_point=entry_point,
             qwen_z1=self._qwen_z1_plan_hash is not None,
             fused_merger=self._vision_fused_merger,
+            max_prefix_len=getattr(self, "_max_prefix_len", 256),
         )
 
     def validate_execution_reconfigure(self, execution_config) -> None:
@@ -1097,7 +1155,7 @@ class Gr00tN1d7VLA:
         )
         self._execution_reconfigure_journal = None
 
-    # ---- RPU Qwen3-VL backbone (P1) -> raw [1,S,2048] post-RMSNorm ----
+    # ---- device Qwen3-VL backbone (P1) -> raw [1,S,2048] post-RMSNorm ----
     def _record_component_plan(
         self,
         component,
@@ -1245,7 +1303,7 @@ class Gr00tN1d7VLA:
             # Native minibatching combines only consecutive identical full
             # grids. Equal patch counts are insufficient: RoPE and window
             # layout also depend on the full T/H/W grid. Prove grouping before
-            # patch_embed or any other RPU mutation.
+            # patch_embed or any other device mutation.
             grid_cpu = grid.detach().cpu()
             run_lengths = []
             run = 1
@@ -1692,10 +1750,11 @@ class Gr00tN1d7VLA:
         )
         if rope_changed:
             mmtt = (input_ids == self._img_tok).to(torch.int32)
-            self._rope_ids, _ = _get_gr00t_rope_index(
-                m.model.get_rope_index, input_ids=input_ids,
+            self._rope_ids, _ = m.model.get_rope_index(
+                input_ids.cpu(),
                 mm_token_type_ids=mmtt.cpu(),
                 image_grid_thw=grid.cpu(),
+                video_grid_thw=None,
                 attention_mask=attention_mask.cpu(),
             )
             self._rope_key = input_ids.detach().clone()
@@ -1858,84 +1917,123 @@ class Gr00tN1d7VLA:
         logical_seq_len = int(input_ids.shape[1])
         pix = inputs["pixel_values"].to(torch.float16); grid = inputs["image_grid_thw"].to(torch.long)
         img_tok = m.config.image_token_id
-        vout = vision_model(pix, grid_thw=grid)
-        vision_receipt = getattr(
-            vision_model, "_rpu_last_execution_plan", None
-        )
-        if (
-            not isinstance(vision_receipt, dict)
-            or vision_receipt.get("component") != _VISION_COMPONENT
-            or vision_receipt.get("generation")
-            != self._component_generations[_VISION_COMPONENT]
-            or not vision_receipt.get("dry_forward_agreement")
-        ):
-            raise RuntimeError(
-                "GR00T Vision forward did not publish the current component "
-                "A6 receipt"
+        def consume_merged(visual_flat, deepstack_features):
+            vision_receipt = getattr(
+                vision_model, "_rpu_last_execution_plan", None
             )
-        self._rpu_last_execution_plan[_VISION_COMPONENT] = dict(
-            vision_receipt
-        )
-        # vout.pooler_output is already [sum(n_i/sm²), oh] in image order — the old
-        # torch.cat(torch.split(pooler_output, per_image)) reconstructed the SAME tensor
-        # (identity), so drop the redundant per-forward split + cat.
-        visual_flat = vout.pooler_output
-        # Opt-a: on-device visual inject. inputs_embeds lives on RPU (memoized: the base text
-        # embedding + the contiguous image-token runs, 1 per image). Each forward overwrites only
-        # the image slices with the visual embeds on-device (narrow+copy_ = RPU DMA) — the image
-        # positions are overwrite-before-read, non-image positions are constant, so no clone is
-        # needed and the buffer address stays pinned across REPLAY. Kills the CPU masked_scatter +
-        # the RPU↔CPU bounces (the vision→backbone glue folds into device copies).
-        if self._emb_text_rpu is None or not torch.equal(input_ids, self._emb_key):
-            # These owners are refreshed in place on every request. Cold
-            # allocation must not inherit the first request's inference mode.
-            with torch.inference_mode(False), torch.no_grad():
-                self._emb_text_rpu = m.get_input_embeddings()(input_ids.to("rpu")).to(
-                    torch.float16).contiguous()                                    # [1,S,H] RPU
-                ipos = (input_ids.reshape(-1) == img_tok).nonzero().reshape(-1).tolist()
-                runs = []                                                          # contiguous (start,len) per image
-                if ipos:
-                    s = p = ipos[0]
-                    for j in ipos[1:]:
-                        if j == p + 1: p = j
-                        else: runs.append((s, p - s + 1)); s = p = j
-                    runs.append((s, p - s + 1))
-                self._img_runs = runs
-                self._emb_key = input_ids.clone()  # snapshot: catch in-place mutation of a reused input_ids
-                # Opt #2: one persistent RPU zero buffer per deepstack merger. Image rows are
-                # overwritten in-place each forward (same contiguous runs as the visual inject);
-                # non-image rows stay zero forever (overwrite-before-read). Replaces the per-forward
-                # torch.zeros + CPU index_put scatter (see the on-device dense build below).
-                self._ds_dense = [torch.zeros((input_ids.shape[1], cfg.text_config.hidden_size),
-                                              dtype=torch.float16, device="rpu").contiguous()
-                                  for _ in range(len(vout.deepstack_features))]
-        visual_rpu = visual_flat.to(device="rpu", dtype=torch.float16).contiguous()
-        voff = 0
-        for (start, length) in self._img_runs:
-            self._emb_text_rpu[0, start:start + length, :].copy_(visual_rpu[voff:voff + length])
-            voff += length
-        inputs_embeds = self._emb_text_rpu
+            if (
+                not isinstance(vision_receipt, dict)
+                or vision_receipt.get("component") != _VISION_COMPONENT
+                or vision_receipt.get("generation")
+                != self._component_generations[_VISION_COMPONENT]
+                or not vision_receipt.get("dry_forward_agreement")
+            ):
+                raise RuntimeError(
+                    "GR00T Vision forward did not publish the current component "
+                    "A6 receipt"
+                )
+            self._rpu_last_execution_plan[_VISION_COMPONENT] = dict(
+                vision_receipt
+            )
+            # Cache only immutable text/zero skeletons and exact prompt/run owners.
+            # device copy_ stages through CPU memcpy; the existing parts assembler
+            # instead consumes current Vision rows through DDR→SPM DMA.
+            if (self._emb_text_rpu is None
+                    or not torch.equal(input_ids, self._emb_key)
+                    or len(deepstack_features) != len(self._ds_dense)):
+                # Prompt-cache owners must not inherit the first request's
+                # inference mode; later requests can reuse them under no_grad.
+                with torch.inference_mode(False), torch.no_grad():
+                    text_skeleton = m.get_input_embeddings()(input_ids.to("rpu")).to(
+                        torch.float16).contiguous()                                    # [1,S,H] device
+                    ipos = (input_ids.reshape(-1) == img_tok).nonzero().reshape(-1).tolist()
+                    runs = []                                                          # contiguous (start,len) per image
+                    if ipos:
+                        s = p = ipos[0]
+                        for j in ipos[1:]:
+                            if j == p + 1: p = j
+                            else: runs.append((s, p - s + 1)); s = p = j
+                        runs.append((s, p - s + 1))
+                    dense_skeletons = [torch.zeros((input_ids.shape[1], cfg.text_config.hidden_size),
+                                                  dtype=torch.float16, device="rpu").contiguous()
+                                      for _ in range(len(deepstack_features))]
+                    bank_count = 1 + len(dense_skeletons)
+                    prefix = torch.cat([text_skeleton[0], *dense_skeletons], dim=0)
+                    assembly_ids = input_ids.reshape(-1).repeat(bank_count).to(
+                        device="rpu", dtype=torch.int32).contiguous()
+                    runs_cpu = torch.tensor(
+                        [(bank * logical_seq_len + start, length)
+                         for bank in range(bank_count) for start, length in runs],
+                        dtype=torch.int64).reshape(-1, 2)
+                    self._emb_text_rpu, self._ds_dense = text_skeleton, dense_skeletons
+                    self._emb_prefix_rpu = prefix
+                    self._emb_assembly_ids, self._img_runs_cpu = assembly_ids, runs_cpu
+                    self._img_runs, self._emb_key = runs, input_ids.clone()
+
+            assembled = None
+            if self._img_runs:
+                parts = []
+                for features in (visual_flat, *deepstack_features):
+                    features_rpu = features.to(device="rpu", dtype=torch.float16).contiguous()
+                    offset = 0
+                    for _start, length in self._img_runs:
+                        parts.append(features_rpu[offset:offset + length])
+                        offset += length
+                # One fresh owner carries all logical banks through capture.end().
+                # The assembler streams them through a bounded shared SPM scratch.
+                assembled = torch.ops.rpu.assemble_inputs_embeds_parts(
+                    self._emb_prefix_rpu, self._emb_assembly_ids, parts,
+                    self._img_runs_cpu, True)
+                inputs_embeds = assembled[:logical_seq_len].unsqueeze(0)
+                dense = [assembled[(i + 1) * logical_seq_len:(i + 2) * logical_seq_len]
+                         for i in range(len(deepstack_features))]
+            else:
+                inputs_embeds, dense = self._emb_text_rpu, self._ds_dense
+            return inputs_embeds, dense, assembled
+
+        # The callback finishes synchronously before a later Vision request can
+        # overwrite its private slots. Keep the original assembled Tensor as
+        # well as its views alive through Text capture, including inference mode.
+        inputs_embeds, dense, assembled_owner = vision_model(
+            pix, grid_thw=grid, _rpu_merged_consumer=consume_merged)
         seq_len = inputs_embeds.shape[1]
         # Opt3: get_rope_index is CPU M-RoPE index math, constant per prompt → memoize on input_ids.
         # get_rope_index depends on input_ids AND grid AND attention_mask — key on all three
         # (cloned snapshots, so a reused/in-place-mutated input tensor is not a false cache hit).
+        native_position_cache = getattr(self, "_native_position_cache", False)
         if (self._rope_ids is None
+                or (native_position_cache and not self._pos_native_ready)
                 or not torch.equal(input_ids, self._rope_key)
                 or not torch.equal(grid, self._rope_grid_key)
                 or not torch.equal(attn, self._rope_attn_key)):
+            # Keep the previous allocation alive until its replacement exists:
+            # the native keepalive cache compares source address and version.
+            # A failed preparation stays a miss without freeing that source.
+            self._pos_native_ready = False
             mmtt = (input_ids == img_tok).to(torch.int32)
-            self._rope_ids, _ = _get_gr00t_rope_index(m.model.get_rope_index, input_ids=input_ids, mm_token_type_ids=mmtt,
-                                                       image_grid_thw=grid,
+            self._rope_ids, _ = m.model.get_rope_index(input_ids.cpu(), mm_token_type_ids=mmtt.cpu(),
+                                                       image_grid_thw=grid.cpu(), video_grid_thw=None,
                                                        attention_mask=attn.cpu())
             self._rope_key = input_ids.clone()
             self._rope_grid_key = grid.clone()
             self._rope_attn_key = attn.clone()
             # Strategy-2: position_ids (= _rope_ids) and attention_mask are per-prompt CONSTANTS
-            # fed to the backbone op every forward — memoize their RPU copies here (alongside
-            # _rope_ids) so the warm loop skips the per-forward CPU→RPU copy AND the backbone
+            # fed to the backbone op every forward — memoize their device copies here (alongside
+            # _rope_ids) so the warm loop skips the per-forward CPU→device copy AND the backbone
             # REPLAY reads a pinned address (same rationale as the denoise masks memo).
             self._pos_rpu = self._rope_ids.to("rpu").contiguous()
             self._attn_rpu = attn.to("rpu").contiguous()
+            if native_position_cache:
+                if tuple(self._rope_ids.shape) != (3, 1, seq_len):
+                    raise ValueError("GR00T position_ids must be [3, 1, logical_len]")
+                # Normalize on CPU once. The decoder accepts this native form
+                # directly, avoiding device transpose/copy/cast on every replay.
+                # Keep the HF form above for the existing padded execution path.
+                self._pos_native_rpu = (
+                    self._rope_ids.squeeze(1).transpose(0, 1)
+                    .to(dtype=torch.int32).contiguous().to("rpu")
+                )
+                self._pos_native_ready = True
             # partial_mrope: bake the interleaved cos/sin from the (constant-per-prompt) M-RoPE
             # position_ids once, here in the memoize block. get_rope_index → [3,1,S]; the helper
             # wants [S,3]. None when the gate is off → _run_causal_decoder_forward keeps legacy.
@@ -1946,18 +2044,8 @@ class Gr00tN1d7VLA:
                     rope_theta=self._mrope_theta, mrope_section=self._mrope_section)
                 self._rope_cos_il = cos_il.to("rpu").contiguous()
                 self._rope_sin_il = sin_il.to("rpu").contiguous()
-        # Opt #2: on-device deepstack scatter. The deepstack features land at the same
-        # contiguous image-token runs as the visual inject (opt-a), so the CPU index_put
-        # `dense[mask]=feat` (×3/fwd) becomes pinned RPU narrow/copy_ into the persistent zero
-        # buffers (non-image rows stay zero). Numerically identical to scatter_visual_embeds_to_dense;
-        # kills the 3 CPU fallbacks + their RPU↔CPU bounces. Held member → mutable-DMA-safe.
-        for i, feat in enumerate(vout.deepstack_features):
-            feat_r = feat.to(device="rpu", dtype=torch.float16).contiguous()
-            voff = 0
-            for (start, length) in self._img_runs:
-                self._ds_dense[i][start:start + length, :].copy_(feat_r[voff:voff + length])
-                voff += length
-        dense = self._ds_dense
+        # The assembled banks are fresh and local through capture.end(); the
+        # native DeepStack prologue also retains and refreshes its mutable bases.
         # The native dry planner accounts for currently available SPM.  Resolve
         # after Vision and its persistent glue have materialized, immediately
         # before padding/signature/forward consume the plan.
@@ -1980,6 +2068,8 @@ class Gr00tN1d7VLA:
             self._rope_sin_il,
             execution_seq_len,
         )
+        if native_position_cache and execution_seq_len == logical_seq_len:
+            pos_rpu = self._pos_native_rpu
         cache = self._bb_cache                       # Opt1: reuse hoisted cache
         cache.reset_to_position(0)                    # prefill writes [0,S); overwrite-before-read
         sig = rpu_backend.graph.GraphSignature(op_id="gr00t_backbone",
@@ -2188,8 +2278,8 @@ class Gr00tN1d7VLA:
         stage_descriptor = tuple(
             action_plan.selected.stage_tuple.physical_descriptor
         )
-        # Opt2: text/image MASK_2D subsets (cross-attn over the backbone tokens) are constant per
-        # prompt → memoize on input_ids. Cached RPU tensors also pin the denoise REPLAY mask addrs.
+        # Own CPU FP16 masks per prompt; native preparation publishes each one
+        # into its stable device ordinal slot before denoise BUILD or REPLAY.
         # masks depend on input_ids (image subset) AND attention_mask (valid subset) — key on both.
         if (self._masks is None
                 or not torch.equal(inputs["input_ids"], self._mask_key)
@@ -2199,8 +2289,8 @@ class Gr00tN1d7VLA:
             def mk(subset):
                 return torch.where(subset.view(1, S).expand(_AH + 1, S),
                                    torch.zeros(_AH + 1, S), torch.full((_AH + 1, S), _NEG)).half()
-            self._masks = (mk((~im_mask) & bam).to("rpu").contiguous(),
-                           mk(im_mask & bam).to("rpu").contiguous())
+            self._masks = (mk((~im_mask) & bam).contiguous(),
+                           mk(im_mask & bam).contiguous())
             self._mask_key = inputs["input_ids"].clone()
             self._mask_attn_key = inputs["attention_mask"].clone()
         tmask_r, imask_r = self._masks
@@ -2241,27 +2331,27 @@ class Gr00tN1d7VLA:
             resolved_chunk_size=resolved,
             physical_descriptor=stage_descriptor,
         )
-        return act.float().cpu()[:, :, :_AD].reshape(1, _AH, _AD)     # crop 144->132 (normalized action)
+        return act.to(device="cpu", dtype=torch.float32)[:, :, :_AD].reshape(1, _AH, _AD)     # crop 144->132 (normalized action)
 
     # ---- full image→action (fully on-device) ----
     @execution_serialized
     @torch.no_grad()
-    def get_action(self, inputs, *, seed=0, num_steps=_NSTEPS):
+    def get_action(self, inputs, *, seed=0, num_steps=None):
         vars(self).pop("_qwen_z1_completed_owner", None)
         vars(self).pop("_qwen_z1_pending_owner", None)
         vars(self).pop("_qwen_z1_completed_ranges", None)
         vars(self).pop("_qwen_z1_pending_ranges", None)
         try:
-            # The denoise handle bakes the Euler schedule (cond/tau/dt/body_iterations) at BUILD
-            # time for _NSTEPS (see _build_denoise); per-call num_steps is NOT re-threaded, so a
-            # different value would silently still run _NSTEPS. Reject rather than mislead.
-            if num_steps != _NSTEPS:
+            # The schedule is baked into this owner's cond/tau/dt and native Graph.
+            # Omission uses the cold policy; a per-call argument only verifies it.
+            requested_steps = self._num_steps if num_steps is None else _validate_gr00t_num_steps(num_steps)
+            if requested_steps != self._num_steps:
                 raise ValueError(
-                    f"gr00t denoise is built for num_steps={_NSTEPS}; got {num_steps}. "
-                    f"Rebuild via build_gr00t_vla(...) for a different schedule.")
+                    f"gr00t denoise is built for num_steps={self._num_steps}; got {requested_steps}. "
+                    "Rebuild via build_gr00t_vla(..., num_steps=...) for a different schedule.")
             self._validate_forward_execution(inputs)
             # Capacity guard BEFORE the backbone: the backbone writes _bb_cache (512); _vl_encode /
-            # _denoise use _a_cache / _d_cache (256). A longer prompt / more images would OOB-write a
+            # _denoise use the cold-sized _a_cache / _d_cache. A longer prompt / more images would OOB-write a
             # KV cache in the C++ op (no capacity check there → wrong action / crash). Check the input
             # seq (== backbone seq) up front against the SMALLEST cache, so we never even run the
             # backbone with an over-capacity sequence.
@@ -2271,7 +2361,7 @@ class Gr00tN1d7VLA:
                        getattr(self._d_cache, "max_seq_len", 256))
             if _S_in > _cap:
                 raise ValueError(f"GR00T input seq {_S_in} exceeds the KV-cache capacity {_cap} "
-                                 f"(backbone/VL/denoise); rebuild with larger caches or shorten the input.")
+                                 f"(backbone/VL/denoise); rebuild with max_prefix_len or shorten the input.")
             # Resolve the two downstream native descriptors before Vision/Text can
             # mutate caches.  This makes an impossible exact component override a
             # true preflight failure while AUTO and EXACT still use one A6 path.
@@ -2309,7 +2399,7 @@ class Gr00tN1d7VLA:
 
 
 # =============================================================================
-# Build — backbone (Qwen3-VL 16L, RPU) + gr00t_vl_encoder (A) + gr00t_denoise (B/C)
+# Build — backbone (Qwen3-VL 16L, device) + gr00t_vl_encoder (A) + gr00t_denoise (B/C)
 # =============================================================================
 def _ckpt_reader(ckpt_path):
     wmap = __import__("json").load(open(glob.glob(ckpt_path + "/*.index.json")[0]))["weight_map"]
@@ -2333,7 +2423,7 @@ def _build_vl_encoder(gw, w_rms):
     if _w8a16:
         from rpu_backend.quant._common import quantize_linear_per_channel
 
-    def _qw(w, swz):  # -> (rpu weight [int8 dwidth=1 if w8a16 else fp16], rpu fp16 scale or None)
+    def _qw(w, swz):  # -> (device weight [int8 dwidth=1 if w8a16 else fp16], device fp16 scale or None)
         if _w8a16:
             wq, ws = quantize_linear_per_channel(w.half())
             return swz(wq, _TP, dwidth=1).contiguous().to("rpu"), ws.to(torch.float16).to("rpu").contiguous()
@@ -2375,9 +2465,10 @@ def _build_vl_encoder(gw, w_rms):
 
 def _build_denoise(gw, emb, num_steps=_NSTEPS):
     """B/C: 32 DiT blocks (gr00t_dit) + per-step glue (encoders/norm_out/decoder) + baked tables."""
+    num_steps = _validate_gr00t_num_steps(num_steps)
     hr = _half_rpu
 
-    def sc(w_lin, kpad=None, npad=None):       # -> (rpu weight, fp16 scale or None); single-core col-swizzle
+    def sc(w_lin, kpad=None, npad=None):       # -> (device weight, fp16 scale or None); single-core col-swizzle
         if kpad is not None and w_lin.size(1) < kpad:
             w_lin = F.pad(w_lin, (0, kpad - w_lin.size(1)))
         if npad is not None and w_lin.size(0) < npad:
@@ -2408,7 +2499,7 @@ def _build_denoise(gw, emb, num_steps=_NSTEPS):
     _w8a16 = _w8a16_on()
     if _w8a16:
         from rpu_backend.quant._common import quantize_linear_per_channel
-    def _qw(w, swz):  # -> (rpu weight [int8 dwidth=1 if w8a16 else fp16], rpu fp16 scale or None)
+    def _qw(w, swz):  # -> (device weight [int8 dwidth=1 if w8a16 else fp16], device fp16 scale or None)
         if _w8a16:
             wq, ws = quantize_linear_per_channel(w.half())
             return swz(wq, _TP, dwidth=1).contiguous().to("rpu"), ws.to(torch.float16).to("rpu").contiguous()
@@ -2456,7 +2547,7 @@ def _build_denoise(gw, emb, num_steps=_NSTEPS):
     po1, po1_s = sc(gw(_AP + "model.proj_out_1.weight")); po1_b = b(gw(_AP + "model.proj_out_1.bias"))
     po2, po2_s = sc(gw(_AP + "model.proj_out_2.weight")); po2_b = b(gw(_AP + "model.proj_out_2.bias"))
 
-    # --- baked tables (cond[4], tau[4,40,1536], pos[40,1536]); fixed num_steps schedule ---
+    # --- baked cond[num_steps,1536], tau[num_steps,40,1536], pos[40,1536] ---
     def _timestep_cond(tb):                                            # SiLU(timestep_embedder(bucket))
         half = 128
         exp = (-math.log(10000.0) * torch.arange(half, dtype=torch.float32) / (half - 1)).exp()
@@ -2500,11 +2591,17 @@ def build_gr00t_vla(
     *,
     embodiment_id=20,
     rpu_execution=None,
+    num_steps=_NSTEPS,
+    max_prefix_len=256,
 ):
-    """Build the fully-on-device RPU GR00T VLA: backbone (Qwen3-VL 16L) + A + B/C fused ops."""
+    """Build with a cold 4/10-step schedule and a 16-aligned prefix capacity <=512."""
+    num_steps = _validate_gr00t_num_steps(num_steps)
+    max_prefix_len = _validate_gr00t_max_prefix_len(max_prefix_len)
     from rpu_backend.api._execution import _require_execution_process_safe
     _require_execution_process_safe()
     qwen_z1_enabled = _qwen3vl_spm_z1_on()
+    if qwen_z1_enabled and num_steps != _NSTEPS:
+        raise ValueError("GR00T Qwen3-VL SPM Z1 requires num_steps=4")
     (
         execution_config,
         text_execution,
@@ -2515,6 +2612,7 @@ def build_gr00t_vla(
         rpu_execution,
         entry_point="build_gr00t_vla",
         qwen_z1=qwen_z1_enabled,
+        max_prefix_len=max_prefix_len,
     )
     if qwen_z1_enabled:
         if _w8a16_on():
@@ -2658,7 +2756,7 @@ def build_gr00t_vla(
                 "vision", {}
             ).get("chunk_size", "auto"),
         )
-        # Opt4: run the patch-merger + deepstack-merger GEMMs on RPU (default qwen3_vl keeps them CPU
+        # Opt4: run the patch-merger + deepstack-merger GEMMs on device (default qwen3_vl keeps them CPU
         # fp32). The merger is the single largest vision stage; the fp16 drift is absorbed by denoise.
         enable_qwen3_vl_vision_merger_on_device(vision_model)
         # ROUND-3 opt #1: the Python cold builder is the only selector
@@ -2682,13 +2780,13 @@ def build_gr00t_vla(
 
         gw = _ckpt_reader(ckpt_path)
         a_handle, a_keep = _build_vl_encoder(gw, w_rms)
-        d_handle, d_keep = _build_denoise(gw, embodiment_id)
+        d_handle, d_keep = _build_denoise(gw, embodiment_id, num_steps=num_steps)
 
-        a_cache = RPUCache(num_layers=_VL_NL, batch_size=1, max_seq_len=256,
+        a_cache = RPUCache(num_layers=_VL_NL, batch_size=1, max_seq_len=max_prefix_len,
                            num_kv_heads=_VLH, head_dim=_VLHD, attn_tp=_TP)
         # Cross-attn KV holds the whole backbone sequence, not just action rows.
         # Bind both actual owner caches before the first composite preparation.
-        d_cache = RPUCache(num_layers=_NL, batch_size=1, max_seq_len=256,
+        d_cache = RPUCache(num_layers=_NL, batch_size=1, max_seq_len=max_prefix_len,
                            num_kv_heads=_NQ, head_dim=_HD, attn_tp=_TP)
         torch.ops.rpu.gr00t_vl_encoder_set_chunk_envelope(a_handle, int(a_cache.max_seq_len), 0)
         torch.ops.rpu.gr00t_dit_set_chunk_envelope(d_handle, int(d_cache.max_seq_len), 0)
@@ -2737,6 +2835,18 @@ def build_gr00t_vla(
             )
             gr00t_z2_plan_hash = None
 
+        if not qwen_z1_enabled:
+            # All four owners must reserve fixed SPM before any component's
+            # cold domain search. Otherwise early action planning can admit a
+            # resident FF1 bank using space that Vision/Text/VL will later hold.
+            # These lengths only seed chunk-independent Persistent declarations;
+            # they do not select chunks, allocate Temp, preload, or run a Graph.
+            _prepare_gr00t_persistent_spm(
+                int(vision_model._rpu_vision_handle),
+                int(text_model._rpu_decoder_handle),
+                int(a_handle), int(d_handle),
+            )
+
         runtime = Gr00tN1d7VLA.__new__(Gr00tN1d7VLA)
         vars(runtime).update(
             _bb=model, _text=text_model, _vision=vision_model,
@@ -2751,6 +2861,8 @@ def build_gr00t_vla(
             image_token_id=model.config.image_token_id,
             execution_config=execution_config,
             embodiment_id=embodiment_id,
+            num_steps=num_steps,
+            max_prefix_len=max_prefix_len,
             qwen_z1_plan_hash=qwen_z1_plan_hash,
             qwen_z1_vision_stage_descriptor=(
                 qwen_z1_vision_stage_descriptor

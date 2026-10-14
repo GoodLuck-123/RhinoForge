@@ -66,7 +66,7 @@ CPU_FALLBACK_PARTITION = -1
 # Element width eager `aten::linear` derives its partition with. `rpu_linear`
 # (src/ops/rpu_linear.cpp:501) uses `input.element_size()`, i.e. the ACTIVATION
 # width, not the weight's — they differ for W8A16 (1 vs 2) and the activation
-# is fp16 on every RPU path (`check_linear_shapes` rejects anything else).
+# is fp16 on every device path (`check_linear_shapes` rejects anything else).
 EAGER_ACTIVATION_DWIDTH = 2
 
 
@@ -149,7 +149,7 @@ def get_linear_partition(in_features: int, out_features: int, dwidth: int = 2, n
 
 
 # D-04 export alias per F2(b) planner decision.
-# feedback_linear_partition.md: partition scheme is FIXED, do not modify.
+# Partition selection follows the fixed model layout below.
 LinearPartition = get_linear_partition
 
 
@@ -219,7 +219,7 @@ def tp_col_swizzle_mc_weight(w: torch.Tensor, num_cores: int = NUM_CORES, dwidth
 
 def transform_linear_weight(weight: torch.Tensor, partition: int, num_cores: int = NUM_CORES) -> torch.Tensor:
     """
-    Transform linear weight for RPU kernel.
+    Transform linear weight for device kernel.
 
     Args:
         weight: shape (out_features, in_features)
@@ -401,7 +401,7 @@ def _guarded_linear_forward(
         raise RuntimeError(
             "rpu linear: this Linear is in SKIP_LINEAR_NAMES, so the converter "
             "left its weight ROW-MAJOR on purpose and a companion swizzler owns "
-            "the RPU copy (AdaRMS dense/cond expansion, the Qwen3.5 q/k/v "
+            "the device copy (AdaRMS dense/cond expansion, the Qwen3.5 q/k/v "
             "re-swizzle, the Pi0.5 int4 packer). Eager aten::linear assumes a "
             "swizzled weight, so calling this module on an rpu tensor reads "
             "row-major bytes as swizzled ones: right L2 norm, wrong direction, "
@@ -625,8 +625,7 @@ def _validate_bounded_linear_move(module, force_col_partition, attn_num_cores,
         weight = child.weight
         if (weight.device.type != "cpu" or weight.dtype != torch.float16
                 or not weight.is_contiguous()
-                or tuple(weight.shape) != (child.out_features, child.in_features)
-                or hasattr(child, "_rpu_linear_partition")):
+                or tuple(weight.shape) != (child.out_features, child.in_features)):
             raise ValueError(f"bounded weight migration requires a contiguous CPU FP16 Linear: {path!r}")
         partition, cores = _linear_conversion_layout(child, name, force_col_partition,
             attn_num_cores, mlp_num_cores, lm_head_num_cores)
@@ -642,7 +641,7 @@ def _validate_bounded_linear_move(module, force_col_partition, attn_num_cores,
 
 
 def _release_cpu_weight_pages():
-    # RPU HostDDR shares host memory. Return freed CPU arenas before the next
+    # device HostDDR shares host memory. Return freed CPU arenas before the next
     # device allocation instead of retaining a second model-sized RSS peak.
     import ctypes
     import gc
@@ -658,7 +657,7 @@ def _release_cpu_weight_pages():
 
 def convert_linear_weights_inplace(module: nn.Module, prefix: str = "", _embedding_ptrs: set = None, force_col_partition: bool = False, attn_num_cores: int = NUM_CORES, skip_names: set = None, *, mlp_num_cores: int = NUM_CORES, lm_head_num_cores: int = NUM_CORES, execution_core_count: int = NUM_CORES, move_to_device=None) -> Dict[str, int]:
     """
-    Recursively convert all Linear layer weights in a module to RPU layout.
+    Recursively convert all Linear layer weights in a module to device layout.
 
     Args:
         module: PyTorch module to convert
@@ -667,7 +666,8 @@ def convert_linear_weights_inplace(module: nn.Module, prefix: str = "", _embeddi
         force_col_partition: If True, always use col partition (for DDR linear without fused decoder)
         attn_num_cores: Number of cores for attention layers (q/k/v/o_proj).
                         Use min(NUM_CORES, num_kv_heads) for models with fewer KV heads than cores.
-                        MLP layers (gate/up/down_proj) always use NUM_CORES.
+        mlp_num_cores: Number of cores for gate/up/down projections.
+        lm_head_num_cores: Number of cores for the output vocabulary projection.
         skip_names: Additional Linear child names to skip (merged with built-in {'dense'}).
                     Use skip_names={'cond'} for QwenPI05 AdaRMS conditioning Linears.
                     A skipped Linear keeps its row-major weight and is recorded
@@ -686,7 +686,7 @@ def convert_linear_weights_inplace(module: nn.Module, prefix: str = "", _embeddi
     lm_head_num_cores = _positive_int(lm_head_num_cores, "lm_head_num_cores", maximum=NUM_CORES)
     # A leaf `nn.Linear` has no `named_children()`, so the walk below would
     # return `{}` having converted nothing — silently leaving a row-major
-    # weight that the RPU kernel then reads as swizzled. That silent no-op has
+    # weight that the device kernel then reads as swizzled. That silent no-op has
     # already faked a positive result twice (pi05 CR-R5 BLOCKER-1, see
     # adapters/pi05/weights.py:19-31; and tests/ops/test_ops_individual.py's
     # Linear-col leg). Refuse instead of returning an empty dict.
@@ -723,7 +723,7 @@ def convert_linear_weights_inplace(module: nn.Module, prefix: str = "", _embeddi
 
     # Linear children whose weights must NOT be swizzled by this pass.
     # `PiGemmaRMSNorm.dense` (lerobot/policies/pi_gemma.py) is an AdaRMS
-    # scale/shift/gate projection that needs its own RPU-specific expansion
+    # scale/shift/gate projection that needs its own device-specific expansion
     # (`.repeat(NUM_CORES, 1)` + col-partition swizzle) in
     # `adarms_converter._prepare_adarms_dense_weights`. Pre-swizzling it here
     # corrupts the downstream AdaRMS GEMV path (double-swizzle → wrong
@@ -748,7 +748,7 @@ def convert_linear_weights_inplace(module: nn.Module, prefix: str = "", _embeddi
             if name in SKIP_LINEAR_NAMES:
                 # AdaRMS dense: consumed by adarms_converter with its own swizzle.
                 # "Skipped" is not "no layout" — the weight stays row-major while
-                # a companion swizzler owns the RPU copy, and every in-tree
+                # a companion swizzler owns the device copy, and every in-tree
                 # companion builds that copy SEPARATELY (adarms `_rpu_dense_w_rp`,
                 # qwenpi05/rhinovla `_rpu_cond_w_rp`, the Qwen3.5 q/k/v lists
                 # handed to C++). So the module is left holding bytes eager
@@ -822,11 +822,11 @@ def convert_model_for_rpu(
     device: str = "cpu",
     half: bool = True,
 ) -> Dict[str, int]:
-    """Convert a PyTorch model for RPU inference and save it.
+    """Convert a PyTorch model for device inference and save it.
 
     This function:
     1. Converts model to fp16 (if half=True)
-    2. Transforms all Linear layer weights to RPU-optimized layout
+    2. Transforms all Linear layer weights to device-optimized layout
     3. Saves the converted model
 
     Returns:
@@ -867,7 +867,7 @@ def load_rpu_model(
     device: str = "rpu",
     strict: bool = True,
 ) -> nn.Module:
-    """Load a model that was converted for RPU inference."""
+    """Load a model that was converted for device inference."""
     if not isinstance(strict, bool):
         raise TypeError(f"strict must be a bool, got {strict!r}")
     save_data = torch.load(
@@ -875,26 +875,26 @@ def load_rpu_model(
     )
     if not isinstance(save_data, Mapping):
         raise TypeError(
-            "converted RPU model artifact must contain a mapping, got "
+            "converted device model artifact must contain a mapping, got "
             f"{type(save_data).__name__}"
         )
 
     if save_data.get("rpu_converted") is not True:
         raise ValueError(
-            "model artifact is not marked as converted for RPU; refusing to "
+            "model artifact is not marked as converted for device; refusing to "
             "load unswizzled weights"
         )
 
     state_dict = save_data.get("state_dict")
     if not isinstance(state_dict, Mapping):
-        raise TypeError("converted RPU model artifact requires a state_dict mapping")
+        raise TypeError("converted device model artifact requires a state_dict mapping")
 
     partition_info = None
     if "partition_info" in save_data:
         partition_info = save_data["partition_info"]
         if not isinstance(partition_info, Mapping):
             raise TypeError(
-                "converted RPU model artifact has invalid partition_info"
+                "converted device model artifact has invalid partition_info"
             )
         for name, value in partition_info.items():
             if (
@@ -904,13 +904,13 @@ def load_rpu_model(
                 or int(value) not in (-2, -1, 0, 1)
             ):
                 raise TypeError(
-                    "converted RPU model artifact has invalid partition_info"
+                    "converted device model artifact has invalid partition_info"
                 )
 
     model.load_state_dict(state_dict, strict=strict)
     if partition_info is not None:
         num_converted = sum(1 for v in partition_info.values() if v >= 0)
-        _LOG.info("Loaded model with %d RPU-optimized Linear layers", num_converted)
+        _LOG.info("Loaded model with %d device-optimized Linear layers", num_converted)
 
     model = model.to(device)
     _LOG.info("Model moved to %s", device)
@@ -918,7 +918,7 @@ def load_rpu_model(
 
 
 def check_model_rpu_compatible(model: nn.Module) -> Dict[str, Dict[str, Any]]:
-    """Check if a model's Linear layers are compatible with RPU acceleration."""
+    """Check if a model's Linear layers are compatible with device acceleration."""
     info: Dict[str, Dict[str, Any]] = {}
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
@@ -944,42 +944,3 @@ def print_rpu_compatibility_report(model: nn.Module) -> None:
     num_col = sum(1 for d in info.values() if d['partition'] == 1)
     _LOG.info("Compatibility: %d Linear layers (accelerated: %d, col: %d, row: %d, fallback: %d)",
               len(info), num_converted, num_col, num_row, num_fallback)
-
-
-def validate_qwen3_vl_text_semantics(text_model) -> None:
-    """Validate live text math before installing a prepacked VL profile."""
-    from transformers.activations import SiLUActivation
-
-    config = text_model.config
-    for index, layer in enumerate(text_model.layers):
-        activation = getattr(layer.mlp, "act_fn", None)
-        if not (type(activation) is SiLUActivation or (
-                type(activation) is nn.SiLU and activation.inplace is False)):
-            raise ValueError(f"Qwen3-VL layer {index} requires exact SiLU activation")
-        for owner, name in ((layer.self_attn, "q_norm"), (layer.self_attn, "k_norm"),
-                            (layer, "input_layernorm"), (layer, "post_attention_layernorm")):
-            if getattr(getattr(owner, name, None), "variance_epsilon", None) != 1e-6:
-                raise ValueError(f"Qwen3-VL layer {index} {name} requires epsilon 1e-6")
-    if getattr(text_model.norm, "variance_epsilon", None) != 1e-6:
-        raise ValueError("Qwen3-VL final norm requires epsilon 1e-6")
-
-    rotary = getattr(text_model, "rotary_emb", None)
-    section = getattr(rotary, "mrope_section", None)
-    rotary_config = getattr(rotary, "config", None)
-    geometry = ("model_type", "hidden_size", "intermediate_size", "num_hidden_layers",
-                "num_attention_heads", "num_key_value_heads", "head_dim", "vocab_size")
-    rope = (getattr(config, "rope_parameters", None)
-            or getattr(config, "rope_scaling", None) or {})
-    rotary_rope = (getattr(rotary_config, "rope_parameters", None)
-                   or getattr(rotary_config, "rope_scaling", None) or {})
-    if (getattr(rotary, "rope_type", None) != "default"
-            or getattr(rotary, "attention_scaling", None) != 1.0
-            or not isinstance(section, (list, tuple))
-            or tuple(section) != (24, 20, 20)
-            or any(isinstance(item, bool) or not isinstance(item, Integral) for item in section)
-            or rotary_config is None
-            or any(getattr(rotary_config, field, None) != getattr(config, field, None)
-                   for field in geometry)
-            or not isinstance(rope, Mapping) or not isinstance(rotary_rope, Mapping)
-            or rotary_rope != rope):
-        raise ValueError("Qwen3-VL requires exact live default interleaved M-RoPE semantics")

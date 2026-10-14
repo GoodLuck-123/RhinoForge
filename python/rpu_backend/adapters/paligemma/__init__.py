@@ -99,7 +99,7 @@ def _image_features_from_vision_output(
     projector: Any,
     decoder: Any,
 ) -> torch.Tensor:
-    """Return image features for merge, accounting for RPU SigLIP fused projector."""
+    """Return image features for merge, accounting for device SigLIP fused projector."""
     hidden_states = image_outputs.last_hidden_state
     if len(hidden_states.shape) == 0:
         raise RPUBackendError("PaliGemma2 vision output must have a feature axis")
@@ -118,11 +118,11 @@ def _image_features_from_vision_output(
         return projector(hidden_states)
 
     raise RPUBackendError(
-        "PaliGemma2 RPU SigLIP feature width mismatch: "
+        "PaliGemma2 device SigLIP feature width mismatch: "
         f"vision_last_dim={last_dim}, "
         f"decoder_hidden_size={decoder_hidden}, "
         f"projector_in_features={projector_input}. "
-        "RPU fused SigLIP should return either raw vision features or "
+        "device fused SigLIP should return either raw vision features or "
         "already-projected image features."
     )
 
@@ -266,7 +266,7 @@ class PaliGemmaAdapter:
             _reset_adapter_runtime_state(self)
             raise RPUBackendError(
                 "PaliGemmaAdapter.to_rpu(): model is marked ready but its "
-                "SigLIP/Gemma2 RPU runtime is incomplete; reload via "
+                "SigLIP/Gemma2 device runtime is incomplete; reload via "
                 "PaliGemmaPolicy.from_pretrained(...)."
             )
 
@@ -296,7 +296,7 @@ class PaliGemmaAdapter:
                 _reset_adapter_runtime_state(self)
                 raise RPUBackendError(
                     "PaliGemmaAdapter.to_rpu(): model is marked ready but its "
-                    "SigLIP/Gemma2 RPU runtime is incomplete; reload via "
+                    "SigLIP/Gemma2 device runtime is incomplete; reload via "
                     "PaliGemmaPolicy.from_pretrained(...)."
                 )
             if getattr(self._hf_model, "_rpu_swizzle_started", False):
@@ -438,9 +438,9 @@ class PaliGemmaAdapter:
             )
             # cpu_tensors are already .detach().to("cpu") (see
             # _collect_probe_tensors_and_tokens l.640-670); cpu_model is no
-            # longer needed once we have cpu_tokens for forcing the RPU
-            # decode path. Release before the RPU forward so the host doesn't
-            # carry both CPU fp16 and RPU fp16 weight sets simultaneously.
+            # longer needed once we have cpu_tokens for forcing the device
+            # decode path. Release before the device forward so the host doesn't
+            # carry both CPU fp16 and device fp16 weight sets simultaneously.
             del cpu_model
             gc.collect()
             rpu_tensors, rpu_tokens = self._collect_probe_tensors_and_tokens(
@@ -512,8 +512,8 @@ class PaliGemmaAdapter:
             # Extract everything we need from cpu_model BEFORE releasing it
             # — _eos_token_ids returns a set[int] (pure Python ints, no
             # tensor refs), cpu_output is already a CPU tensor. After this
-            # del the host carries only the RPU fp16 weights during the
-            # RPU generate below.
+            # del the host carries only the device fp16 weights during the
+            # device generate below.
             eos_ids = _eos_token_ids(cpu_model)
             del cpu_model
             gc.collect()
@@ -1207,7 +1207,7 @@ class PaliGemmaAdapter:
 
     def forward_rpu(self, *args: Any, **kwargs: Any) -> Any:
         raise RPUBackendError(
-            "PaliGemmaPolicy._forward_rpu requires the PaliGemma2 RPU adapter."
+            "PaliGemmaPolicy._forward_rpu requires the PaliGemma2 device adapter."
         )
 
 

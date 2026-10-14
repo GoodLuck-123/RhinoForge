@@ -1,4 +1,4 @@
-"""Bounded Qwen3-TTS Base speech inference with RPU autoregressive components."""
+"""Bounded Qwen3-TTS Base speech inference with device autoregressive components."""
 from __future__ import annotations
 
 import hashlib
@@ -111,8 +111,8 @@ def _predictor_generate(owner, inputs_embeds, *, max_new_tokens, do_sample,
 class Qwen3TTSModel:
     """Frozen 0.6B Base, bounded non-streaming voice cloning, batch one.
 
-    Talker, Code Predictor and their output heads execute FP16 on RPU.
-    The codec frontend also uses RPU FP16 when the native RoPE contract is available.
+    Talker, Code Predictor and their output heads execute FP16 on device.
+    The codec frontend also uses device FP16 when the native RoPE contract is available.
     Embedding, speaker encoder, remaining codec and composition use CPU FP32.
     Only speech output is exposed; internal per-layer traces are not an API.
     """
@@ -138,7 +138,7 @@ class Qwen3TTSModel:
         from .causal_lm import _claim_live_instance
 
         if dtype is not torch.float16:
-            raise RPUUnsupportedDtypeError("TTS RPU components require torch.float16; CPU components use float32")
+            raise RPUUnsupportedDtypeError("TTS device components require torch.float16; CPU components use float32")
         model = cls()
         _claim_live_instance(model)
         model._closed = False
@@ -240,7 +240,7 @@ class Qwen3TTSModel:
                 result = torch.ops.rpu.linear_with_accumulation(
                     device_hidden.reshape(-1, 1024), weight, None, 1, 8, False).cpu().float()
                 if not torch.isfinite(result).all():
-                    raise FloatingPointError("non-finite TTS RPU logits")
+                    raise FloatingPointError("non-finite TTS device logits")
                 calls[index] += 1
                 return result.reshape(*hidden.shape[:-1], owner.out_features)
             head.forward = types.MethodType(linear, head)
@@ -347,7 +347,7 @@ class Qwen3TTSModel:
             codec_rpu = "codec_transformer" in self._components
             device = self._components["codec_transformer"].get("last_device", "rpu") if codec_rpu else "cpu"
             result["codec_frontend"] = {"device": device,
-                "fallback_reason": (None if device == "rpu" else "sequence exceeds 63 RPU codec frames")
+                "fallback_reason": (None if device == "rpu" else "sequence exceeds 63 device codec frames")
                     if codec_rpu else "native lacks explicit TTS codec mode"}
             for name, part in self._components.items():
                 graph = part["graph"]
@@ -500,7 +500,7 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
             continue
         value = raw[:, :size].cpu().float()
         if value.shape != (1, size, 1024) or not torch.isfinite(value).all():
-            raise FloatingPointError("non-finite or invalid TTS RPU hidden state")
+            raise FloatingPointError("non-finite or invalid TTS device hidden state")
         chunks.append(value)
         cache.update_position(size)
         offset += size

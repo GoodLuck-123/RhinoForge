@@ -1,27 +1,39 @@
-# 示例与运行范围
+# 模型入口与运行范围
 
-简体中文 | [English](model_support.md)
+**简体中文** | [English](model_support.md)
 
-[`examples/`](../examples/README.md) 提供统一的 `run_model.py` 入口和模型专用脚本。
-TOML 配置在 [`examples/configs/`](../examples/configs/README.md) 下按模型、组件、
-精度和工作量归档。
+从[模型示例](../examples/README.zh.md)选择 TOML，按模型指南准备权重和输入，执行 `python -m examples.run --config PATH --check-config` 后运行。检查命令只验证配置。
 
-选择配置并准备对应 checkpoint 与输入后，先运行
-`python examples/run_model.py --config PATH --check-config`。该命令不加载权重或访问
-板卡，只检查配置，不验证 checkpoint 或认证模型质量。对应运行合同见
-[模型运行](model_testing.zh.md)、[API 参考](api_reference.zh.md)和
-[量化说明](quantization.zh.md)。
+支持范围按 checkpoint、精度、核数、输入形状和长度确定，由加载器与运行时准入检查执行。受控入口还需模板声明的 opt-in；详细参数见[配置索引](../examples/configs/CONFIGURATIONS.md)。
 
-## 通用运行边界
+权重与请求数据由调用方提供。安装依赖见[模型资产](model_assets.zh.md)和[运行时资产](runtime_assets.zh.md)；调用方式见[运行与调试](model_testing.zh.md)、[API](api_reference.zh.md)和[量化](quantization.zh.md)。
 
-每个 checkpoint 和请求的实际范围由运行时准入检查决定。配置文件不代表其他尺寸、
-精度、核数、图像数量或输入长度也适用。Source-only 和受控示例保留各自精确的输入
-限制与 opt-in 开关；历史验证记录不代表当前运行时，也不构成新的模型认证。
+## 模型与输入
 
-模型权重、请求数据、Rhino Launch 和算子资产分别获取，其格式、来源和许可要求见
-[模型资产](model_assets.zh.md)与[运行时资产](runtime_assets.zh.md)。保留公开
-Wall-OSS 底座适配；公开交付不包含私有应用模型、数据或部署定制。
+下表链接到可执行配置及输入约定。模型系列名不能替代 checkpoint、精度和形状要求。
 
-## Qwen3 语音模型
+| 模型 | 入口与指南 | 输入 |
+|---|---|---|
+| Qwen3 / Llama | `RPUModelForCausalLM`；[Qwen3](../examples/configs/qwen3/README.md)、[Llama](../examples/configs/llama/README.md) | Token 与匹配的 KV cache |
+| Qwen3-VL | `RPUModelForConditionalGeneration`；[指南](../examples/configs/qwen3_vl/README.md) | 文本、图片及 processor 生成的位置和网格信息 |
+| Qwen3.5 Dense / MoE | `RPUModelForConditionalGeneration`；[指南](../examples/configs/qwen3_5/README.md) | 文本或图文、对应 Dense/MoE cache 与 checkpoint 配置 |
+| Gemma4 | `Gemma4Adapter`；[指南](../examples/configs/gemma4/README.md) | E4B Instruct 文本生成；CPU 前后处理与设备 decoder |
+| DINOv3 | `DINOv3Adapter`；[指南](../examples/configs/dinov3/README.md) | 预处理后的图片 |
+| Pi0.5 | `Pi05Policy`；[指南](../examples/configs/pi05/README.md) | 与 checkpoint 匹配的观测，可显式指定 action noise |
+| Wall-OSS | `WallOssPolicy`；[基础](../examples/configs/wall_oss/README.md)、[RTC](../examples/configs/wall_oss/rtc/README.md)、[分拣](../examples/configs/wall_oss/sorting/README.md) | 图片、指令、本体状态及对应 mask |
+| HY Embodied / HyVLA | `HyEmbodiedPolicy` 或组件 adapter；[UMI](../examples/configs/hy_embodied/README.md)、[HyVLA](../examples/configs/hy_vla/README.md) | 预处理后的相机、文本和状态张量 |
+| GR00T | 专用 adapter/runner；[指南](../examples/configs/gr00t/README.md) | 匹配 checkpoint 的观测 batch 和 backbone 资产 |
+| G0.5 | `patch_g05_policy_for_rpu`；[指南](../examples/configs/g05/README.md) | 相机、文本、状态输入包及外部 policy 源码 |
+| InternVLA / NavDP | 完整链 runner 与组件 adapter；[指南](../examples/configs/internvla/README.md) | System2 → RGBD → NavDP 的配对权重包、CPU fixture 和资产清单 |
+| LingBot v1 / v2 | 组件 adapter 或 `build_lingbot_vla_v2`；[v1](../examples/configs/lingbot/README.md)、[v2](../examples/configs/lingbot/v2/README.md) | v1 为预处理观测；v2 为权重、训练 YAML 及相机/状态/语言张量 |
+| RhinoVLA | `RhinoVLAPolicy`；[指南](../examples/configs/rhinovla/README.md) | 模型仓库预处理及 runtime factory |
+| HALO | Action Expert runner；[指南](../examples/configs/halo/README.md) | 配对 EMA 权重、单步 CPU fixture 和已准备的前缀 K/V |
 
-新增独立的 `Qwen3ASRModel` 和 `Qwen3TTSModel` 混合推理接口。精确 checkpoint、CPU/RPU 分工、输入限制和 R1 实测见[语音迁移报告](qwen3_audio_r1.zh.md)。这两个接口不经过通用 CausalLM/VLM registry；运行验证不等同于识别质量、音色相似度或实时性能认证。
+核数、存储补齐与 cache 创建见[计算核拓扑](planner_core_topology.zh.md)，
+adapter 所有权与共享运行约定见[实现索引](../knowledge/synthesis/model-family-map.md)。
+
+## Qwen3 语音
+
+`Qwen3ASRModel` 和 `Qwen3TTSModel` 提供独立的 ASR/TTS 入口，由 CPU 和设备组件
+共同执行。固定资产、输入范围、源码准备和进程所有权见[语音指南](qwen3_audio.zh.md)。
+这两个接口不经过文本/视觉 TOML runner 或 CausalLM/VLM registry。

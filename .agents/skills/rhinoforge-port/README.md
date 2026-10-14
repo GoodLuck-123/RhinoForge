@@ -35,8 +35,4 @@ under [references](references/).
   [Vision](references/families/vision.md), [VLM](references/families/vlm.md),
   and [VLA](references/families/vla.md)
 
-The skill is intentionally tool-neutral. It contains no `.claude` directory,
-generated orchestration workflow, autonomous self-modification loop, internal
-benchmark corpus, or privileged hardware command. An agent runtime may use its
-own isolated reviewers, task list, and command runner while preserving the
-same evidence and stop rules.
+Agent runtimes may supply reviewers and command runners while preserving the skill’s evidence and stop rules.

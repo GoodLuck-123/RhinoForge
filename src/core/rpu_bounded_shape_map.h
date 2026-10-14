@@ -98,6 +98,20 @@ public:
     size_t size()     const noexcept { return index_.size(); }
     size_t capacity() const noexcept { return capacity_; }
 
+    // Explicit retirement, never automatic LRU eviction of DMA-backed entries.
+    // The predicate must prove that no retained graph can use the entry.
+    template <class Predicate>
+    void erase_if(Predicate retired) {
+        for (auto it = entries_.begin(); it != entries_.end();) {
+            if (retired(it->second)) {
+                index_.erase(it->first);
+                it = entries_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
 private:
     void evict_one() {
         TORCH_CHECK(policy_ == ShapeMapPolicy::Evict,

@@ -1,4 +1,4 @@
-"""Exact Qwen3.5-35B-A3B mixed-E4M3 fixed-core adapter."""
+"""Exact Qwen3.5-35B-A3B mixed-E4M3 and routed-INT4 adapters."""
 from __future__ import annotations
 
 import threading
@@ -25,6 +25,7 @@ from rpu_backend.runtime.device import extract_to_device_target, is_rpu_device_t
 from rpu_backend.runtime.registry import register_adapter
 from rpu_backend.runtime.weights import transform_linear_weight
 
+from rpu_backend.api.qwen3_5_inputs import _ordinary_decode_embedding_cpu
 from rpu_backend.adapters.qwen3_5.vision import (
     QWEN3_5_MOE_35B_VISION_PROFILE,
     QWEN3_5_MOE_35B_TP4_VISION_PROFILE,
@@ -36,7 +37,7 @@ from rpu_backend.adapters.qwen3_5.vision import (
 )
 from .cores import core_topology
 from .loader import load_qwen3_5_moe_model
-from .quant_scope import EXACT_PROFILE_ID, validate_exact_profile
+from .quant_scope import EXACT_PROFILE_ID, runtime_capabilities, validate_exact_profile
 from .text import (
     CERTIFIED_CHUNK_ENVELOPE,
     _bind_qwen35_moe_retirement,
@@ -47,6 +48,7 @@ from .text import (
     _retire_qwen3_5_moe_text_state,
     _text_config,
     _validate_layer_types,
+    _validate_qwen3_5_moe_linear_accumulation,
     _validate_qwen35_moe_retirement_children,
     install_qwen3_5_moe_text_for_rpu,
     layer_types_to_is_full,
@@ -301,13 +303,13 @@ def _validate_qwen3_5_moe_execution_reconfigure(
     adapter.preflight_execution(adapter.model.config, execution_config)
     if not _qwen3_5_moe_cold_config_only(adapter):
         raise ValueError(
-            "Qwen3.5-35B-A3B execution controls are immutable after RPU "
+            "Qwen3.5-35B-A3B execution controls are immutable after device "
             "installation; reload the model to use another configuration"
         )
 
 
 class Qwen3_5MoeAdapter:
-    """Public adapter for one exact mixed-E4M3 35B-A3B checkpoint."""
+    """Public adapter for the admitted 35B-A3B checkpoint profiles."""
 
     _EXECUTION_SUPPORTED = {
         "model": ("num_cores",),
@@ -329,11 +331,12 @@ class Qwen3_5MoeAdapter:
         self.model = model
         _check_profile(model.config)
         _validate_layer_types(model.config)
-        if getattr(model, "_qwen3_5_moe_profile", None) != EXACT_PROFILE_ID:
+        expected_profile = validate_exact_profile(model.config)["profile"]
+        if getattr(model, "_qwen3_5_moe_profile", None) != expected_profile:
             raise UnsupportedModelError(
                 "Qwen3.5-35B-A3B must be loaded by "
-                "Qwen3_5MoeAdapter.load_pretrained so raw E4M3 tensors retain "
-                "their typed mode-5 storage"
+                "Qwen3_5MoeAdapter.load_pretrained so quantized tensors retain "
+                "their exact typed checkpoint storage"
             )
         self._rpu_execution = bind_rpu_execution(
             model,
@@ -391,7 +394,7 @@ class Qwen3_5MoeAdapter:
                 or getattr(model, "_rpu_swizzle_started", False)
             ):
                 raise RPUBackendError(
-                    "Qwen3.5-MoE weights are irreversibly swizzled for RPU; "
+                    "Qwen3.5-MoE weights are irreversibly swizzled for device; "
                     "reload the checkpoint to select another device"
                 )
             return original_to(*args, **kwargs)
@@ -407,7 +410,10 @@ class Qwen3_5MoeAdapter:
     @classmethod
     def preflight_execution(cls, config, execution_config) -> None:
         _check_profile(config)
-        core_topology(execution_config)
+        _validate_qwen3_5_moe_linear_accumulation(
+            validate_exact_profile(config)["profile"], execution_config
+        )
+        core_topology(execution_config, config=config)
         prefill = execution_config.get("prefill", {})
         for field, limit in (
             ("padding_budget", QWEN3_5_OPTIONAL_PADDING_CAP),
@@ -467,7 +473,7 @@ class Qwen3_5MoeAdapter:
             raise RPUBackendError(
                 "a prior Qwen3.5-MoE install mutated weights; reload the model"
             )
-        topology = core_topology(model._rpu_execution)
+        topology = core_topology(model._rpu_execution, config=getattr(model, "config", None))
         resolved_text = _resolve_text_install_options(
             max_seq_len, execution_config=model._rpu_execution
         )
@@ -596,25 +602,44 @@ def _rpu_qwen3_5_moe_forward(
     cache_position=None,
     **kw,
 ):
-    from rpu_backend.runtime.hw_attrs import mark_first_forward_done
-    mark_first_forward_done(self)
-
+    if (runtime_capabilities(getattr(self, "_qwen3_5_moe_profile", EXACT_PROFILE_ID)).text_only
+            and any(value is not None for value in
+                    (pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw,
+                     mm_token_type_ids))):
+        raise NotImplementedError("Qwen3.5 routed INT4 profile is text-only")
+    if pixel_values_videos is not None or video_grid_thw is not None:
+        raise NotImplementedError("Qwen3.5-MoE video inputs are not supported")
+    image_inputs = (pixel_values, image_grid_thw, mm_token_type_ids)
+    if any(value is not None for value in image_inputs) and (
+        input_ids is None or any(value is None for value in image_inputs)
+    ):
+        raise ValueError(
+            "image prefill requires input_ids, pixel_values, image_grid_thw, "
+            "and mm_token_type_ids together"
+        )
     if (input_ids is None) == (inputs_embeds is None):
         raise ValueError("Qwen3.5-MoE requires exactly one input source")
+    request = inputs_embeds if inputs_embeds is not None else input_ids
+    expected_rank = 3 if inputs_embeds is not None else 2
+    if not isinstance(request, torch.Tensor) or request.ndim != expected_rank:
+        raise ValueError(
+            "Qwen3.5-MoE expects input_ids [batch, seq] or "
+            "inputs_embeds [batch, seq, hidden]"
+        )
+    if request.shape[0] != 1:
+        raise UnsupportedModelError("Qwen3.5-MoE supports batch_size == 1 only")
     if not isinstance(past_key_values, Qwen3_5MoeCache):
         raise TypeError(
             "Qwen3.5-MoE requires Qwen3_5MoeCache.from_model(model, ...)"
         )
     if labels is not None:
-        raise NotImplementedError("Qwen3.5-MoE RPU is inference-only")
+        raise NotImplementedError("Qwen3.5-MoE device is inference-only")
     if use_cache is False or return_dict is False:
         raise NotImplementedError("Qwen3.5-MoE requires cache and return_dict")
     if output_attentions or output_hidden_states:
         raise NotImplementedError(
             "Qwen3.5-MoE does not expose intermediate attention/hidden tensors"
         )
-    if pixel_values_videos is not None or video_grid_thw is not None:
-        raise NotImplementedError("Qwen3.5-MoE video inputs are not supported")
     if kw:
         raise TypeError(
             "unsupported Qwen3.5-MoE forward arguments: " + ", ".join(sorted(kw))
@@ -625,10 +650,6 @@ def _rpu_qwen3_5_moe_forward(
     cache = past_key_values
     _fusion, inner, _vision = _model_parts(self)
     if pixel_values is not None:
-        if input_ids is None or image_grid_thw is None or mm_token_type_ids is None:
-            raise ValueError(
-                "image prefill requires input_ids, image_grid_thw, and mm_token_type_ids"
-            )
         if int(cache.position) != 0:
             raise NotImplementedError("images are accepted only at prefill position 0")
     if attention_mask is not None:
@@ -637,7 +658,6 @@ def _rpu_qwen3_5_moe_forward(
             raise NotImplementedError("Qwen3.5-MoE does not support padded attention")
         attention_mask = None
 
-    request = inputs_embeds if inputs_embeds is not None else input_ids
     request_len = int(request.shape[1])
     if cache_position is not None:
         actual = cache_position.detach().to("cpu").reshape(-1).long()
@@ -646,6 +666,9 @@ def _rpu_qwen3_5_moe_forward(
         )
         if not torch.equal(actual, expected):
             raise ValueError("cache_position does not match the live MoE cache")
+    from rpu_backend.runtime.hw_attrs import mark_first_forward_done
+    mark_first_forward_done(self)
+
     preflight_plan = _preflight_qwen3_5_moe_text(
         inner,
         cache,
@@ -661,11 +684,21 @@ def _rpu_qwen3_5_moe_forward(
         preflight_plan = _preflight_qwen3_5_moe_text(
             inner, cache, request_len, multimodal_prefill=True)
 
+    private_cpu_prefill = False
     if inputs_embeds is not None:
         hidden = inputs_embeds.to(device="rpu", dtype=torch.float16).contiguous()
     else:
-        ids_rpu = input_ids if input_ids.device.type == "rpu" else input_ids.to("rpu")
-        hidden = inner.embed_tokens(ids_rpu).to(dtype=torch.float16).contiguous()
+        hidden = (_ordinary_decode_embedding_cpu(
+            _fusion, inner.embed_tokens, input_ids, cache.position)
+            if all(value is None for value in
+                   (pixel_values, image_grid_thw, mm_token_type_ids)) else None)
+        private_cpu_prefill = hidden is not None and request_len > 1
+        if hidden is None:
+            # Custom producers and hooks retain their original device input device.
+            # Only the admitted private gather may bypass this upload.
+            embedding_ids = (input_ids if input_ids.device.type == "rpu"
+                             else input_ids.to("rpu"))
+            hidden = inner.embed_tokens(embedding_ids).to(dtype=torch.float16).contiguous()
 
     if pixel_values is None and int(cache.position) == 0:
         self.model.rope_deltas = None
@@ -690,6 +723,7 @@ def _rpu_qwen3_5_moe_forward(
         position_ids=position_ids,
         multimodal_prefill=pixel_values is not None,
         preflight_plan=preflight_plan,
+        _private_cpu_prefill=private_cpu_prefill,
     )
     head_in = (
         out[:, -logits_to_keep:, :].contiguous()

@@ -65,7 +65,7 @@ void rpu_launch_cast_uint8_fp16_kernel(uint32_t in_spm_addr,
     wq->enqueu_kernel(*kernel, {(uint16_t)blk_cnt, (uint16_t)1, (uint16_t)1}, {(uint8_t)0});
 }
 
-// torch op: cast_uint8_fp16(input uint8) -> fp16, all RPU. Flattens to n = numel,
+// torch op: cast_uint8_fp16(input uint8) -> fp16, all device. Flattens to n = numel,
 // stages through SPM (DMA in → cast → DMA out). See file header.
 //
 // ponytail: single-shot SPM staging (in n bytes + out 2n bytes must fit one core's
@@ -77,7 +77,7 @@ at::Tensor rpu_cast_uint8_fp16(const at::Tensor &input)
                 "cast_uint8_fp16: input must be uint8, got ", input.scalar_type());
     TORCH_CHECK(input.is_contiguous(), "cast_uint8_fp16: input must be contiguous");
     TORCH_CHECK(input.device().type() == at::kPrivateUse1,
-                "cast_uint8_fp16: input must be on RPU device");
+                "cast_uint8_fp16: input must be on device");
 
     const int64_t n = input.numel();
     TORCH_CHECK(n > 0, "cast_uint8_fp16: empty input");
@@ -109,7 +109,7 @@ at::Tensor rpu_cast_uint8_fp16(const at::Tensor &input)
     return out;
 }
 
-// torch op: cast_uint8_fp16_into(input uint8, out fp16) -> (), all RPU. Graph-CAPTURABLE
+// torch op: cast_uint8_fp16_into(input uint8, out fp16) -> (), all device. Graph-CAPTURABLE
 // out-param variant: writes the cast into a caller-provided output. Inside a graph
 // capture (graph_dma::active()) the 3 staging steps record as graph nodes and REPLAY as
 // one batch. Fixed graph DMAs bake the src/dst at BUILD, so the caller must pass persistent
@@ -127,7 +127,7 @@ void rpu_cast_uint8_fp16_into(const at::Tensor &input, at::Tensor &output)
                 "cast_uint8_fp16_into: input and output must be contiguous");
     TORCH_CHECK(input.device().type() == at::kPrivateUse1
                 && output.device().type() == at::kPrivateUse1,
-                "cast_uint8_fp16_into: input and output must be on RPU device");
+                "cast_uint8_fp16_into: input and output must be on device");
     const int64_t n = input.numel();
     TORCH_CHECK(n > 0 && output.numel() == n,
                 "cast_uint8_fp16_into: numel mismatch (in ", n, " out ", output.numel(), ")");

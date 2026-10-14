@@ -79,14 +79,14 @@ def reset_profile_accumulators() -> None:
 # -------------------------------
 def set_hw_perf_trace(
     enabled: bool,
-    output_dir: str = ".rpu-hw-perf",
+    output_dir: str = ".",
     max_dumps: int = 32,
 ) -> None:
-    """Enable RPU HW cycle-precision kernel/DMA Chrome trace dump.
+    """Enable device HW cycle-precision kernel/DMA Chrome trace dump.
 
     Generates one JSON per BUILD and per REPLAY of every cached fused-decoder
     subgraph, up to ``max_dumps`` files per process. File names:
-    ``<output_dir>/rpu_hwperf_pid<P>_tid<TID>_seq<S>_<GRAPH>_<build|replay>.json``.
+    ``<output_dir>/rpu_hwperf_pid<P>_seq<S>_graph<HASH>_<build|replay>_seg<N>.json``.
     Drag a JSON into https://ui.perfetto.dev to visualize.
 
     Toggle semantics: lazy per-slot invalidate — calling this with ``enabled``
@@ -108,7 +108,7 @@ def get_hw_perf_trace() -> bool:
 
 
 @contextlib.contextmanager
-def hw_perf_trace(output_dir: str = ".rpu-hw-perf", max_dumps: int = 32):
+def hw_perf_trace(output_dir: str = ".", max_dumps: int = 32):
     """Enable HW perf trace for the body of a ``with`` block.
 
     Always disables on exit, even on exception. Does NOT snapshot/restore
@@ -138,14 +138,37 @@ def hw_perf_trace(output_dir: str = ".rpu-hw-perf", max_dumps: int = 32):
 # -------------------------------
 # Debug tensor export
 # -------------------------------
+def set_debug_export(enabled: bool) -> None:
+    """Enable/disable debug tensor export for fused decoder layer verification."""
+    if _cpp_loaded():
+        _cpp().set_debug_export(enabled)
 
 
+def get_debug_export() -> bool:
+    """Get debug tensor export state."""
+    if _cpp_loaded() and hasattr(_cpp(), "get_debug_export"):
+        return _cpp().get_debug_export()
+    return False
 
 
+def get_debug_tensor(name: str) -> torch.Tensor:
+    """Get a debug tensor by name."""
+    if _cpp_loaded() and hasattr(_cpp(), "get_debug_tensor"):
+        return _cpp().get_debug_tensor(name)
+    return torch.Tensor()
 
 
+def clear_debug_tensors() -> None:
+    """Clear all stored debug tensors."""
+    if _cpp_loaded() and hasattr(_cpp(), "clear_debug_tensors"):
+        _cpp().clear_debug_tensors()
 
 
+def list_debug_tensors() -> list:
+    """List all stored debug tensor names."""
+    if _cpp_loaded() and hasattr(_cpp(), "list_debug_tensors"):
+        return _cpp().list_debug_tensors()
+    return []
 
 
 # -------------------------------

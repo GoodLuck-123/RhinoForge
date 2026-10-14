@@ -20,12 +20,6 @@ _GRAPH_COMPOSITE_CHILD = "COMPOSITE_CHILD"
 _ACTION_ROUTE_IO = 1 << 0
 _ACTION_ROUTE_RTC = 1 << 1
 _ACTION_ROUTE_TRACE = 1 << 2
-_ACTION_PROFILE = (
-    1024, 4096, 24, 8, 2, 256,
-    False, "silu", "adaLN", 1024, "linear", 27, "linear", 27, True,
-    1.0e-6, 10_000_000.0, "default", (11, 11, 10), True, 0.25,
-    ("full_attention",) * 24,
-)
 
 
 def _run_action_cold_prime(graph_api, retained_cache, plan, dispatch):
@@ -187,38 +181,9 @@ def _publish_g05_action_receipt(
 
 
 def _check_g05_action_profile(config) -> None:
-    from rpu_backend.api.errors import UnsupportedModelError
+    from rpu_backend.adapters.qwen3_5._g05_cold import _check_g05_action_profile as check_profile
 
-    rope = getattr(config, "rope_parameters", None) or {}
-    profile = (
-        int(config.hidden_size),
-        int(config.intermediate_size),
-        int(config.num_hidden_layers),
-        int(config.num_attention_heads),
-        int(config.num_key_value_heads),
-        int(config.head_dim),
-        bool(config.attention_bias),
-        str(config.hidden_act),
-        str(config.adaptive_mode),
-        int(config.time_hidden_size),
-        str(config.input_type),
-        int(config.input_dim),
-        str(config.output_type),
-        int(config.output_dim),
-        bool(config.use_final_norm),
-        float(config.rms_norm_eps),
-        float(rope.get("rope_theta", 0.0)),
-        str(rope.get("rope_type", "")),
-        tuple(int(x) for x in rope.get("mrope_section", ())),
-        bool(rope.get("mrope_interleaved", False)),
-        float(rope.get("partial_rotary_factor", 0.0)),
-        tuple(config.layer_types),
-    )
-    if profile != _ACTION_PROFILE:
-        raise UnsupportedModelError(
-            "G0.5 RPU action bring-up supports only the canonical "
-            f"Qwen3.5 action-expert profile; got {profile}."
-        )
+    return check_profile(config)
 
 
 def _g05_action_runtime_ready(expert) -> bool:
@@ -233,6 +198,10 @@ def _g05_action_runtime_ready(expert) -> bool:
         return False
     state = getattr(expert, "_rpu_qwen3_5", None)
     if state is None or getattr(state, "handle", None) is None:
+        return False
+    math_precision = getattr(expert, "_rpu_g05_math_precision", "base")
+    if (math_precision not in ("base", "high") or
+            getattr(state, "g05_math_precision", "base") != math_precision):
         return False
     from rpu_backend.adapters.qwen3_5.text import _qwen35_retirement_ready
 
@@ -501,7 +470,7 @@ def _adaptive_modulation_stack(expert, time_conditions) -> torch.Tensor:
 
 def _rpu_g05_encode_time(self, timestep: torch.Tensor) -> torch.Tensor:
     if tuple(timestep.shape) != (1,):
-        raise ValueError("G0.5 RPU time conditioning requires batch_size=1")
+        raise ValueError("G0.5 device time conditioning requires batch_size=1")
     timestep = timestep.detach().to(
         device="cpu", dtype=torch.float32
     ).contiguous()
@@ -605,11 +574,11 @@ def _check_action_mask(mask, *, action_len: int, prefix_len: int) -> None:
     expected = (1, 1, action_len, prefix_len + action_len)
     if tuple(mask.shape) != expected:
         raise NotImplementedError(
-            f"G0.5 RPU action mask must have shape {expected}, got {tuple(mask.shape)}"
+            f"G0.5 device action mask must have shape {expected}, got {tuple(mask.shape)}"
         )
     if not bool(mask.eq(0).all().item()):
         raise NotImplementedError(
-            "G0.5 RPU action bring-up supports only unpadded, non-causal action attention"
+            "G0.5 device action bring-up supports only unpadded, non-causal action attention"
         )
 
 
@@ -668,7 +637,7 @@ def _cached_action_position(
 
 
 def _cached_action_keep_mask(state, pad_mask):
-    """Keep the cold feature mask and its RPU allocation stable across REPLAY."""
+    """Keep the cold feature mask and its device allocation stable across REPLAY."""
     feature_mask = None
     if pad_mask is not None:
         if (
@@ -745,18 +714,18 @@ def _rpu_g05_action_forward(
 ):
     del attn_implementation, mixture_name
     if self.training:
-        raise NotImplementedError("G0.5 RPU action expert supports inference only")
+        raise NotImplementedError("G0.5 device action expert supports inference only")
     if inputs_embeds.device.type != "cpu" or inputs_embeds.shape[0] != 1:
         raise NotImplementedError(
-            "G0.5 RPU action expert requires batch_size=1 with host inputs"
+            "G0.5 device action expert requires batch_size=1 with host inputs"
         )
     if inputs_embeds.shape[1] != 32:
-        raise NotImplementedError("G0.5 RPU action expert requires horizon_steps=32")
+        raise NotImplementedError("G0.5 device action expert requires horizon_steps=32")
     if past_key_values is not None or kv_cache is None:
-        raise TypeError("G0.5 RPU action expert requires a sparse prefix kv_cache")
+        raise TypeError("G0.5 device action expert requires a sparse prefix kv_cache")
     if return_kv_cache or split_idx is not None or padding_mask is not None:
         raise NotImplementedError(
-            "G0.5 RPU action expert supports read-only prefix inference only"
+            "G0.5 device action expert supports read-only prefix inference only"
         )
     prefix_len = int(getattr(kv_cache, "_rpu_g05_prefix_len", -1))
     prefix_cache = getattr(kv_cache, "_rpu_g05_prefix_cache", kv_cache)
@@ -764,7 +733,7 @@ def _rpu_g05_action_forward(
         logical = getattr(prefix_cache, "num_items", None)
         prefix_len = int(logical() if callable(logical) else -1)
     if prefix_len < 0:
-        raise TypeError("G0.5 RPU action prefix cache is missing its prefix length")
+        raise TypeError("G0.5 device action prefix cache is missing its prefix length")
     _check_action_mask(
         attention_mask,
         action_len=int(inputs_embeds.shape[1]),
@@ -855,7 +824,7 @@ def _rpu_g05_action_step(
     prefix_lens: list[int],
     prefix_len: int,
 ) -> torch.Tensor:
-    """Run one RPU input-projection → decoder → output-projection → Euler step."""
+    """Run one device input-projection → decoder → output-projection → Euler step."""
     import rpu_backend as _rb
 
     state = expert._rpu_qwen3_5
@@ -868,7 +837,7 @@ def _rpu_g05_action_step(
         or action_input.data_ptr() == action_output.data_ptr()
     ):
         raise ValueError(
-            "G0.5 RPU action step expects distinct FP16 RPU input/output "
+            "G0.5 device action step expects distinct FP16 device input/output "
             f"buffers with shape {expected}"
         )
     if (
@@ -876,7 +845,7 @@ def _rpu_g05_action_step(
         or action_keep_mask.device.type != "rpu"
     ):
         raise ValueError(
-            "G0.5 RPU action keep mask must be a padded 1D RPU tensor"
+            "G0.5 device action keep mask must be a padded 1D device tensor"
         )
     plan = _plan_g05_action_execution(
         expert, prefix_len=prefix_len, include_action_io=True,
@@ -963,7 +932,7 @@ def _rpu_g05_action_loop(
     rtc_prefix: torch.Tensor | None = None,
     rtc_prefix_len: int = 0,
 ) -> torch.Tensor:
-    """Run the complete Euler trajectory in one captured RPU graph."""
+    """Run the complete Euler trajectory in one captured device graph."""
     import rpu_backend as _rb
 
     state = expert._rpu_qwen3_5
@@ -973,20 +942,31 @@ def _rpu_g05_action_loop(
         num_steps != 10
         or tuple(action_input.shape) != expected
         or tuple(action_output.shape) != expected
-        or action_input.device.type != "rpu"
+        or action_input.device.type not in ("cpu", "rpu")
+        or (
+            action_input.device.type == "cpu"
+            and (
+                state.action_dim_pad != 32
+                or action_input.dtype != torch.float16
+                or not action_input.is_contiguous()
+                or action_input.requires_grad
+                or action_input.is_neg()
+                or action_input.is_conj()
+            )
+        )
         or action_output.device.type != "rpu"
         or action_input.data_ptr() == action_output.data_ptr()
     ):
         raise ValueError(
-            "G0.5 RPU action loop expects 10 steps and distinct FP16 "
-            f"RPU input/output buffers with shape {expected}"
+            "G0.5 device action loop expects 10 steps and distinct FP16 "
+            f"CPU or device input and device output buffers with shape {expected}"
         )
     if (
         tuple(action_keep_mask.shape) != (state.action_dim_pad,)
         or action_keep_mask.device.type != "rpu"
     ):
         raise ValueError(
-            "G0.5 RPU action keep mask must be a padded 1D RPU tensor"
+            "G0.5 device action keep mask must be a padded 1D device tensor"
         )
     rtc_active = rtc_prefix is not None
     if rtc_active:
@@ -994,12 +974,21 @@ def _rpu_g05_action_loop(
             rtc_prefix_len <= 0
             or tuple(rtc_prefix.shape)
             != (1, rtc_prefix_len, state.action_dim_pad)
-            or rtc_prefix.device.type != "rpu"
+            or rtc_prefix.device.type not in ("cpu", "rpu")
             or rtc_prefix.dtype != torch.float16
             or not rtc_prefix.is_contiguous()
+            or (
+                rtc_prefix.device.type == "cpu"
+                and (
+                    state.action_dim_pad != 32
+                    or rtc_prefix.requires_grad
+                    or rtc_prefix.is_neg()
+                    or rtc_prefix.is_conj()
+                )
+            )
         ):
             raise ValueError(
-                "G0.5 RTC prefix must be contiguous FP16 RPU "
+                "G0.5 RTC prefix must be plain contiguous FP16 CPU or device "
                 "[1, inference_delay, action_dim_pad]"
             )
     elif rtc_prefix_len != 0:
@@ -1108,7 +1097,7 @@ def _rpu_g05_action_rtc_trace(
         or action_input.data_ptr() == action_output.data_ptr()
     ):
         raise ValueError(
-            "G0.5 RTC trace expects 10 steps, contiguous FP16 RPU inputs, "
+            "G0.5 RTC trace expects 10 steps, contiguous FP16 device inputs, "
             f"and distinct action buffers with shape {expected}"
         )
     if tuple(action_keep_mask.shape) != (state.action_dim_pad,):
@@ -1214,7 +1203,7 @@ def _rpu_g05_action_step_velocity(
     state = expert._rpu_qwen3_5
     if tuple(action.shape) != (1, 32, state.action_dim):
         raise ValueError(
-            "G0.5 RPU action step expects action shape "
+            "G0.5 device action step expects action shape "
             f"[1, 32, {state.action_dim}]"
         )
     action_input = F.pad(
@@ -1249,7 +1238,7 @@ def _rpu_g05_inference_fm(
     inference_delay=None,
     **kwargs,
 ) -> torch.Tensor:
-    """Canonical G0.5 FM loop with RPU-fused action I/O projections."""
+    """Canonical G0.5 FM loop with device-fused action I/O projections."""
     if prev_actions is None:
         prev_actions = kwargs.pop("prev_action", None)
     del kwargs
@@ -1259,11 +1248,11 @@ def _rpu_g05_inference_fm(
     first_image = next(iter(pixel_values.values()))
     if first_image.device.type != "cpu" or first_image.size(0) != 1:
         raise NotImplementedError(
-            "G0.5 RPU FM inference requires batch_size=1 with host inputs"
+            "G0.5 device FM inference requires batch_size=1 with host inputs"
         )
     dtype = first_image.dtype
     if dtype != torch.float32:
-        raise NotImplementedError("G0.5 RPU FM inference requires FP32 host state")
+        raise NotImplementedError("G0.5 device FM inference requires FP32 host state")
 
     pad_mask = (
         action_dim_is_pad.bool().unsqueeze(1)
@@ -1280,7 +1269,7 @@ def _rpu_g05_inference_fm(
     else:
         if bool(getattr(helper, "use_correlated_noise", False)):
             raise NotImplementedError(
-                "G0.5 RPU release inference does not support correlated noise"
+                "G0.5 device release inference does not support correlated noise"
             )
         action = torch.randn(
             (1, helper.horizon_steps, helper.action_dim),
@@ -1333,7 +1322,7 @@ def _rpu_g05_inference_fm(
             rtc_prefix = F.pad(
                 rtc_prefix_cpu,
                 (0, state.action_dim_pad - state.action_dim),
-            ).to(device="rpu", dtype=torch.float16).contiguous()
+            ).to(dtype=torch.float16).contiguous()
 
     prefix = self._build_prefix_action_kv(
         past_key_values, past_key_values.num_items()
@@ -1353,10 +1342,12 @@ def _rpu_g05_inference_fm(
     prefix_lens, _ = _prepare_prefix(expert, prefix_cache, prefix_len)
     _ensure_action_rope(state, action_pos, helper.horizon_steps)
 
+    # Native copies each current CPU action/prefix into fresh private DDR and
+    # publishes them with the existing Action Batch. device inputs keep their route.
     action_input = F.pad(
         action, (0, state.action_dim_pad - state.action_dim)
-    ).to(device="rpu", dtype=torch.float16).contiguous()
-    action_output = torch.empty_like(action_input)
+    ).to(dtype=torch.float16).contiguous()
+    action_output = torch.empty_like(action_input, device="rpu")
     action_keep_mask = _cached_action_keep_mask(state, pad_mask)
 
     delta_t = 1.0 / helper.num_inference_steps
@@ -1401,10 +1392,42 @@ def _rpu_g05_inference_fm(
 
 
 def patch_g05_action_expert_for_rpu(
-    expert, *, max_seq_len: int = 2048, _execution_config=None
+    expert, *, max_seq_len: int = 2048, _execution_config=None,
+    weight_dtype: str = "fp16", linear_accumulation: str = "acc32",
+    _g05_acc16_experiment: bool = False, action_weight_dtype: str | None = None,
+    _g05_exact_k1: bool = False,
+    math_precision: str = "base",
 ):
-    """Patch G0.5 action inference for diagnostic one-step and ten-step RPU graphs."""
+    """Patch G0.5 action inference for diagnostic one-step and ten-step device graphs."""
     from rpu_backend.api._execution import normalize_rpu_execution
+    from rpu_backend.adapters.g05.quant import (
+        check_installed_weight_dtype, normalize_weight_dtype,
+        check_installed_linear_accumulation, validate_linear_accumulation,
+        linear_execution_config,
+        validate_math_precision, check_installed_math_precision, require_g05_high_math_native,
+        quantize_g05_text_weights, normalize_action_weight_dtype,
+        check_installed_action_weight_dtype, require_g05_action_nvfp4_native,
+        prepare_g05_action_nvfp4, g05_action_nvfp4_inventory,
+    )
+
+    weight_dtype = normalize_weight_dtype(weight_dtype)
+    action_weight_dtype = normalize_action_weight_dtype(
+        action_weight_dtype, weight_dtype=weight_dtype)
+    if type(_g05_acc16_experiment) is not bool:
+        raise TypeError("_g05_acc16_experiment must be bool")
+    if type(_g05_exact_k1) is not bool:
+        raise TypeError("_g05_exact_k1 must be bool")
+    exact_k1 = _g05_exact_k1 or _g05_acc16_experiment
+    linear_accumulation = validate_linear_accumulation(
+        linear_accumulation, weight_dtype=weight_dtype, exact_k1=exact_k1)
+    math_precision = validate_math_precision(math_precision, exact_k1=exact_k1)
+    if math_precision == "high":
+        require_g05_high_math_native()
+    if action_weight_dtype == "nvfp4a16":
+        if not exact_k1:
+            raise ValueError("G0.5 Action NVFP4 requires exact K1 W8A16")
+        require_g05_action_nvfp4_native()
+    install_execution = linear_execution_config(None, linear_accumulation)
 
     execution_config = normalize_rpu_execution(
         (
@@ -1422,6 +1445,11 @@ def patch_g05_action_expert_for_rpu(
         )
     if getattr(expert, "_rpu_g05_action_ready", False):
         if _g05_action_runtime_ready(expert):
+            check_installed_weight_dtype(expert, weight_dtype)
+            check_installed_action_weight_dtype(
+                expert, action_weight_dtype, weight_dtype=weight_dtype)
+            check_installed_linear_accumulation(expert, linear_accumulation)
+            check_installed_math_precision(expert, math_precision)
             if getattr(expert, "_rpu_execution", None) != execution_config:
                 raise ValueError(
                     "G0.5 action runtime execution config conflicts with the "
@@ -1439,7 +1467,7 @@ def patch_g05_action_expert_for_rpu(
         )
     if expert.training:
         raise NotImplementedError(
-            "G0.5 RPU action expert supports inference only; call expert.eval()"
+            "G0.5 device action expert supports inference only; call expert.eval()"
         )
     if max_seq_len < 32:
         raise ValueError("max_seq_len must cover the 32-token action horizon")
@@ -1448,7 +1476,7 @@ def patch_g05_action_expert_for_rpu(
         parameter.device.type != "cpu" for parameter in parameters()
     ):
         raise NotImplementedError(
-            "G0.5 RPU action patch requires a CPU-hosted checkpoint"
+            "G0.5 device action patch requires a CPU-hosted checkpoint"
         )
     _check_g05_action_profile(expert.config)
     if not _ACTION_INSTALL_LOCK.acquire(blocking=False):
@@ -1479,6 +1507,8 @@ def patch_g05_action_expert_for_rpu(
                 "_rpu_g05_original_encode_time",
                 "_rpu_g05_original_forward",
                 "_rpu_g05_action_ready",
+                "_rpu_g05_action_weight_dtype",
+                "_rpu_g05_math_precision",
                 "_rpu_execution",
                 "_rpu_execution_component_id",
                 "_rpu_execution_generation",
@@ -1505,13 +1535,23 @@ def patch_g05_action_expert_for_rpu(
         from rpu_backend.adapters.qwen3_5.text import install_qwen3_5_text_for_rpu
         from rpu_backend.api.qwen3_5_cache import Qwen3_5Cache
 
+        quant_kwargs = {}
+        if math_precision == "high":
+            quant_kwargs["_g05_math_precision"] = math_precision
+        if action_weight_dtype == "nvfp4a16":
+            quant_kwargs["_g05_action_nvfp4"] = prepare_g05_action_nvfp4(expert)
+        if weight_dtype == "w8a16":
+            quantize_g05_text_weights(expert, action=True)
+            quant_kwargs["_g05_w8a16"] = True
         handle = install_qwen3_5_text_for_rpu(
             expert,
             expert.config,
             max_seq_len=max_seq_len,
-            _cpu_stage_weights=True,
+            _cpu_stage_weights=True, execution_config=install_execution,
+            **quant_kwargs,
         )
-        torch.ops.rpu.qwen3_5_set_linear_acc32(handle, True)
+        torch.ops.rpu.qwen3_5_set_linear_acc32(
+            handle, linear_accumulation == "acc32")
         torch.ops.rpu.qwen3_5_enable_action_mode(handle)
         torch.ops.rpu.qwen3_5_set_fast_replay(handle, True)
         from rpu_backend.runtime.weights import tp_col_swizzle_mc_weight
@@ -1587,6 +1627,13 @@ def patch_g05_action_expert_for_rpu(
         expert.encode_time = types.MethodType(_rpu_g05_encode_time, expert)
         expert._rpu_g05_original_forward = expert.forward
         expert.forward = types.MethodType(_rpu_g05_action_forward, expert)
+        if action_weight_dtype == "nvfp4a16":
+            expert._rpu_g05_quant_inventory = g05_action_nvfp4_inventory(
+                quant_kwargs["_g05_action_nvfp4"], expert._rpu_g05_quant_inventory)
+        expert._rpu_g05_action_weight_dtype = action_weight_dtype
+        expert._rpu_g05_weight_dtype = weight_dtype
+        expert._rpu_g05_linear_accumulation = linear_accumulation
+        expert._rpu_g05_math_precision = math_precision
         expert._rpu_g05_action_ready = True
         return expert
     except BaseException as error:

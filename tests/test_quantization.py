@@ -12,7 +12,6 @@ from rpu_backend.quant._common import (
 )
 from rpu_backend.quant.load import is_w8a16_config
 from rpu_backend.quant.convert_pi05 import (
-    PI05_W4_GROUP_SIZE,
     _convert_tensor as convert_pi05_tensor,
     _quant_config as pi05_quant_config,
 )
@@ -49,7 +48,7 @@ def test_w8a16_config_marker() -> None:
     )
 
 
-def test_pi05_mixed_w4a16_g32_kv8_contract_and_runtime_pack(tmp_path) -> None:
+def test_pi05_per_channel_w4_kv8_contract_and_runtime_pack(tmp_path) -> None:
     from rpu_backend.adapters.pi05.loader import (
         _install_pi05_w8a16_tensors,
         _load_pi05_rpu_quant_config,
@@ -83,23 +82,17 @@ def test_pi05_mixed_w4a16_g32_kv8_contract_and_runtime_pack(tmp_path) -> None:
     raw, n_quantized, _, _ = convert_pi05_tensor(
         raw_q_name, torch.ones(128, 64), bits=8
     )
-    assert n_quantized == 1 and raw_q_name in raw
+    assert n_quantized == 0 and raw_q_name in raw
 
     config = pi05_quant_config(bits=4, real_w4=True)
     assert config["method"] == "w4a16"
-    assert config["mode"] == "group_wise_symmetric"
+    assert config["mode"] == "per_channel_symmetric"
     assert config["mixed_int8_suffixes"] == ["k_proj.weight", "v_proj.weight"]
-    assert config["group_size"] == 32
-    assert "mixed W4A16-G32-KV8" in config["note"]
-    assert "Linear projection weights are quantized" in config["note"]
-    assert "Activations and KV cache stay FP16" in config["note"]
+    assert config["scale"] == "per_output_channel" and "group_size" not in config
     config_path = tmp_path / "rpu_quant_config.json"
     config_path.write_text(json.dumps(config))
-    assert _load_pi05_rpu_quant_config(str(tmp_path))["group_size"] == 32
-    config_path.write_text(json.dumps({**config, "mixed_int8_suffixes": ["k_proj"]}))
+    assert _load_pi05_rpu_quant_config(str(tmp_path)) == config
     from rpu_backend.api.errors import RPUBackendError
-    with pytest.raises(RPUBackendError, match="k_proj and v_proj"):
-        _load_pi05_rpu_quant_config(str(tmp_path))
 
     converted = {}
     for name, weight in (
@@ -112,7 +105,6 @@ def test_pi05_mixed_w4a16_g32_kv8_contract_and_runtime_pack(tmp_path) -> None:
             weight,
             bits=4,
             int8_keep_suffixes=tuple(config["mixed_int8_suffixes"]),
-            group_size=PI05_W4_GROUP_SIZE,
         )
         converted.update(tensors)
 
@@ -123,9 +115,9 @@ def test_pi05_mixed_w4a16_g32_kv8_contract_and_runtime_pack(tmp_path) -> None:
     q_values = converted[q_name].clone()
     down_scale = converted[down_scale_name].clone()
     down_values = converted[down_name].clone()
-    assert q_scale.shape == (2, 128)
+    assert q_scale.shape == (128,)
     assert converted[k_scale_name].shape == (128,)
-    assert down_scale.shape == (16, 16)
+    assert down_scale.shape == (16,)
 
     malformed = dict(converted)
     malformed[k_scale_name] = converted[k_scale_name].repeat(2, 1)
@@ -133,12 +125,12 @@ def test_pi05_mixed_w4a16_g32_kv8_contract_and_runtime_pack(tmp_path) -> None:
         _pop_pi05_w8a16_tensors(policy, malformed, config)
     malformed = dict(converted)
     malformed[q_scale_name] = q_scale[:1]
-    with pytest.raises(RPUBackendError, match=r"weight_scale must be torch\.float16 \(2, 128\)"):
+    with pytest.raises(RPUBackendError, match=r"weight_scale must be torch\.float16 \(128,\)"):
         _pop_pi05_w8a16_tensors(policy, malformed, config)
 
     consumed = _pop_pi05_w8a16_tensors(policy, converted, config)
     _install_pi05_w8a16_tensors(policy, consumed)
-    assert layer.self_attn.q_proj.weight_scale.shape == (2, 128)
+    assert layer.self_attn.q_proj.weight_scale.shape == (128,)
     assert layer.self_attn.k_proj.weight_scale.shape == (128,)
 
     assert pack_int4_projections_inplace(
@@ -150,7 +142,7 @@ def test_pi05_mixed_w4a16_g32_kv8_contract_and_runtime_pack(tmp_path) -> None:
     )
     assert torch.equal(
         layer.self_attn.q_proj.weight_scale.cpu(),
-        swizzle_int4_pgrp_scale(q_scale, 32, 1, 8),
+        swizzle_int4_pgrp_scale(q_scale.unsqueeze(0).repeat(2, 1), 32, 1, 8),
     )
     assert torch.equal(
         layer.mlp.down_proj.weight.cpu(),
@@ -158,5 +150,5 @@ def test_pi05_mixed_w4a16_g32_kv8_contract_and_runtime_pack(tmp_path) -> None:
     )
     assert torch.equal(
         layer.mlp.down_proj.weight_scale.cpu(),
-        swizzle_int4_pgrp_scale(down_scale, 32, 0, 8),
+        swizzle_int4_pgrp_scale(down_scale.unsqueeze(0).repeat(16, 1), 32, 0, 8),
     )

@@ -283,7 +283,7 @@ void rpu_launch_spm_local_shard_copy_kernel(
 // =============================================================================
 // rpu_all_gather_test — torch op wrapper for isolated all_gather testing.
 //
-// shards: [num_cores, n, chunk_elems] fp16/int32 RPU DDR — shard j scattered to
+// shards: [num_cores, n, chunk_elems] fp16/int32 device DDR — shard j scattered to
 // core j. Returns [n, chunk_elems*num_cores], read back from core 0 (every core
 // should hold an identical copy).
 // =============================================================================
@@ -300,7 +300,7 @@ at::Tensor rpu_all_gather_test(
                 "all_gather_test: shards must be fp16 or int32, got ", shards.scalar_type());
     TORCH_CHECK(shards.is_contiguous(), "all_gather_test: shards must be contiguous");
     TORCH_CHECK(shards.device().type() == at::kPrivateUse1,
-                "all_gather_test: shards must be on RPU device");
+                "all_gather_test: shards must be on device");
     TORCH_CHECK(shards.size(0) == num_cores,
                 "all_gather_test: shards.size(0)=", shards.size(0),
                 " must equal num_cores=", num_cores);
@@ -330,7 +330,7 @@ at::Tensor rpu_all_gather_test(
     // The DMA helpers are typed fp16, but they are byte movers; for int32 we
     // reinterpret the pointer and halve the element count. (reinterpret_cast
     // rather than Tensor::view(kHalf) — the latter would dispatch a view op on
-    // the RPU device for no benefit.)
+    // the device for no benefit.)
     const int64_t in_elems_h  = in_bytes / 2;
     const int64_t out_elems_h = out_bytes / 2;
 

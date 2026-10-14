@@ -58,7 +58,7 @@ def _install_gemma_rotary_class_patch() -> None:
     `[seq_len, head_dim//2]`; the unpatched transformers Gemma rotary returns
     `[batch, seq_len, head_dim]` with `cat(freqs, freqs)` duplicated halves.
     Without this patch, `patch_gemma_model_for_rpu_all_layers_once` reads
-    the wrong format when it calls `rotary(dummy, dummy_pos)` on RPU and passes
+    the wrong format when it calls `rotary(dummy, dummy_pos)` on device and passes
     wrong cos/sin to `gemma_set_weights`, producing incorrect RoPE angles.
 
     Legacy parity: `pi05_converter._patch_gemma_rotary_embedding`
@@ -196,7 +196,7 @@ def _batched_preprocess_images(
             for camera_idx in range(len(image_keys))
         ]
         # `_siglip_forward_images` recognizes these views and uploads their
-        # shared slab once instead of one CPU→RPU copy per camera.
+        # shared slab once instead of one CPU→device copy per camera.
         for camera_idx, image in enumerate(per_camera):
             image._pi05_batch_slab = images
             image._pi05_batch_index = camera_idx
@@ -241,11 +241,11 @@ def _preprocess_outputs_equal(candidate, reference) -> bool:
 
 
 def _install_preprocess_images_class_patch(policy) -> None:
-    """Batch camera preprocessing and keep images fp16 on RPU.
+    """Batch camera preprocessing and keep images fp16 on device.
 
     ITERATION 5 (2026-04-21) — missing-patch fix.
     Legacy `_patch_preprocess_images` (pi05_converter.py:264-282) casts images to
-    fp16 when the model lives on RPU so downstream SigLIP + `embed_image` stay
+    fp16 when the model lives on device so downstream SigLIP + `embed_image` stay
     in the fp16-throughout contract. The adapter was missing this patch; images
     flowed as fp32, triggering dtype-hook round-trips through SigLIP.
 
@@ -326,7 +326,7 @@ def _install_preprocess_images_class_patch(policy) -> None:
 
 
 def _install_eval_fastpath_class_patch(policy) -> None:
-    """Make repeated ``eval()`` calls O(1) for an already-eval RPU policy.
+    """Make repeated ``eval()`` calls O(1) for an already-eval device policy.
 
     LeRobot calls ``self.eval()`` on every ``predict_action_chunk``. Once the
     adapter has recursively put the policy in eval mode, repeating that tree
@@ -376,13 +376,13 @@ def _language_weight_identity(model):
 
 
 def _assemble_packed_prefix_ondevice(self, packed_emb, tokens):
-    """Assemble image + language prefix on RPU with an LRU-1 text cache.
+    """Assemble image + language prefix on device with an LRU-1 text cache.
 
     `assemble_inputs_embeds` normally gathers from a full vocabulary. Here the
     already-scaled language rows form a tiny per-prompt vocabulary: image rows
     temporarily gather row 0 and are then overwritten by `packed_emb`; language
     rows gather 0..L-1. This reuses Wall-OSS's device-only gather/scatter/DMA
-    path without keeping Pi0.5's ~1 GiB embedding table resident on RPU.
+    path without keeping Pi0.5's ~1 GiB embedding table resident on device.
 
     Returns ``(None, lang_emb)`` when the narrow batch-1 fp16 contract is not
     met, so the caller can preserve the established `torch.cat` path.
@@ -481,7 +481,7 @@ def _patched_embed_prefix(self, images, img_masks, tokens, masks):
     total_prefix_len = 0
     packed_emb = None
 
-    # SigLIP-batch (2026-05-31): when the RPU SigLIP forward was patched for N
+    # SigLIP-batch (2026-05-31): when the device SigLIP forward was patched for N
     # packed images (`_rpu_siglip_batch_n` set by Pi05Adapter), pass the N camera
     # images as a LIST to the C++ multi op and run a SINGLE seq=N*256 fused
     # encoder forward (collapses 27-layer weight DDR + LN/Linear/MLP/KV launches
@@ -490,7 +490,7 @@ def _patched_embed_prefix(self, images, img_masks, tokens, masks):
     # [i*256,(i+1)*256), aligned with the per-image pad_masks built below.
     _batch_n = getattr(self, '_rpu_siglip_batch_n', 1)
     if _batch_n > 1 and len(images) == _batch_n:
-        # All-RPU packed forward: bypass embed_image + torch.cat (a CPU fallback
+        # All-device packed forward: bypass embed_image + torch.cat (a CPU fallback
         # that leaves its result un-flushed to DDR → stale patch-emb DMA read).
         # Pass the N images straight to the C++ multi op, which patch-embeds +
         # packs them itself. Returns the same [1, N*256, 2048] embed_image would.
@@ -522,7 +522,7 @@ def _patched_embed_prefix(self, images, img_masks, tokens, masks):
                 packed_emb = packed_emb[:, :len(keep) * per_img_embs, :]
             else:
                 # Non-prefix subset: reindex host-side, the same round-trip the
-                # assembly fallback further down already uses.
+                # composition fallback further down already uses.
                 packed_emb = torch.cat(
                     [packed_emb[:, i * per_img_embs:(i + 1) * per_img_embs, :].cpu()
                      for i in keep], dim=1).to(packed_emb.device)
@@ -557,7 +557,7 @@ def _patched_embed_prefix(self, images, img_masks, tokens, masks):
             self._pi05_language_prefix_cache = None
             import warnings
             warnings.warn(
-                "pi05 device prefix assembly failed; using torch.cat for "
+                "pi05 device prefix composition failed; using torch.cat for "
                 f"this model instance ({type(exc).__name__}: {exc}).",
                 RuntimeWarning,
             )
@@ -569,9 +569,9 @@ def _patched_embed_prefix(self, images, img_masks, tokens, masks):
     if assembled_embs is not None:
         if getattr(self, "_pi05_prefix_assembly_ok", None) is None:
             # The optimized path deliberately keeps the packed image rows on
-            # RPU while the stable language cache stays on CPU.  Build the
+            # device while the stable language cache stays on CPU.  Build the
             # one-time parity oracle on CPU; a mixed-device torch.cat would
-            # fail before the assembly path could certify itself.
+            # fail before the composition path could certify itself.
             reference_cpu = torch.cat(
                 [packed_emb.cpu(), lang_emb.cpu()], dim=1
             )
@@ -587,7 +587,7 @@ def _patched_embed_prefix(self, images, img_masks, tokens, masks):
                 self._pi05_language_prefix_cache = None
                 import warnings
                 warnings.warn(
-                    "pi05 device prefix assembly differs from torch.cat; "
+                    "pi05 device prefix composition differs from torch.cat; "
                     "using the reference path for this model instance.",
                     RuntimeWarning,
                 )
@@ -597,8 +597,8 @@ def _patched_embed_prefix(self, images, img_masks, tokens, masks):
         embs = assembled_embs
     else:
         if packed_emb is not None:
-            # The optimized packed image stays on RPU while the reference
-            # language embedding is intentionally cached on CPU. Assembly
+            # The optimized packed image stays on device while the reference
+            # language embedding is intentionally cached on CPU. composition
             # failures must still take a valid reference path.
             embs = torch.cat(
                 [packed_emb.cpu(), lang_emb.cpu()], dim=1

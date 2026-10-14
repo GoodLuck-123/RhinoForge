@@ -1,4 +1,4 @@
-"""Controlled-evaluation InternVLA-N1 RPU adapters."""
+"""Controlled-evaluation InternVLA-N1 device adapters."""
 from __future__ import annotations
 
 __all__ = [

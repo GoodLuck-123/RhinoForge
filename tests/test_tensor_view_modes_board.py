@@ -13,7 +13,7 @@ import torch
 pytestmark = pytest.mark.skipif(
     os.environ.get("RHINOFORGE_RUN_BOARD_TESTS") != "1"
     or not torch.rpu.is_available(),
-    reason="requires explicit RHINOFORGE_RUN_BOARD_TESTS=1 and an idle, locked RPU",
+    reason="requires explicit RHINOFORGE_RUN_BOARD_TESTS=1 and an idle, locked device",
 )
 
 

@@ -50,14 +50,14 @@ void rpu_launch_unit_tril_inv_spm_kernel(uint32_t in_spm_addr, uint32_t out_spm_
 }
 
 // Isolated test harness (mirrors rpu_l2norm_test): DMA [.., 64, 64] in, run
-// unit_tril_inv (single core), DMA back. input fp16 RPU (strict lower-tri M);
+// unit_tril_inv (single core), DMA back. input fp16 device (strict lower-tri M);
 // returns (I - M)^-1 per 64x64 block.
 at::Tensor rpu_unit_tril_inv_test(const at::Tensor& m) {
     TORCH_CHECK(m.scalar_type() == at::kHalf && m.dim() >= 2 &&
                     m.size(-1) == 64 && m.size(-2) == 64,
                 "unit_tril_inv_test: input must be fp16 [.., 64, 64]");
     TORCH_CHECK(m.device().type() == at::kPrivateUse1,
-                "unit_tril_inv_test: input must be on RPU");
+                "unit_tril_inv_test: input must be on device");
     auto x = m.contiguous();
     const int64_t numel  = x.numel();
     const int64_t blocks = numel / (64 * 64);

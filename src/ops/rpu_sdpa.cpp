@@ -4,17 +4,20 @@
 // sdpa_dma_mask_to_spm and related helpers prepare its operands.
 // The eager unified-layout entry point computes on CPU.
 //
-// RPU unified layout is [batch, seq_len, num_heads, head_dim]. K/V caches use
+// device unified layout is [batch, seq_len, num_heads, head_dim]. K/V caches use
 // the swizzled format produced by rpu_launch_llama_insert_kcache/_vcache.
 // Other SDPA variants live in sibling rpu_sdpa_*.cpp files.
 
 #include <limits>
+#include <array>
+#include <utility>
 #include "rhino_launch_buffer.h"
 
 #include "rhino_launch_program.h"
 #include "rhino_launch_queue.h"
 #include "rpu_ops.h"
 #include "rpu_qwen3vl_vision_sdpa.h"
+#include "rpu_hyvla_sdpa_tiling.h"
 #include "rpu_spm_allocator.h"
 #include <c10/util/Half.h>
 #include <cmath>
@@ -55,7 +58,7 @@ at::Tensor rpu_temporal_sdpa_composite_test(
   auto check = [=](const at::Tensor& x, const char* name) {
     TORCH_CHECK(x.device().type() == at::kPrivateUse1 &&
                 x.scalar_type() == at::kHalf && x.is_contiguous(),
-                name, " must be contiguous fp16 RPU");
+                name, " must be contiguous fp16 device");
     TORCH_CHECK(x.dim() == 4 && x.size(0) == cores &&
                 x.size(1) == frames && x.size(3) == head_dim,
                 name, " must be [8,6,P*2,64], got ", x.sizes());
@@ -167,6 +170,14 @@ static at::Tensor sdpa_cache_batch_operand(
 // grid_dim_y: num_heads_per_core      (heads)
 // ============================================================================
 
+// Published tail payload is parameterized by logical key rows. Keep this
+// extension bounded to the common single-prefix LingBot Action geometries;
+// other lengths retain the ordinary SDPA selector.
+bool rpu_lingbot2_sdpa_tail_t51_key_rows_supported(int64_t key_rows) {
+  return key_rows == 275 || key_rows == 291 || key_rows == 307 ||
+      key_rows == 371 || key_rows == 451;
+}
+
 static void launch_sdpa_spm_unified_impl(
     const at::Tensor &key,
     const at::Tensor &value,
@@ -180,7 +191,9 @@ static void launch_sdpa_spm_unified_impl(
     int64_t cache_batch_offset_elems,
     bool use_16b,
     bool qwen3vl_tm160,
-    const SdpaTiling* admitted_tiling)
+    const SdpaTiling* admitted_tiling,
+    std::optional<KernelId> admitted_kernel = std::nullopt,
+    bool lingbot2_tail = false)
 {
   // Validate before divisions, cache operand staging, or narrowed queue/grid ABI.
   TORCH_CHECK(num_cores >= 1 && num_cores <= MAX_CORES &&
@@ -197,9 +210,38 @@ static void launch_sdpa_spm_unified_impl(
                    (num_cores % num_kv_heads == 0)) &&
                   num_heads % num_kv_heads == 0,
               "SDPA SPM requires integral attention head partitions and GQA");
-  const KernelId sdpa_kernel_id = use_16b
+  TORCH_CHECK(!admitted_kernel ||
+                  (!lingbot2_tail && admitted_tiling &&
+                   ((*admitted_kernel == KernelId::HYVLA_EXPERT_SDPA_M16_S51 &&
+                     admitted_tiling->tile_m_v16 == 1 && admitted_tiling->tile_m == 16 &&
+                     admitted_tiling->tile_k_v16 == 16 && admitted_tiling->tile_k == 256) ||
+                    (*admitted_kernel == KernelId::HYVLA_EXPERT_SDPA_K128_S51 &&
+                     admitted_tiling->tile_m_v16 == 4 && admitted_tiling->tile_m == 64 &&
+                     admitted_tiling->tile_k_v16 == 8 && admitted_tiling->tile_k == 128)) &&
+                   admitted_tiling->tile_n_v16 == 8 && admitted_tiling->tile_n == 128 &&
+                   !use_16b && !qwen3vl_tm160 && seq_q == 51 &&
+                   rpu_hyvla_s51_key_rows_supported(kv_seq_len) &&
+                   head_dim == 128 && num_heads == 16 && num_kv_heads == 8 &&
+                   num_cores == 8 && virtual_num_cores == 8 && attn_mask_type == 4 &&
+                   cache_batch_offset_elems == 0),
+              "HyVLA attention alias requires its exact admitted physical schedule");
+  const KernelId sdpa_kernel_id = admitted_kernel.value_or(lingbot2_tail
+      ? KernelId::LINGBOT2_SDPA_T51_K275_TAIL : use_16b
       ? KernelId::SDPA_FLASH_ATTN_SPM_16B
-      : KernelId::SDPA_FLASH_ATTN_SPM;
+      : KernelId::SDPA_FLASH_ATTN_SPM);
+
+  if (lingbot2_tail) {
+    TORCH_CHECK(seq_q == 51 && rpu_lingbot2_sdpa_tail_t51_key_rows_supported(kv_seq_len) &&
+                    num_heads == 32 &&
+                    num_kv_heads == 8 && head_dim == 128 && num_cores == 8 &&
+                    virtual_num_cores == 8 && attn_mask_type == MASK_2D &&
+                    !scale.has_value() && cache_batch_offset_elems == 0 &&
+                    !use_16b && !qwen3vl_tm160 && admitted_tiling == nullptr,
+                "Lingbot2 SDPA tail requires admitted T51/K{275,291,307,371,451}/Q32/KV8/D128/TP8 MASK2D");
+    TORCH_CHECK(KernelCache::instance().has_loaded(sdpa_kernel_id),
+                "Lingbot2 SDPA tail optional payload is absent");
+    TORCH_CHECK(GET_QUEUE(8) != nullptr, "Lingbot2 SDPA tail eight-core queue is absent");
+  }
 
   int64_t core_num = num_cores;  // real cores for dispatch and SPM addressing
 
@@ -259,6 +301,10 @@ static void launch_sdpa_spm_unified_impl(
                       GraphDdrRegisterEncoding::DevAddrShift8LoHi,
                       52, 53},
                   value_operand}});
+  if (lingbot2_tail) {
+    RpuKernelGraph::active().keep_alive(key_operand);
+    RpuKernelGraph::active().keep_alive(value_operand);
+  }
   c10::Half* k_ptr = key_operand.data_ptr<c10::Half>();
   c10::Half* v_ptr = value_operand.data_ptr<c10::Half>();
   rpu_ddr_flush(k_ptr);
@@ -474,6 +520,74 @@ void rpu_launch_sdpa_spm_unified_kernel_v2(
       use_16b, qwen3vl_tm160, nullptr);
 }
 
+// Bounded LingBot Action tail SDPA. Arguments are allocator offsets, converted
+// once by the shared SCM setup. The unchanged packed cache includes ceil16(K)
+// physical rows, and the explicit row-major mask uses that same stride.
+void rpu_launch_lingbot2_sdpa_tail_t51_spm_kernel(
+    const at::Tensor& key, const at::Tensor& value,
+    uint32_t q_off, uint32_t output_off, uint32_t tmp_off, uint32_t mask_off,
+    int64_t kv_seq_len) {
+  TORCH_CHECK(rpu_lingbot2_sdpa_tail_t51_key_rows_supported(kv_seq_len),
+              "Lingbot2 SDPA tail key rows are outside the bounded Action profile");
+  const int64_t physical_rows = CeilDiv(kv_seq_len, int64_t{16}) * 16;
+  const auto cache_ok = [physical_rows](const at::Tensor& tensor) {
+    if (!(tensor.defined() && tensor.scalar_type() == at::kHalf &&
+          tensor.device().type() == c10::DeviceType::PrivateUse1 &&
+          tensor.layout() == c10::Layout::Strided && tensor.is_contiguous() &&
+          tensor.dim() == 7 && tensor.size(0) == 1 && tensor.size(1) >= physical_rows / 16 &&
+          tensor.size(2) == 1 && tensor.size(3) == 8 && tensor.size(4) == 8 &&
+          tensor.size(5) == 16 && tensor.size(6) == 16 &&
+          tensor.storage_offset() >= 0)) return false;
+    const uint64_t storage_bytes = tensor.storage().nbytes();
+    const uint64_t offset = static_cast<uint64_t>(tensor.storage_offset());
+    if (offset > storage_bytes / sizeof(c10::Half) ||
+        tensor.nbytes() > storage_bytes - offset * sizeof(c10::Half)) return false;
+    const uint64_t address = RpuGetDevAddr(tensor.data_ptr());
+    constexpr uint64_t limit = uint64_t{1} << 40;
+    return address != 0 && (address & 255u) == 0 && address < limit &&
+        tensor.nbytes() <= limit - address;
+  };
+  TORCH_CHECK(cache_ok(key) && cache_ok(value) && key.device() == value.device() &&
+                  key.sizes() == value.sizes(),
+              "Lingbot2 SDPA tail requires complete same-device aligned FP16 KV caches "
+              "[1,capacity/16,1,8,8,16,16] with capacity >= ceil16(K)");
+  TORCH_CHECK(SPM_ALLOC.is_initialized(), "Lingbot2 SDPA tail requires initialized SPM");
+  const std::array<std::pair<uint32_t, uint64_t>, 4> ranges{{
+      {q_off, 51 * 512 * 2}, {output_off, 51 * 512 * 2},
+      {tmp_off, 65536}, {mask_off, uint64_t{51} * static_cast<uint64_t>(physical_rows) * 2}}};
+  for (size_t i = 0; i < ranges.size(); ++i) {
+    const auto [offset, bytes] = ranges[i];
+    TORCH_CHECK((offset & 31u) == 0 && bytes <= SpmAllocator::SPM_USABLE &&
+                    offset <= SpmAllocator::SPM_USABLE - bytes,
+                "Lingbot2 SDPA tail requires complete aligned SPM offset intervals");
+    for (int core = 0; core < 8; ++core) {
+      const uint64_t base = SPM_ALLOC.addr(core, 0);
+      TORCH_CHECK((base & 31u) == 0 && base + offset + bytes <= (uint64_t{1} << 32),
+                  "Lingbot2 SDPA tail SPM interval exceeds its U32 address domain");
+    }
+    for (size_t j = 0; j < i; ++j)
+      TORCH_CHECK(uint64_t{offset} + bytes <= ranges[j].first ||
+                      uint64_t{ranges[j].first} + ranges[j].second <= offset,
+                  "Lingbot2 SDPA tail query, output, temporary and mask must be disjoint");
+  }
+  const SdpaConfig cfg{SdpaKernelType::FLASH_ATTN_SPM, 128, 32, 8, 8, MASK_2D};
+  const auto tile = sdpa_compute_tiling(cfg, 51);
+  TORCH_CHECK(tile.tile_m_v16 == 4 && tile.tile_n_v16 == 8 && tile.tile_k_v16 == 16,
+              "Lingbot2 SDPA tail requires its original physical tile 4/8/16");
+  launch_sdpa_spm_unified_impl(
+      key, value, MASK_2D, std::nullopt, q_off, output_off, tmp_off, mask_off,
+      51, 32, 8, 128, kv_seq_len, 8, 8, 0, false, false, nullptr, std::nullopt, true);
+}
+
+
+// Preserve the already-published six-argument ABI and exact K275 behavior.
+void rpu_launch_lingbot2_sdpa_t51_k275_tail_spm_kernel(
+    const at::Tensor& key, const at::Tensor& value,
+    uint32_t q_off, uint32_t output_off, uint32_t tmp_off, uint32_t mask_off) {
+  rpu_launch_lingbot2_sdpa_tail_t51_spm_kernel(
+      key, value, q_off, output_off, tmp_off, mask_off, 275);
+}
+
 void rpu_launch_sdpa_qwen3vl_n1200_tm160(
     const at::Tensor& key, const at::Tensor& value,
     uint32_t q_off, uint32_t output_off, uint32_t sdpa_tmp_off,
@@ -488,14 +602,86 @@ void rpu_launch_sdpa_qwen3vl_n1200_tm160(
       /*use_16b=*/false, /*delivery_tm160=*/false, &*t);
 }
 
+// Both explicit HyVLA schedules share complete cache and SPM owner checks.
+// The caller selects a bounded tile first; no generic SDPA selector changes.
+static void launch_sdpa_hyvla_s51_checked(
+    const at::Tensor& key, const at::Tensor& value,
+    uint32_t q_off, uint32_t output_off, uint32_t tmp_off, uint32_t mask_off,
+    int64_t query_rows, int64_t key_rows, int64_t declared_tmp_bytes,
+    const std::optional<SdpaTiling>& tile, KernelId kernel_id) {
+  TORCH_CHECK(tile.has_value() && SPM_ALLOC.is_initialized(),
+              "HyVLA attention requires Q51/P{192,208,224,240}/D128/GQA2/MASK2D and its declared scratch");
+  for (const auto* cache : {&key, &value}) {
+    TORCH_CHECK(cache->defined() && cache->is_contiguous() &&
+                    cache->device().type() == c10::DeviceType::PrivateUse1 &&
+                    cache->scalar_type() == at::kHalf && cache->dim() == 7 &&
+                    cache->size(0) == 1 && cache->size(1) >= CeilDiv(key_rows, int64_t{16}) &&
+                    cache->size(2) == 1 && cache->size(3) == 8 && cache->size(4) == 8 &&
+                    cache->size(5) == 16 && cache->size(6) == 16,
+                "HyVLA attention requires FP16 device [1,ceil16(K)/16,1,8,8,16,16] cache capacity");
+    const uint64_t address = rhino_lkn::RpuGetDevAddr(cache->data_ptr());
+    constexpr uint64_t limit = UINT64_C(1) << 40;
+    TORCH_CHECK(address != 0 && address % 256 == 0 && address < limit &&
+                    cache->nbytes() <= limit - address,
+                "HyVLA attention requires complete encodable cache DDR ranges");
+  }
+  TORCH_CHECK(key.device() == value.device() && key.size(1) == value.size(1),
+              "HyVLA attention cache device/capacity mismatch");
+  const std::array<std::pair<uint32_t, uint64_t>, 4> regions{{
+      {q_off, 51 * 256 * 2}, {output_off, 51 * 256 * 2},
+      {tmp_off, uint64_t(declared_tmp_bytes)}, {mask_off, uint64_t(51 * CeilDiv(key_rows, int64_t{16}) * 16 * 2)}}};
+  for (size_t i = 0; i < regions.size(); ++i) {
+    const uint64_t offset = regions[i].first, bytes = regions[i].second;
+    TORCH_CHECK(offset % 256 == 0 && offset + bytes <= SpmAllocator::SPM_USABLE,
+                "HyVLA attention requires complete aligned SPM offset owners");
+    for (int core = 0; core < 8; ++core)
+      TORCH_CHECK(uint64_t(SPM_ALLOC.addr(core, 0)) + offset + bytes <= uint64_t(UINT32_MAX) + 1,
+                  "HyVLA attention SPM address overflows on a core");
+    for (size_t j = 0; j < i; ++j)
+      TORCH_CHECK(offset + bytes <= regions[j].first ||
+                      uint64_t(regions[j].first) + regions[j].second <= offset,
+                  "HyVLA attention requires disjoint query/output/scratch/mask owners");
+  }
+  launch_sdpa_spm_unified_impl(
+      key, value, /*MASK_2D=*/4, std::nullopt,
+      q_off, output_off, tmp_off, mask_off,
+      query_rows, /*Q=*/16, /*KV=*/8, /*D=*/128, key_rows,
+      /*cores=*/8, /*vtp=*/8, /*cache_offset=*/0,
+      /*use_16b=*/false, /*delivery_tm160=*/false, &*tile, kernel_id);
+}
+
+// Identical N/K tiling and online K order; additional query tiles require
+// independently declared 256KiB scratch.
+void rpu_launch_sdpa_hyvla_s51_m16(
+    const at::Tensor& key, const at::Tensor& value,
+    uint32_t q_off, uint32_t output_off, uint32_t tmp_off, uint32_t mask_off,
+    int64_t query_rows, int64_t key_rows, int64_t declared_tmp_bytes) {
+  launch_sdpa_hyvla_s51_checked(key, value, q_off, output_off, tmp_off, mask_off,
+      query_rows, key_rows, declared_tmp_bytes,
+      rpu_hyvla_s51_m16_tiling(query_rows, key_rows, declared_tmp_bytes),
+      KernelId::HYVLA_EXPERT_SDPA_M16_S51);
+}
+
+// Keep M64/N128, halve K and scratch. Online-softmax rounding differs from
+// K256; numerical diagnostics belong to this separately admitted profile.
+void rpu_launch_sdpa_hyvla_s51_k128(
+    const at::Tensor& key, const at::Tensor& value,
+    uint32_t q_off, uint32_t output_off, uint32_t tmp_off, uint32_t mask_off,
+    int64_t query_rows, int64_t key_rows, int64_t declared_tmp_bytes) {
+  launch_sdpa_hyvla_s51_checked(key, value, q_off, output_off, tmp_off, mask_off,
+      query_rows, key_rows, declared_tmp_bytes,
+      rpu_hyvla_s51_k128_tiling(query_rows, key_rows, declared_tmp_bytes),
+      KernelId::HYVLA_EXPERT_SDPA_K128_S51);
+}
+
 // =============================================================================
-// SDPA Mask: prepare (CPU side) + DMA (RPU side, batch-compatible)
+// SDPA Mask: prepare (CPU side) + DMA (device side, batch-compatible)
 // =============================================================================
 //
 // Route B mask slot: the prepared mask is `.to(at::kPrivateUse1)`-allocated
 // fresh each call (data_ptr unstable across forwards) — graph-mode DMA bakes
 // the src addr at BUILD and can't rebind on REPLAY. Each FusedModelBase owns
-// one typed cache containing a stable RPU tensor per
+// one typed cache containing a stable device tensor per
 // (seq_q, seq_k_aligned, dtype, device). The model-owned strong reference keeps
 // the address stable across sequential host threads and releases it with the
 // model, without process-global owner keys or ABA-prone raw identities.
@@ -551,7 +737,7 @@ at::Tensor SdpaStableMaskCache::stable_slot(
     return it->second;
 }
 
-// CPU side: reduce dims, convert type, pad if needed, move to RPU DDR.
+// CPU side: reduce dims, convert type, pad if needed, move to device DDR.
 // Skips pad_nd entirely when seq_k is already v16-aligned.
 PreparedMask sdpa_prepare_mask(
     const c10::optional<at::Tensor> &attn_mask,
@@ -588,7 +774,7 @@ PreparedMask sdpa_prepare_mask(
 
     // Route B: copy into the shape-keyed stable slot so graph-mode DMA can
     // bake its address at BUILD and have it stay valid across REPLAYs. Publish
-    // directly from CPU: a temporary RPU upload followed by host-backed RPU
+    // directly from CPU: a temporary device upload followed by host-backed device
     // copy_ adds an unnecessary allocation and two cache-maintenance passes.
     at::Tensor slot = stable_cache.stable_slot(
         seq_q, seq_k_aligned, mask_padded.options().device(at::kPrivateUse1), ordinal);
@@ -596,7 +782,7 @@ PreparedMask sdpa_prepare_mask(
     return {slot, 4};  // MASK_2D, stable slot
 }
 
-// RPU side: DMA prepared mask DDR → SPM (batch-compatible).
+// device side: DMA prepared mask DDR → SPM (batch-compatible).
 void sdpa_dma_mask_to_spm(
     const PreparedMask &mask,
     uint32_t sdpa_mask_off,

@@ -90,7 +90,7 @@ struct KvInsertCostCertificate {
     int64_t certificate_identity = 0;
     bool sealed = false;
     KvInsertCostDomain domain;
-    // Same-session median device ns per complete route, indexed by route enum.
+    // Same-session media device ns per complete route, indexed by route enum.
     // Infeasible routes (including INVALID) must have zero cost. Structural
     // grid counts remain an unsealed fallback, never fitted "measured" weights.
     std::array<int64_t, 6> route_costs_ns{};
@@ -217,16 +217,6 @@ private:
         KvInsertCostScope cost_scope,
         c10::ArrayRef<KvInsertCostCertificate> cost_certificates);
 };
-
-// Public provider release and opaque asset identities. A dependency bump
-// invalidates sealed hardware cost certificates; it does not relabel
-// historical calibration evidence. Hashes refer to the shared library and
-// combined operator payload supplied with this release.
-inline constexpr char kKvInsertCostRuntimeRelease[] = "runtime-v1.1.0";
-inline constexpr char kKvInsertCostLaunchSha256[] =
-    "30b98620d37645d72ecff4390cc95c0061ef9bf3a9c6b7fde69b359c2d00c423";
-inline constexpr char kKvInsertCostOperatorSha256[] =
-    "a582e62a6577a112afaef5896818d6673c297bba6deb527eef70bd388acec587";
 
 // The no-argument overload is only the unsealed structural fallback.
 const KvInsertCostCertificate& rpu_kvinsert_cost_certificate();

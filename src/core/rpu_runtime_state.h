@@ -89,7 +89,10 @@ extern std::unordered_map<std::string, at::Tensor> g_debug_tensors;
 void    set_cross_layer_batch_size(int64_t size);
 int64_t get_cross_layer_batch_size();
 
-// Public builds never capture intermediate activations. Keeping this constant
-// lets the compiler remove dormant model probes while shared forward code stays
-// aligned with the internal implementation.
-inline constexpr bool get_debug_export() noexcept { return false; }
+// Debug export cluster (Python: torch.rpu.set_debug_export / get_debug_export /
+// list_debug_tensors / get_debug_tensor / clear_debug_tensors)
+void                      set_debug_export(bool enabled);
+bool                      get_debug_export();
+at::Tensor                get_debug_tensor(const std::string& name);
+void                      clear_debug_tensors();
+std::vector<std::string>  list_debug_tensors();
