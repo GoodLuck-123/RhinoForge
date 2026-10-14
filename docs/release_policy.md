@@ -20,6 +20,7 @@ source and component commits, and package checksums; a duplicate `archive/` tag
 is unnecessary. The current download entry is `1.2.0`. Keep superseded candidate
 packages and their original checksums in the download history. Before removing
 a candidate tag or Release, migrate its records and update download links.
+See [source history](release_history.md) for retired source references.
 
 Keep stable tags and published package bytes fixed. Advance `main` independently;
 compatible stable fixes receive a new patch version. Retain `main` and the active
