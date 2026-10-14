@@ -6,7 +6,7 @@
 
 Development has moved to 1.3; this line currently provides source only.
 
-## v1.2.0rc1
+## v1.2.0
 
 - 增加 Qwen3.5-2B 的 MLP W4、attention/GDN W8 混合量化转换和三份示例配置；转换保留输入浮点权重的原始精度。
 - 补齐示例参数、权重与输入步骤、旧路径映射，以及配置导出和执行工具。
@@ -22,7 +22,7 @@ Development has moved to 1.3; this line currently provides source only.
 - 修复首次运行的生成文本显示、Wall-OSS W4 转换命令，更新运行时资产依赖、许可说明和安装文档。
 
 安装步骤与输入要求见[中文升级指南](docs/upgrading_1_2.zh.md)。
-RhinoForge、Runtime 和 Rhino Launch 发行版本为 `1.2.0rc1`；Launch CMake 版本为 `1.2.0`，ABI 版本保持 `1`。
+RhinoForge、Runtime 和 Rhino Launch 发行版本为 `1.2.0`；Launch CMake 版本为 `1.2.0`，ABI 版本保持 `1`。
 
 ### English
 
@@ -39,4 +39,4 @@ RhinoForge、Runtime 和 Rhino Launch 发行版本为 `1.2.0rc1`；Launch CMake 
 - Standardized configuration names by quantized modules, method and group size; expanded parameter, model and weight guides with current template paths.
 - Corrected first-run text output and Wall-OSS W4 commands; updated runtime asset dependencies, notices and installation guides.
 
-See the [upgrade guide](docs/upgrading_1_2.md). RhinoForge, Runtime and Rhino Launch use release version `1.2.0rc1`; Launch uses CMake version `1.2.0` and ABI version `1`.
+See the [upgrade guide](docs/upgrading_1_2.md). RhinoForge, Runtime and Rhino Launch use release version `1.2.0`; Launch uses CMake version `1.2.0` and ABI version `1`.

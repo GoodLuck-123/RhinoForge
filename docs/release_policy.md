@@ -1,41 +1,35 @@
 # Version and release policy
 
 RhinoForge, Runtime and Rhino Launch share a distribution version. The root
-[VERSION](../VERSION) is the source for Python metadata and the numeric CMake
-version. The release suffix remains part of Python metadata and package names.
+[VERSION](../VERSION) supplies Python metadata and the numeric CMake version.
+Package names retain the full version, including any development suffix.
 
 | Line | Version | Purpose |
 |---|---|---|
 | `main` | `1.3.0.dev0` | Next release development |
-| `release/1.2` | `1.2.0rc1`, then `1.2.0` | Release candidates and stabilization |
+| `release/1.2` | `1.2.0` | Current stable release |
 | `release/1.2` after release | `1.2.1` | Compatible fixes |
 | Historical tags | Original version | Reproducible source and downloads |
 
-Cut the release branch before advancing `main`. The Launch development line
-uses `develop` with the same version stages. Release branches accept reviewed
-fixes; development continues on the next version. A version's presence in the
-archive does not by itself define whether it receives maintenance.
+Cut the release branch before advancing `main`. Launch uses `develop` for its
+development line and follows the same version stages. Merge release fixes back
+into development while keeping its next-version metadata.
 
-Tags use `v` followed by the complete version, such as `v1.2.0rc1`. Publish
-candidate, stable and development entries separately. A development entry may
-provide source only; it must not imply that matching runtime binaries exist.
-The current release candidate is `1.2.0rc1`. Keep it in the current-candidate
-section while release preparation continues; advancing development to `1.3`
-does not archive it. Pre-publication source updates stay on `release/1.2`.
-Keep existing package bytes, tags and checksums; identify replacement builds
-by source commit in separate download paths. After public release, a new
-candidate receives the next `rc` number and a stable fix the next patch version.
-Archive a candidate when it is superseded, retaining its dates, component
-commits and checksums.
+Tag the stable release `v1.2.0` and retain a dated archive tag with its source
+commit. The current download entry is `1.2.0`; superseded candidates remain in
+history. Advancing development does not retire the current stable release.
+A development entry may provide source only. Preserve published tags, package
+bytes and checksums; keep build dates and component commits with each archive.
+New stable fixes increment the patch version. Archive status does not determine
+whether a release receives maintenance.
 
 ## Build and dependency versions
 
 [runtime-dependencies.json](../release/runtime-dependencies.json) records the
-Launch source commit, complete `release_version`, numeric `cmake_version` and
-`abi_version`. Its legacy `version` field equals `cmake_version`. For `1.2.0rc1`,
-CMake uses `1.2.0` and also checks the full candidate version. The library SONAME
-tracks ABI compatibility independently. Python's `API_VERSION` is also a separate
-compatibility level and is unchanged by a distribution release.
+Launch source commit, full `release_version`, numeric `cmake_version` and
+`abi_version`. The legacy `version` field equals `cmake_version`. CMake checks
+both numeric and full versions. Library SONAME and Python `API_VERSION` track
+compatibility independently of distribution versions.
 
 Runtime contains exactly the main and DDR-expansion operator assets pinned by
 commit and checksum. Their component source versions need not match the bundle
@@ -48,16 +42,16 @@ evaluation records outside release artifacts.
 
 ## 中文说明
 
-RhinoForge、Runtime 和 Rhino Launch 使用同一发行版本，`VERSION` 为唯一版本源。
-从 `main` 切出 `release/1.2` 后，候选版使用 `1.2.0rc1`，开发线进入 `1.3.0.dev0`；
-Launch 的开发分支仍为 `develop`。正式版使用 `1.2.0`，兼容修复使用 `1.2.1`。
+RhinoForge、Runtime 和 Rhino Launch 使用同一发行版本，`VERSION` 为版本源。
+`release/1.2` 发布正式版 `1.2.0`，`main` 开发 `1.3.0.dev0`；Launch 开发分支为
+`develop`。兼容修复递增补丁号，并合回开发分支，保留开发线的版本信息。
 
-下载页分别显示开发版、候选版、稳定版和历史版本。开发版可仅提供源码；归档不等于
-停止维护。当前待发布版本为 `1.2.0rc1`，准备期间保持当前候选入口，源码更新进入
-`release/1.2`；开发线进入 `1.3` 不触发候选版归档。原标签、包和校验和保持不变，
-重建包按源码 commit 使用独立下载路径。公开发布后的新候选递增 `rc`，正式版修复
-递增补丁号；候选被替代后再归档，保留日期、组件 commit 和校验和。
+正式版使用 `v1.2.0` 标签，同时保留含日期与源码 commit 的归档标签。下载页当前
+版本为 `1.2.0`，被替代的候选版进入历史记录。开发线升版不影响当前正式版入口。
+开发版可仅提供源码。已发布的标签、包和校验和保持不变，归档记录日期和组件
+commit；归档状态不代表停止维护。
 
-CMake 数值版本不含 `rc` 或 `.dev` 后缀，构建时另外核对完整发行版本。Launch ABI
-和 Python API 兼容版本独立维护。算子资产仍固定来自 main 与 DDR-expansion 两个
-分支，依赖清单记录准确 commit 和校验和。
+CMake 数值版本不含开发后缀，构建时另行核对完整发行版本。Launch ABI 和 Python
+API 兼容版本独立维护。算子资产固定来自 main 与 DDR-expansion 两个分支，依赖
+清单记录准确 commit 和校验和。发布前检查版本、包装和受影响的构建或运行路径；
+模型评测记录不进入发行资产。
