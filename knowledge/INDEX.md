@@ -103,5 +103,5 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
 ## Speech inference
 
 - [Qwen3 ASR/TTS current profile](../docs/qwen3_audio_r1.zh.md): frozen assets,
-  installation, CPU/RPU boundaries, owner-scoped Graphs and codec mode, latest
+  installation, CPU/RPU boundaries, owner-scoped Graphs, Predictor checked replay and codec mode, latest
   measurement scope, quality limits and reproduction commands.

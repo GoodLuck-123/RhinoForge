@@ -93,13 +93,14 @@ def _predictor_generate(owner, inputs_embeds, *, max_new_tokens, do_sample,
 
     warpers = (TemperatureLogitsWarper(temperature), TopKLogitsWarper(top_k))
     cache = None
-    ids = None
     tokens = []
+    embeddings = owner.model.get_input_embeddings()
     for index in range(15):
-        result = owner(inputs_embeds=inputs_embeds if index == 0 else None,
-            input_ids=ids, past_key_values=cache, use_cache=True,
-            generation_steps=index, output_hidden_states=False, return_dict=True)
-        scores = result.logits[:, -1].float()
+        hidden = inputs_embeds if index == 0 else embeddings[index - 1](ids)
+        result = owner.model(inputs_embeds=owner.small_to_mtp_projection(hidden),
+            past_key_values=cache, use_cache=True, output_attentions=False,
+            output_hidden_states=False, return_dict=True)
+        scores = owner.lm_head[index](result.last_hidden_state)[:, -1].float()
         for warper in warpers:
             scores = warper(None, scores)
         ids = torch.multinomial(scores.softmax(-1), num_samples=1)
@@ -191,7 +192,8 @@ class Qwen3TTSModel:
             positions = torch.arange(part["capacity"]).view(1, -1)
             if name == "talker":
                 positions = positions.unsqueeze(0).expand(3, -1, -1)
-            with torch.inference_mode():
+            # Replay binds immutable table/norm owners through their version counters.
+            with torch.inference_mode(False), torch.no_grad():
                 cos, sin = core.rotary_emb(torch.zeros(1, 1, 1024, dtype=torch.float16), positions)
                 if name == "talker":
                     if not all(torch.equal(value[0], value[index]) for value in (cos, sin) for index in (1, 2)):
@@ -205,6 +207,8 @@ class Qwen3TTSModel:
             core._rpu_decoder_handle = handle
             core._rpu_decoder_graph_cache = graph
             torch.ops.rpu.causal_decoder_set_weights(handle, *groups, cos, sin, norm, 16, 8, 128, 1024, 3072, 1e-6, True)
+            if name == "predictor":
+                torch.ops.rpu.causal_decoder_set_fast_replay(handle, True)
             if name == "talker":
                 from rpu_backend.adapters.qwen3 import lookup_causal_decoder
 

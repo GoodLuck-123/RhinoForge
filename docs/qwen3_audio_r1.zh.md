@@ -84,6 +84,11 @@ FP16 配方是明确的精度变化，不能当作整个 codec 的 FP32 等价�
   Predictor 一个、codec 一个、即时算子一个。框架全局默认预算不变。
 - 同长度 BUILD 一次后 REPLAY，长度变化淘汰对应旧签名。codec、Talker、Predictor
   的 Graph 共用同一 owner policy；销毁时先清 Graph，再释放 handle 和权重。
+- Predictor 复用 native checked decode replay：仅匹配五层 FP16、32 位置缓存、
+  一维 RoPE 和无融合输出头的固定路径。首次记录完整算子序列，后续校验权重版本、
+  KV 所有者、Graph 和内存布局，再更新位置及 attention 参数，跳过重复的主机算子
+  调度。输入上传、设备计算、输出头和原采样继续执行；不满足证明条件时走普通路径。
+  此优化需要重新编译匹配的 native，不能用通用 Graph 跳过开关代替。
 - 一个进程只有一个存活的 RPU 模型/策略；请求、统计和关闭串行。两类 API 支持
   `with`、`close()` 和 `execution_stats()`，返回结果有独立存储。
 - speech loader 在首次设备分配前选择 caching allocator；已冻结为不兼容 allocator

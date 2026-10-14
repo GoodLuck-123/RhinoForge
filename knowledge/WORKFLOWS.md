@@ -128,6 +128,12 @@ bounded to the latest decoded audio content, never just a file path or mtime.
 Its x-vector-only profile does not consume reference codec tokens. ASR CPU
 convolutions accumulate FP16-rounded weights in FP32 and round outputs back to
 FP16; preserve this boundary in reference comparisons.
+TTS Predictor checked decode replay retains the ordinary input/output route and
+sampling. Bind its exact five-layer FP16/32-row/1D-RoPE grammar, versioned immutable
+weights and tables, KV owners, Graph lifetime and physical layout before skipping
+host emission. Refresh position and attention fields on every replay, including
+resets to position zero; reject a stale proof or use ordinary emission to rebind.
+See the [speech profile](../docs/qwen3_audio_r1.zh.md#graph资源和公共代码隔离).
 ASR uses channels-last CPU convolution storage without changing FP16 boundaries.
 Its causal-LM wrapper reuses the shared fused decode head and projects only the
 last prefill hidden position, retaining CPU single-token embedding lookup because

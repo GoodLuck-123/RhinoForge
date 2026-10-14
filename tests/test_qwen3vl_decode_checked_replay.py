@@ -89,6 +89,7 @@ public:
  bool qwen3_spm_kv_by_mha_enabled_=true,equal_two_prefill_=false,adarms_mutable_=false,adarms_unroll_=false;
  bool adarms_schedule_select_=false,adarms_fused_bcast_enabled_=false;
  bool fast_replay_skip_layer_loop_=false,preload_replay_skip_=false;
+ int64_t rope_position_base_=-1;
  int64_t vocab_size_=151936,lm_head_exact_candidates_=0,configured_chunk_size_cap_=0;
  SdpaKernelType sdpa_kernel_=SdpaKernelType::FLASH_ATTN_SPM;
  std::vector<int32_t> mrope_section_{24,20,20};std::vector<int64_t> deepstack_lang_layers_{0,1,2};
@@ -249,10 +250,60 @@ void populate_ordinary(RpuKernelGraph&g,const Model&m,bool fused){
  for(int l=0;l<m.layers;++l){
   add("llama_rms_norm");add(lin);add(lin);add(lin);
   if(fused)add("qwen3vl_qk_norm_mrope_kv_insert_d128");
-  else{add("llama_rms_norm");add("llama_rms_norm");add("llama_mrope_interleave");add("llama_mrope_interleave");add("llama_insert_kcache_multiwarp");add("llama_insert_vcache_multiwarp");}
+  else{add("llama_rms_norm");add("llama_rms_norm");add(m.has_mrope_?"llama_mrope_interleave":"llama_rope");add(m.has_mrope_?"llama_mrope_interleave":"llama_rope");add("llama_insert_kcache_multiwarp");add("llama_insert_vcache_multiwarp");}
   add("llm_fp16_32b_prefill_flash_attn_univ_dp");add(lin);add("llm_all_reduce_residual_nopace");add("llama_rms_norm");
-  add(lin);add("unary");add(lin);add("binary_sameshape");add(lin);add("llm_all_reduce_residual_nopace");if(l<3)add("binary_sameshape");
- }add("llama_rms_norm");add(head);
+  if(p.tts_predictor){add(lin);add(lin);add("llama_silu_mul");}
+  else{add(lin);add("unary");add(lin);add("binary_sameshape");}
+  add(lin);add("llm_all_reduce_residual_nopace");if(l<3&&!m.deepstack_lang_layers_.empty())add("binary_sameshape");
+ }add("llama_rms_norm");if(m.fuse_lm_head_)add(head);
+}
+void tts_fixture(Fixture&f){
+ ordinary_fixture(f,5,at::kHalf,false);auto&m=f.m;
+ m.h=1024;m.intermediate=3072;m.qheads=16;m.has_mrope_=false;
+ m.fuse_lm_head_=false;m.lm_head_w_=m.lm_head_w_scale_=m.position_ids_keepalive_=Tensor{};
+ m.deepstack_lang_layers_.clear();m.mrope_section_.clear();m.fast_replay_skip_layer_loop_=true;
+ m.qwen3vl_fp16_decode_profile_=m.qwen3vl_ordinary_resident_prefill_profile_=false;
+ m.cos_=metadata(at::kHalf,{32,64});m.sin_=metadata(at::kHalf,{32,64});m.final_norm_w_=metadata(at::kHalf,{1024});
+ f.hidden=metadata(at::kHalf,{1,1,1024});
+ for(int l=0;l<5;++l){auto&w=m.layer_weights_[l];
+  w.q_w=metadata(at::kHalf,{2048,1024});w.k_w=w.v_w=metadata(at::kHalf,{1024,1024});
+  w.o_w=metadata(at::kHalf,{1024,2048});w.gate_w=w.up_w=metadata(at::kHalf,{3072,1024});w.down_w=metadata(at::kHalf,{1024,3072});
+  w.input_norm_w=w.post_norm_w=metadata(at::kHalf,{1024});
+  f.k[l]=metadata(at::kHalf,{1,2,1,8,8,16,16});f.v[l]=metadata(at::kHalf,{1,2,1,8,8,16,16});
+ }
+}
+void tts_cases(){
+ Fixture f;tts_fixture(f);RpuKernelGraph g;
+ auto run=[&](int p){assert(f.begin(g,p));
+  if(!f.m.try_checked_layer_body_replay()){preload(g);++g.ordinary;if(g.mode==RpuKernelGraph::State::RECORDING)populate_ordinary(g,f.m,false);else g.cursor=g.nodes.size();}
+  f.m.finish_qwen3vl_decode_replay();f.m.cancel_qwen3vl_decode_replay();g.mode=RpuKernelGraph::State::REPLAYING;g.topology=9001;
+ };
+ run(0);assert(f.m.qwen3vl_decode_replay_state_->recipe);
+ for(int p:{1,14,15,16,31,0}){run(p);assert(g.applied.size()==80);
+  for(int l=0;l<5;++l)for(int j=0;j<16;++j){const auto&x=g.applied[l*16+j];
+   const std::array<int,8> attn{p+1,0,(p+16)/16,(p+15)/16,p,0,(p+16)/16,(p+16)/16};
+   assert(x.value==uint64_t(j<8?(j%2?0:p):attn[j-8]));}
+ }assert(g.ordinary==1&&g.skips==6);
+ f.k[2]=metadata(at::kHalf,{1,2,1,8,8,16,16});run(1);assert(g.ordinary==2);run(2);assert(g.ordinary==2);
+ f.m.layer_weights_[3].gate_w.unsafeGetTensorImpl()->bump_version();run(3);assert(g.ordinary==3);run(4);assert(g.ordinary==3);
+ rejects([&]{f.begin(g,32);});
+ for(int fault=0;fault<8;++fault){Fixture bad;tts_fixture(bad);RpuKernelGraph other;
+  if(fault==0)bad.m.fast_replay_skip_layer_loop_=false;
+  if(fault==1)bad.m.fuse_lm_head_=true;
+  if(fault==2)bad.m.has_mrope_=true;
+  if(fault==3)bad.m.deepstack_lang_layers_={0};
+  if(fault==4)bad.m.rope_position_base_=1;
+  if(fault==5)bad.m.linear_acc32_=true;
+  if(fault==6)bad.k[0]=metadata(at::kHalf,{1,3,1,8,8,16,16});
+  if(fault==7)bad.m.cos_=metadata(at::kHalf,{16,64});
+  assert(!bad.begin(other,0));
+ }
+ // A weight without mutation tracking cannot authorize a skipped body.
+ {Fixture bad;tts_fixture(bad);RpuKernelGraph other;
+  {c10::InferenceMode inference;bad.m.final_norm_w_=metadata(at::kHalf,{1024});}
+  assert(bad.begin(other,0));assert(!bad.m.try_checked_layer_body_replay());preload(other);populate_ordinary(other,bad.m,false);
+  bad.m.finish_qwen3vl_decode_replay();assert(!bad.m.qwen3vl_decode_replay_state_->recipe);
+ }
 }
 void cross_profile_cases(){
  for(int layers:{28,36})for(auto dtype:{at::kHalf,at::kChar,at::kByte})for(bool acc32:{false,true}){
@@ -312,6 +363,7 @@ void exact_8b_cases(){
  }
 }
 int main(){
+ tts_cases();
  cross_profile_cases();
  exact_8b_cases();
  for(int64_t cap:{2048,4176}){cold_envelope=cap;

@@ -1,4 +1,4 @@
-// Bounded owner-local replay of the admitted Qwen3-VL M1 bodies.
+// Bounded owner-local replay of admitted Qwen3-VL and TTS Predictor M1 bodies.
 // The ordinary forward/preload and Graph runtime remain the authority for
 // dynamic DMA, allocation and COMPLETE routes. Only proven static emission is
 // omitted; the existing Graph patch API refreshes every dynamic kernel field.
@@ -73,7 +73,7 @@ struct DecodeKernelSlot { size_t kernel, node; std::string name; };
 constexpr int64_t kCheckedDecodeMaxCacheRows = 4352;
 
 std::optional<int64_t> decode_cache_capacity(at::TensorList k, at::TensorList v, int layers) {
-    if ((layers != 28 && layers != 36) || k.size() != size_t(layers) || v.size() != size_t(layers) || !k[0].defined() || k[0].dim() != 7)
+    if ((layers != 5 && layers != 28 && layers != 36) || k.size() != size_t(layers) || v.size() != size_t(layers) || !k[0].defined() || k[0].dim() != 7)
         return std::nullopt;
     const int64_t blocks = k[0].size(1);
     if (blocks <= 0 || blocks > kCheckedDecodeMaxCacheRows / 16)
@@ -95,6 +95,7 @@ struct DecodeProfile {
     int layers = 36;
     at::ScalarType dtype = at::kChar;
     bool acc32 = false, gemv = true, packed_qkv = true, fused_mlp = true;
+    bool tts_predictor = false;
 };
 
 bool linear_name(const std::string& name, const DecodeProfile& profile, bool head) {
@@ -164,7 +165,7 @@ bool bind_decode_patches(const std::vector<DecodeKernelSlot>& kernels,
         } else {
             if (!norm() || !norm()) return false;
             for (int axis = 0; axis < 2; ++axis) {
-                if (!take("llama_mrope_interleave")) return false;
+                if (!take(profile.tts_predictor ? "llama_rope" : "llama_mrope_interleave")) return false;
                 position_patch();
             }
         }
@@ -188,18 +189,22 @@ bool bind_decode_patches(const std::vector<DecodeKernelSlot>& kernels,
         } else if (!linear() || !take("llm_all_reduce_residual_nopace") || !norm()) return false;
         if (profile.fused_mlp) {
             if (!take("qwen3vl_gateup_swiglu_gemv")) return false;
+        } else if (profile.tts_predictor) {
+            if (!linear() || !linear() || !take("llama_silu_mul")) return false;
         } else if (profile.layers == 36 && profile.dtype == at::kChar && profile.gemv) {
             if (!linear() || !linear() || !take("silu_mul")) return false;
         } else if (!linear() || !take("unary") || !linear() || !take("binary_sameshape")) return false;
         if (!linear() || !take("llm_all_reduce_residual_nopace") ||
-            (layer < 3 && !take("binary_sameshape"))) return false;
+            (!profile.tts_predictor && layer < 3 && !take("binary_sameshape"))) return false;
     }
-    return norm() && cursor + 1 == kernels.size() && linear_name(kernels[cursor].name, profile, true);
+    if (!norm()) return false;
+    return profile.tts_predictor ? cursor == kernels.size() :
+        cursor + 1 == kernels.size() && linear_name(kernels[cursor].name, profile, true);
 }
 
 void update_decode_patches(std::vector<RegisterPatch>& patches, int64_t position,
                            int64_t cache_capacity, int layers) {
-    TORCH_CHECK((layers == 28 || layers == 36) &&
+    TORCH_CHECK((layers == 5 || layers == 28 || layers == 36) &&
                     (patches.size() == size_t(layers * 10) || patches.size() == size_t(layers * 14) ||
                      patches.size() == size_t(layers * 16)) &&
                     cache_capacity > 0 && cache_capacity <= kCheckedDecodeMaxCacheRows &&
@@ -278,6 +283,7 @@ struct CausalDecoderModel::Qwen3VlDecodeReplayState {
         p.acc32 = model.linear_acc32_; p.gemv = model.qwen3vl_decode_gemv(1);
         p.packed_qkv = p.gemv && model.qwen3vl_4b_packed_qkv_weights_;
         p.fused_mlp = p.gemv && model.qwen3vl_4b_decode_gateup_fused_;
+        p.tts_predictor = model.num_layers() == 5;
         return p;
     }
 
@@ -303,11 +309,12 @@ struct CausalDecoderModel::Qwen3VlDecodeReplayState {
                     if (!fn(*t, true)) return false;
             if (!fn(k[l], false) || !fn(v[l], false)) return false;
         }
-        for (const auto* t : {&model.cos_, &model.sin_, &model.final_norm_w_, &model.lm_head_w_})
+        for (const auto* t : {&model.cos_, &model.sin_, &model.final_norm_w_})
             if (!fn(*t, true)) return false;
+        if (!p.tts_predictor && !fn(model.lm_head_w_, true)) return false;
         if (p.packed_qkv && !fn(model.qwen3vl_4b_qkv_scale_bank_, true)) return false;
         if (p.dtype != at::kHalf && !fn(model.lm_head_w_scale_, true)) return false;
-        return fn(model.position_ids_keepalive_, false);
+        return p.tts_predictor || fn(model.position_ids_keepalive_, false);
     }
 
     static bool projection_shape(const at::Tensor& w, const at::Tensor& scale,
@@ -349,8 +356,8 @@ struct CausalDecoderModel::Qwen3VlDecodeReplayState {
             (!p.packed_qkv || tensor_shape(model.qwen3vl_4b_qkv_scale_bank_, at::kHalf, {36, 6144})) &&
             // Ordinary 2B/8B use an exact-size THW table; only the bounded
             // cache envelope is reachable. 4B retains its fused-kernel tail proof.
-            readable_elements(model.position_ids_keepalive_,
-                ((h == 2560 ? 8192 : kCheckedDecodeMaxCacheRows) - 1) * 3 + 8);
+            (p.tts_predictor || readable_elements(model.position_ids_keepalive_,
+                ((h == 2560 ? 8192 : kCheckedDecodeMaxCacheRows) - 1) * 3 + 8));
     }
 
     bool owners_match(CausalDecoderModel& model) const {
@@ -398,7 +405,7 @@ struct CausalDecoderModel::Qwen3VlDecodeReplayState {
                     rpu_ddr_flush(t->data_ptr());
         }
         rpu_ddr_flush(model.final_norm_w_.data_ptr());
-        rpu_ddr_flush(model.lm_head_w_.data_ptr());
+        if (!profile(model).tts_predictor) rpu_ddr_flush(model.lm_head_w_.data_ptr());
         if (profile(model).dtype != at::kHalf) rpu_ddr_flush(model.lm_head_w_scale_.data_ptr());
     }
 };
@@ -417,28 +424,34 @@ bool CausalDecoderModel::begin_qwen3vl_decode_replay(
         !qwen3vl_decode_gemv(1) && !layer_weights_.empty() &&
         layer_weights_.front().q_w.defined() &&
         layer_weights_.front().q_w.scalar_type() == at::kHalf;
-    const bool ordinary = qwen3vl_ordinary_resident_prefill_profile_ || qwen3vl_4b_w8_profile_ || exact_8b;
+    const bool tts_predictor = fast_replay_skip_layer_loop_ && num_layers() == 5 &&
+        hidden_size() == 1024 && intermediate_size() == 3072 && num_q_heads() == 16 &&
+        !linear_acc32_ && !has_mrope_ && !fuse_lm_head_ && !lm_head_w_.defined() &&
+        !lm_head_w_scale_.defined() && deepstack_lang_layers_.empty() && rope_position_base_ < 0 &&
+        !layer_weights_.empty() && layer_weights_.front().q_w.defined() &&
+        layer_weights_.front().q_w.scalar_type() == at::kHalf;
+    const bool ordinary = qwen3vl_ordinary_resident_prefill_profile_ || qwen3vl_4b_w8_profile_ || exact_8b || tts_predictor;
     const bool geometry = (num_layers() == 28 && hidden_size() == 2048 && intermediate_size() == 6144 && num_q_heads() == 16) ||
-        (num_layers() == 36 && hidden_size() == 2560 && intermediate_size() == 9728 && num_q_heads() == 32) || exact_8b;
-    const bool envelope = exact_8b
+        (num_layers() == 36 && hidden_size() == 2560 && intermediate_size() == 9728 && num_q_heads() == 32) || exact_8b || tts_predictor;
+    const bool envelope = tts_predictor || (exact_8b
         ? (chunk_envelope().max_kv_len == 320 || chunk_envelope().max_kv_len == 4176) &&
           chunk_envelope().chunk == 128
         : (chunk_envelope().max_kv_len == 2048 || chunk_envelope().max_kv_len == 4176) &&
-          chunk_envelope().chunk == (num_layers() == 28 ? 320 : 256);
+          chunk_envelope().chunk == (num_layers() == 28 ? 320 : 256));
     if (typeid(*this) != typeid(CausalDecoderModel) || !RpuKernelGraph::has_active() ||
         !ordinary || !geometry || !is_causal || mask.has_value() || partial_mrope_active_ ||
         adarms_ || planning_mode_ != CausalDecoderPlanningMode::ORDINARY ||
         qwen3vl_pooler_z1_dispatch_ || qwen3vl_multiview_text_composite_dispatch_ ||
-        !has_qk_norm_ || !has_mrope_ || num_kv_heads() != 8 || head_dim() != 128 ||
+        !has_qk_norm_ || (!tts_predictor && !has_mrope_) || num_kv_heads() != 8 || head_dim() != 128 ||
         layer_weights_.size() != size_t(num_layers()) ||
         num_cores() != 8 || attn_tp() != 8 || mlp_tp() != 8 || lm_head_tp() != 8 ||
-        !fuse_lm_head_ || vocab_size_ != 151936 || lm_head_exact_candidates_ || reuse_lm_head_output_ ||
+        (!tts_predictor && (!fuse_lm_head_ || vocab_size_ != 151936)) || lm_head_exact_candidates_ || reuse_lm_head_output_ ||
         !use_silu_ || nvfp4_ || has_qkv_bias_ || norm_slab_active() ||
         equal_two_prefill_ || configured_chunk_size_cap_ ||
         adarms_mutable_ || adarms_unroll_ || adarms_schedule_select_ || adarms_fused_bcast_enabled_ ||
         sdpa_kernel_ != SdpaKernelType::FLASH_ATTN_SPM ||
-        mrope_section_ != std::vector<int32_t>({24, 20, 20}) ||
-        deepstack_lang_layers_ != std::vector<int64_t>({0, 1, 2}) ||
+        (!tts_predictor && (mrope_section_ != std::vector<int32_t>({24, 20, 20}) ||
+         deepstack_lang_layers_ != std::vector<int64_t>({0, 1, 2}))) ||
         // Preserve each named prefill envelope; actual KV owners bound decode.
         !envelope ||
         get_debug_export() || descriptor.empty() || k.size() != size_t(num_layers()) || v.size() != size_t(num_layers()) ||
@@ -452,14 +465,19 @@ bool CausalDecoderModel::begin_qwen3vl_decode_replay(
     // Quantized ACC32 is not yet admitted to this specialized replay path;
     // retain the generic recorded-Graph execution for those profiles.
     if (profile.acc32 && profile.dtype != at::kHalf) return false;
-    if (!Qwen3VlDecodeReplayState::projection_shape(lm_head_w_, lm_head_w_scale_,
+    if ((!tts_predictor && (!Qwen3VlDecodeReplayState::projection_shape(lm_head_w_, lm_head_w_scale_,
             profile.dtype, 151936, hidden_size(), false) ||
-        !tensor_shape(position_ids_keepalive_, at::kInt, {8192, 3}) ||
+        !tensor_shape(position_ids_keepalive_, at::kInt, {8192, 3}))) ||
         !cos_.defined() || cos_.dim() != 2 || cos_.size(1) != 64 ||
         cos_.scalar_type() != at::kHalf || !tensor_shape(sin_, at::kHalf, cos_.sizes())) return false;
     const auto cache_capacity = decode_cache_capacity(k, v, num_layers());
     if (!cache_capacity) return false;
-    check_decode_position(position_ids_keepalive_, cos_, position, *cache_capacity);
+    if (tts_predictor) {
+        if (*cache_capacity != 32 || cos_.size(0) != 32) return false;
+        TORCH_CHECK(position >= 0 && position < 32, "TTS Predictor checked decode position exceeds cache");
+    } else {
+        check_decode_position(position_ids_keepalive_, cos_, position, *cache_capacity);
+    }
     if (!qwen3vl_decode_replay_state_)
         qwen3vl_decode_replay_state_ = std::make_shared<Qwen3VlDecodeReplayState>();
     auto& state = *qwen3vl_decode_replay_state_;
