@@ -115,7 +115,7 @@ class Qwen3TTSModel:
     Talker, Code Predictor and their output heads execute FP16 on device.
     The codec frontend also uses device FP16 when the native RoPE contract is available.
     Embedding, speaker encoder and composition use CPU FP32. The codec's twelve
-    residual convolutions can optionally use RPU FP16/ACC32; the rest stays CPU.
+    residual convolutions default to RPU FP16/ACC32; the rest stays CPU.
     Only speech output is exposed; internal per-layer traces are not an API.
     """
 
@@ -135,8 +135,8 @@ class Qwen3TTSModel:
         self._codec_convolutions = {"backend": "cpu", "layers": 0, "calls": 0}
 
     @classmethod
-    def from_pretrained(cls, checkpoint, *, source, dtype=torch.float16, codec_backend="cpu"):
-        """Load frozen weights/source; codec_backend=rpu opts into residual-conv offload."""
+    def from_pretrained(cls, checkpoint, *, source, dtype=torch.float16, codec_backend="rpu"):
+        """Load frozen weights/source; codec_backend=cpu restores FP32 residual convolutions."""
         from rpu_backend.adapters.qwen3_tts import load_cpu_model
         from .causal_lm import _claim_live_instance
 

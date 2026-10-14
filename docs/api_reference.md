@@ -512,7 +512,7 @@ from rpu_backend.api import Qwen3ASRModel, Qwen3TTSModel
 |---|---|
 | `Qwen3ASRModel.from_pretrained(checkpoint, dtype=torch.float16)` | Local pinned Qwen3-ASR-0.6B checkpoint |
 | `model.transcribe(audio, sample_rate=16000, max_new_tokens=64)` | One finite CPU floating-point waveform, mono 16 kHz, 0.5–8 seconds; token limit 1–64. Returns `ASRTranscription(text, raw_text, token_ids)` |
-| `Qwen3TTSModel.from_pretrained(checkpoint, source=prepared_package, dtype=torch.float16, codec_backend="cpu")` | Local pinned Qwen3-TTS-12Hz-0.6B-Base checkpoint and prepared `qwen_tts/` source directory |
+| `Qwen3TTSModel.from_pretrained(checkpoint, source=prepared_package, dtype=torch.float16, codec_backend="rpu")` | Local pinned Qwen3-TTS-12Hz-0.6B-Base checkpoint and prepared `qwen_tts/` source directory |
 | `model.synthesize(text, reference_audio=local_file, language="Chinese", max_new_tokens=256)` | Text of 1–1024 characters; `Chinese` or `English`; finite, nonzero mono 24 kHz reference audio, 0.5–20 seconds; token limit 2–256 per segment. Returns an independent float32 mono waveform and sample rate 24000 |
 
 ASR uses greedy generation without context prompts, timestamps or streaming.
@@ -569,4 +569,5 @@ output head consumes it; requests for hidden states retain independent CPU
 outputs. Retire Graphs before native handles and weights. Set CPU thread count
 with `torch.set_num_threads` before loading; the API leaves it unchanged.
 
-`codec_backend="rpu"` is an experimental twelve-layer residual convolution offload; the remaining vocoder stays on CPU. `execution_stats().codec_convolutions` reports backend, installed layers and cumulative device calls. See the [speech guide](qwen3_audio.md#experimental-rpu-vocoder-convolutions).
+`codec_backend="rpu"` defaults to the experimental twelve-layer residual convolution offload;
+select `codec_backend="cpu"` to restore the FP32 residual convolutions; the remaining vocoder stays on CPU. `execution_stats().codec_convolutions` reports backend, installed layers and cumulative device calls. See the [speech guide](qwen3_audio.md#experimental-rpu-vocoder-convolutions).

@@ -130,7 +130,9 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   CLI and the dedicated audio runner. Keep configuration checks free of Torch/device
   imports and validate paths/audio before loading weights. Record resident latency,
   process CPU time and actual-duration RTF separately from load and profiling.
-- The opt-in TTS `codec_backend="rpu"` offloads only twelve kernel-7 residual
+- TTS defaults to `codec_backend="rpu"` in both the API and TOML runner;
+  explicit `codec_backend="cpu"` restores FP32 residual convolutions. The RPU path
+  offloads only twelve kernel-7 residual
   convolutions through synchronous FP16/ACC32 Linear. Validate all geometries before
   conversion, preserve CPU weights, restore forwards on close and report actual calls.
   CPU im2col, bias and the rest of the vocoder remain explicit; do not claim full

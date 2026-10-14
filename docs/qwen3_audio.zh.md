@@ -136,7 +136,7 @@ CPU 浮点 Tensor。
 | 模型 | CPU | Rhino 设备 |
 |---|---|---|
 | ASR | 音频读取、mel/分块、卷积与层间激活、单 token embedding、有限值检查、argmax、文本解码 | conv_out、位置和有效行处理、音频 encoder 与末尾投影、prefill 文本/音频组装、文本 decoder 和输出头 |
-| TTS | embedding、参考音频、speaker encoder、生成控制、码本、卷积/上采样、SnakeBeta、波形输出 | Talker、Predictor 和输出头；具备对应 native 接口时还包括 codec 输入/输出投影和 Transformer 前段 |
+| TTS | embedding、参考音频、speaker encoder、生成控制、码本、其余卷积/上采样、SnakeBeta、波形输出 | 默认卸载的 12 层残差卷积；Talker、Predictor 和输出头；具备对应 native 接口时还包括 codec 输入/输出投影和 Transformer 前段 |
 
 ASR 卷积使用 FP16 舍入权重进行 CPU FP32 计算，再转回 FP16；卷积采用 channels-last。
 设备音频 Graph 使用 FP32 Linear 累加。TTS CPU 组件保持 FP32，设备组件使用 FP16、
@@ -166,8 +166,9 @@ FP32 Linear 累加；codec 前段 LayerScale 在 FP32 中折入投影后转 FP16
 
 ## 实验性 RPU 声码器卷积
 
-在 `Qwen3TTSModel.from_pretrained` 中设置 `codec_backend="rpu"`，或使用
-`examples/configs/qwen3_tts/0_6b/base_rpu_codec.toml`。默认仍为 `cpu`。
+`Qwen3TTSModel.from_pretrained` 和示例运行器默认使用 `codec_backend="rpu"`，
+省略参数或配置字段时也启用 RPU。`examples/configs/qwen3_tts/0_6b/base.toml`
+和 `base_rpu_codec.toml` 均选择该模式；显式设置 `codec_backend="cpu"` 可恢复 CPU FP32 残差卷积。
 RPU 模式将 12 层残差 Conv1d（kernel 7；通道 768/384/192/96；dilation 1/3/9）
 转换成显式八核 Linear，输入/权重 FP16、累加 FP32。权重只转换一次，保留原 CPU FP32
 权重；输出通道补齐到 128 对齐后裁回原大小，再加原 FP32 bias。
@@ -179,4 +180,4 @@ CPU 仍执行列展开、码本、SnakeBeta、其余卷积和上采样，因此�
 边界和更长序列的 CPU 滑窗注意力保持不变。
 
 FP16 舍入会改变波形，应使用同一份 codec tokens 对照 CPU FP32 并核验语音内容。
-该模式为实验选项，不继承默认配置的音质结论，运行成功不等于音质认证。
+该路径虽已设为默认，仍属实验性实现，不继承此前 CPU 残差卷积配置的音质结论；运行成功不等于音质认证。

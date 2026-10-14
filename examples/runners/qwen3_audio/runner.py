@@ -34,7 +34,7 @@ def validate_example_config(config):
             raise ValueError(f"{key} requires non-empty text")
     if tts and (len(inputs["text"]) > 1024 or inputs.get("language", "Chinese") not in ("Chinese", "English")):
         raise ValueError("TTS requires 1–1024 characters and Chinese or English")
-    if tts and model.get("codec_backend", "cpu") not in ("cpu", "rpu"):
+    if tts and model.get("codec_backend", "rpu") not in ("cpu", "rpu"):
         raise ValueError("codec_backend must be cpu or rpu")
     for value, label, low, high in (
             (inputs.get("max_new_tokens", 256 if tts else 64), "max_new_tokens", 2 if tts else 1, 256 if tts else 64),
@@ -98,7 +98,7 @@ def run_example_config(config):
             start = time.perf_counter()
             if tts:
                 owner = Qwen3TTSModel.from_pretrained(options["checkpoint"], source=options["source"],
-                    codec_backend=options.get("codec_backend", "cpu"))
+                    codec_backend=options.get("codec_backend", "rpu"))
                 def infer():
                     return owner.synthesize(inputs["text"], reference_audio=inputs["reference_audio"],
                         language=inputs.get("language", "Chinese"), max_new_tokens=limit)

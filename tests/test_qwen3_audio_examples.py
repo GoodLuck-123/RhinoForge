@@ -55,7 +55,8 @@ def test_relative_paths_and_dispatch(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_runner_records_results_and_closes_on_failure(tmp_path, monkeypatch, fail):
+@pytest.mark.parametrize("codec_backend", [None, "cpu", "rpu"])
+def test_runner_records_results_and_closes_on_failure(tmp_path, monkeypatch, fail, codec_backend):
     import numpy as np
     import soundfile as sf
     from rpu_backend import api
@@ -63,6 +64,10 @@ def test_runner_records_results_and_closes_on_failure(tmp_path, monkeypatch, fai
     from rpu_backend.api import qwen3_tts
 
     cfg = config.load_config(ROOT / "examples/configs" / TEMPLATES[2])
+    if codec_backend is None:
+        cfg["qwen3_tts"].pop("codec_backend")
+    else:
+        cfg["qwen3_tts"]["codec_backend"] = codec_backend
     cfg["run"].update(warmup=2, runs=3, output_dir=str(tmp_path / "out"))
     monkeypatch.setattr(libraries, "current_libraries", lambda root: ({}, {}))
     monkeypatch.setattr(runner, "configure_cpu_threads", lambda value: {})
@@ -81,7 +86,7 @@ def test_runner_records_results_and_closes_on_failure(tmp_path, monkeypatch, fai
             self.closed = True
     model = Model()
     def load(checkpoint, **kw):
-        assert kw["codec_backend"] == "rpu"
+        assert kw["codec_backend"] == (codec_backend or "rpu")
         return model
     monkeypatch.setattr(api, "Qwen3TTSModel", SimpleNamespace(from_pretrained=load))
     if fail:

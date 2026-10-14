@@ -1,7 +1,7 @@
 [qwen3_tts]
 checkpoint = "/path/to/Qwen3-TTS-12Hz-0.6B-Base"
 source = "/path/to/qwen3-tts-prepared/qwen_tts"
-codec_backend = "cpu"
+codec_backend = "rpu"
 
 [input]
 text = "你好，欢迎使用语音助手。"

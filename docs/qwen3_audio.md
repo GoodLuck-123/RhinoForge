@@ -150,7 +150,7 @@ ASR also accepts a one-dimensional CPU floating-point Tensor. See
 | Model | CPU | Rhino device |
 |---|---|---|
 | ASR | Audio reading, mel features/chunking, convolutions and their activations, single-token embedding, finite checks, argmax, text decoding | conv_out, positions and valid rows, audio encoder and output projections, prefill text/audio composition, text decoder and vocabulary head |
-| TTS | Embedding, reference processing, speaker encoder, generation control, codebook, convolutions/upsampling, SnakeBeta, waveform output | Talker, Predictor and output heads; codec input/output projections and Transformer frontend when supported by native interfaces |
+| TTS | Embedding, reference processing, speaker encoder, generation control, codebook, remaining convolutions/upsampling, SnakeBeta, waveform output | Twelve residual convolutions by default; Talker, Predictor and output heads; codec input/output projections and Transformer frontend when supported by native interfaces |
 
 ASR convolutions use channels-last storage and FP16-rounded weights in CPU FP32
 computation, then round outputs to FP16. The device audio Graph uses FP32 Linear
@@ -194,8 +194,10 @@ and its 72-frame sliding attention.
 
 ## Experimental RPU vocoder convolutions
 
-Set `codec_backend="rpu"` in `Qwen3TTSModel.from_pretrained`, or select
-`examples/configs/qwen3_tts/0_6b/base_rpu_codec.toml`. The default remains `cpu`.
+`Qwen3TTSModel.from_pretrained` and the example runner default to
+`codec_backend="rpu"`, including when the argument/configuration field is omitted.
+Both `examples/configs/qwen3_tts/0_6b/base.toml` and `base_rpu_codec.toml` select it.
+Set `codec_backend="cpu"` explicitly to restore the CPU FP32 residual convolutions.
 This option moves twelve residual Conv1d layers (kernel 7, channels
 768/384/192/96, dilation 1/3/9) to explicit eight-core RPU Linear with FP16
 inputs/weights and FP32 accumulation. Weights are converted once from independent
@@ -213,5 +215,5 @@ remain unchanged.
 
 FP16 rounding changes the waveform. Compare identical codec tokens against the
 CPU FP32 anchor and inspect speech content; runtime checks alone do not certify
-audio quality. The RPU option is experimental and does not inherit the default
-profile's quality evidence.
+audio quality. The RPU path remains experimental even though it is now the default; it does
+not inherit the previous CPU residual-convolution profile's quality evidence.

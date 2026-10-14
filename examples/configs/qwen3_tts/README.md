@@ -4,10 +4,12 @@
 
 | 模板 | 声码器后段 |
 |---|---|
-| [0_6b/base.toml](0_6b/base.toml) | 原 CPU FP32 配方，默认 |
-| [0_6b/base_rpu_codec.toml](0_6b/base_rpu_codec.toml) | 实验性：12 层残差卷积使用 RPU FP16/ACC32，其余仍为 CPU |
+| [0_6b/base.toml](0_6b/base.toml) | 默认：12 层残差卷积使用 RPU FP16/ACC32，其余仍为 CPU |
+| [0_6b/base_rpu_codec.toml](0_6b/base_rpu_codec.toml) | 显式选择同一 RPU 配方，保留既有配置路径 |
 
 两者均复用设备 Talker、Predictor 及现有 codec Transformer 路由。
+省略 `codec_backend` 时也默认使用 RPU；如需原 FP32 残差卷积，将该字段改为 `"cpu"`。
+RPU 卷积路径仍为经过有限样本验证的实验性实现。
 只接受固定 Base checkpoint、中英文文本 1–1024 字符和单声道 24 kHz、0.5–20 秒非静音参考音频。
 不是完整声码器全 RPU 迁移。详细采样、分段和前段 CPU 回退范围见[语音指南](../../../docs/qwen3_audio.zh.md)。
 
@@ -27,10 +29,10 @@ python -m examples.run --config /path/to/tts.toml
 默认 16 个 CPU 线程，2 次预热后测 5 次；模型只加载一次，每次合成前重置 `run.seed`。
 在空闲设备上按机器约定获取设备锁，ASR/TTS 分进程运行。
 
-Python API 同样可选：
+Python API 同样默认启用；传入 `codec_backend="cpu"` 可切回 CPU：
 
 ```python
-with Qwen3TTSModel.from_pretrained(checkpoint, source=source, codec_backend="rpu") as model:
+with Qwen3TTSModel.from_pretrained(checkpoint, source=source) as model:
     waveform, rate = model.synthesize(text, reference_audio=reference)
 ```
 
