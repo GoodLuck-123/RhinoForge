@@ -7,11 +7,11 @@ main and expansion operator assets, the board SDK, or model weights. Obtain a ru
 compatible with the source revision you are installing from the runtime provider.
 Follow that package's distribution terms and integrity instructions.
 
-For RhinoForge v1.2.0rc1, request
-`RhinoForge-runtime-v1.2.0rc1.tar.gz` and its `.tar.gz.sha256` file from the provider.
-The archive extracts to `RhinoForge-runtime-v1.2.0rc1/` and contains
+For RhinoForge v1.2.0, request
+`RhinoForge-runtime-v1.2.0.tar.gz` and its `.tar.gz.sha256` file from the provider.
+The archive extracts to `RhinoForge-runtime-v1.2.0/` and contains
 `rhinoOpLib_current.ref` and `rhinoExpansionOpLib_current.ref`, each with an adjacent `.ref.kernels` manifest.
-RhinoForge, Runtime and Rhino Launch share the `1.2.0rc1` release version.
+RhinoForge, Runtime and Rhino Launch share the `1.2.0` release version.
 Launch's numeric CMake version is `1.2.0`; its ABI version remains `1`. Use the
 exact nested Launch package named by `RELEASE.txt`. See the [release policy](release_policy.md).
 
@@ -24,7 +24,7 @@ out of the public issue. Asset access follows the provider's distribution terms.
 
 ## Required components
 
-- **Rhino Launch 1.2.0rc1**, built as a sanitized Release package, with headers,
+- **Rhino Launch 1.2.0**, built as a sanitized Release package, with headers,
   shared libraries and `lib/cmake/rhino_launch/rhino_launchConfig.cmake`.
   Current CMake checks `graph-arena-pool-v2`, `register-state-token`, Chrome
   hwperf support and the absence of the development Program API.
@@ -45,8 +45,8 @@ to the installed Launch prefix and the unchanged operator asset:
 
 ```bash
 export RHINO_LAUNCH_ROOT="/absolute/path/to/matching/launch-install"
-export RPU_KERNEL_LIB_PATH="/absolute/path/to/RhinoForge-runtime-v1.2.0rc1/rhinoOpLib_current.ref"
-export RPU_KERNEL_LIB_PATH_EXPANSION="/absolute/path/to/RhinoForge-runtime-v1.2.0rc1/rhinoExpansionOpLib_current.ref"
+export RPU_KERNEL_LIB_PATH="/absolute/path/to/RhinoForge-runtime-v1.2.0/rhinoOpLib_current.ref"
+export RPU_KERNEL_LIB_PATH_EXPANSION="/absolute/path/to/RhinoForge-runtime-v1.2.0/rhinoExpansionOpLib_current.ref"
 export CMAKE_PREFIX_PATH="$RHINO_LAUNCH_ROOT${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export LD_LIBRARY_PATH="$RHINO_LAUNCH_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 

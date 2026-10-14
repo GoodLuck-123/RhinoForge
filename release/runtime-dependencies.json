@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "launch_kernel": {
-    "commit": "530a1f1dc890c0904a9eac46d7997ad7ce1064ce",
+    "commit": "3dd1b410f5f46373997fef3dfbf9b67eecec6a84",
     "version": "1.2.0",
-    "release_version": "1.2.0rc1",
+    "release_version": "1.2.0",
     "cmake_version": "1.2.0",
     "abi_version": 1
   },

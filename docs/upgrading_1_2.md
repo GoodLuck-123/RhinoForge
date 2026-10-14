@@ -2,7 +2,7 @@
 
 [简体中文](upgrading_1_2.zh.md) | English
 
-The current 1.2 candidate is `1.2.0rc1`. See the [changelog](../CHANGELOG.md) for
+The current release is `1.2.0`. See the [changelog](../CHANGELOG.md) for
 changes. The distribution is `rhinoforge`; Python uses `rpu_backend` and `torch.rpu`.
 
 ## Install
@@ -10,10 +10,10 @@ changes. The distribution is `rhinoforge`; Python uses `rpu_backend` and `torch.
 1. Follow [Getting started](getting_started.md) in a fresh Python 3.12 environment.
    [pyproject.toml](../pyproject.toml) pins PyTorch 2.10.0 and Transformers 5.3.0;
    select the `vision`, `vla` or `audio` extra for the models you use.
-2. Obtain `RhinoForge-runtime-v1.2.0rc1.tar.gz` and its checksum from the
+2. Obtain `RhinoForge-runtime-v1.2.0.tar.gz` and its checksum from the
    [asset request entry](runtime_assets.md#request-runtime-assets). Verify the
    archive and keep both main and DDR-expansion assets with their sidecars.
-   Rhino Launch uses the same `1.2.0rc1` version. Exact component revisions are in
+   Rhino Launch uses the same `1.2.0` version. Exact component revisions are in
    [runtime-dependencies.json](../release/runtime-dependencies.json).
 3. Update `RHINO_LAUNCH_ROOT`, `RPU_KERNEL_LIB_PATH` and
    `RPU_KERNEL_LIB_PATH_EXPANSION`, rebuild the extension, and start a new process.

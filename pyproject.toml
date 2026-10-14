@@ -15,7 +15,7 @@ license = {file = "LICENSE"}
 requires-python = ">=3.12,<3.13"
 keywords = ["pytorch", "rhinoforge", "inference", "transformers", "vla"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",

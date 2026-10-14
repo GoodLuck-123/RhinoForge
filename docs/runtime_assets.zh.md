@@ -6,10 +6,10 @@ RhinoForge 源码和 wheel 不包含 Rhino Launch 二进制、主算子资产与
 模型权重。请向运行时提供方获取与待安装源码版本匹配的资产，按随包条款和完整性说明
 使用。
 
-RhinoForge v1.2.0rc1 的整包名为 `RhinoForge-runtime-v1.2.0rc1.tar.gz`，
-请向提供方同时获取其 `.tar.gz.sha256`。解压目录为 `RhinoForge-runtime-v1.2.0rc1/`，
+RhinoForge v1.2.0 的整包名为 `RhinoForge-runtime-v1.2.0.tar.gz`，
+请向提供方同时获取其 `.tar.gz.sha256`。解压目录为 `RhinoForge-runtime-v1.2.0/`，
 其中包含 `rhinoOpLib_current.ref`、`rhinoExpansionOpLib_current.ref` 及各自相邻的 `.ref.kernels` 清单。
-RhinoForge、Runtime、Rhino Launch 统一使用发行版本 `1.2.0rc1`。
+RhinoForge、Runtime、Rhino Launch 统一使用发行版本 `1.2.0`。
 Launch 的 CMake 数值版本为 `1.2.0`，ABI 版本保持 `1`。
 使用 `RELEASE.txt` 指定的准确 Launch 内包，版本规则见[发布流程](release_policy.md)。
 
@@ -21,7 +21,7 @@ Launch 的 CMake 数值版本为 `1.2.0`，ABI 版本保持 `1`。
 
 ## 必需组件
 
-- **Rhino Launch 1.2.0rc1**：sanitized Release 包，包含头文件、动态库和
+- **Rhino Launch 1.2.0**：sanitized Release 包，包含头文件、动态库和
   `lib/cmake/rhino_launch/rhino_launchConfig.cmake`。当前 CMake 检查
   `graph-arena-pool-v2`、`register-state-token`、Chrome hwperf 能力，且要求
   不暴露 development Program API。
@@ -39,8 +39,8 @@ Launch 的 CMake 数值版本为 `1.2.0`，ABI 版本保持 `1`。
 
 ```bash
 export RHINO_LAUNCH_ROOT="/absolute/path/to/matching/launch-install"
-export RPU_KERNEL_LIB_PATH="/absolute/path/to/RhinoForge-runtime-v1.2.0rc1/rhinoOpLib_current.ref"
-export RPU_KERNEL_LIB_PATH_EXPANSION="/absolute/path/to/RhinoForge-runtime-v1.2.0rc1/rhinoExpansionOpLib_current.ref"
+export RPU_KERNEL_LIB_PATH="/absolute/path/to/RhinoForge-runtime-v1.2.0/rhinoOpLib_current.ref"
+export RPU_KERNEL_LIB_PATH_EXPANSION="/absolute/path/to/RhinoForge-runtime-v1.2.0/rhinoExpansionOpLib_current.ref"
 export CMAKE_PREFIX_PATH="$RHINO_LAUNCH_ROOT${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export LD_LIBRARY_PATH="$RHINO_LAUNCH_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 

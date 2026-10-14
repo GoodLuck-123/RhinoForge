@@ -20,7 +20,7 @@ PyTorch 后端中提供模型适配器、融合模型运行时、图捕获与重
 发行包名为 `rhinoforge`，Python 导入名仍为 `rpu_backend`。RhinoForge 仅支持
 推理，不支持训练和微调。
 
-当前源码版本为 **v1.2.0rc1**（候选版）。版本规则见[发布流程](docs/release_policy.md)。更新范围见[发行说明](CHANGELOG.md)，
+当前源码版本为 **v1.2.0**。版本规则见[发布流程](docs/release_policy.md)。更新范围见[发行说明](CHANGELOG.md)，
 已有环境请先阅读[升级指南](docs/upgrading_1_2.zh.md)。
 
 ## 主要能力
@@ -83,7 +83,7 @@ python -m examples.run --config qwen3.local.toml
 
 | 主题 | 文档 |
 |---|---|
-| v1.2.0rc1 更新与安装 | [发行说明](CHANGELOG.md) · [升级指南](docs/upgrading_1_2.zh.md) |
+| v1.2.0 更新与安装 | [发行说明](CHANGELOG.md) · [升级指南](docs/upgrading_1_2.zh.md) |
 | 完整文档导航 | [文档索引](docs/README.md) |
 | 当前源码安装 | [源码构建](docs/development_build.md) |
 | 安装与首次运行 | [入门指南](docs/getting_started.zh.md) |
