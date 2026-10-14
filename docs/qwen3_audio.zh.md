@@ -30,6 +30,7 @@ checkpoint 配置：top-k 50、temperature 0.9、top-p 1.0。未生成 EOS 时�
 片段最多 128 字符，目标 12 token；不超过八个字符的短句尾可与前一分句合并至
 16 token。段尾补句号可能改变 token 数、停顿和语调。每段从本次请求初始 CPU 随机状态开始，后续分段
 恢复第一段留下的调用方状态。各段独立复制，全部成功后拼接返回；失败不返回部分音频。
+在上述长度范围内，仅含句末标点的尾段并回前一段，避免单独合成句号。
 
 加载器先核对固定 checkpoint、配置和 tokenizer 身份，再转换权重。ASR 身份见
 [`qwen3_asr.py`](../python/rpu_backend/api/qwen3_asr.py)，TTS 身份见
@@ -156,6 +157,12 @@ FP32 Linear 累加；codec 前段 LayerScale 在 FP32 中折入投影后转 FP16
   Predictor decode 及当前帧数的 codec 图。长度变化按组件淘汰旧签名，同长度重放。
 - Predictor 最后一行设备 hidden 只供紧接着的输出头使用一次；请求 hidden states
   时仍返回独立 CPU 存储。
+- Predictor 包括首个条件 token 在内，全部在 RPU 计算。固定 checkpoint 的第三层
+  （索引 2）`SiLU(gate) * up` 中间值会超过 FP16 范围，而 down 投影后的残差仍在范围内。
+  安装时在 FP32 中将该层 up 权重除以 8、down 权重乘以 8，再转换为 FP16 并打包。
+  成对的二次幂缩放保持 MLP 的数学函数，不裁剪激活，不增加逐 token 计算或 CPU 解码；
+  原 checkpoint 与 CPU 参考权重不变。
+  Talker 和 Predictor 均在解析 Graph 描述前显式启用 FP32 Linear 累加，激活与权重仍以 FP16 存储。
 - Predictor 复用 native checked decode replay：仅匹配五层 FP16、32 位置缓存、
   一维 RoPE 和无融合输出头的固定路径。首次记录完整算子序列，后续校验权重版本、
   KV 所有者、Graph 和内存布局，再更新位置及 attention 参数，跳过重复的主机算子

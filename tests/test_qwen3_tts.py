@@ -138,6 +138,43 @@ def test_text_splitting_keeps_tiny_sentence_endings_with_their_clause():
     assert tts._split_text(sentence * 4, tokenizer) == [sentence] * 4
 
 
+def test_text_splitting_does_not_synthesize_a_standalone_sentence_stop():
+    tokenizer = lambda value: {"input_ids": list(value)}
+    text = ("甲" * 12 + "。") * 3
+    segments = tts._split_text(text, tokenizer)
+    assert segments == ["甲" * 12 + "。"] * 3
+
+
+def test_predictor_mlp_balance_prevents_product_overflow_without_changing_mlp():
+    # Captured RPU layer-2 channel: both operands fit FP16; their product does not.
+    gate = torch.tensor([[351.75, -2.]])
+    up = torch.tensor([[440.25], [1.]])
+    down = torch.tensor([[0.341796875, 0.5]])
+    original_up, original_down = up.clone(), down.clone()
+    activation = torch.nn.functional.silu(gate)
+    assert torch.isinf(activation.half() * up.T.half()).any()
+    balanced_up = tts._tts_mlp_weight(up, "predictor", 2, "mlp.up_proj")
+    balanced_down = tts._tts_mlp_weight(down, "predictor", 2, "mlp.down_proj")
+    product = activation.half() * balanced_up.T
+    assert torch.isfinite(product).all()
+    expected = (activation * up.T) @ down.T
+    actual = product.float() @ balanced_down.float().T
+    torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3)
+    # The paired power-of-two transform preserves FP32 reference semantics.
+    torch.testing.assert_close((activation * balanced_up.float().T) @ balanced_down.float().T,
+                               expected, rtol=0, atol=0)
+    assert torch.equal(up, original_up) and torch.equal(down, original_down)
+
+
+@pytest.mark.parametrize("component,index,path", [
+    ("talker", 2, "mlp.up_proj"), ("predictor", 1, "mlp.up_proj"),
+    ("predictor", 3, "mlp.down_proj"), ("predictor", 2, "mlp.gate_proj"),
+])
+def test_mlp_balance_leaves_other_weights_unchanged(component, index, path):
+    weight = torch.tensor([[0.1, -0.25], [0.375, 1.]])
+    assert torch.equal(tts._tts_mlp_weight(weight, component, index, path), weight.half())
+
+
 def test_text_splitting_also_bounds_characters():
     segments = tts._split_text("字" * 300, lambda value: {"input_ids": [1]})
     assert list(map(len, segments)) == [128, 128, 44]
@@ -523,8 +560,10 @@ def test_predictor_reuses_kv_with_fresh_positions_inputs_and_owned_outputs(monke
         first_head = tts._take_head_input(part, first.last_hidden_state).clone()
     else:
         first_head = first.last_hidden_state
-    second = tts._decoder_forward(part, torch.zeros(1, 1, 1024), None, None, None, None, hidden_states)
-    assert len(allocations) == 1 and positions == [0, 1, 0]
+    tts._decoder_forward(part, torch.full((1, 1, 1024), 2.), first.past_key_values,
+                         None, None, None, hidden_states)
+    second = tts._decoder_forward(part, torch.zeros(1, 2, 1024), None, None, None, None, hidden_states)
+    assert len(allocations) == 1 and positions == [0, 1, 2, 0, 1]
     assert first_head.eq(1).all() and second.last_hidden_state.eq(0).all()
 
 

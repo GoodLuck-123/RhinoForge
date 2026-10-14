@@ -112,6 +112,17 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   before skipping host emission. Refresh position and attention fields on every
   replay, including resets to zero; use ordinary emission when the proof cannot
   be established, and fail explicitly on inconsistencies after skipping starts.
+- Keep every Predictor token on device. Its frozen third MLP layer (index 2)
+  overflows FP16 at `SiLU(gate) * up`, before the down projection; subsequent
+  RMSNorm receives Inf and produces zero. The ordinary device RMSNorm handles
+  the finite ~53k residual correctly in isolation, so do not infer a norm defect
+  from a CPU FP16-square experiment. Divide up weights by 8 and multiply down
+  weights by 8 in FP32 before packing, without mutating CPU reference weights.
+  Check the paired transform's semantics, finite intermediate products, and
+  position-zero device decode/replay. Keep sentence-stop-only tails attached
+  within the segment bounds so punctuation cannot exhaust EOS.
+  Explicitly bind Talker/Predictor FP32 Linear accumulation before planning their
+  descriptors; changing it after descriptor resolution leaves a stale plan.
 - Accept up to 1024 characters. Keep requests within 128 characters and 32 tokens
   on their single-segment path. Split longer text at punctuation with a 12-token
   target and 128-character bound; retain tiny sentence endings up to 16 tokens.

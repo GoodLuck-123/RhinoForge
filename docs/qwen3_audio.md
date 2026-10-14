@@ -35,6 +35,7 @@ to 16 tokens. Adding sentence stops can change token counts, pauses and
 intonation. Every segment starts from the request's initial CPU RNG state; later
 segments restore the caller state left by the first. All segments must succeed
 before their independently stored waveforms are concatenated.
+Sentence-stop-only tails join the preceding segment within those bounds.
 
 Loaders check the pinned checkpoint, configuration and tokenizer before weight
 transformation. ASR identities are in
@@ -180,6 +181,15 @@ and its 72-frame sliding attention.
   matching signatures.
 - Predictor passes its last device hidden row directly to the immediate output
   head, consumed once; callers requesting hidden states receive owned CPU output.
+- All Predictor tokens, including the first conditioning token, execute on RPU.
+  In the frozen checkpoint's third layer (index 2), `SiLU(gate) * up` can exceed
+  FP16 range before the down projection, although the final residual fits FP16.
+  Installation divides that layer's up-projection weights by 8 and multiplies
+  its down-projection weights by 8 in FP32 before FP16 packing. The paired
+  power-of-two scaling preserves the MLP function without clipping, per-token
+  work or a CPU decoder path; original checkpoint/CPU weights stay unchanged.
+  Talker and Predictor explicitly bind FP32 Linear accumulation before resolving
+  their Graph descriptors; their activation and weight storage remains FP16.
 - Predictor uses native checked decode replay only for its five-layer FP16 path,
   32-position cache, 1D RoPE and separate output heads. After recording the full
   operator sequence, replay checks weight versions, KV owners, Graph identity and

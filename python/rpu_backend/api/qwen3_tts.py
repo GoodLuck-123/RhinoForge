@@ -53,7 +53,8 @@ def _split_text(text, tokenizer):
                         break
         segment = remaining[:end].strip()
         # Keep tiny sentence endings attached to their preceding clause.
-        if (segments and segments[-1].endswith((",", "，", ":", "：", "、"))
+        if (segments and (segments[-1].endswith((",", "，", ":", "：", "、"))
+                          or not segment.rstrip("。！？.!?"))
                 and segment.endswith(("。", "！", "？", ".", "!", "?"))
                 and len(segment.rstrip("。！？.!?")) <= 8
                 and len(segments[-1] + segment) <= 128
@@ -107,6 +108,17 @@ def _predictor_generate(owner, inputs_embeds, *, max_new_tokens, do_sample,
         tokens.append(ids)
         cache = result.past_key_values
     return types.SimpleNamespace(sequences=torch.cat(tokens, dim=1))
+
+
+def _tts_mlp_weight(weight, component, layer_index, path):
+    # The frozen Predictor's third-layer SiLU*up exceeds FP16; balance its two
+    # linear projections before packing so every token can stay on device.
+    if component == "predictor" and layer_index == 2:
+        if path == "mlp.up_proj":
+            weight = weight / 8
+        elif path == "mlp.down_proj":
+            weight = weight * 8
+    return weight.half()
 
 
 class Qwen3TTSModel:
@@ -192,8 +204,9 @@ class Qwen3TTSModel:
             for path in ("self_attn.q_norm", "self_attn.k_norm", "input_layernorm", "post_attention_layernorm"):
                 groups.append([layer.get_submodule(path).weight.detach().half().to("rpu") for layer in core.layers])
             for path, partition in (("mlp.gate_proj", 1), ("mlp.up_proj", 1), ("mlp.down_proj", 0)):
-                groups.append([transform_linear_weight(layer.get_submodule(path).weight.detach().half(), partition, 8).to("rpu")
-                               for layer in core.layers])
+                groups.append([transform_linear_weight(_tts_mlp_weight(
+                    layer.get_submodule(path).weight.detach(), name, index, path), partition, 8).to("rpu")
+                    for index, layer in enumerate(core.layers)])
             positions = torch.arange(part["capacity"]).view(1, -1)
             if name == "talker":
                 positions = positions.unsqueeze(0).expand(3, -1, -1)
@@ -212,6 +225,7 @@ class Qwen3TTSModel:
             core._rpu_decoder_handle = handle
             core._rpu_decoder_graph_cache = graph
             torch.ops.rpu.causal_decoder_set_weights(handle, *groups, cos, sin, norm, 16, 8, 128, 1024, 3072, 1e-6, True)
+            torch.ops.rpu.causal_decoder_set_linear_acc32(handle, True)
             if name == "predictor":
                 torch.ops.rpu.causal_decoder_set_fast_replay(handle, True)
             if name == "talker":
