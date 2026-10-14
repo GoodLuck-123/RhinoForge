@@ -129,6 +129,11 @@ def _check_prefix_envelope(n_valid: Any, prefix_len: int) -> int:
     return value
 
 
+def _require_finite_tensor(name: str, value: torch.Tensor) -> None:
+    if not bool(torch.isfinite(value).all().item()):
+        raise ValueError(f"{name} must contain only finite values (no NaN/Inf).")
+
+
 def _validate_runner_observation(
     obs: Mapping[str, Any], *, n_cameras: int, prefix_len: int
 ) -> dict[str, Any]:
@@ -155,6 +160,7 @@ def _validate_runner_observation(
         if not torch.is_tensor(image) or tuple(image.shape) != (1, 3, 224, 224):
             raise ValueError(
                 f"obs['images'][{index}] 必须是 tensor [1,3,224,224]。")
+        _require_finite_tensor(f"obs['images'][{index}]", image)
 
     def require_shape(name: str, expected: str, valid) -> None:
         value = values[name]
@@ -187,6 +193,7 @@ def _validate_runner_observation(
         lambda s: len(s) == 2 and s[0] == 51 and s[1] >= prefix_len + 51)
     require_shape("suffix_pos", "[51]", lambda s: s == (51,))
     require_shape("noise", "[1,50,32]", lambda s: s == (1, 50, 32))
+    _require_finite_tensor("obs['noise']", values["noise"])
 
     state_keys = [name for name in ("state", "state_emb") if values.get(name) is not None]
     if len(state_keys) != 1:
@@ -195,6 +202,7 @@ def _validate_runner_observation(
         require_shape("state", "[1,32]", lambda s: s == (1, 32))
     else:
         require_shape("state_emb", "[1,1,1024]", lambda s: s == (1, 1, 1024))
+    _require_finite_tensor(f"obs[{state_keys[0]!r}]", values[state_keys[0]])
     return values
 
 
@@ -714,6 +722,9 @@ class HyEmbodiedPolicy:
                     raise ValueError(
                         "传了 ee_pose 但没有 norm_stats —— 无法把位姿编码成模型的 "
                         "state。请在 from_checkpoint 里给 norm_stats_path。")
+                _require_finite_tensor(
+                    "ee_pose", torch.as_tensor(ee_pose, dtype=torch.float64)
+                )
                 norm_state = torch.as_tensor(
                     self._decoder.encode_state(ee_pose), dtype=torch.float32)
             elif state is not None:

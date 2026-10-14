@@ -42,14 +42,14 @@ audio = [
     "torchaudio==2.10.0",
 ]
 vision = [
-    "pillow>=11",
+    "pillow>=12.3.0",
     "torchvision==0.25.0",
 ]
 vla = [
     "diffusers==0.33.1",
     "lerobot==0.5.1",
     "omegaconf>=2.3,<3",
-    "pillow>=11",
+    "pillow>=12.3.0",
     "pyyaml>=6",
     "qwen-vl-utils==0.0.14",
     "scipy>=1.15,<2",
