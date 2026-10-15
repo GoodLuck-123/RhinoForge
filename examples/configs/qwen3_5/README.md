@@ -81,9 +81,9 @@ MoE 由 router 选择路由专家参与计算，shared expert 是独立的共享
 |---|---|---|
 | RTN W4/G128：[Text](text/35b_a3b/w4a16_experts_rtn_g128.toml) / [VL](vl/35b_a3b/w4a16_experts_rtn_g128.toml) | **仅路由专家** gate/up/down 为 W4/G128；Attention/GDN、router、shared expert、head、embedding、norm、conv、Vision 全部 FP16 | [官方 35B-A3B 浮点包 → 本仓库 RTN](#cmd-moe-rtn) |
 | GPTQ W4/G128：[Text](text/35b_a3b/w4a16_experts_gptq_g128.toml) / [VL](vl/35b_a3b/w4a16_experts_gptq_g128.toml) | 量化范围相同，改用 Qwen 官方 GPTQ 结果；方法和零点编码不同，使用 GPTQ alias/profile | [直接下载 Qwen 官方 GPTQ](#cmd-moe-gptq) |
-| mixed E4M3：[Text](text/35b_a3b/fp8_e4m3_experts_attn_gdn.toml) / [VL](vl/35b_a3b/fp8_e4m3_experts_attn_gdn.toml) | **路由专家 + full-attention Q/K/V/O + GDN QKV/Z/out** 为逐输出通道缩放 E4M3；GDN a/b/conv、router、shared expert、head、embedding、norm、Vision FP16；`dtype="mixed-e4m3"` | [使用配套 mixed E4M3 包](#cmd-moe-mixed) |
+| mixed E4M3：[Text](text/35b_a3b/fp8_e4m3_experts_attn_gdn.toml) / [VL](vl/35b_a3b/fp8_e4m3_experts_attn_gdn.toml) | **路由专家 + full-attention Q/K/V/O + GDN QKV/Z/out** 为逐输出通道缩放 E4M3；GDN a/b/conv、router、shared expert、head、embedding、norm、Vision FP16；`dtype="mixed-e4m3"` | [官方浮点父 → mixed E4M3](#cmd-moe-mixed) |
 
-RTN 在本仓库直接舍入。[GPTQ](https://arxiv.org/abs/2210.17323) 利用校准数据，在逐步量化权重时补偿产生的误差。这里直接读取上游 GPTQ 成品包；[加载器](../../../python/rpu_backend/adapters/qwen3_5_moe/gptq_checkpoint.py)识别原包零点编码并按设备布局安装。mixed E4M3 同时改变专家精度与 Attention/GDN 的量化范围，使用配套派生包，格式不是官方 block-FP8。
+RTN 在本仓库直接舍入。[GPTQ](https://arxiv.org/abs/2210.17323) 利用校准数据，在逐步量化权重时补偿产生的误差。这里直接读取上游 GPTQ 成品包；[加载器](../../../python/rpu_backend/adapters/qwen3_5_moe/gptq_checkpoint.py)识别原包零点编码并按设备布局安装。mixed E4M3 同时改变专家精度与 Attention/GDN 的量化范围，由本仓库的独立脚本从官方浮点父离线生成，无需校准数据，格式不是官方 block-FP8。
 
 RTN/GPTQ 使用 B1、TP8、文本 ACC16；短模板 CPU24、no_grad、W2/R3，Text D31、VL D4。mixed 有 TP4/6/8 模板；短模板省略 CPU 线程与 `inference_mode`，分别沿用环境和默认 `true`。RTN 转换保留非路由张量（包括 MTP）的原 dtype/值，加载时转为 FP16。
 
@@ -166,7 +166,7 @@ ln -s /absolute/path/to/existing-Qwen3.5-2B "$RPU_MODEL_CACHE/Qwen3.5-2B"
 | MoE 35B-A3B | BF16 + 少量 FP32 | Qwen 官方 [Qwen/Qwen3.5-35B-A3B](https://huggingface.co/Qwen/Qwen3.5-35B-A3B) · [精度元数据](https://huggingface.co/api/models/Qwen/Qwen3.5-35B-A3B) | `Qwen3.5-35B-A3B` |
 | MoE RTN W4/G128：本仓库产物 | 路由专家 INT4（I32 packed），FP16 scale；非路由参数保留原 BF16/FP32 | 本仓库 routed-only RTN 转换 | `Qwen3.5-35B-A3B-RTN-W4A16-G128` |
 | MoE GPTQ W4/G128：公开量化包 | 路由专家 INT4（I32 packed）；未量化参数/scale 含 BF16、FP32 | **Qwen 官方量化** [Qwen/Qwen3.5-35B-A3B-GPTQ-Int4](https://huggingface.co/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4) · [量化声明](https://huggingface.co/Qwen/Qwen3.5-35B-A3B-GPTQ-Int4/blob/main/config.json) | `Qwen3.5-35B-A3B-GPTQ-Int4` |
-| MoE mixed E4M3：交付的派生包 | E4M3 原始 UINT8 + FP16 scale；其余参数加载为 FP16 | 使用交付的完整包；公开下载地址和完整转换脚本未提供 | `Qwen3.5-35B-A3B-rpu-fp8-mixed` |
+| MoE mixed E4M3：本仓库产物 | E4M3 原始 UINT8 + FP16 scale；其余浮点参数保存为 FP16 | 从 Qwen 官方未量化 35B-A3B 按 [mixed E4M3 转换命令](#cmd-moe-mixed)生成 | `Qwen3.5-35B-A3B-rpu-fp8-mixed` |
 | legacy27：交付的浮点父 / W8 包 | 原父记录为 BF16；产物为 INT8 + FP16 scale，其余 FP16 | 使用交付的 legacy27 浮点父 | 父目录由交付提供；产物 `Qwen3.8-27B-w8a16` |
 
 官方 27B 使用固定 revision `fc05daec18b0a78c049392ed2e771dde82bdf654`。其他命令按来源仓库下载。所有下载目录都要保留配套 tokenizer、processor、config 和完整分片。
@@ -344,11 +344,31 @@ hf download Qwen/Qwen3.5-35B-A3B-GPTQ-Int4 --local-dir "$DST"
 
 <a id="cmd-moe-mixed"></a>
 
-### MoE mixed E4M3：使用交付包
+### MoE mixed E4M3：官方浮点父 → 离线转换
 
-公共运行步骤中的 `MODEL` 使用交付的 mixed E4M3 checkpoint。也可放到登记目录 `$RPU_MODEL_CACHE/Qwen3.5-35B-A3B-rpu-fp8-mixed`，省略 `--model`。此配方使用逐输出通道 scale，与官方 block-FP8 包格式不同。
+从仓库根目录执行。输入使用官方未量化 `Qwen/Qwen3.5-35B-A3B` 的完整 checkpoint；已有对应浮点权重时可跳过下载并修改 `SRC`。转换在 CPU 上执行，需要 PyTorch、safetensors 和支持 `Qwen3_5MoeConfig` 的 Transformers，无需 RPU、GPU 或校准数据。`DST` 必须是尚不存在的新目录。
 
-VL改用 `vl/35b_a3b/fp8_e4m3_experts_attn_gdn.toml` 并填写图像路径，同样用 `--model` 指定该包。
+```bash
+SRC="$RPU_MODEL_CACHE/Qwen3.5-35B-A3B"
+DST="$RPU_MODEL_CACHE/Qwen3.5-35B-A3B-rpu-fp8-mixed"
+hf download Qwen/Qwen3.5-35B-A3B --local-dir "$SRC"
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5_moe_fp8.py \
+  --src "$SRC" --dst "$DST" --expert-chunk 1 --threads 8
+```
+
+入口：[convert_qwen3_5_moe_fp8.py](../../../python/rpu_backend/quant/convert_qwen3_5_moe_fp8.py)。脚本量化 210 个 routed-expert、full-attention 和 GDN mixer 张量，保存 E4M3 原始 UINT8 与逐输出通道 FP16 scale；其他浮点张量转为 FP16，并保留完整 config、tokenizer、processor 与分片索引。`--expert-chunk 1` 限制每次量化的行／专家数，`--threads 8` 设置 CPU 线程数。转换按分片处理，仍需为源、输出和单分片工作内存预留空间。
+
+官方 block-FP8 的 `weight_scale_inv` 格式、GPTQ 和 RTN 包不能作为本转换器的输入，也不能替代该输出。生成的新包不自动继承历史派生包的字节身份或测量结果；重现历史报告时仍须核对其原始资产记录。
+
+运行时指定转换产物：
+
+```bash
+python examples/run.py \
+  --config examples/configs/qwen3_5/text/35b_a3b/fp8_e4m3_experts_attn_gdn.toml \
+  --model "$DST"
+```
+
+使用上述登记目录时也可省略 `--model`。TP4／TP6／TP8、不同 P/D 与 ACC 配置共用这份权重。VL 改用 `vl/35b_a3b/fp8_e4m3_experts_attn_gdn.toml` 并填写 `input.images`，同样指向该产物。
 
 <a id="历史-legacy27"></a>
 

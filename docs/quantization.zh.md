@@ -207,6 +207,27 @@ python -m rpu_backend.quant.convert_qwen3_5 --src SOURCE_DIR --dst MIXED_DIR --p
 独立的 QuantTrio AWQ G128 来源保持第零层 MLP、Attention、GDN、Vision、LM head 为 FP16，
 后续层 MLP 保留 AWQ 权重。用对应 AWQ 模板加载原始 checkpoint；上述 RTN converter 不生成此格式。
 
+## Qwen3.5 MoE mixed E4M3
+
+使用独立 CPU 转换器从官方未量化 `Qwen/Qwen3.5-35B-A3B` 生成权重。
+从仓库根目录执行，指定已有浮点源和尚不存在的输出目录：
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5_moe_fp8.py \
+  --src SOURCE_DIR --dst OUTPUT_DIR --expert-chunk 1 --threads 8
+```
+
+[完整下载与运行命令](../examples/configs/qwen3_5/README.md#cmd-moe-mixed)
+默认输出到 `$RPU_MODEL_CACHE/Qwen3.5-35B-A3B-rpu-fp8-mixed`。转换需要 PyTorch、
+safetensors 和支持 `Qwen3_5MoeConfig` 的 Transformers，无需校准数据或设备运行时。
+
+脚本量化 210 个 routed-expert、full-attention Q/K/V/O 和 GDN QKV/Z/out 张量，
+保存 E4M3 原始 UINT8 codes 与逐输出通道 FP16 scales；其余浮点张量，包括 router、
+shared expert、head、embedding、norm 和 Vision，保存为 FP16。输出保留 config、
+tokenizer、processor 和分片元数据。官方 block-FP8 `weight_scale_inv`、GPTQ 和 RTN
+包不能作为输入。Text/VL、核数及 ACC 模板共用这份产物，各自准入规则保持不变。
+新转换产物不自动继承历史派生资产的身份或测量结果。
+
 ## Qwen3.5 MoE routed INT4
 
 35B-A3B 的 RTN 和官方 GPTQ 配置只量化 routed Gate/Up/Down expert，格式为 UINT4/G128。
