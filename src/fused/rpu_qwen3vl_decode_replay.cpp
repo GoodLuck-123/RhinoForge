@@ -95,22 +95,23 @@ struct DecodeProfile {
     int layers = 36;
     at::ScalarType dtype = at::kChar;
     bool acc32 = false, gemv = true, packed_qkv = true, fused_mlp = true;
-    bool tts_predictor = false;
+    bool tts_predictor = false, tts_head = false;
 };
 
 bool linear_name(const std::string& name, const DecodeProfile& profile, bool head) {
     if (!head && profile.gemv)
         return name == (profile.dtype == at::kHalf ? "llama_gemv" : "llama_gemv_wint8");
+    const bool acc32 = profile.acc32 && !(head && profile.tts_head);
     using namespace rpu_pl_tiling;
     for (int n : {128, 112, 96, 80, 64, 48, 32}) {
         std::string expected;
         if (profile.dtype == at::kByte)
-            expected = profile.acc32
+            expected = acc32
                 ? autotile_kernel_name_int4_acc32(mtile_int4_acc32(n), n)
                 : autotile_kernel_name_int4(mtile_int4(n), n);
         else {
             const bool half = profile.dtype == at::kHalf;
-            expected = profile.acc32
+            expected = acc32
                 ? autotile_kernel_name_acc32(half, half ? mtile_fp16_acc32(n) : mtile_w8a16_acc32(n), n)
                 : autotile_kernel_name(half, half ? mtile_w16(n) : mtile_w8a16(n), n);
         }
@@ -198,7 +199,7 @@ bool bind_decode_patches(const std::vector<DecodeKernelSlot>& kernels,
             (!profile.tts_predictor && layer < 3 && !take("binary_sameshape"))) return false;
     }
     if (!norm()) return false;
-    return profile.tts_predictor ? cursor == kernels.size() :
+    return profile.tts_predictor && !profile.tts_head ? cursor == kernels.size() :
         cursor + 1 == kernels.size() && linear_name(kernels[cursor].name, profile, true);
 }
 
@@ -265,7 +266,7 @@ struct CausalDecoderModel::Qwen3VlDecodeReplayState {
         std::array<uint32_t, 8> bases{};
         // Persistent norms are not part of the temporary COMPLETE layout hash.
         std::vector<uint32_t> norms;
-        size_t temporary = 0;
+        size_t temporary = 0, head_kernel = 0;
         int64_t cache_capacity = 0;
     };
     std::unique_ptr<Recipe> recipe;
@@ -284,6 +285,7 @@ struct CausalDecoderModel::Qwen3VlDecodeReplayState {
         p.packed_qkv = p.gemv && model.qwen3vl_4b_packed_qkv_weights_;
         p.fused_mlp = p.gemv && model.qwen3vl_4b_decode_gateup_fused_;
         p.tts_predictor = model.num_layers() == 5;
+        p.tts_head = !model.tts_predictor_heads_.empty();
         return p;
     }
 
@@ -312,6 +314,8 @@ struct CausalDecoderModel::Qwen3VlDecodeReplayState {
         for (const auto* t : {&model.cos_, &model.sin_, &model.final_norm_w_})
             if (!fn(*t, true)) return false;
         if (!p.tts_predictor && !fn(model.lm_head_w_, true)) return false;
+        for (const auto& head : model.tts_predictor_heads_)
+            if (!fn(head, true)) return false;
         if (p.packed_qkv && !fn(model.qwen3vl_4b_qkv_scale_bank_, true)) return false;
         if (p.dtype != at::kHalf && !fn(model.lm_head_w_scale_, true)) return false;
         return p.tts_predictor || fn(model.position_ids_keepalive_, false);
@@ -332,6 +336,12 @@ struct CausalDecoderModel::Qwen3VlDecodeReplayState {
         const auto p = profile(model);
         const int64_t h = model.hidden_size(), i = model.intermediate_size();
         const int64_t q = model.num_q_heads() * 128;
+        if (p.tts_head) {
+            if (!p.tts_predictor || !p.acc32 || model.tts_predictor_heads_.size() != 15 ||
+                model.vocab_size_ != 2048) return false;
+            for (const auto& head : model.tts_predictor_heads_)
+                if (!tensor_shape(head, at::kHalf, {2048, 1024})) return false;
+        }
         for (const auto& w : model.layer_weights_) {
             if (p.packed_qkv) {
                 if (!tensor_shape(w.qkv_w, at::kChar, {6144, 2560}) ||
@@ -406,6 +416,8 @@ struct CausalDecoderModel::Qwen3VlDecodeReplayState {
         }
         rpu_ddr_flush(model.final_norm_w_.data_ptr());
         if (!profile(model).tts_predictor) rpu_ddr_flush(model.lm_head_w_.data_ptr());
+        if (!model.tts_predictor_heads_.empty())
+            rpu_ddr_flush(model.tts_predictor_heads_.at(model.tts_predictor_head_index_).data_ptr());
         if (profile(model).dtype != at::kHalf) rpu_ddr_flush(model.lm_head_w_scale_.data_ptr());
     }
 };
@@ -538,7 +550,21 @@ bool CausalDecoderModel::try_checked_layer_body_replay() {
     Qwen3VlDecodeReplayState::visibility(*this, state.k, state.v);
     // No fallback is allowed after this boundary. The existing Graph API owns
     // typed/census/semantic validation and register patch application.
-    graph.skip_op_stream_with_patches(recipe.patches, {});
+    if (tts_predictor_heads_.empty()) {
+        graph.skip_op_stream_with_patches(recipe.patches, {});
+    } else {
+        TORCH_CHECK(state.position >= 2 && state.position <= 15 &&
+                        tts_predictor_head_index_ == state.position - 1,
+                    "TTS checked replay head does not match its codec position");
+        // Same public Linear DDR ABI as the ordinary launcher; owners above
+        // prove all fifteen bindings, including their alignment and versions.
+        const uint64_t address = RpuGetDevAddr(tts_predictor_heads_.at(tts_predictor_head_index_).data_ptr());
+        const uint32_t encoded = static_cast<uint32_t>(address >> 8);
+        auto patches = recipe.patches;
+        patches.push_back({recipe.head_kernel, 2, uint16_t(encoded), 2});
+        patches.push_back({recipe.head_kernel, 3, uint16_t(encoded >> 16), 2});
+        graph.skip_op_stream_with_patches(patches, {});
+    }
     state.skipped = true;
     return true;
 }
@@ -577,7 +603,8 @@ void CausalDecoderModel::finish_qwen3vl_decode_replay() {
         if (admissible && Qwen3VlDecodeReplayState::owner_shapes(*this) &&
             bind_decode_patches(kernels, next->patches,
                                 Qwen3VlDecodeReplayState::profile(*this))) {
-            next->owners.reserve(num_layers() * 20 + 7);
+            if (!tts_predictor_heads_.empty()) next->head_kernel = kernels.back().kernel;
+            next->owners.reserve(num_layers() * 20 + 7 + tts_predictor_heads_.size());
             admissible = Qwen3VlDecodeReplayState::visit_owners(*this, state.k, state.v,
                 [&](const at::Tensor& t, bool fixed) {
                     DecodeOwner owner;

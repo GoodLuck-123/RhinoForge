@@ -164,6 +164,15 @@ at::Tensor rpu_linear_with_accumulation(
     int64_t partition, int64_t num_cores, bool linear_acc32,
     const c10::optional<at::Tensor>& scale_opt);
 
+at::Tensor rpu_tts_codec_conv_pair(
+    const at::Tensor& input, const at::Tensor& first_weight, const at::Tensor& affine,
+    const at::Tensor& second_weight, const at::Tensor& second_bias,
+    int64_t dilation, int64_t channels);
+at::Tensor rpu_tts_codec_conv1d(
+    const at::Tensor& input, const at::Tensor& weight,
+    const c10::optional<at::Tensor>& bias,
+    int64_t kernel, int64_t dilation, int64_t out_channels);
+
 void rpu_linear_into(const at::Tensor &input, const at::Tensor &weight,
                      const c10::optional<at::Tensor> &bias_opt,
                      at::Tensor &output, bool linear_acc32 = true);
@@ -3295,6 +3304,8 @@ void rpu_causal_decoder_set_lm_head(
     const std::optional<at::Tensor>& lm_head_scale = std::nullopt,
     bool fuse_prefill_last = false,
     int64_t exact_candidates = 0);
+void rpu_causal_decoder_set_tts_predictor_heads(int64_t handle, at::TensorList heads);
+at::Tensor rpu_causal_decoder_tts_predictor_logits(int64_t handle);
 void rpu_causal_decoder_clear_lm_head(int64_t handle);
 void rpu_causal_decoder_set_rhinovla_high_precision_fusions(int64_t handle, bool enabled);
 void rpu_causal_decoder_set_rhinovla_high_precision(int64_t handle, bool enabled);

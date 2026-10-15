@@ -2506,6 +2506,14 @@ public:
                          !adarms_ && !decoder_mixed_precision_ && !nvfp4_),
                     "reduced-core decoder requires B1 causal FP16 execution for its installed profile");
         const int64_t seq_len_in = hidden_states.size(1);
+        if (!tts_predictor_heads_.empty()) {
+            TORCH_CHECK(linear_acc32_ && !fuse_lm_head_ && !decoder_mixed_precision_ &&
+                            is_causal && !attention_mask.has_value() && hidden_states.size(0) == 1 &&
+                            ((position == 0 && (seq_len_in == 2 || seq_len_in == 16 || seq_len_in == 32)) ||
+                             (seq_len_in == 1 && position >= 2 && position <= 15)),
+                        "TTS fused Predictor requires its two-token prefix (optionally padded to 16/32) or positions 2..15");
+            tts_predictor_head_index_ = position == 0 ? 0 : position - 1;
+        }
         detail::validate_fmb_planning_shape(
             seq_len_in, position, "CausalDecoderModel::forward");
 
@@ -2942,7 +2950,7 @@ public:
         const bool fused_lm_head_this_forward = decode_fused_lm_head ||
             (fuse_lm_head_ && fuse_prefill_last_lm_head_ &&
              is_causal && seq_len_in > 1);
-        if (fused_lm_head_this_forward) {
+        if (fused_lm_head_this_forward || !tts_predictor_heads_.empty()) {
             RECORD_FUNCTION("rpu_causal::lm_head_output_setup", {});
             TORCH_CHECK(vocab_size_ > 0 && vocab_size_ % lm_head_tp() == 0,
                         "CausalDecoderModel::forward: fuse_lm_head requires "
@@ -3037,11 +3045,43 @@ public:
 
     // ── Phase 2.5: fused lm_head 入口 (per-instance state, called from C API) ──
 
+    void set_tts_predictor_heads(at::TensorList heads) {
+        TORCH_CHECK(num_layers() == 5 && hidden_size() == 1024 && intermediate_size() == 3072 &&
+                        num_q_heads() == 16 && num_kv_heads() == 8 && head_dim() == 128 &&
+                        num_cores() == 8 && attn_tp() == 8 && mlp_tp() == 8 && lm_head_tp() == 8 &&
+                        linear_acc32_ && !has_mrope_ && has_qk_norm_ && use_silu_ &&
+                        !fuse_lm_head_ && !lm_head_w_.defined() && !lm_head_w_scale_.defined() &&
+                        !decoder_mixed_precision_ && !nvfp4_ && !adarms_ && !has_qkv_bias_ &&
+                        deepstack_lang_layers_.empty() && rope_position_base_ < 0 &&
+                        tts_predictor_heads_.empty() && heads.size() == 15 &&
+                        layer_weights_.size() == 5,
+                    "TTS head bank requires the FP16/ACC32 0.6B Predictor profile, installed once");
+        for (const auto& layer : layer_weights_)
+            TORCH_CHECK(layer.q_w.scalar_type() == at::kHalf,
+                        "TTS fused Predictor requires FP16 body weights");
+        for (const auto& head : heads) {
+            TORCH_CHECK(head.defined() && head.device().type() == at::kPrivateUse1 &&
+                            head.scalar_type() == at::kHalf && head.is_contiguous() &&
+                            head.sizes().equals({2048, 1024}),
+                        "TTS head bank requires fifteen device FP16 [2048,1024] col-swizzled weights");
+        }
+        tts_predictor_heads_.assign(heads.begin(), heads.end());
+        vocab_size_ = 2048;
+        invalidate_model_state();
+    }
+
+    at::Tensor tts_predictor_logits() const {
+        TORCH_CHECK(!tts_predictor_heads_.empty() && lm_head_logits_out_.defined(),
+                    "TTS fused Predictor has no logits; run its decoder first");
+        return lm_head_logits_out_;
+    }
+
     void set_lm_head(
         const at::Tensor& lm_head_weight,
         const std::optional<at::Tensor>& lm_head_scale = std::nullopt,
         bool fuse_prefill_last = false,
         int64_t exact_candidates = 0) {
+        TORCH_CHECK(tts_predictor_heads_.empty(), "TTS head bank cannot be replaced by a generic head");
         TORCH_CHECK(lm_head_weight.defined(),
                     "set_lm_head: lm_head_weight must be defined");
         const bool reduced_qwen3_w8_head =
@@ -3151,6 +3191,7 @@ public:
     }
 
     void clear_lm_head() {
+        TORCH_CHECK(tts_predictor_heads_.empty(), "TTS head bank belongs to the Predictor handle");
         lm_head_w_ = at::Tensor{};
         lm_head_w_scale_ = at::Tensor{};
         vocab_size_ = 0;
@@ -4071,6 +4112,7 @@ protected:
         int64_t h = detail::layout_mix(
             0, deepstack_lang_layers_.empty() ? 0 : 1);
         h = detail::layout_mix(h, wall_prefill_staged_mlp_ ? 1 : 0);
+        if (!tts_predictor_heads_.empty()) h = detail::layout_mix(h, 0x54545348);
         if (wall_base_paired_kv_) {
             h = detail::layout_mix(h, CAUSAL_DECODER_WALL_BASE_PAIRED_KV_SITE);
         }
@@ -4605,7 +4647,7 @@ protected:
         manifest.graph_lifecycle = planning_graph_lifecycle_;
         // NVFP4 follows the same immutable accumulation choice as the other
         // ordinary Linear formats; only the explicit mixed profile differs.
-        manifest.linear_accumulation = decoder_mixed_precision_
+        manifest.linear_accumulation = (decoder_mixed_precision_ || !tts_predictor_heads_.empty())
             ? FmbLinearAccumulationPolicy::MIXED_BY_SITE
             : (linear_acc32_
                    ? FmbLinearAccumulationPolicy::ACC32
@@ -4791,7 +4833,7 @@ protected:
                causal_deepstack_topology_arguments(deepstack_lang_layers_));
         append(FmbRouteFamily::GRAPH_SCHEDULE,
                CAUSAL_DECODER_LM_HEAD_TOPOLOGY_SITE, topology_selector, 0,
-               {fuse_lm_head_ ? 1 : 0, vocab_size_});
+               {!tts_predictor_heads_.empty() ? 2 : (fuse_lm_head_ ? 1 : 0), vocab_size_});
         if (lingbot_prefill_mode_bound_) {
             append(FmbRouteFamily::GRAPH_SCHEDULE, LINGBOT2_PREFILL_POLICY_SITE,
                    topology_selector, 0, lingbot_prefill_policy_arguments());
@@ -5141,7 +5183,8 @@ protected:
                        static_cast<int64_t>(
                            CausalDecoderMutableDmaRoute::DDR_BROADCAST_TO_SPM));
             }
-            if (fuse_lm_head_ && (physical_len == 1 || fuse_prefill_last_lm_head_)) {
+            if (!tts_predictor_heads_.empty() ||
+                (fuse_lm_head_ && (physical_len == 1 || fuse_prefill_last_lm_head_))) {
                 append_linear(CAUSAL_DECODER_KV_FIRST_LM_HEAD_SITE,
                               CausalDecoderLinearRoute::AUTO_TILE);
                 append(FmbRouteFamily::MUTABLE_DMA,
@@ -5327,7 +5370,8 @@ protected:
                        static_cast<int64_t>(
                            CausalDecoderMutableDmaRoute::DDR_BROADCAST_TO_SPM));
             }
-            if (fuse_lm_head_ && (physical_len == 1 || fuse_prefill_last_lm_head_)) {
+            if (!tts_predictor_heads_.empty() ||
+                (fuse_lm_head_ && (physical_len == 1 || fuse_prefill_last_lm_head_))) {
                 append_linear(CAUSAL_DECODER_LM_HEAD_SITE,
                               CausalDecoderLinearRoute::AUTO_TILE);
                 append(FmbRouteFamily::MUTABLE_DMA,
@@ -8080,7 +8124,7 @@ protected:
                 FmbRouteFamily::GRAPH_SCHEDULE,
                 CAUSAL_DECODER_LM_HEAD_TOPOLOGY_SITE, topology_selector,
                 /*resolved_flags=*/0,
-                {fuse_lm_head_ ? 1 : 0, vocab_size_});
+                {!tts_predictor_heads_.empty() ? 2 : (fuse_lm_head_ ? 1 : 0), vocab_size_});
             if (lingbot_prefill_mode_bound_) {
                 ctx().consume_physical_route(FmbRouteFamily::GRAPH_SCHEDULE,
                     LINGBOT2_PREFILL_POLICY_SITE, topology_selector, 0,
@@ -8148,8 +8192,11 @@ protected:
         const bool emit_prefill_last_lm_head =
             fuse_prefill_last_lm_head_ && ctx().is_causal &&
             !decode_forward && chunk.offset + chunk.len == ctx().seq_len;
-        const bool emit_fused_lm_head = is_last_layer && fuse_lm_head_ &&
-            (decode_forward || emit_prefill_last_lm_head);
+        const bool tts_head = !tts_predictor_heads_.empty();
+        TORCH_CHECK(!tts_head || (chunk.offset == 0 && chunk.len == ctx().seq_len),
+                    "TTS fused Predictor requires one bounded chunk per step");
+        const bool emit_fused_lm_head = is_last_layer &&
+            (tts_head || (fuse_lm_head_ && (decode_forward || emit_prefill_last_lm_head)));
         if (emit_fused_lm_head) {
             TORCH_CHECK(lm_head_logits_out_.defined()
                             && lm_head_logits_dst_base_ != 0,
@@ -9283,13 +9330,14 @@ protected:
                 FmbRouteFamily::LINEAR, CAUSAL_DECODER_LM_HEAD_SITE,
                 static_cast<int64_t>(CausalDecoderLinearRoute::AUTO_TILE));
             const int64_t lm_head_rows =
-                emit_prefill_last_lm_head ? 1 : rows;
+                (tts_head || emit_prefill_last_lm_head) ? 1 : rows;
             const uint32_t lm_head_input_addr = addr(0, "residual1") +
                 static_cast<uint32_t>(
-                    (emit_prefill_last_lm_head ? rows - 1 : 0) * h * DWIDTH);
+                    (tts_head ? (decode_forward ? 0 : 1) :
+                     (emit_prefill_last_lm_head ? rows - 1 : 0)) * h * DWIDTH);
             rpu_launch_linear_spm_to_spm_acc16_kernel(
                 lm_head_input_addr,        // final normed row(s), in SPM
-                lm_head_w_,                // DDR weight [vocab, hidden]
+                tts_head ? tts_predictor_heads_.at(tts_predictor_head_index_) : lm_head_w_,
                 addr(0, "lm_head_out"),    // SPM output per core, [rows][local_n]
                 /*M=*/lm_head_rows,
                 /*N=*/vocab_size_,
@@ -9300,7 +9348,7 @@ protected:
                 lm_head_w_scale_,
                 /*nvfp4_tensor_scale_spm_addr=*/0,
                 /*nvfp4_layer_id=*/0,
-                /*force_acc32=*/linear_acc32_);
+                /*force_acc32=*/tts_head ? false : linear_acc32_);
             const int64_t local_n = vocab_size_ / lm_head_tp();
             // The logits tensor is [bs, 1, vocab]; core c owns vocab slice
             // [c*local_n, (c+1)*local_n). SPM holds [rows][local_n] per core, so
@@ -9334,7 +9382,8 @@ protected:
                         /*num_elements=*/h);
                 }
             }
-        } else if (!ctx().output_to_spm) {
+        }
+        if ((!emit_fused_lm_head || tts_head) && !ctx().output_to_spm) {
             // 正常路径: spm2ddr 写回 output_tensor_ (或 chain buffer)
             emit_layer_output_dma(layer_idx, chunk);
         }
@@ -10149,6 +10198,11 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
             identity.insert(identity.end(), {WALL_BASE_FP16_PREFILL_SHARED_GATEUP_SITE, 1});
         if (wall_base_prefill_owner_norm_)
             identity.insert(identity.end(), {WALL_BASE_PREFILL_O_OWNER_NORM_SITE, 1});
+        if (!tts_predictor_heads_.empty()) {
+            identity.insert(identity.end(), {0x54545348, 1, 15});
+            for (const auto& head : tts_predictor_heads_)
+                append_kvinsert_cost_tensor_identity(identity, head);
+        }
         return identity;
     }
 
@@ -10216,6 +10270,8 @@ protected:  // LingBot2 sparse-MoE subclass reuses the decoder's layer state.
     int64_t configured_vocab_size_ = 0;  // 0 preserves legacy eight-core callers
     int configured_lm_head_tp_ = 8;
     bool cold_routes_configured_ = false;
+    std::vector<at::Tensor> tts_predictor_heads_;
+    int64_t tts_predictor_head_index_ = 0;
     at::Tensor lm_head_w_;        // FP16/W8 [V,H] or packed W4 [V,H/2], device
     at::Tensor lm_head_w_scale_;  // W8 [V] or W4 pgrp controller-striped scale
     bool fuse_lm_head_ = false;

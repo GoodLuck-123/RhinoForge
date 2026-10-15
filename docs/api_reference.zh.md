@@ -443,7 +443,7 @@ prompt 加生成上限须在 512 个位置内；达到上限仍无 EOS 时，在
 
 两类 API 均支持 `with`、幂等 `close()` 和 `execution_stats()`。请求、统计及关闭
 串行调用，一个进程只保留一个存活设备模型/策略。加载器在转换前检查资产，并在
-设备分配前选择 caching allocator；TTS 还声明 owner 专属五个 arena。
+设备分配前选择 caching allocator；TTS 还声明 owner 专属六个 arena。
 进程已冻结为不兼容 allocator 或 arena 计划时，启动新进程。
 
 ASR 需要重编译的 native 提供 `siglip_set_audio_mode`、`siglip_set_audio_projection`
@@ -460,8 +460,10 @@ ASR 需要重编译的 native 提供 `siglip_set_audio_mode`、`siglip_set_audio
   `audio_linear_calls` 统计逻辑投影调用。
 - TTS 返回 `generation.steps`、`generation.eos` 和 `generation.segment_steps`；
   `codec_frontend.device`、`fallback_reason` 描述最后一段。还返回输出头调用计数
-  以及各组件的 calls、tokens 和 Graph 状态。Talker 在 prompt 长度变化时替换 prefill 图并保留
-  decode；Predictor 保留一张 decode 图；codec 在帧数变化时替换自己的图。
+  以及各组件的 calls、tokens 和 Graph 状态。`components.predictor.fused_head_calls`
+  统计从主体与头融合图消费的 logits 次数；`head_calls` 仍统计逻辑输出头调用。
+  Talker 在 prompt 长度变化时替换 prefill 图并保留
+  decode；Predictor 保留双 token 条件 prefill 图和一张 decode 图；codec 在帧数变化时替换自己的图。
 
 每个新序列重置逻辑 KV 位置并保留私有存储。TTS 按解码后的音频内容只缓存最新
 speaker embedding，每次请求仍读取和校验参考文件。输出存储独立于重放；释放时
@@ -469,5 +471,9 @@ speaker embedding，每次请求仍读取和校验参考文件。输出存储独
 紧接着的输出头；请求 hidden states 时仍返回独立 CPU 存储。加载前通过
 `torch.set_num_threads` 设置 CPU 线程数，API 不修改此值。
 
-默认 `codec_backend="rpu"` 启用实验性 12 层残差卷积卸载，其余声码器仍在 CPU。
-显式设置 `codec_backend="cpu"` 可恢复 FP32 残差卷积。`execution_stats().codec_convolutions` 返回 backend、已安装层数和累计设备调用次数，详见[语音指南](qwen3_audio.zh.md#实验性-rpu-声码器卷积)。
+默认 `codec_backend="rpu"` 实验性卸载全部 31 层解码 Conv1d；匹配 native 时，
+12 组卷积还将中间 SnakeBeta 和首层 bias 留在 RPU 上，以 FP16 执行。
+显式设置 `codec_backend="cpu"` 恢复 CPU FP32 卷积和激活。
+`execution_stats().codec_convolutions` 返回 backend、已安装层数、累计卷积调用次数、
+`transport`（`shared_ddr` 或旧版 `staged`）、`residual_pairs` 和成功的 `paired_calls`。
+每组成对执行也计入两次卷积调用。剩余 CPU 工作和精度边界见[语音指南](qwen3_audio.zh.md#实验性-rpu-声码器卷积)。

@@ -151,7 +151,7 @@ ASR also accepts a one-dimensional CPU floating-point Tensor. See
 | Model | CPU | Rhino device |
 |---|---|---|
 | ASR | Audio reading, mel features/chunking, convolutions and their activations, single-token embedding, finite checks, argmax, text decoding | conv_out, positions and valid rows, audio encoder and output projections, prefill text/audio composition, text decoder and vocabulary head |
-| TTS | Embedding, reference processing, speaker encoder, generation control, codebook, transposed convolutions/upsampling, SnakeBeta, waveform output | All 31 decoding Conv1d layers by default; Talker, Predictor and output heads; codec input/output projections and Transformer frontend when supported by native interfaces |
+| TTS | Embedding, reference processing, speaker encoder, generation control, codebook, transposed convolutions/upsampling, remaining 17 SnakeBeta layers, waveform output | All 31 decoding Conv1d layers and 12 intermediate SnakeBeta layers with the matching native extension; Talker, Predictor and output heads; codec input/output projections and Transformer frontend when supported by native interfaces |
 
 ASR convolutions use channels-last storage and FP16-rounded weights in CPU FP32
 computation, then round outputs to FP16. The device audio Graph uses FP32 Linear
@@ -174,19 +174,28 @@ and its 72-frame sliding attention.
   and `close()`. Both APIs support `with`, idempotent `close()` and outputs with
   storage independent of later replay.
 - Loaders select the caching allocator before device allocation. TTS requests
-  five owner-specific arenas: four retained Graphs and one serial immediate call.
+  six owner-specific arenas: five retained Graphs and one serial immediate call.
   Start a new process if its frozen allocator or arena plan is incompatible.
 - ASR retains one audio Graph and at most two text Graphs for current lengths.
-  TTS retains Talker prefill/decode, Predictor decode and the current codec frame
+  TTS retains Talker prefill/decode, Predictor prefill/decode and the current codec frame
   count. Components evict old signatures when their length changes and replay
   matching signatures.
-- Predictor passes its last device hidden row directly to the immediate output
-  head, consumed once; callers requesting hidden states receive owned CPU output.
-- The single-row, eight-core FP16/ACC16 bias-free `1024→2048` Predictor head
-  batches input upload, compute and write-back in a one-shot Graph. DMA ownership,
-  boundary flushes and completion waits remain checked; changing addresses are
-  not cached and no persistent Graph is added. Other Linear paths are unchanged.
-  This optimization requires a rebuilt native extension.
+- Predictor processes its two conditioning tokens together at logical KV position
+  zero, using the existing bounded prefill planner and a 32-position/32-row
+  envelope. Padding never advances logical KV or supplies the output-head row.
+  Each frame needs 15 body executions instead of 16; all 15 dependent output
+  heads and the sampling recipe remain unchanged. Later tokens use checked decode replay.
+- With a rebuilt native extension, each Predictor body and its `1024→2048`
+  output head share one Graph submission. Installation binds fifteen FP16 heads;
+  the body retains ACC32 and the head retains ACC16. The two-token prefix selects
+  logical row 1, and decode selects its head from the logical KV position.
+  Logits have independent storage and are consumed once by the matching head;
+  callers requesting hidden states still receive owned CPU output. No persistent
+  Graph is added. `components.predictor.fused_head_calls` counts consumed fused
+  results; `head_calls` continues to count logical head calls.
+- Older native extensions retain the separate head path: its single-row TP8
+  FP16/ACC16 projection batches upload, compute and write-back in a one-shot Graph.
+  Both paths retain DMA ownership, boundary flushes and completion checks.
 - CPU codec SnakeBeta precomputes the frozen parameters' exponentials and inverse
   scale, then updates only a newly allocated temporary in place. Convolutions add
   bias into their own output. Residual inputs and previously returned waveforms
@@ -201,8 +210,10 @@ and its 72-frame sliding attention.
   Talker and Predictor explicitly bind FP32 Linear accumulation before resolving
   their Graph descriptors; their activation and weight storage remains FP16.
 - Predictor uses native checked decode replay only for its five-layer FP16 path,
-  including FP32 Linear accumulation, with a 32-position cache, 1D RoPE and separate
-  output heads. The recorded Linear kernels must match the accumulation mode.
+  including FP32 Linear accumulation, with a 32-position cache and 1D RoPE.
+  Fused heads additionally bind all fifteen weight owners and the ACC16 head
+  kernel, refreshing its DDR register pair for every decode position.
+  The recorded Linear kernels must match each site's accumulation mode.
   After recording the full
   operator sequence, replay checks weight versions, KV owners, Graph identity and
   memory layout, then updates position and attention parameters while skipping
@@ -226,17 +237,43 @@ convolutions, fourteen kernel-1 projections, three input/output convolutions and
 two depthwise convolutions. Depthwise weights expand into a channel-diagonal
 matrix at installation, preserving group semantics. The shared quantizer's two
 encoder-only input projections are not transformed. Weights are converted once
-from independent copies; original CPU FP32 weights remain intact. Output channels
-are padded to 128 alignment and sliced back before applying the original FP32 bias.
+from independent copies; original CPU FP32 weights remain intact. Standalone
+convolution outputs are padded to 128 alignment and sliced back before applying
+the original FP32 bias.
 
-CPU still performs padding, im2col, bias, codebook, SnakeBeta, six transposed
-convolutions, ConvNeXt Linear/normalization/GELU and upsampling layout operations. Inputs round to FP16 before
-im2col to avoid an expanded FP32 copy.
-This is partial vocoder offload, not an all-RPU decoder. Each Linear
-uses the existing synchronous immediate path and the shared fifth arena; no new
+CPU still performs padding, im2col, remaining bias/residual arithmetic, codebook,
+17 SnakeBeta layers, six transposed
+convolutions, ConvNeXt Linear/normalization/GELU and upsampling layout operations.
+With native `tts_codec_conv1d`, CPU im2col writes rounded FP16 values directly into
+fresh device-owned DDR through the existing storage-retaining CPU view. After
+synchronous ACC32 Linear, the coherent shared-DDR output is cropped to valid
+channels and copied once into owned NCT FP32 output, combining conversion and
+layout. Standalone convolutions preserve FP32 bias arithmetic. No CPU alias escapes the op;
+input publication and output coherency flushes remain mandatory, and Graph capture
+is rejected. Older native extensions retain the staged FP16 im2col path.
+With native `tts_codec_conv_pair`, each of the twelve residual units keeps its
+kernel-7 projection, first bias, intermediate SnakeBeta and kernel-1 projection
+on device. Channel padding remains through both projections; installation pads
+both axes of the second weight and binds frozen FP16 bias/alpha/scale copies.
+The first SnakeBeta, causal padding, final FP32 bias and residual addition remain
+on CPU. There is one shared-DDR input preparation and one owned CPU output per
+pair, with no intermediate CPU activation or extra residual upload. The two
+Linear calls retain ACC32; intermediate arithmetic is FP16 and changes the
+waveform relative to the prior CPU FP32 activation path. Compare identical codec
+tokens and representative speech content, not bitwise equality with that path.
+The pair uses existing eager kernels, not a single fused device program or Graph;
+per-kernel submits and boundary flushes remain. Older native extensions keep all
+SnakeBeta layers on CPU. `codec_backend="cpu"` keeps both convolutions and
+activations on CPU.
+
+This remains partial vocoder offload. Each Linear
+uses the existing synchronous immediate path and the shared sixth arena; no new
 retained Graph is introduced. Unsupported geometry rejects installation; execution
 errors propagate instead of silently reverting to CPU. `execution_stats()` adds
-`codec_convolutions` with `backend`, installed `layers` (31 in RPU mode) and cumulative RPU `calls`.
+`codec_convolutions` with `backend`, installed `layers` (31 in RPU mode), cumulative
+RPU `calls`, `transport` (`shared_ddr` or the older `staged` route),
+`residual_pairs` (12 with the matching native extension, otherwise 0), and
+`paired_calls` (completed pair executions; each also adds two to `calls`).
 The frontend's existing 63-frame device bound and CPU sliding-attention fallback
 remain unchanged.
 

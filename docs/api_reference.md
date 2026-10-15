@@ -536,7 +536,7 @@ preparation and runnable API examples are in the [speech guide](qwen3_audio.md).
 Both APIs support `with`, idempotent `close()` and `execution_stats()`. Serialize
 requests, statistics and close, with one live device model/policy per process.
 Loaders validate assets before transformation and select the caching allocator
-before device allocation. TTS also declares five owner-specific arenas. Restart
+before device allocation. TTS also declares six owner-specific arenas. Restart
 if the process has an incompatible frozen allocator or arena plan.
 
 ASR requires `siglip_set_audio_mode`, `siglip_set_audio_projection` and
@@ -557,8 +557,10 @@ errors propagate.
 - TTS reports `generation.steps`, `generation.eos` and `generation.segment_steps`;
   `codec_frontend.device` and `fallback_reason` describe the last segment. It also
   reports output-head calls and each component's calls, tokens and Graph state.
+  `components.predictor.fused_head_calls` counts logits consumed from the fused
+  body/head Graph; `head_calls` still counts all logical head invocations.
   Talker replaces its prefill Graph on a prompt-length change while retaining
-  decode; Predictor retains one
+  decode; Predictor retains its two-token conditioning prefill and one
   decode Graph; codec replaces its Graph on a frame-count change.
 
 Each sequence resets logical KV position while retaining private storage. TTS
@@ -569,5 +571,11 @@ output head consumes it; requests for hidden states retain independent CPU
 outputs. Retire Graphs before native handles and weights. Set CPU thread count
 with `torch.set_num_threads` before loading; the API leaves it unchanged.
 
-`codec_backend="rpu"` defaults to the experimental twelve-layer residual convolution offload;
-select `codec_backend="cpu"` to restore the FP32 residual convolutions; the remaining vocoder stays on CPU. `execution_stats().codec_convolutions` reports backend, installed layers and cumulative device calls. See the [speech guide](qwen3_audio.md#experimental-rpu-vocoder-convolutions).
+`codec_backend="rpu"` defaults to experimental offload of all 31 decoding Conv1d
+layers. With matching native support, twelve pairs also keep their intermediate
+SnakeBeta and first bias on RPU in FP16. Select `codec_backend="cpu"` to restore
+CPU FP32 convolutions and activations. `execution_stats().codec_convolutions`
+reports backend, installed layers, cumulative convolution calls, `transport`
+(`shared_ddr` or older `staged`), `residual_pairs` and completed `paired_calls`.
+Each pair contributes two convolution calls. See the [speech guide](qwen3_audio.md#experimental-rpu-vocoder-convolutions)
+for remaining CPU work and the changed numerical boundary.

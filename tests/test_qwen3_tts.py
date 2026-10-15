@@ -360,7 +360,7 @@ def test_graph_creation_failure_does_not_create_native_handle(monkeypatch):
     monkeypatch.setattr(graph.GraphRuntimePolicy, "prepare_arenas",
                         lambda policy: prepared.append(policy.graph_arena_count) or True)
     def fail_graph(*, runtime_policy):
-        assert prepared == [5] and runtime_policy.graph_arena_count == 5
+        assert prepared == [6] and runtime_policy.graph_arena_count == 6
         raise RuntimeError("graph allocation failed")
 
     monkeypatch.setattr(graph, "GraphCache", fail_graph)
@@ -522,9 +522,11 @@ def test_speaker_cache_tracks_audio_content_and_never_runs_reference_codec(monke
 
 
 @pytest.mark.parametrize("head_only,hidden_states", [(False, False), (True, True), (True, False)])
-def test_predictor_reuses_kv_with_fresh_positions_inputs_and_owned_outputs(monkeypatch, head_only, hidden_states):
+@pytest.mark.parametrize("fused_heads", [False, True])
+def test_predictor_reuses_kv_with_fresh_positions_inputs_and_owned_outputs(monkeypatch, head_only, hidden_states, fused_heads):
     from contextlib import nullcontext
     from rpu_backend.api import cache as cache_module
+    from rpu_backend.runtime import decoder
 
     allocations, positions = [], []
     class Cache:
@@ -543,27 +545,47 @@ def test_predictor_reuses_kv_with_fresh_positions_inputs_and_owned_outputs(monke
             return tensor
         return original_to(tensor, *args, **kwargs)
     monkeypatch.setattr(torch.Tensor, "to", to)
-    output = torch.empty(1, 1, 1024, dtype=torch.float16)
+    plan = SimpleNamespace(selected=SimpleNamespace(stage_tuple=SimpleNamespace(physical_descriptor=(7,))),
+                           graph_key_words=lambda: (7,))
+    monkeypatch.setattr(decoder, "_text_prefill_execution_plan", lambda *args: (16, 16, plan))
+    output = torch.empty(1, 16, 1024, dtype=torch.float16)
     def forward(handle, hidden, k, v, mask, position, causal, **kwargs):
         positions.append(position)
-        return output.copy_(hidden)
+        result = output[:, :hidden.shape[1]].copy_(hidden)
+        if hidden.shape[1] == 16:
+            assert position == 0 and hidden[:, 2:].eq(0).all()
+            assert kwargs["planned_stage_descriptor"] == (7,)
+            result[:, 2:] = 17  # Padded rows must never become the head input.
+        return result
     monkeypatch.setattr(torch.ops.rpu, "causal_decoder_forward", forward, raising=False)
     part = dict(layers=5, capacity=32, name="predictor", handle=1, descriptor=[],
                 signature=None, graph=SimpleNamespace(capture=lambda sig: nullcontext()), calls=0, tokens=0,
-                device_head_only=head_only)
+                device_head_only=head_only, planner=object(), fused_heads=fused_heads, fused_head_calls=0)
+    monkeypatch.setattr(torch.ops.rpu, "causal_decoder_tts_predictor_logits",
+        lambda handle: torch.full((1, 1, 2048), positions[-1], dtype=torch.float16), raising=False)
     borrowed = head_only and not hidden_states
     if borrowed:
         monkeypatch.setattr(torch.Tensor, "cpu", lambda tensor: pytest.fail("Predictor hidden copied to CPU"))
     first = tts._decoder_forward(part, torch.ones(1, 2, 1024), None, None, None, None, hidden_states)
     if borrowed:
         assert first.last_hidden_state.shape == (1, 1, 1024)
+        if fused_heads:
+            assert part["head_index"] == 1 and part["head_logits"].eq(0).all()
         first_head = tts._take_head_input(part, first.last_hidden_state).clone()
     else:
         first_head = first.last_hidden_state
     tts._decoder_forward(part, torch.full((1, 1, 1024), 2.), first.past_key_values,
                          None, None, None, hidden_states)
+    if borrowed and fused_heads:
+        assert part["head_index"] == 2 and part["head_logits"].eq(2).all()
     second = tts._decoder_forward(part, torch.zeros(1, 2, 1024), None, None, None, None, hidden_states)
-    assert len(allocations) == 1 and positions == [0, 1, 2, 0, 1]
+    if borrowed and fused_heads:
+        assert part["head_index"] == 1 and part["head_logits"].eq(0).all()
+        assert part["fused_head_calls"] == 0
+    else:
+        assert "head_logits" not in part
+    assert len(allocations) == 1 and positions == [0, 2, 0]
+    assert first.past_key_values.position == 2
     assert first_head.eq(1).all() and second.last_hidden_state.eq(0).all()
 
 
@@ -662,3 +684,14 @@ def test_codec_geometry_rejected_before_any_patch():
     with pytest.raises(ValueError, match="geometry"):
         install_codec_convolutions(modules, restore)
     assert restore == [] and [m.forward for m in modules] == originals
+
+
+@pytest.mark.parametrize("same_hidden,same_index", [(True, True), (False, True), (True, False)])
+def test_fused_predictor_logits_are_single_use_and_match_hidden_and_head(same_hidden, same_index):
+    hidden = torch.zeros(1, 1, 1024)
+    logits = torch.ones(1, 1, 2048, dtype=torch.float16)
+    part = dict(head_hidden=hidden, head_logits=logits, head_index=3, fused_head_calls=0)
+    result = tts._take_predictor_logits(part, hidden if same_hidden else hidden.clone(), 3 if same_index else 4)
+    assert (result is logits) == (same_hidden and same_index)
+    assert part["fused_head_calls"] == int(same_hidden and same_index)
+    assert tts._take_predictor_logits(part, hidden, 3) is None
