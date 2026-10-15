@@ -36,10 +36,12 @@ def check(root: Path, *, branch: str = "", tag: str = "") -> dict:
     if "Development Status :: " + expected_classifier not in project["project"]["classifiers"]:
         raise ValueError("Python development-status classifier must match the release stage")
     launch = json.loads((root / "release/runtime-dependencies.json").read_text())["launch_kernel"]
-    if launch["version"] != base or launch["cmake_version"] != base:
-        raise ValueError("Launch CMake version must match the distribution's numeric version")
-    if launch["release_version"] != version:
-        raise ValueError("Launch release version must match VERSION, including rc/dev suffix")
+    launch_match = (VERSION_PATTERN.fullmatch(launch["release_version"])
+                    if isinstance(launch["release_version"], str) else None)
+    if launch_match is None:
+        raise ValueError("Launch release version must be a canonical release, rc or dev version")
+    if launch["version"] != launch_match["base"] or launch["cmake_version"] != launch_match["base"]:
+        raise ValueError("Launch version and CMake version must match its release version's numeric version")
     if not isinstance(launch["abi_version"], int) or launch["abi_version"] < 1:
         raise ValueError("Launch ABI version must be a positive integer")
     if not re.fullmatch(r"[0-9a-f]{40}", launch["commit"]):
@@ -52,6 +54,7 @@ def check(root: Path, *, branch: str = "", tag: str = "") -> dict:
     if tag and (tag != "v" + version or stage.startswith(".dev")):
         raise ValueError("release tag must match VERSION and cannot identify a dev build")
     return {"version": version, "cmake_version": base, "stage": stage or "stable",
+            "launch_release_version": launch["release_version"], "launch_cmake_version": launch["cmake_version"],
             "launch_commit": launch["commit"], "launch_abi": launch["abi_version"]}
 
 

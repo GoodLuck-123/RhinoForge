@@ -4,12 +4,13 @@ This directory contains the operator-manifest generator and provenance manifests
 for public model sources and weights. Runtime binaries, opaque operator payloads,
 and model checkpoints are distributed separately under their own terms.
 
-RhinoForge `1.3.0.dev0` is a source-only development version. Matching runtime
-binaries are not published. Build the Launch revision and use the two operator
-assets pinned in [runtime-dependencies.json](runtime-dependencies.json).
-Rhino Launch uses release version `1.3.0.dev0`, CMake version `1.3.0` and ABI
-version `1`. Keep each operator payload with its adjacent `.ref.kernels` file.
-For packaged runtime assets, select a published release and its matching source.
+RhinoForge `1.3.0.dev0` depends on archived Rhino Launch `1.2.0` at
+`3dd1b410f5f46373997fef3dfbf9b67eecec6a84`, with CMake version `1.2.0` and ABI
+version `1`. Use the Launch SDK and two operator assets from the stable
+`RhinoForge-runtime-v1.2.0.tar.gz` distribution, as pinned in
+[runtime-dependencies.json](runtime-dependencies.json). Keep each operator payload
+with its adjacent `.ref.kernels` file. Advancing RhinoForge's development version
+does not change the Launch dependency version.
 See the [release policy](../docs/release_policy.md).
 
 Keep model evaluation data and reports outside source releases, package artifacts and release notes.

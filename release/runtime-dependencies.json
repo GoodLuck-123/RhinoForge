@@ -1,10 +1,10 @@
 {
   "schema_version": 1,
   "launch_kernel": {
-    "commit": "1ced66910666d48dc750eb0d7a799f5785e5b372",
-    "version": "1.3.0",
-    "release_version": "1.3.0.dev0",
-    "cmake_version": "1.3.0",
+    "commit": "3dd1b410f5f46373997fef3dfbf9b67eecec6a84",
+    "version": "1.2.0",
+    "release_version": "1.2.0",
+    "cmake_version": "1.2.0",
     "abi_version": 1
   },
   "artifacts": {

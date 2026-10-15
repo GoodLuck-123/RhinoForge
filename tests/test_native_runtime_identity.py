@@ -24,8 +24,6 @@ def test_each_provider_and_release_change_invalidates_native_cost_identity(tmp_p
         if changed == "release":
             base_version = f"{int(version.split('.', 1)[0]) + 1}.0.0"
             version = base_version + ".dev0"
-            dependencies["launch_kernel"].update(
-                version=base_version, cmake_version=base_version, release_version=version)
         elif changed == "launch":
             dependencies["launch_kernel"]["commit"] = "a" * 40
         elif changed:

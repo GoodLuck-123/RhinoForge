@@ -1,8 +1,10 @@
 # Version and release policy
 
-RhinoForge, Runtime and Rhino Launch share a distribution version. The root
-[VERSION](../VERSION) supplies Python metadata and the numeric CMake version.
-Package names retain the full version, including any development suffix.
+RhinoForge's root [VERSION](../VERSION) supplies its Python metadata and numeric
+CMake version. Rhino Launch is an independently versioned dependency pinned in
+[runtime-dependencies.json](../release/runtime-dependencies.json). Advancing
+RhinoForge's version does not advance Launch or rename a published runtime bundle.
+Package names retain their full version, including any development suffix.
 
 | Line | Version | Purpose |
 |---|---|---|
@@ -12,8 +14,11 @@ Package names retain the full version, including any development suffix.
 | Historical tags | Original version | Reproducible source and downloads |
 
 Cut the release branch before advancing `main`. Launch uses `develop` for its
-development line and follows the same version stages. Merge release fixes back
-into development while keeping its next-version metadata.
+own development line. RhinoForge `main` currently retains archived Launch
+`1.2.0` at `3dd1b410f5f46373997fef3dfbf9b67eecec6a84`, ABI `1`.
+Change that dependency only when adopting a new Launch revision, with the matching
+package and affected compatibility checks. Merge release fixes back into
+development while keeping each project's version metadata.
 
 Tag each stable release once, such as `v1.2.0`. Its Release records the date,
 source and component commits, and package checksums; a duplicate `archive/` tag
@@ -31,8 +36,11 @@ commits. A development entry may provide source only.
 
 [runtime-dependencies.json](../release/runtime-dependencies.json) records the
 Launch source commit, full `release_version`, numeric `cmake_version` and
-`abi_version`. The legacy `version` field equals `cmake_version`. CMake checks
-both numeric and full versions. Library SONAME and Python `API_VERSION` track
+`abi_version`. The legacy `version` field equals `cmake_version`, which is the
+numeric base of Launch's own `release_version`. CMake checks the installed Launch
+package against these exact dependency versions and ABI, and retains capability
+checks. Launch's version need not equal RhinoForge's version.
+Library SONAME and Python `API_VERSION` track
 compatibility independently of distribution versions.
 
 Runtime contains exactly the main and DDR-expansion operator assets pinned by
@@ -46,9 +54,12 @@ evaluation records outside release artifacts.
 
 ## 中文说明
 
-RhinoForge、Runtime 和 Rhino Launch 使用同一发行版本，`VERSION` 为版本源。
-`release/1.2` 发布正式版 `1.2.0`，`main` 开发 `1.3.0.dev0`；Launch 开发分支为
-`develop`。兼容修复递增补丁号，并合回开发分支，保留开发线的版本信息。
+RhinoForge 的 `VERSION` 决定自身发行版本，Rhino Launch 独立版本化并由依赖清单固定。
+`release/1.2` 发布正式版 `1.2.0`，`main` 开发 `1.3.0.dev0`，继续依赖已归档的
+Launch `1.2.0`（`3dd1b410f5f46373997fef3dfbf9b67eecec6a84`，ABI `1`）。
+RhinoForge 升版不要求 Launch 同步升版，也不改名或覆盖已发布的 runtime 包。
+Launch 自身的开发分支为 `develop`；采用新 Launch 提交时，单独更新依赖、获取配套包，
+并验证受影响的兼容性。兼容修复递增各自的补丁号，并合回开发分支。
 
 每个正式版只保留一个标准标签，如 `v1.2.0`；Release 记录日期、源码及组件 commit
 和包校验和，无需重复创建 `archive/` 标签。当前下载入口为 `1.2.0`。被替代的候选包
@@ -58,7 +69,8 @@ RhinoForge、Runtime 和 Rhino Launch 使用同一发行版本，`VERSION` 为�
 `main` 和仍在维护的 release 分支；工作分支合并后确认没有新增提交即可删除。
 开发版可仅提供源码。
 
-CMake 数值版本不含开发后缀，构建时另行核对完整发行版本。Launch ABI 和 Python
+CMake 数值版本不含开发后缀。Launch 的数值版本、完整发行版本和 ABI 按依赖清单
+精确核对，并保留能力检查；它们不要求与 RhinoForge 同号。Launch ABI 和 Python
 API 兼容版本独立维护。算子资产固定来自 main 与 DDR-expansion 两个分支，依赖
 清单记录准确 commit 和校验和。发布前检查版本、包装和受影响的构建或运行路径；
 模型评测记录不进入发行资产。

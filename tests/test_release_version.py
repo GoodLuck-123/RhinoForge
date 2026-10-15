@@ -1,4 +1,4 @@
-"""Release metadata must not accept a mismatched stage or runtime package."""
+"""Distribution and pinned Launch versions are independent and internally consistent."""
 import importlib.util
 import json
 from pathlib import Path
@@ -28,29 +28,39 @@ def set_version(source, version):
     pyproject = source / "pyproject.toml"
     classifier = "3 - Alpha" if ".dev" in version else "4 - Beta" if "rc" in version else "5 - Production/Stable"
     pyproject.write_text(re.sub(r'Development Status :: [^\"]+', "Development Status :: " + classifier, pyproject.read_text()))
+
+
+def set_launch(source, **fields):
     path = source / "release/runtime-dependencies.json"
     dependencies = json.loads(path.read_text())
-    launch = dependencies["launch_kernel"]
-    launch["release_version"] = version
-    launch["version"] = launch["cmake_version"] = version_check.VERSION_PATTERN.fullmatch(version)["base"]
+    dependencies["launch_kernel"].update(fields)
     path.write_text(json.dumps(dependencies))
 
 
-@pytest.mark.parametrize("version,branch,tag", [
-    ("1.2.0rc1", "release/1.2", "v1.2.0rc1"),
-    ("1.2.0", "release/1.2", "v1.2.0"),
-    ("1.2.1", "release/1.2", "v1.2.1"),
-    ("1.3.0.dev0", "main", ""),
+@pytest.mark.parametrize("version,branch,tag,launch_version", [
+    ("1.2.0rc1", "release/1.2", "v1.2.0rc1", "1.2.0rc1"),
+    ("1.2.0", "release/1.2", "v1.2.0", "1.2.0"),
+    ("1.2.1", "release/1.2", "v1.2.1", "1.2.0"),
+    ("1.3.0.dev0", "main", "", "1.2.0"),
+    ("1.3.0.dev0", "main", "", "1.3.0rc1"),
+    ("1.3.0.dev0", "main", "", "1.3.0.dev0"),
 ])
-def test_supported_versions_match_cmake(source, version, branch, tag):
+def test_supported_versions_match_cmake(source, version, branch, tag, launch_version):
     set_version(source, version)
+    launch_base = version_check.VERSION_PATTERN.fullmatch(launch_version)["base"]
+    set_launch(source, release_version=launch_version, version=launch_base, cmake_version=launch_base)
     result = version_check.check(source, branch=branch, tag=tag)
     driver = source / "check.cmake"
     driver.write_text('include("${CMAKE_CURRENT_LIST_DIR}/release/version.cmake")\n'
                       'file(WRITE "${CMAKE_CURRENT_LIST_DIR}/result.txt" '
-                      '"${RHINOFORGE_VERSION}|${RHINOFORGE_CMAKE_VERSION}|${RHINOFORGE_VERSION_STAGE}")\n')
+                      '"${RHINOFORGE_VERSION}|${RHINOFORGE_CMAKE_VERSION}|${RHINOFORGE_VERSION_STAGE}|'
+                      '${RHINOFORGE_LAUNCH_RELEASE_VERSION}|${RHINOFORGE_LAUNCH_CMAKE_VERSION}")\n')
     subprocess.run(["cmake", "-P", str(driver)], check=True)
-    assert (source / "result.txt").read_text() == f'{version}|{result["cmake_version"]}|{result["stage"] if result["stage"] != "stable" else ""}'
+    stage = result["stage"] if result["stage"] != "stable" else ""
+    assert (source / "result.txt").read_text() == (
+        f'{version}|{result["cmake_version"]}|{stage}|'
+        f'{result["launch_release_version"]}|{result["launch_cmake_version"]}'
+    )
 
 
 @pytest.mark.parametrize("version,branch,tag", [
@@ -66,16 +76,35 @@ def test_rejects_wrong_branch_or_tag(source, version, branch, tag):
         version_check.check(source, branch=branch, tag=tag)
 
 
-def test_rejects_runtime_with_different_stage(source):
-    set_version(source, "1.2.0rc1")
-    path = source / "release/runtime-dependencies.json"
-    dependencies = json.loads(path.read_text())
-    dependencies["launch_kernel"]["release_version"] = "1.2.0"
-    path.write_text(json.dumps(dependencies))
-    with pytest.raises(ValueError, match="including rc/dev"):
+@pytest.mark.parametrize("field,value,error", [
+    ("release_version", "1.02.0", "canonical"),
+    ("release_version", "1.2.0rc0", "canonical"),
+    ("release_version", "1.2.0.dev01", "canonical"),
+    ("release_version", "1.2.0+local", "canonical"),
+    ("release_version", 120, "canonical"),
+    ("release_version", "1.3.0", "numeric version"),
+    ("cmake_version", "1.3.0", "numeric version"),
+    ("version", "1.3.0", "numeric version"),
+])
+def test_rejects_invalid_or_inconsistent_launch_versions(source, field, value, error):
+    set_launch(source, **{field: value})
+    with pytest.raises(ValueError, match=error):
         version_check.check(source)
-    failed = subprocess.run(["cmake", "-P", str(source / "release/version.cmake")], capture_output=True)
+    failed = subprocess.run(["cmake", "-P", str(source / "release/version.cmake")],
+                            capture_output=True, text=True)
     assert failed.returncode != 0
+    assert error in " ".join(failed.stderr.split())
+
+
+@pytest.mark.parametrize("field,value,error", [
+    ("abi_version", 0, "positive integer"),
+    ("abi_version", "1", "positive integer"),
+    ("commit", "3dd1b410", "full commit"),
+])
+def test_rejects_invalid_launch_abi_or_unpinned_source(source, field, value, error):
+    set_launch(source, **{field: value})
+    with pytest.raises(ValueError, match=error):
+        version_check.check(source)
 
 
 def test_existing_build_reconfigures_after_version_or_lock_changes(source):
@@ -90,10 +119,7 @@ def test_existing_build_reconfigures_after_version_or_lock_changes(source):
     set_version(source, "1.2.0rc2")
     subprocess.run(["cmake", "--build", str(build)], check=True)
     assert (build / "version.txt").read_text() == "1.2.0rc2"
-    path = source / "release/runtime-dependencies.json"
-    dependencies = json.loads(path.read_text())
-    dependencies["launch_kernel"]["release_version"] = "1.2.0"
-    path.write_text(json.dumps(dependencies))
+    set_launch(source, cmake_version="1.3.0")
     failed = subprocess.run(["cmake", "--build", str(build)], capture_output=True)
     assert failed.returncode != 0
 

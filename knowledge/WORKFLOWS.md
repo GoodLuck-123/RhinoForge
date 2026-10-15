@@ -11,6 +11,11 @@
 See [RETRIEVAL.md](RETRIEVAL.md) for the Markdown-first retrieval contract and
 the boundary for optional semantic indexing.
 
+For build-version mismatches, compare the installed Launch package with
+`release/runtime-dependencies.json`. RhinoForge's development version does not
+determine the Launch version. Preserve exact dependency and capability checks;
+see the [release policy](../docs/release_policy.md).
+
 For model assessment or implementation, use the
 [`rhinoforge-port` skill](../.agents/skills/rhinoforge-port/SKILL.md) with
 [model porting](../docs/model_porting.md).
