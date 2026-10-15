@@ -6,6 +6,9 @@ restricted library and main and expansion operator assets remain outside the sou
 
 ## Dependency and compatibility contract
 
+- RhinoForge and Launch have independent versions. The `1.3.0.dev0` development
+  line retains archived Launch `1.2.0`; resolve components by the dependency
+  manifest rather than assuming their versions match. [Release policy](../../docs/release_policy.md)
 - CMake checks the numeric package version, complete release version and ABI
   against [runtime-dependencies.json](../../release/runtime-dependencies.json). Install its headers,
   shared library, and CMake package files from the same runtime set as the

@@ -37,7 +37,7 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
   conversion.
 
 - [Release policy](../docs/release_policy.md): development and release branches,
-  version stages, dependency locks and immutable artifacts.
+  independent component versions, dependency locks and immutable artifacts.
 
 ## Concepts
 

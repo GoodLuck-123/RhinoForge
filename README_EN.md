@@ -22,7 +22,9 @@ The distribution name is `rhinoforge`; the Python import remains
 `rpu_backend`. RhinoForge is inference-only and does not support training or
 fine-tuning.
 
-This source tree targets **v1.3.0.dev0** (development source; runtime binaries are not published). See the [release policy](docs/release_policy.md). See the [changelog](CHANGELOG.md)
+This source tree targets **v1.3.0.dev0** and depends on archived **Rhino Launch v1.2.0**.
+Use the published components specified in the [runtime asset guide](docs/runtime_assets.md).
+See the [release policy](docs/release_policy.md), [changelog](CHANGELOG.md)
 and [upgrade guide](docs/upgrading_1_2.md) before updating an existing installation.
 
 ## Highlights

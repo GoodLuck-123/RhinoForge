@@ -20,7 +20,8 @@ PyTorch 后端中提供模型适配器、融合模型运行时、图捕获与重
 发行包名为 `rhinoforge`，Python 导入名仍为 `rpu_backend`。RhinoForge 仅支持
 推理，不支持训练和微调。
 
-当前源码版本为 **v1.3.0.dev0**（开发版，仅提供源码）。版本规则见[发布流程](docs/release_policy.md)。更新范围见[发行说明](CHANGELOG.md)，
+当前源码版本为 **v1.3.0.dev0**（开发版），依赖已归档的 **Rhino Launch v1.2.0**；
+使用[运行时资产指南](docs/runtime_assets.zh.md)指定的正式版组件。版本规则见[发布流程](docs/release_policy.md)。更新范围见[发行说明](CHANGELOG.md)，
 已有环境请先阅读[升级指南](docs/upgrading_1_2.zh.md)。
 
 ## 主要能力

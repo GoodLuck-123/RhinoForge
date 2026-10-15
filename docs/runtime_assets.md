@@ -7,12 +7,16 @@ main and expansion operator assets, the board SDK, or model weights. Obtain a ru
 compatible with the source revision you are installing from the runtime provider.
 Follow that package's distribution terms and integrity instructions.
 
-This `1.3.0.dev0` development line provides source only; matching runtime binaries
-are not published. Build the pinned Launch source and obtain the main and
-DDR-expansion assets recorded in [runtime-dependencies.json](../release/runtime-dependencies.json).
-Each operator asset requires its adjacent `.ref.kernels` file. Launch uses release
-version `1.3.0.dev0`, CMake version `1.3.0` and ABI version `1`. For packaged
-runtime assets, select a published release and its matching source.
+This `1.3.0.dev0` development line depends on archived Rhino Launch **1.2.0**,
+commit `3dd1b410f5f46373997fef3dfbf9b67eecec6a84`, with CMake version `1.2.0` and
+ABI version `1`. Obtain the stable `RhinoForge-runtime-v1.2.0.tar.gz` and its
+`.tar.gz.sha256` from the provider. Its Launch SDK directory is
+`rhino-launch-kernel-v1.2.0-linux-aarch64`; its main and DDR-expansion assets match
+[runtime-dependencies.json](../release/runtime-dependencies.json).
+Each operator asset requires its adjacent `.ref.kernels` file.
+Historical candidates can have the same bundle filename: verify the checksum,
+`RELEASE.txt` and Launch commit. A directory named `v1.1.0-2-gbdc0dae` contains
+an older SDK whose CMake version is `1.0.0`, and does not satisfy this dependency.
 See the [release policy](release_policy.md).
 
 ## Request runtime assets
@@ -24,7 +28,7 @@ out of the public issue. Asset access follows the provider's distribution terms.
 
 ## Required components
 
-- **Rhino Launch 1.3.0.dev0**, built as a sanitized Release package, with headers,
+- **Rhino Launch 1.2.0**, built as a sanitized Release package, with headers,
   shared libraries and `lib/cmake/rhino_launch/rhino_launchConfig.cmake`.
   Current CMake checks `graph-arena-pool-v2`, `register-state-token`, Chrome
   hwperf support and the absence of the development Program API.
@@ -95,6 +99,7 @@ payload. Operator source and payload contents remain outside this repository.
 | Symptom | Action |
 |---|---|
 | CMake cannot find `rhino_launch` | Set the Launch prefix or pass `-Ccmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch"` |
+| CMake reports a Launch version mismatch | Select the archived stable SDK pinned by the dependency manifest and update both build and runtime paths; do not rewrite SDK version files or remove the EXACT check |
 | CMake rejects a required capability | Obtain a matching sanitized Release Launch package |
 | Launch cannot be loaded | Check its `lib` path and the board SDK library paths |
 | Asset or sidecar is missing, or a kernel is absent | Obtain the matching asset and unchanged sidecar together |
