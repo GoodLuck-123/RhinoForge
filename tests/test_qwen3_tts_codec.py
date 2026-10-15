@@ -225,3 +225,114 @@ def test_rpu_install_covers_decoding_convs_and_preserves_unused_layers(monkeypat
     for module, forward in reversed(restore):
         module.forward = forward
     assert all(m.forward == forward for m, forward in originals.items())
+
+
+def test_native_codec_transport_preserves_arguments_and_propagates_errors(monkeypatch):
+    module = torch.nn.Conv1d(96, 96, 7, dilation=3).eval()
+    hidden = torch.randn(1, 96, 50)[:, :, ::2]
+    weight = object()
+    output = torch.randn(1, 96, 7)
+    stats = {"calls": 0}
+    def native(value, packed, bias, kernel, dilation, channels):
+        assert value is hidden and packed is weight and bias is module.bias
+        assert (kernel, dilation, channels) == (7, 3, 96)
+        return output
+    monkeypatch.setattr(torch.ops.rpu, "tts_codec_conv1d", native, raising=False)
+    monkeypatch.setattr(torch.ops.rpu, "linear_with_accumulation",
+                        lambda *args: pytest.fail("staged path executed"), raising=False)
+    assert _rpu_convolution(module, hidden, weight, stats) is output and stats["calls"] == 1
+    def fail(*args):
+        raise RuntimeError("device failure")
+    monkeypatch.setattr(torch.ops.rpu, "tts_codec_conv1d", fail)
+    with pytest.raises(RuntimeError, match="device failure"):
+        _rpu_convolution(module, hidden, weight, stats)
+    assert stats["calls"] == 1
+    with pytest.raises(ValueError, match="CPU FP32"):
+        _rpu_convolution(module, hidden.half(), weight, stats)
+
+
+def _paired_decoder():
+    decoder = _decoder()
+    residual_type = type("Qwen3TTSTokenizerV2DecoderDecoderResidualUnit", (torch.nn.Module,), {})
+    stages = [torch.nn.Identity()]
+    for stage, channels in enumerate((768, 384, 192, 96)):
+        blocks = [torch.nn.Identity(), torch.nn.Identity()]
+        for index, dilation in enumerate((1, 3, 9)):
+            unit = residual_type()
+            unit.act1 = torch.nn.Identity()
+            unit.act2 = SnakeBeta()
+            unit.act2.alpha = torch.nn.Parameter(torch.zeros(channels))
+            unit.act2.beta = torch.nn.Parameter(torch.zeros(channels))
+            unit.conv1, unit.conv2 = torch.nn.Module(), torch.nn.Module()
+            unit.conv1.conv = decoder.convs[stage * 6 + index]
+            unit.conv2.conv = decoder.convs[stage * 6 + index + 3]
+            unit.conv1.padding, unit.conv1.dilation = 6 * dilation, dilation
+            unit.conv2.padding = 0
+            blocks.append(unit)
+        group = torch.nn.Module()
+        group.block = torch.nn.ModuleList(blocks)
+        stages.append(group)
+    decoder.convs = decoder.convs[24:]
+    decoder.decoder = torch.nn.ModuleList(stages)
+    return decoder
+
+
+def test_residual_pair_binding_padding_calls_errors_and_restore(monkeypatch):
+    from rpu_backend.runtime import weights
+    decoder = _paired_decoder()
+    originals = {m: m.forward for m in decoder.modules()}
+    original_to = torch.Tensor.to
+    monkeypatch.setattr(torch.Tensor, "to", lambda self, *a, **kw:
+                        self if a == ("rpu",) else original_to(self, *a, **kw))
+    monkeypatch.setattr(weights, "transform_linear_weight", lambda weight, *args: weight)
+    seen = []
+    def pair(hidden, first, affine, second, bias, dilation, channels):
+        n = (channels + 127) // 128 * 128
+        assert first.shape == (n, channels * 7) and second.shape == (n, n)
+        assert affine.shape == (3, n) and affine.dtype == torch.float16
+        assert torch.equal(affine[1, channels:], torch.ones(n - channels))
+        assert torch.count_nonzero(affine[0, channels:]) == torch.count_nonzero(affine[2, channels:]) == 0
+        assert not torch.count_nonzero(second[channels:]) and not torch.count_nonzero(second[:, channels:])
+        seen.append(hidden.clone())
+        return torch.zeros(1, channels, hidden.shape[-1] - 6 * dilation)
+    monkeypatch.setattr(torch.ops.rpu, "tts_codec_conv_pair", pair, raising=False)
+    restore, stats = [], {"calls": 0}
+    install_rpu_convolutions(decoder, restore, stats)
+    assert stats["residual_pairs"] == 12 and stats["paired_calls"] == 0
+    unit = decoder.decoder[4].block[3]
+    hidden = torch.randn(1, 96, 17)
+    result = unit(hidden)
+    assert torch.equal(result, hidden) and result.data_ptr() != hidden.data_ptr()
+    assert torch.equal(seen[0], F.pad(hidden, (18, 0)))
+    assert stats["calls"] == 2 and stats["paired_calls"] == 1
+    def fail(*args):
+        raise RuntimeError("pair failure")
+    monkeypatch.setattr(torch.ops.rpu, "tts_codec_conv_pair", fail)
+    with pytest.raises(RuntimeError, match="pair failure"):
+        unit(hidden)
+    assert stats["calls"] == 2 and stats["paired_calls"] == 1
+    with pytest.raises(ValueError, match="CPU FP32"):
+        unit(hidden.half())
+    for module, original in reversed(restore):
+        module.forward = original
+    assert all(m.forward == forward for m, forward in originals.items())
+
+
+@pytest.mark.parametrize("invalid", ["geometry", "child_dilation", "range"])
+def test_residual_pair_rejects_before_transform(monkeypatch, invalid):
+    from rpu_backend.runtime import weights
+    decoder = _paired_decoder()
+    unit = decoder.decoder[1].block[2]
+    if invalid == "geometry":
+        unit.conv1.padding = 1
+    elif invalid == "child_dilation":
+        unit.conv1.conv.dilation = (9,)
+        decoder.decoder[1].block[4].conv1.conv.dilation = (1,)
+    else:
+        unit.act2.alpha.data.fill_(100)
+    monkeypatch.setattr(torch.ops.rpu, "tts_codec_conv_pair", lambda *args: None, raising=False)
+    monkeypatch.setattr(weights, "transform_linear_weight", lambda *args: pytest.fail("premature transform"))
+    restore = []
+    with pytest.raises(ValueError, match="geometry|finite FP16"):
+        install_rpu_convolutions(decoder, restore, {"calls": 0})
+    assert not restore

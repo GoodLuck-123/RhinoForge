@@ -137,7 +137,7 @@ CPU 浮点 Tensor。
 | 模型 | CPU | Rhino 设备 |
 |---|---|---|
 | ASR | 音频读取、mel/分块、卷积与层间激活、单 token embedding、有限值检查、argmax、文本解码 | conv_out、位置和有效行处理、音频 encoder 与末尾投影、prefill 文本/音频组装、文本 decoder 和输出头 |
-| TTS | embedding、参考音频、speaker encoder、生成控制、码本、转置卷积/上采样、SnakeBeta、波形输出 | 默认卸载的 31 层解码 Conv1d；Talker、Predictor 和输出头；具备对应 native 接口时还包括 codec 输入/输出投影和 Transformer 前段 |
+| TTS | embedding、参考音频、speaker encoder、生成控制、码本、转置卷积/上采样、剩余 17 层 SnakeBeta、波形输出 | 默认卸载的 31 层解码 Conv1d，以及匹配 native 下的 12 层中间 SnakeBeta；Talker、Predictor 和输出头；具备对应 native 接口时还包括 codec 输入/输出投影和 Transformer 前段 |
 
 ASR 卷积使用 FP16 舍入权重进行 CPU FP32 计算，再转回 FP16；卷积采用 channels-last。
 设备音频 Graph 使用 FP32 Linear 累加。TTS CPU 组件保持 FP32，设备组件使用 FP16、
@@ -152,15 +152,21 @@ FP32 Linear 累加，Talker/Predictor 输出头仍使用 FP16 累加；codec 前
   EOS 和每段步数；其他执行错误直接报告。
 - 一个进程只保留一个存活模型/策略；请求、`execution_stats()` 和 `close()` 串行调用。
   两类 API 均支持 `with` 和幂等 `close()`，输出存储独立于后续重放。
-- 加载器在设备分配前选择 caching allocator。TTS 同时申请 owner 专属五个 arena：
-  四个保留 Graph 和一个串行即时调用。allocator 或 arena 计划已冻结且不兼容时，启动新进程。
+- 加载器在设备分配前选择 caching allocator。TTS 同时申请 owner 专属六个 arena：
+  五个保留 Graph 和一个串行即时调用。allocator 或 arena 计划已冻结且不兼容时，启动新进程。
 - ASR 保留当前长度的一张音频图和最多两张文本图；TTS 保留 Talker prefill/decode、
-  Predictor decode 及当前帧数的 codec 图。长度变化按组件淘汰旧签名，同长度重放。
-- Predictor 最后一行设备 hidden 只供紧接着的输出头使用一次；请求 hidden states
-  时仍返回独立 CPU 存储。
-- Predictor 的单行 `1024→2048`、八核 FP16/ACC16 无偏置输出头用一次性 Graph
-  合并输入上传、计算和输出回传。保留 DMA 所有权、边界 flush 和完成等待，不缓存
-  逐步变化的地址，也不增加持久 Graph；其他 Linear 路径不变。此优化需要重编 native。
+  Predictor prefill/decode 及当前帧数的 codec 图。长度变化按组件淘汰旧签名，同长度重放。
+- Predictor 在逻辑 KV 位置零将两个条件 token 合并 prefill，复用有界规划器和
+  32 位置/32 行 envelope。补齐行不推进逻辑 KV，也不能作为输出头的输入。
+  每帧主体执行由 16 次降至 15 次；15 个有依赖的输出头和采样规则不变，
+  后续 token 仍使用 checked decode replay。
+- 重编 native 后，Predictor 每步主体和 `1024→2048` 输出头合并为一次 Graph 提交。
+  安装时绑定 15 个 FP16 输出头，主体保持 ACC32、头保持 ACC16；首步使用两个条件
+  token 中的逻辑第 2 行，后续按逻辑 KV 位置选择输出头。logits 使用独立存储，
+  只允许对应输出头消费一次；请求 hidden states 时仍返回独立 CPU 输出，不新增持久图。
+  `components.predictor.fused_head_calls` 统计消费的融合结果，`head_calls` 仍统计逻辑调用。
+- 旧 native 保留独立输出头路径，其单行八核 FP16/ACC16 投影通过一次性 Graph 合并
+  上传、计算和回传。两条路径均保留 DMA 所有权、边界 flush 和完成等待。
 - CPU 声码器的 SnakeBeta 预计算冻结参数的指数和倒数，只原位更新新分配的临时结果；
   卷积 bias 同样在自己的输出上累加。残差输入和此前返回的波形不会被覆盖，仍使用 FP32。
 - Predictor 包括首个条件 token 在内，全部在 RPU 计算。固定 checkpoint 的第三层
@@ -170,8 +176,9 @@ FP32 Linear 累加，Talker/Predictor 输出头仍使用 FP16 累加；codec 前
   原 checkpoint 与 CPU 参考权重不变。
   Talker 和 Predictor 均在解析 Graph 描述前显式启用 FP32 Linear 累加，激活与权重仍以 FP16 存储。
 - Predictor 复用 native checked decode replay：仅匹配五层 FP16、32 位置缓存、
-  一维 RoPE 和无融合输出头的固定路径，支持 FP32 Linear 累加，并校验记录的 Linear
-  算子与累加模式一致。首次记录完整算子序列，后续校验权重版本、
+  一维 RoPE 的固定路径，支持 FP32 Linear 累加。融合头额外绑定全部 15 个权重所有者
+  和 ACC16 头算子，每步更新其 DDR 地址寄存器；记录的 Linear 必须匹配各位置的累加
+  模式。首次记录完整算子序列，后续校验权重版本、
   KV 所有者、Graph 和内存布局，再更新位置及 attention 参数，跳过重复的主机算子
   调度。输入上传、设备计算、输出头和原采样继续执行；无法建立证明时走普通路径。
   此优化需要重新编译匹配的 native，不能用通用 Graph 跳过开关代替。
@@ -186,14 +193,31 @@ FP32 Linear 累加，Talker/Predictor 输出头仍使用 FP16 累加；codec 前
 RPU 模式将解码实际调用的全部 31 层 Conv1d 转换成显式八核 Linear，输入/权重 FP16、
 累加 FP32：12 层残差 kernel-7 卷积、14 层 kernel-1 投影、3 层输入/输出卷积，以及
 2 层逐通道卷积。后者在安装时展开为通道对角权重，保留分组语义；共享量化器中仅供
-编码使用的两个 input_proj 不转换。权重只转换一次，保留原 CPU FP32 权重；输出通道
+编码使用的两个 input_proj 不转换。权重只转换一次，保留原 CPU FP32 权重；独立卷积的输出通道
 补齐到 128 对齐后裁回原大小，再加原 FP32 bias。
 
-CPU 仍执行补边、列展开、bias、码本、SnakeBeta、6 层转置卷积、ConvNeXt 的
-Linear/归一化/GELU 及上采样整理，因此属于部分卸载。卷积在列展开前将输入转换为 FP16，减少展开后的 FP32 副本。
-复用同步 immediate Linear 和第五个共享 arena，不新增常驻 Graph。几何不匹配会拒绝
+CPU 仍执行补边、列展开、剩余 bias/残差相加、码本、17 层 SnakeBeta、6 层转置卷积、ConvNeXt 的
+Linear/归一化/GELU 及上采样整理，因此属于部分卸载。native 提供 `tts_codec_conv1d` 时，
+CPU 通过保留存储所有权的共享视图，将展开并舍入后的 FP16 输入直接写入新分配的设备 DDR。
+同步 ACC32 Linear 完成后，读取已同步的共享 DDR 输出，先裁剪有效通道，再一次性转换并
+写入独立的 NCT FP32 输出；独立卷积路径保留原 FP32 bias 运算。CPU 别名不向调用者暴露，输入发布与
+输出一致性 flush 均保留，禁止在 Graph capture 内调用。旧 native 保留原有分段复制路径。
+native 提供 `tts_codec_conv_pair` 时，12 个残差单元各自将 kernel-7 卷积、首层 bias、
+中间 SnakeBeta 和 kernel-1 卷积留在设备上连续执行。安装时对第二个权重的两个维度补齐，
+并绑定独立的 FP16 bias/alpha/scale，两个投影之间保留通道 padding，不回 CPU 整理。
+每组只准备一次共享 DDR 输入并返回一次独立 CPU 输出；首个 SnakeBeta、因果补边、
+末层 FP32 bias 和残差相加仍在 CPU，不新增残差上传。Linear 保留 ACC32，
+中间算术改用 FP16，会相对于旧 CPU FP32 激活路径改变波形，需要同 codec tokens
+数值对照和代表性语音内容检查，不能声明逐样本相同。这是现有 eager 算子的设备驻留组合，
+并非单个融合设备程序或单张 Graph，仍保留逐算子提交和边界 flush。旧 native 保留全部
+CPU SnakeBeta；`codec_backend="cpu"` 下卷积和激活均在 CPU。
+
+复用同步 immediate Linear 和第六个共享 arena，不新增常驻 Graph。几何不匹配会拒绝
 安装，执行错误直接抛出，不静默退回 CPU。`execution_stats().codec_convolutions`
-记录 `backend`、安装的 `layers`（RPU 模式为 31）和累计 RPU `calls`。前段 Transformer 的 63 帧设备
+记录 `backend`、安装的 `layers`（RPU 模式为 31）、累计 RPU `calls`，以及
+`transport`（`shared_ddr` 或旧路径 `staged`）、`residual_pairs`（匹配 native 时为 12，
+否则为 0）和 `paired_calls`（成功完成的成组调用次数，每次也使 `calls` 增加 2）。
+前段 Transformer 的 63 帧设备
 边界和更长序列的 CPU 滑窗注意力保持不变。
 
 FP16 舍入会改变波形，应使用同一份 codec tokens 对照 CPU FP32 并核验语音内容。

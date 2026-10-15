@@ -127,7 +127,8 @@ class Qwen3TTSModel:
     Talker, Code Predictor and their output heads execute FP16 on device.
     The codec frontend also uses device FP16 when the native RoPE contract is available.
     Embedding, speaker encoder and composition use CPU FP32. The codec's 31 decoding
-    Conv1d layers default to RPU FP16/ACC32; transposed convolutions and activations stay CPU.
+    Conv1d layers default to RPU FP16/ACC32; native pairs also offload 12 intermediate
+    SnakeBeta layers. Transposed convolutions and remaining activations stay CPU.
     Only speech output is exposed; internal per-layer traces are not an API.
     """
 
@@ -177,10 +178,10 @@ class Qwen3TTSModel:
         from rpu_backend.runtime.weights import transform_linear_weight
         from rpu_backend.runtime._native_retirement import _InstalledNativeResource
 
-        # Four retained Graphs plus one serialized immediate-launch arena.
-        self._graph_runtime_policy = GraphRuntimePolicy.from_environment(graph_arena_count=5)
+        # Five retained Graphs plus one serialized immediate-launch arena.
+        self._graph_runtime_policy = GraphRuntimePolicy.from_environment(graph_arena_count=6)
         if not self._graph_runtime_policy.prepare_arenas():
-            raise RuntimeError("TTS requires its cold five-arena Graph plan")
+            raise RuntimeError("TTS requires its cold six-arena Graph plan")
         talker = self._wrapper.model.talker
         for name, core in (("talker", talker.model), ("predictor", talker.code_predictor.model)):
             graph = GraphCache(runtime_policy=self._graph_runtime_policy)
@@ -234,6 +235,8 @@ class Qwen3TTSModel:
                 envelope = lookup_causal_decoder("qwen3", part["layers"], 1024)
                 torch.ops.rpu.causal_decoder_set_chunk_envelope(
                     handle, min(part["capacity"], envelope.max_kv_len), envelope.chunk)
+            else:
+                torch.ops.rpu.causal_decoder_set_chunk_envelope(handle, 32, 32)
             descriptor = list(torch.ops.rpu.causal_decoder_resolve_decode_stage_descriptor(handle))
             part["descriptor"] = descriptor
             part["signature"] = GraphSignature(op_id="qwen3_tts_" + name, shapes=[1, 1, 1024],
@@ -257,16 +260,30 @@ class Qwen3TTSModel:
             part = self._components["talker" if index == 0 else "predictor"]
 
             def linear(owner, hidden, weight=weight, index=index, part=part):
+                fused = _take_predictor_logits(part, hidden, index)
                 device_hidden = _take_head_input(part, hidden)
-                if device_hidden is None:
-                    device_hidden = hidden.half().contiguous().to("rpu")
-                result = torch.ops.rpu.linear_with_accumulation(
-                    device_hidden.reshape(-1, 1024), weight, None, 1, 8, False).cpu().float()
+                if fused is None:
+                    if device_hidden is None:
+                        device_hidden = hidden.half().contiguous().to("rpu")
+                    fused = torch.ops.rpu.linear_with_accumulation(
+                        device_hidden.reshape(-1, 1024), weight, None, 1, 8, False)
+                result = fused.cpu().float()
                 if not torch.isfinite(result).all():
                     raise FloatingPointError("non-finite TTS device logits")
                 calls[index] += 1
                 return result.reshape(*hidden.shape[:-1], owner.out_features)
             head.forward = types.MethodType(linear, head)
+        if hasattr(torch.ops.rpu, "causal_decoder_set_tts_predictor_heads"):
+            if not hasattr(torch.ops.rpu, "causal_decoder_tts_predictor_logits"):
+                raise RuntimeError("native TTS Predictor head fusion is incomplete")
+            part = self._components["predictor"]
+            torch.ops.rpu.causal_decoder_set_tts_predictor_heads(part["handle"], self._head_weights[1:])
+            part["fused_heads"] = True
+            part["fused_head_calls"] = 0
+            descriptor = list(torch.ops.rpu.causal_decoder_resolve_decode_stage_descriptor(part["handle"]))
+            part["descriptor"] = descriptor
+            part["signature"] = GraphSignature(op_id="qwen3_tts_predictor", shapes=[1, 1, 1024],
+                dyn_dims=[part["handle"], *descriptor], dtypes=[torch.float16])
         predictor = talker.code_predictor
         self._restore_generate = (predictor, predictor.generate)
         predictor.generate = types.MethodType(_predictor_generate, predictor)
@@ -384,6 +401,8 @@ class Qwen3TTSModel:
                 result["components"][name] = {"calls": part["calls"], "tokens": part["tokens"],
                     "graph_size": graph.size(), "graph_replays": sum(e.replay_count for e in graph.snapshot()),
                     "graph_invariant_ok": graph.cache_invariant_ok()}
+                if name == "predictor":
+                    result["components"][name]["fused_head_calls"] = part.get("fused_head_calls", 0)
             return result
         finally:
             self._lock.release()
@@ -449,6 +468,16 @@ class Qwen3TTSModel:
             pass
 
 
+def _take_predictor_logits(part, hidden, index):
+    logits = part.pop("head_logits", None)
+    head_index = part.pop("head_index", None)
+    if hidden is part.get("head_hidden") and index == head_index and hidden.shape[1] == 1:
+        if logits is not None:
+            part["fused_head_calls"] += 1
+        return logits
+    return None
+
+
 def _take_head_input(part, hidden):
     previous = part.pop("head_hidden", None)
     device_hidden = part.pop("head_device", None)
@@ -489,10 +518,18 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
         raise ValueError("TTS cache_position differs from the contiguous cache range")
     part.pop("head_hidden", None)
     part.pop("head_device", None)
+    part.pop("head_logits", None)
+    part.pop("head_index", None)
+    if part.get("fused_heads", False) and not (
+            (cache.position == 0 and count == 2) or
+            (2 <= cache.position <= 15 and count == 1)):
+        raise ValueError("fused TTS Predictor requires two conditioning tokens then fourteen decode steps")
     chunks = []
     head_only = part.get("device_head_only", False) and not output_hidden_states
-    # shortcut: Predictor keeps decode until its five-layer prefill envelope is measured.
-    sizes = [count] if count > 1 and part["name"] == "talker" else [1] * count
+    # Only the two known conditioning tokens can run before the first sample.
+    prefill = count > 1 and (part["name"] == "talker" or
+                            (count == 2 and cache.position == 0))
+    sizes = [count] if prefill else [1] * count
     offset = 0
     for size in sizes:
         half_input = hidden[:, offset:offset + size].half().contiguous()
@@ -523,8 +560,10 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
         if size > 1:
             part["prefill_signature"] = signature
         if head_only:
-            if raw.shape != (1, size, 1024) or raw.dtype != torch.float16:
+            physical_size = execution_len if size > 1 else size
+            if raw.shape != (1, physical_size, 1024) or raw.dtype != torch.float16:
                 raise RuntimeError("invalid TTS Predictor device hidden state")
+            raw = raw[:, :size]
             cache.update_position(size)
             offset += size
             continue
@@ -541,6 +580,12 @@ def _decoder_forward(part, hidden, cache, attention_mask, position_ids, cache_po
         # the head publishes independent finite-checked CPU logits.
         result = raw[:, -1:]
         part["head_hidden"], part["head_device"] = result, result
+        if part.get("fused_heads", False):
+            logits = torch.ops.rpu.causal_decoder_tts_predictor_logits(part["handle"])
+            if logits.shape != (1, 1, 2048) or logits.dtype != torch.float16:
+                raise RuntimeError("invalid fused TTS Predictor logits")
+            part["head_logits"] = logits
+            part["head_index"] = cache.position - 1
         return BaseModelOutputWithPast(last_hidden_state=result, past_key_values=cache)
     result = torch.cat(chunks, dim=1)
     if count == 1:

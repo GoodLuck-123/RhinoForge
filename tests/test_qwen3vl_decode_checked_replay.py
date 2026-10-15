@@ -6,6 +6,7 @@ production C++ source. Full SDK/Torch translation-unit syntax is a separate gate
 """
 from pathlib import Path
 import subprocess
+import re
 import torch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,7 @@ class CausalDecoderModel{
 public:
  virtual ~CausalDecoderModel()=default;
  struct LayerWeights{Tensor q_w,k_w,v_w,q_ws,k_ws,v_ws,qkv_w,qkv_ws,o_w,o_ws,gate_w,gate_ws,up_w,up_ws,down_w,down_ws,input_norm_w,post_norm_w,q_norm_w,k_norm_w;};
+ std::vector<Tensor> tts_predictor_heads_;int64_t tts_predictor_head_index_=0;
  std::vector<LayerWeights> layer_weights_=std::vector<LayerWeights>(36);
  Tensor cos_,sin_,final_norm_w_,qwen3vl_4b_qkv_scale_bank_,lm_head_w_,lm_head_w_scale_,position_ids_keepalive_;
  bool qwen3vl_4b_decode_o_ring_norm_fused_=false;
@@ -114,6 +116,9 @@ public:
   return SPM_ALLOC.addr(core,10000+layer*16384+role*4096+norm_delta);}
  uint32_t addr(int core,const char*)const{return SPM_ALLOC.addr(core,7777+norm_delta);}
  struct Qwen3VlDecodeReplayState;std::shared_ptr<Qwen3VlDecodeReplayState> qwen3vl_decode_replay_state_;
+ void validate_tts_step(const Tensor& hidden_states,int64_t position,bool is_causal,const std::optional<Tensor>& attention_mask){
+  /* TTS_FORWARD_ADMISSION */
+ }
  bool begin_qwen3vl_decode_replay(const Tensor&,at::TensorList,at::TensorList,const std::optional<Tensor>&,int64_t,bool,at::IntArrayRef);
  bool try_checked_layer_body_replay();void finish_qwen3vl_decode_replay();void cancel_qwen3vl_decode_replay()noexcept;
 };
@@ -246,7 +251,8 @@ void populate_ordinary(RpuKernelGraph&g,const Model&m,bool fused){
  const auto p=v3::CausalDecoderModel::Qwen3VlDecodeReplayState::profile(m);
  const auto names=rpu_pl_tiling::autotile_kernel_names();std::string lin,head;
  for(const auto&n:names)if(v3::linear_name(n,p,true)){head=n;break;}
- lin=p.gemv?"llama_gemv":head;assert(!head.empty());
+ for(const auto&n:names)if(v3::linear_name(n,p,false)){lin=n;break;}
+ if(p.gemv)lin="llama_gemv";assert(!head.empty()&&!lin.empty());
  auto add=[&](const std::string&n){Node node;node.kind=GraphNodeKind::Kernel;node.kernel.kernel_idx=19+g.nodes.size()*7;node.kernel.kernel_name=n;g.nodes.push_back(node);};
  for(int l=0;l<m.layers;++l){
   add("llama_rms_norm");add(lin);add(lin);add(lin);
@@ -256,7 +262,7 @@ void populate_ordinary(RpuKernelGraph&g,const Model&m,bool fused){
   if(p.tts_predictor&&!p.acc32){add(lin);add(lin);add("llama_silu_mul");}
   else{add(lin);add("unary");add(lin);add("binary_sameshape");}
   add(lin);add("llm_all_reduce_residual_nopace");if(l<3&&!m.deepstack_lang_layers_.empty())add("binary_sameshape");
- }add("llama_rms_norm");if(m.fuse_lm_head_)add(head);
+ }add("llama_rms_norm");if(m.fuse_lm_head_||p.tts_head)add(head);
 }
 void tts_fixture(Fixture&f,bool acc32=false){
  ordinary_fixture(f,5,at::kHalf,acc32);auto&m=f.m;
@@ -313,6 +319,36 @@ void tts_cases(){
   bad.m.finish_qwen3vl_decode_replay();assert(!bad.m.qwen3vl_decode_replay_state_->recipe);
  }
  }
+}
+void tts_fused_head_cases(){
+ Fixture f;tts_fixture(f,true);auto&m=f.m;RpuKernelGraph g;
+ alignas(256) std::array<std::array<char,256>,15> storage{};
+ for(auto& bytes:storage)m.tts_predictor_heads_.push_back(at::from_blob(bytes.data(),{2048,1024},at::TensorOptions().dtype(at::kHalf)));
+ m.vocab_size_=2048;
+ for(int rows:{2,16,32}){m.validate_tts_step(metadata(at::kHalf,{1,rows,1024}),0,true,{});assert(m.tts_predictor_head_index_==0);}
+ for(int rows:{1,3,48})rejects([&]{m.validate_tts_step(metadata(at::kHalf,{1,rows,1024}),0,true,{});});
+ for(int pos:{0,1,16})rejects([&]{m.validate_tts_step(f.hidden,pos,true,{});});
+ rejects([&]{m.validate_tts_step(f.hidden,2,false,{});});
+ auto run=[&](int p){m.validate_tts_step(f.hidden,p,true,{});assert(f.begin(g,p));
+  if(!m.try_checked_layer_body_replay()){preload(g);++g.ordinary;if(g.mode==RpuKernelGraph::State::RECORDING)populate_ordinary(g,m,false);else g.cursor=g.nodes.size();}
+  m.finish_qwen3vl_decode_replay();m.cancel_qwen3vl_decode_replay();g.mode=RpuKernelGraph::State::REPLAYING;g.topology=9001;
+ };
+ run(2);assert(m.qwen3vl_decode_replay_state_->recipe);
+ for(int p:{3,14,15,2}){run(p);assert(g.applied.size()==82);
+  const auto address=RpuGetDevAddr(m.tts_predictor_heads_[p-1].data_ptr())>>8;
+  assert(g.applied[80].reg_idx==2&&g.applied[81].reg_idx==3);
+  assert(g.applied[80].value==uint16_t(address)&&g.applied[81].value==uint16_t(address>>16));
+  assert(g.applied[80].kernel_idx==g.nodes.back().kernel.kernel_idx);
+ }assert(g.ordinary==1&&g.skips==4);
+ m.tts_predictor_heads_[14].unsafeGetTensorImpl()->bump_version();run(3);assert(g.ordinary==2);run(4);assert(g.ordinary==2);
+ assert(f.begin(g,5));m.tts_predictor_head_index_=3;
+ rejects([&]{m.try_checked_layer_body_replay();});m.cancel_qwen3vl_decode_replay();
+ // The head must be ACC16 even when the body uses ACC32.
+ RpuKernelGraph wrong;assert(f.begin(wrong,2));assert(!m.try_checked_layer_body_replay());preload(wrong);populate_ordinary(wrong,m,false);
+ wrong.nodes.back().kernel.kernel_name=wrong.nodes[prefix+1].kernel.kernel_name;
+ m.finish_qwen3vl_decode_replay();assert(!m.qwen3vl_decode_replay_state_->recipe);
+ m.tts_predictor_heads_[0]=metadata(at::kHalf,{1024,1024});
+ assert(!Model::Qwen3VlDecodeReplayState::owner_shapes(m));
 }
 void cross_profile_cases(){
  for(int layers:{28,36})for(auto dtype:{at::kHalf,at::kChar,at::kByte})for(bool acc32:{false,true}){
@@ -372,7 +408,7 @@ void exact_8b_cases(){
  }
 }
 int main(){
- tts_cases();
+ tts_cases();tts_fused_head_cases();
  for(auto flag:{&Model::decoder_mixed_precision_,&Model::wall_prefill_staged_mlp_,
                  &Model::wall_prefill_mixed_requested_,&Model::wall_prefill_staged_requested_}){
   Fixture f;RpuKernelGraph g;assert(f.begin(g,0));f.m.cancel_qwen3vl_decode_replay();
@@ -596,7 +632,10 @@ def test_actual_decode_owner_recipe_and_invalidation(tmp_path):
     assert source.count('t.device().type() != at::kPrivateUse1') == 2
     source = source.replace('t.device().type() != at::kPrivateUse1', 't.device().type() != at::kCPU')
     cpp = tmp_path / "checked_replay.cpp"
-    cpp.write_text(HARNESS + source + CASES)
+    header = (ROOT / "src/fused/rpu_qwen3_model.h").read_text()
+    admission = re.search(r"        const int64_t seq_len_in = hidden_states.size\(1\);.*?(?=        detail::validate_fmb_planning_shape)", header, re.S)
+    assert admission is not None
+    cpp.write_text(HARNESS.replace("/* TTS_FORWARD_ADMISSION */", admission.group()) + source + CASES)
     torch_root = Path(torch.__file__).resolve().parent
     exe = tmp_path / "checked_replay"
     subprocess.run([

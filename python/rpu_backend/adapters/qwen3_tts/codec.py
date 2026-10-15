@@ -83,7 +83,12 @@ def _rpu_convolution(owner, hidden, weight, stats):
     count = hidden.shape[-1] - width + 1
     if count <= 0:
         raise ValueError("TTS RPU convolution input is shorter than its kernel")
-    # shortcut: CPU im2col and bias remain; fuse them only after measuring transfer cost.
+    native = getattr(torch.ops.rpu, "tts_codec_conv1d", None)
+    if native is not None:
+        result = native(hidden, weight, owner.bias, owner.kernel_size[0], dilation, owner.out_channels)
+        stats["calls"] += 1
+        return result
+    # Older native extensions retain the staged input/output path.
     # Round each input once, before overlapping windows multiply the copy volume.
     patches = hidden.half().unfold(-1, width, 1)[..., ::dilation]
     patches = patches.permute(0, 2, 1, 3).reshape(count, -1).contiguous().to("rpu")
@@ -118,6 +123,7 @@ def install_rpu_convolutions(decoder, restore, stats):
                 (module.bias is not None and
                  (module.bias.device.type != "cpu" or module.bias.dtype != torch.float32))):
             raise ValueError("TTS RPU convolution requires CPU FP32 source weights")
+    pairs = _residual_pair_affines(decoder) if hasattr(torch.ops.rpu, "tts_codec_conv_pair") else []
     prepared = []
     for module in modules:
         weight = module.weight.detach().half()
@@ -137,3 +143,65 @@ def install_rpu_convolutions(decoder, restore, stats):
         restore.append((module, module.forward))
         module.forward = types.MethodType(forward, module)
     stats["layers"] = len(modules)
+    stats["transport"] = "shared_ddr" if hasattr(torch.ops.rpu, "tts_codec_conv1d") else "staged"
+    stats["residual_pairs"] = len(pairs)
+    stats["paired_calls"] = 0
+    weights = dict(zip(modules, prepared))
+    for unit, affine in pairs:
+        channels = unit.conv2.conv.in_channels
+        padding = (-channels) % 128
+        second = weights[unit.conv2.conv]
+        if padding:
+            weight = torch.nn.functional.pad(unit.conv2.conv.weight.detach().squeeze(2).half(),
+                                             (0, padding, 0, padding))
+            second = transform_linear_weight(weight, 1, 8).to("rpu")
+        first, affine = weights[unit.conv1.conv], affine.to("rpu")
+
+        def forward(owner, hidden, first=first, affine=affine, second=second):
+            channels = owner.conv1.conv.in_channels
+            if (hidden.device.type != "cpu" or hidden.dtype != torch.float32 or
+                    hidden.ndim != 3 or hidden.shape[:2] != (1, channels)):
+                raise ValueError("TTS RPU residual pair requires batch-one CPU FP32 input")
+            padded = torch.nn.functional.pad(owner.act1(hidden), (owner.conv1.padding, 0))
+            output = torch.ops.rpu.tts_codec_conv_pair(
+                padded, first, affine, second, owner.conv2.conv.bias,
+                owner.conv1.dilation, channels)
+            stats["calls"] += 2
+            stats["paired_calls"] += 1
+            return output + hidden
+
+        restore.append((unit, unit.forward))
+        unit.forward = types.MethodType(forward, unit)
+
+
+def _residual_pair_affines(decoder):
+    units = {name: module for name, module in decoder.named_modules()
+             if type(module).__name__ == "Qwen3TTSTokenizerV2DecoderDecoderResidualUnit"}
+    expected = {f"decoder.{stage}.block.{block}" for stage in range(1, 5) for block in range(2, 5)}
+    if units.keys() != expected:
+        raise ValueError("TTS RPU residual pair geometry differs from the twelve-unit profile")
+    prepared = []
+    for name, unit in units.items():
+        stage, block = int(name.split(".")[1]), int(name.split(".")[3])
+        channels, dilation = 1536 // 2**stage, 3**(block - 2)
+        if (unit.conv1.conv.in_channels != channels or unit.conv2.conv.in_channels != channels or
+                unit.conv1.conv.kernel_size != (7,) or unit.conv2.conv.kernel_size != (1,) or
+                unit.conv1.conv.dilation != (dilation,) or unit.conv2.conv.dilation != (1,) or
+                unit.conv1.dilation != dilation or unit.conv1.padding != 6 * dilation or
+                unit.conv2.padding != 0 or unit.conv1.conv.bias is None or unit.conv2.conv.bias is None or
+                type(unit.act2).__name__ != "SnakeBeta"):
+            raise ValueError("TTS RPU residual pair geometry differs")
+        parameters = (unit.conv1.conv.bias, unit.act2.alpha, unit.act2.beta)
+        if any(p.device.type != "cpu" or p.dtype != torch.float32 or p.shape != (channels,)
+               for p in parameters):
+            raise ValueError("TTS RPU residual pair requires CPU FP32 channel parameters")
+        bias, alpha, beta = (p.detach() for p in parameters)
+        padding = (-channels) % 128
+        affine = torch.stack((torch.nn.functional.pad(bias, (0, padding)),
+                              torch.nn.functional.pad(alpha.exp(), (0, padding), value=1),
+                              torch.nn.functional.pad(1 / (beta.exp() + unit.act2.no_div_by_zero),
+                                                      (0, padding)))).half()
+        if not torch.isfinite(affine).all():
+            raise ValueError("TTS RPU residual pair parameters exceed finite FP16 range")
+        prepared.append((unit, affine))
+    return prepared

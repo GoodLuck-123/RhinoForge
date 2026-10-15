@@ -94,7 +94,7 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   Prefill input composition stays on device; single-token embedding lookup stays on CPU.
   Enable the fused output head only for causal-LM callers and retire the decoder
   before releasing that head.
-- TTS Talker, Predictor and optional codec share one owner policy and five arenas.
+- TTS Talker, Predictor and optional codec share one owner policy and six arenas.
   Enable `causal_decoder_set_tts_codec_mode` only on the installed codec handle;
   its default-off state preserves other decoders' RoPE parameters and layout hash.
   Keep original CPU FP32 codec weights; fold LayerScale into new frontend copies
@@ -112,11 +112,23 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   before skipping host emission. Refresh position and attention fields on every
   replay, including resets to zero; use ordinary emission when the proof cannot
   be established, and fail explicitly on inconsistencies after skipping starts.
-- The measured single-row TP8 FP16/ACC16 `1024→2048` output head uses a one-shot
-  Graph, within the existing temporary arena budget. Keep operands alive through
+- Predictor binds fifteen FP16 `1024→2048` heads once and appends its ACC16 head
+  to the ACC32 body Graph. Prefix output uses logical row 1; decode uses head
+  index `position - 1`. Bind head-bank identity in the physical profile and prove
+  all owners/versions before patching the head's Linear DDR registers on replay.
+  Keep owned logits, hidden outputs and the original sampling sequence; consume
+  fused logits once and only for the matching hidden object and head index.
+  Older native extensions retain the single-row head's one-shot Graph. Keep operands alive through
   synchronous completion, retain DMA/flush checks and abort on failure; never
   reuse a Graph with fresh fixed input addresses. CPU codec temporary reuse must
   preserve residual inputs, retained outputs and the frozen SnakeBeta formula.
+- Codec Conv1d shared-DDR staging uses fresh device allocations: fill the FP16
+  im2col destination through a retained CPU view, force publication, run the
+  existing synchronous ACC32 Linear, then read through the coherent CPU view.
+  Crop padded channels before the single owned NCT FP32 conversion/layout copy.
+  Keep FP32 bias arithmetic, reject capture, and propagate errors. Compare the
+  same codec inputs against the staged path; never expose writable CPU aliases
+  or replace device computation with a CPU matrix multiply.
 - Keep every Predictor token on device. Its frozen third MLP layer (index 2)
   overflows FP16 at `SiLU(gate) * up`, before the down projection; subsequent
   RMSNorm receives Inf and produces zero. The ordinary device RMSNorm handles
@@ -140,7 +152,11 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   another replay. Cache only the latest decoded reference speaker embedding.
 - Talker reuses the 28-layer/1024 prefill envelope within its 512-position cache.
   Exclude physical padding from logical KV position; replace only the old prefill
-  Graph when prompt length changes. Predictor keeps one decode Graph; codec keeps
+  Graph when prompt length changes. Predictor batches only its two initial
+  conditioning tokens at logical position zero using a 32-row/32-position
+  envelope, then keeps single-token checked decode. Exclude padded rows from
+  the returned head input and logical KV position. Retain separate Predictor
+  prefill/decode Graphs and all 15 dependent sampling/head steps; codec keeps
   one current-frame Graph. Retire Graphs before handles and weights.
 - Speech TOMLs under `examples/configs/qwen3_asr` and `qwen3_tts` use the shared
   CLI and the dedicated audio runner. Keep configuration checks free of Torch/device
@@ -152,9 +168,18 @@ Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these con
   two depthwise layers expanded to channel-diagonal weights at installation.
   Leave the shared quantizer's two encoder-only input projections untouched. Validate
   all geometries before conversion, preserve CPU weights, restore forwards on close
-  and report actual calls. CPU padding/im2col, bias, transposed convolutions,
-  ConvNeXt Linear/normalization and activations remain explicit; do not claim
+  and report actual calls. CPU padding/im2col, remaining bias/residual arithmetic,
+  transposed convolutions, ConvNeXt Linear/normalization and 17 SnakeBeta layers
+  remain explicit with native pairs enabled; do not claim
   full device execution or bitwise equality with the FP32 anchor.
+- Native codec residual pairs keep two ACC32 Linear projections and their
+  intermediate FP16 bias/SnakeBeta on device. Bind frozen parameters and padded
+  second weights once; preserve FP32 final bias/residual on CPU without an extra
+  residual upload. Reject unsupported geometry before transformation. One pair
+  contributes two convolution calls; compare the changed precision boundary
+  using fixed codec tokens and speech content, not a bitwise FP32 assertion.
+  Do not use eager legacy LocalSPM LayerNorm inside a model that already owns
+  the arenas: ConvNeXt migration needs framework-owned SPM and lifecycle planning.
 - CPU codec matrix multiplication and adjacent-block overlap-add preserve output
   lengths. Keep thread settings caller-controlled and check retained outputs, input changes and close/reload
   when changing component handoffs.
