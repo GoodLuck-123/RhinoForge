@@ -82,6 +82,10 @@ Qwen3-VL 另接受冷态布尔值 `prefill.fast_replay`，不接受 `vision.fast
 
 模型开关放在对应配置或启动进程中。显式环境值优先于 adapter 的 `setdefault`；示例 runner 在导入 adapter 前应用所选配置。日志、分配器及 Launch 初始化设置须在导入 backend 前准备。使用模板的 opt-in 与默认值，避免把模型优化开关导出到所有进程。
 
+Qwen3.5-35B-A3B mixed-E4M3 权重按
+[官方源下载与 CPU 转换命令](../examples/configs/qwen3_5/README.md#cmd-moe-mixed)准备。
+Text/Vision、核数与 ACC 变体共用转换产物，运行参数不改变权重配方。
+
 ## 通用和 cache 设置
 
 | 变量 | 未设置时的默认值与接受值 | 读取 / 更改 | 作用域、效果与风险 |

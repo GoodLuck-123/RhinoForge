@@ -92,6 +92,11 @@ Omitting `model.num_cores` selects eight. For admitted reduced-core dense Qwen3,
 
 Keep model switches scoped to that model's configuration or launch process. Explicit environment values override adapter `setdefault` values; the example runner applies its selected configuration before adapter import. Logging, allocator and Launch initialization settings must be present before importing the backend. Use the model template's opt-ins and defaults instead of exporting optimization flags globally.
 
+Prepare Qwen3.5-35B-A3B mixed-E4M3 weights with the
+[official-source download and CPU conversion commands](../examples/configs/qwen3_5/README.md#cmd-moe-mixed).
+Text/Vision, core-count and ACC variants share the same converted checkpoint;
+these runtime settings do not select a different conversion recipe.
+
 ## General and cache settings
 
 | Variable | Unset/default and accepted values | Read / change | Scope, effect, and risk |

@@ -70,7 +70,10 @@ INT8 with FP16 per-channel scales; GDN b/a, convolution, normalization,
 embedding and LM head stay FP16. Text accumulation is ACC16. The 9B image tower uses physical head/MLP widths
 80/4352. Video and other quantized geometries retain their own admission.
 
-The Qwen3.5-35B-A3B mixed-E4M3 profile has a separate topology:
+The Qwen3.5-35B-A3B mixed-E4M3 profile has a separate topology. Prepare its
+checkpoint with the [official-source download and CPU conversion commands](../examples/configs/qwen3_5/README.md#cmd-moe-mixed).
+All three core budgets share the converted weights; core-specific padding and
+packing happen during cold installation:
 
 | Budget | Attention / GDN / router / head / Vision | Routing / routed / shared | Expert logical / physical width |
 |---|---|---|---|

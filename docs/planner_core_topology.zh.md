@@ -56,7 +56,9 @@ projection 使用 signed INT8 和 FP16 per-channel scale；GDN b/a、卷积、�
 及 LM head 保持 FP16，文本累加为 ACC16。9B Vision 的物理 head/MLP width 为 80/4352。
 视频和其他量化结构仍按各自入口检查。
 
-Qwen3.5-35B-A3B mixed-E4M3 使用独立拓扑：
+Qwen3.5-35B-A3B mixed-E4M3 使用独立拓扑。权重按
+[官方源下载与 CPU 转换命令](../examples/configs/qwen3_5/README.md#cmd-moe-mixed)准备。
+三种核数共用转换产物，核数对应的补齐和打包在冷态安装时完成：
 
 | 核数 | Attention / GDN / router / head / Vision | Routing / routed / shared | Expert 逻辑 / 物理 width |
 |---|---|---|---|

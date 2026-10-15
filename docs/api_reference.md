@@ -238,6 +238,16 @@ cache.reset()
 
 For image input, pass the processor's `input_ids`, `attention_mask`, `pixel_values` and `image_grid_thw` together on the first call after reset. Keep subsequent calls text-only while reusing that cache. Returned logits are CPU FP32.
 
+Prepare the separate mixed-E4M3 profile from the official unquantized
+`Qwen/Qwen3.5-35B-A3B` source using
+[`convert_qwen3_5_moe_fp8.py`](../python/rpu_backend/quant/convert_qwen3_5_moe_fp8.py).
+The [download, CPU conversion and run commands](../examples/configs/qwen3_5/README.md#cmd-moe-mixed)
+write `$RPU_MODEL_CACHE/Qwen3.5-35B-A3B-rpu-fp8-mixed`; pass that output to
+`from_pretrained` or the example's `--model`. Conversion needs no calibration
+and produces per-output E4M3 weights. Official block-FP8 checkpoints are not
+accepted inputs or substitutes for this format. Select the matching mixed-E4M3
+Text/VL and core-count template; the RTN/GPTQ limits above remain separate.
+
 ## Policy APIs
 
 The following classes are exported from `rpu_backend.api`:

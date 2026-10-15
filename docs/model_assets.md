@@ -84,6 +84,10 @@ output format.
 python -m rpu_backend.quant.convert_qwen3 \
   --src SOURCE_DIR --dst OUTPUT_DIR --quant-lm-head
 
+# Qwen3.5 35B-A3B mixed E4M3; run from the repository root
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5_moe_fp8.py \
+  --src SOURCE_DIR --dst OUTPUT_DIR --expert-chunk 1 --threads 8
+
 # Pi0.5 W8A16
 python -m rpu_backend.quant.convert_pi05 --src SOURCE_DIR --dst OUTPUT_DIR
 
@@ -99,6 +103,11 @@ python -m rpu_backend.quant.convert_wall_oss_w8a16 \
 python -m rpu_backend.quant.convert_wall_oss \
   --src SOURCE_DIR --dst OUTPUT_DIR --group-size 32
 ```
+
+For MoE mixed E4M3, use the official unquantized `Qwen/Qwen3.5-35B-A3B`
+source and follow the [download, CPU conversion and run recipe](../examples/configs/qwen3_5/README.md#cmd-moe-mixed).
+The script needs no calibration data; official block-FP8, GPTQ and RTN packages
+cannot replace the floating source or its per-output E4M3 output.
 
 Converters create a new destination and reject an existing output directory.
 After conversion, point the matching TOML at that output and retain the source

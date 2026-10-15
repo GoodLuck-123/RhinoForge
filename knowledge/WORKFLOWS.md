@@ -81,6 +81,18 @@ points and runtime boundaries linked from [Examples](../docs/model_support.md)
 and follow [model validation policy](../docs/validation_policy.md). Update stale
 knowledge in the same change; do not preserve conflicting summaries.
 
+## Qwen3.5 MoE mixed-E4M3 weights
+
+Download the official unquantized `Qwen/Qwen3.5-35B-A3B` and run
+`python/rpu_backend/quant/convert_qwen3_5_moe_fp8.py` on CPU using the
+[configuration guide's commands](../examples/configs/qwen3_5/README.md#cmd-moe-mixed).
+Write to `$RPU_MODEL_CACHE/Qwen3.5-35B-A3B-rpu-fp8-mixed` or select the output
+explicitly with `--model`. No calibration is required; official block-FP8,
+GPTQ and RTN cannot replace the unquantized source. When changing this workflow,
+update the weight index and bilingual quantization, asset and API guides,
+and check the loader's `quant_scope.py` contract. Preserve the recorded identity
+of historical assets and measurements.
+
 ## Speech changes
 
 Start with the [Qwen3 speech guide](../docs/qwen3_audio.md) and retain these contracts:

@@ -60,7 +60,7 @@
 | <a id="cmd-qwen3"></a>Qwen3 | 对应尺寸的官方浮点权重；Instruct 使用单独模型；W8、W4 与输出头配方分别选择 | [对应表](qwen3/README.md#weight-recipes) | [操作步骤](qwen3/README.md#quantization) |
 | <a id="cmd-qwen3-vl"></a>Qwen3-VL | 官方浮点权重或指定 AWQ 包；区分完整运行时配方和仅文本量化 | [对应表](qwen3_vl/README.md#weight-recipes) | [操作步骤](qwen3_vl/README.md#quantization) |
 | <a id="cmd-qwen35-dense"></a><a id="cmd-qwen35-text-w4"></a>Qwen3.5 Dense | 官方 BF16/FP32 权重；统一 W8/W4、仅 MLP RTN、QuantTrio AWQ 分开 | [对应表](qwen3_5/README.md#weight-recipes) | [操作步骤](qwen3_5/README.md#quantization) |
-| <a id="cmd-qwen35-moe"></a>Qwen3.5 35B-A3B MoE | 官方浮点权重用于 RTN；官方 GPTQ 直接加载；mixed E4M3 使用配对交付包 | [对应表](qwen3_5/README.md#weight-recipes) | [操作步骤](qwen3_5/README.md#cmd-moe-rtn) |
+| <a id="cmd-qwen35-moe"></a>Qwen3.5 35B-A3B MoE | 官方未量化浮点权重经独立脚本生成 RTN 或 mixed E4M3；官方 GPTQ 直接加载 | [对应表](qwen3_5/README.md#weight-recipes) | [RTN](qwen3_5/README.md#cmd-moe-rtn) / [GPTQ](qwen3_5/README.md#cmd-moe-gptq) / [mixed E4M3 下载与转换](qwen3_5/README.md#cmd-moe-mixed) |
 | Llama 3.2-1B | Meta 官方 BF16 权重，加载为 FP16 | [对应表](llama/README.md#weight-recipes) | [操作步骤](llama/README.md#quantization) |
 | Gemma4 E4B-it | Google 官方 BF16 权重，按组件加载 | [对应表](gemma4/README.md#weight-recipes) | [操作步骤](gemma4/README.md#quantization) |
 | DINOv3 ViT-B | Meta 官方 FP32 权重，加载为 FP16 | [对应表](dinov3/README.md#weight-recipes) | [操作步骤](dinov3/README.md#quantization) |

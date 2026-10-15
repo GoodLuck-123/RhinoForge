@@ -204,6 +204,15 @@ cache.reset()
 
 图像请求在 reset 后的首次调用同时传入 processor 的 `input_ids`、`attention_mask`、`pixel_values`、`image_grid_thw`；随后复用 cache 的调用只传文本 token。返回 logits 为 CPU FP32。
 
+独立 mixed-E4M3 配方使用
+[`convert_qwen3_5_moe_fp8.py`](../python/rpu_backend/quant/convert_qwen3_5_moe_fp8.py)
+从官方未量化 `Qwen/Qwen3.5-35B-A3B` 在 CPU 离线生成，无需校准数据。
+按[下载、转换与运行命令](../examples/configs/qwen3_5/README.md#cmd-moe-mixed)
+写入 `$RPU_MODEL_CACHE/Qwen3.5-35B-A3B-rpu-fp8-mixed`，将输出目录传给
+`from_pretrained` 或示例的 `--model`。官方 block-FP8 包不能作为转换输入，
+也不能替代本配方的逐输出通道 E4M3 格式。选择匹配的 mixed-E4M3 Text/VL
+及核数模板；上述 RTN/GPTQ 限制保持独立。
+
 ## Policy API
 
 `rpu_backend.api` 导出：

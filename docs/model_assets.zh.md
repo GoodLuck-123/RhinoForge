@@ -73,6 +73,10 @@ hf download tencent/Hy-Embodied-0.5-VLA-UMI \
 python -m rpu_backend.quant.convert_qwen3 \
   --src SOURCE_DIR --dst OUTPUT_DIR --quant-lm-head
 
+# Qwen3.5 35B-A3B mixed E4M3；从仓库根目录执行
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5_moe_fp8.py \
+  --src SOURCE_DIR --dst OUTPUT_DIR --expert-chunk 1 --threads 8
+
 # Pi0.5 W8A16
 python -m rpu_backend.quant.convert_pi05 --src SOURCE_DIR --dst OUTPUT_DIR
 
@@ -88,6 +92,10 @@ python -m rpu_backend.quant.convert_wall_oss_w8a16 \
 python -m rpu_backend.quant.convert_wall_oss \
   --src SOURCE_DIR --dst OUTPUT_DIR --group-size 32
 ```
+
+MoE mixed E4M3 使用官方未量化 `Qwen/Qwen3.5-35B-A3B` 源，按
+[下载、CPU 转换与运行命令](../examples/configs/qwen3_5/README.md#cmd-moe-mixed)生成。
+脚本不需要校准数据；官方 block-FP8、GPTQ 和 RTN 包不能替代浮点源或逐输出通道 E4M3 产物。
 
 Converter 创建新 destination 并拒绝已有目录。转换后让匹配 TOML 指向该输出，并保留
 source model 与 converter version 以便复现。

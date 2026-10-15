@@ -244,6 +244,31 @@ Attention, GDN, Vision and LM head in FP16; later MLP projections retain
 AWQ weights. Load its original checkpoint with the matching AWQ template;
 these RTN converter recipes do not produce that format.
 
+## Qwen3.5 MoE mixed E4M3
+
+Generate this checkpoint from the official unquantized `Qwen/Qwen3.5-35B-A3B`
+with the standalone CPU converter. Run from the repository root with an existing
+source checkpoint and a new destination directory:
+
+```bash
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 python python/rpu_backend/quant/convert_qwen3_5_moe_fp8.py \
+  --src SOURCE_DIR --dst OUTPUT_DIR --expert-chunk 1 --threads 8
+```
+
+The [complete download and run recipe](../examples/configs/qwen3_5/README.md#cmd-moe-mixed)
+uses `$RPU_MODEL_CACHE/Qwen3.5-35B-A3B-rpu-fp8-mixed` for the output. Conversion
+requires PyTorch, safetensors and Transformers with `Qwen3_5MoeConfig`; it needs
+no calibration data or device runtime.
+
+The converter quantizes 210 routed-expert, full-attention Q/K/V/O and GDN
+QKV/Z/out tensors to raw UINT8 E4M3 codes with per-output FP16 scales. Other
+floating tensors, including router, shared expert, head, embeddings, norms and
+Vision, are stored as FP16. It retains configuration, tokenizer, processor and
+shard metadata. Official block-FP8 `weight_scale_inv`, GPTQ and RTN checkpoints
+are not valid sources. Text/VL, core-count and ACC templates share this output;
+use each template's existing admission rules. Newly converted checkpoints do
+not inherit the identity or measurements of historical derived assets.
+
 ## Qwen3.5 MoE routed INT4
 
 The 35B-A3B RTN and official GPTQ profiles quantize routed Gate/Up/Down experts
