@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cassert>
 #include <condition_variable>
+#include <charconv>
+#include <cstdlib>
 #include <iostream>
 #include <cstring>
 #include <iterator>
@@ -802,13 +804,30 @@ size_t RPUCachingAllocator::round_size(size_t size) {
 }
 
 size_t RPUCachingAllocator::get_allocation_size(size_t size) {
+    // Cold process setting: pack medium/large tensors into fewer HostDDR
+    // mappings on drivers with a small mapping table. Logical tensor sizes,
+    // alignment, ownership and splitting rules remain unchanged.
+    static const size_t min_large_segment = []() -> size_t {
+        const char* value = std::getenv("RPU_CACHING_SEGMENT_MB");
+        if (!value) return kRoundLarge;
+        size_t mib = 0;
+        const char* end = value + std::strlen(value);
+        const auto parsed = std::from_chars(value, end, mib);
+        if (parsed.ec != std::errc{} || parsed.ptr != end ||
+            mib < 2 || mib > 1024 || mib % 2 != 0) {
+            throw std::invalid_argument(
+                "RPU_CACHING_SEGMENT_MB must be an even integer in [2, 1024]");
+        }
+        return mib * 1024 * 1024;
+    }();
     if (size <= kSmallSize) {
         // Small allocations: use small buffer size
         return kSmallBuffer;
     }
     // Bound HostDDR reservation for live medium-sized model weights instead
     // of reserving a 20 MiB segment for a request just above 1 MiB.
-    return kRoundLarge * ((size + kRoundLarge - 1) / kRoundLarge);
+    return std::max(min_large_segment,
+        kRoundLarge * ((size + kRoundLarge - 1) / kRoundLarge));
 }
 
 BlockPool& RPUCachingAllocator::get_pool(size_t size) {
