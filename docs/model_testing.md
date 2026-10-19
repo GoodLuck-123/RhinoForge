@@ -21,7 +21,7 @@ Preprocessed-input examples accept CPU tensor mappings produced by the checkpoin
 - `run.warmup` defaults to two calls: BUILD followed by REPLAY for a new Graph signature. Set `run.runs` for subsequent calls.
 - With `warmup >= 2`, omit `warmup_decode_steps` or match `input.decode_steps`. Explicit `warmup=0` or `1` allows shortened cold-path diagnostics.
 - Decode steps count calls after the prefill token. EOS may stop generation early; fixed-length runs use `stop_on_eos=false` in both phases.
-- `run.output_dir` selects the output directory. Check the generated files for outputs and Graph state.
+- `run.output_dir` selects the output directory. Check the generated files for outputs and execution status. Graph statistics depend on the runner; the ordinary Qwen3 report does not collect them. BUILD/REPLAY log messages alone do not prove Graph invariants.
 
 ## Diagnose a call
 
