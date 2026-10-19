@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import errno
 import glob
 import os
 import sys
@@ -14,14 +15,14 @@ _RPU_DEVICE_GLOB = "/dev/rpu*"
 _MEM_DEVICE = "/dev/mem"
 
 
-def device_nodes_accessible(
+def _check_device_nodes(
     *,
     rpu_paths: tuple[str, ...] | None = None,
     mem_path: str = _MEM_DEVICE,
     open_fn=None,
     close_fn=None,
-) -> bool:
-    """Return whether this process can open the device nodes required by Rhino Launch.
+) -> None:
+    """Open the required nodes, preserving the failing path and OS error.
 
     The native SDK probes these nodes while its shared objects initialize.  A
     preflight here keeps a normal host-only ``import rpu_backend`` from entering
@@ -30,29 +31,91 @@ def device_nodes_accessible(
     """
     candidates = tuple(sorted(glob.glob(_RPU_DEVICE_GLOB))) if rpu_paths is None else rpu_paths
     if not candidates:
-        return False
+        raise FileNotFoundError(errno.ENOENT, "No RPU device nodes found", _RPU_DEVICE_GLOB)
     open_fn = os.open if open_fn is None else open_fn
     close_fn = os.close if close_fn is None else close_fn
     flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
     opened: list[int] = []
+    open_error = None
     try:
         rpu_fd = None
+        failures: list[tuple[str, OSError]] = []
         for path in candidates:
             try:
                 rpu_fd = open_fn(path, flags)
-            except OSError:
+            except OSError as exc:
+                failures.append((path, exc))
                 continue
             opened.append(rpu_fd)
             break
         if rpu_fd is None:
-            return False
+            path, last_error = failures[-1]
+            details = "; ".join(f"{path}: {exc}" for path, exc in failures)
+            raise OSError(
+                last_error.errno, "Cannot open any RPU device read/write; " + details, path,
+            ) from last_error
         opened.append(open_fn(mem_path, flags))
-        return True
+    except BaseException as exc:
+        open_error = exc
+        raise
+    finally:
+        close_error = None
+        for fd in reversed(opened):
+            try:
+                close_fn(fd)
+            except OSError as exc:
+                if open_error is not None:
+                    open_error.add_note(f"Device preflight cleanup also failed: {exc}")
+                elif close_error is None:
+                    close_error = exc
+        if close_error is not None:
+            raise close_error
+
+
+def device_nodes_accessible(
+    *,
+    rpu_paths: tuple[str, ...] | None = None,
+    mem_path: str = _MEM_DEVICE,
+    open_fn=None,
+    close_fn=None,
+) -> bool:
+    """Keep CPU-only imports and availability queries safe without device access."""
+    try:
+        _check_device_nodes(
+            rpu_paths=rpu_paths, mem_path=mem_path, open_fn=open_fn, close_fn=close_fn,
+        )
     except OSError:
         return False
-    finally:
-        for fd in reversed(opened):
-            close_fn(fd)
+    return True
+
+
+def require_native_backend() -> None:
+    """Fail before loading or transforming weights for an explicit RPU request.
+
+    Access is checked on every request: permissions can change after import.
+    Native registration itself is import-bound and is never retried in place.
+    """
+    from rpu_backend.runtime._errors import RPUBackendError
+
+    try:
+        _check_device_nodes()
+    except OSError as exc:
+        raise RPUBackendError(
+            f"RPU device preflight failed: {exc}. Rhino Launch requires read/write "
+            "access to an RPU device (/dev/rpu*) and /dev/mem. Ask the board "
+            "administrator to check the driver and grant this account the required "
+            "device permissions; then start a new Python process. "
+            "See docs/getting_started.md."
+        ) from exc
+
+    if not getattr(sys.modules.get("rpu_backend"), "_cpp_loaded", False):
+        raise RPUBackendError(
+            "RPU native backend is not loaded in this process. Install/build "
+            "rpu_backend.so with the matching runtime assets, check the import "
+            "warning above, and start a new Python process. Restart is also "
+            "required if device permissions were fixed after importing rpu_backend. "
+            "See docs/getting_started.md and docs/runtime_assets.md."
+        )
 
 
 def find_shared_object(
@@ -140,13 +203,16 @@ def load_cpp_extension(
     extension = None
     if path is None:
         print("[RhinoForge] warning: C++ backend (.so) not found. native backend not loaded.")
-    elif not device_nodes_accessible():
-        print(
-            "[RhinoForge] warning: device nodes are unavailable to this "
-            "process; native backend not loaded."
-        )
     else:
-        extension = _load_extension(path, package_name)
+        try:
+            _check_device_nodes()
+        except OSError as exc:
+            print(
+                f"[RhinoForge] warning: device nodes are unavailable: {exc}; "
+                "native backend not loaded. CPU-only use remains available."
+            )
+        else:
+            extension = _load_extension(path, package_name)
 
     cpp_ext = types.ModuleType(f"{package_name}._cpp_ext")
     if extension is not None:
@@ -163,4 +229,4 @@ def load_cpp_extension(
     return cpp_ext, loaded
 
 
-__all__ = ["device_nodes_accessible", "find_shared_object", "load_cpp_extension"]
+__all__ = ["device_nodes_accessible", "find_shared_object", "load_cpp_extension", "require_native_backend"]

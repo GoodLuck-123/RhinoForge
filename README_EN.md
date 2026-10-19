@@ -61,19 +61,23 @@ Qwen3 ASR/TTS use dedicated speech entry points. Follow the
 
 ## Quick start
 
-The current source requires Python 3.12, a configured device board environment,
+The current source requires Python 3.12 with headers and venv, a C++17 compiler,
+the board SDK/driver,
 and matching Rhino Launch and operator assets. Follow
 [Build the current development source](docs/development_build.md) to create an
 isolated environment and install the dependencies defined in
 [pyproject.toml](pyproject.toml). Use the `vision`, `vla` or `audio` extra for the corresponding
 entry points.
 
-1. Configure the external runtime paths and install the current source using
-   the build guide.
+1. Follow the build guide to select installed `CC/CXX` compilers, clear inherited
+   `PYTHONPATH/RPU_BACKEND_SO`, verify and unpack both runtime layers, and install
+   the source in a new environment.
 2. Prepare the checkpoint as described in [Model assets](docs/model_assets.md),
    set `RPU_MODEL_CACHE`, and select the corresponding TOML example.
-3. Confirm that the board is idle, check the installation and configuration,
-   then run inference:
+3. Follow [Getting started](docs/getting_started.md#3-run-inference-on-an-idle-device)
+   to confirm an idle board, check read/write access to `/dev/rpu*` and `/dev/mem`,
+   and use the platform device lock. Run the following under that lock and the
+   approved execution account:
 
 ```bash
 python -m pip check
@@ -89,6 +93,12 @@ python -m examples.run --config qwen3.local.toml
 
 The example sets `logging.level="INFO"` to display generated text. The default
 `ERROR` level shows errors and separately controlled summaries.
+`--check-config` checks syntax/profile only, not devices, shared libraries or
+weights. This raw-prompt P7/D4, W2/R3 example generates at most five tokens and
+does not apply a chat template. Results default to
+`perf_results/examples/qwen3-0.6b.fp16.text-*`; `PASS` means execution completed,
+not CPU-reference comparison or full quality certification. The first-run guide
+shows how to keep results outside the repository.
 [Run and debug models](docs/model_testing.md) describes the TOML
 runner, quantization and diagnostic entry points.
 

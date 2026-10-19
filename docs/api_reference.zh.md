@@ -72,6 +72,13 @@ Loader 在完整权重加载前读取 Hugging Face 配置，按 `config.architec
 adapter，并提前拒绝 unsupported profile。当前入口接收 built-in Qwen3、Llama CausalLM
 architecture，只接受 `torch.float16`；量化 checkpoint 自带受检查 metadata。
 
+指定 `device="rpu"` 时，CausalLM loader 在加载完整权重前检查 native backend，
+以及对一个 RPU 节点和 `/dev/mem` 的 `O_RDWR` 权限。设备不可访问会抛出包含
+失败路径和 OS 错误的 `RPUBackendError`；native extension 不可用时另有明确诊断。
+Qwen3/Llama 两步 `model.to("rpu")` 路径也在权重转换及 live-instance 归属前重查。
+CPU 加载不要求设备；若导入时权限或安装不可用，修复后需启动新 Python 进程。
+见[运行时配置前提](runtime_assets.zh.md#板卡-sdk-与设备权限)。
+
 `rpu_execution` 是 read-only per-handle mapping。CausalLM 的 `prefill` 接受：
 
 - `chunk_size`：`"auto"` 或正的 16 倍数；

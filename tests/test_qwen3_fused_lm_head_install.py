@@ -71,6 +71,7 @@ class _Cache:
 
 @pytest.fixture
 def runtime(monkeypatch):
+    monkeypatch.setattr(qwen3, "require_native_backend", lambda: None)
     monkeypatch.setattr(_execution, "_UNSAFE_PROCESS_REASON", None)
     monkeypatch.setattr(_native_retirement, "_FAILED_RETIREMENTS", [])
     monkeypatch.setattr(causal_lm, "_LIVE_REF", None)

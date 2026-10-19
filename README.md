@@ -53,15 +53,18 @@ Qwen3 ASR/TTS 使用独立语音入口，下载和运行步骤见[语音指南](
 
 ## 快速开始
 
-当前源码需要 Python 3.12、已配置好的设备板卡环境，以及与源码匹配的
+当前源码需要 Python 3.12（含开发头文件与 venv）、C++17 编译器、板卡 SDK/驱动，以及与源码匹配的
 Rhino Launch 和算子资产。请按[当前源码构建说明](docs/development_build.md)
 创建独立环境并安装依赖；版本以 [pyproject.toml](pyproject.toml) 为准。
 视觉、VLA 和语音入口分别使用 `vision`、`vla`、`audio` 可选依赖。
 
-1. 按构建说明配置外部运行时路径，在独立环境中安装当前源码。
+1. 按构建说明选择实际可用的 `CC/CXX`，清除 `PYTHONPATH/RPU_BACKEND_SO`，
+   校验并解开两层 Runtime 包，在独立环境中安装当前源码。
 2. 按[模型资产说明](docs/model_assets.zh.md)准备模型 checkpoint，设置
    `RPU_MODEL_CACHE`，选择对应的 TOML 示例。
-3. 确认板卡空闲后检查安装和模型配置，再运行推理：
+3. 按[入门指南](docs/getting_started.zh.md#3-在空闲设备上运行)确认板卡空闲，
+   检查 `/dev/rpu*` 和 `/dev/mem` 的读写权限并使用平台设备锁，再运行推理。
+   以下命令需在该锁和获准的执行账号下运行：
 
 ```bash
 python -m pip check
@@ -76,6 +79,10 @@ python -m examples.run --config qwen3.local.toml
 ```
 
 示例显式设置 `logging.level="INFO"`，以显示生成文本；默认 `ERROR` 仅显示错误及独立摘要。
+`--check-config` 只检查语法/profile，不检查设备、动态库或权重。
+本例使用裸提示词 P7/D4、W2/R3，最多生成 5 token，不应用 chat template。
+结果默认在 `perf_results/examples/qwen3-0.6b.fp16.text-*` 下；`PASS` 表示执行完成，
+不代表已做 CPU 参考对比或完整质量认证。首次安装建议按入门指南把结果放在仓库外。
 [模型运行与调试](docs/model_testing.zh.md)说明 TOML runner、量化与调试入口。
 
 完整安装和首次运行步骤见[入门指南](docs/getting_started.zh.md)。

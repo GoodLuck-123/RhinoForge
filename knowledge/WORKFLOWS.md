@@ -16,6 +16,19 @@ For build-version mismatches, compare the installed Launch package with
 determine the Launch version. Preserve exact dependency and capability checks;
 see the [release policy](../docs/release_policy.md).
 
+For a clean installation, follow the [Python/compiler preparation](../docs/development_build.md#prepare-python-and-the-compiler),
+[two-layer runtime extraction and SDK checks](../docs/runtime_assets.md), and
+[first-run device locking](../docs/getting_started.md). Clear inherited Python
+and native-library overrides, bind compiler and asset identities, and distinguish
+the new application environment from the board OS/SDK/driver baseline.
+`--check-config` is device-free; it does not prove runtime availability.
+For CausalLM permission failures, retain the failing node and OS error and verify
+failure before weight loading or transformation. Preserve CPU-only loading and
+restart the process after repairing an import-time native-load failure. Normal
+Graph BUILD/REPLAY is informational; do not classify all native stderr as an
+error or downgrade genuine errors. See [API behavior](../docs/api_reference.md#rpumodelforcausallmfrom_pretrained)
+and [model diagnostics](../docs/model_testing.md).
+
 For model assessment or implementation, use the
 [`rhinoforge-port` skill](../.agents/skills/rhinoforge-port/SKILL.md) with
 [model porting](../docs/model_porting.md).

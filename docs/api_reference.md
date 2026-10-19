@@ -86,6 +86,15 @@ profiles early. It currently admits the built-in Qwen3 and Llama CausalLM
 architectures. Only `torch.float16` is accepted by this entry point; a
 quantized checkpoint carries its own checked metadata.
 
+With `device="rpu"`, the CausalLM loader checks native-backend availability and
+`O_RDWR` access to an RPU node and `/dev/mem` before loading full weights.
+Unavailable devices raise `RPUBackendError` with the failing path and OS error;
+an unavailable native extension is reported separately. The Qwen3/Llama two-step
+`model.to("rpu")` path checks again before weight conversion and live-instance
+ownership. CPU loading does not require device access. After fixing permissions
+or an installation that was unavailable at import, start a fresh Python process.
+See [runtime setup](runtime_assets.md#board-sdk-and-device-access).
+
 `rpu_execution` is a read-only per-handle mapping. The CausalLM entry accepts a
 `prefill` stage with:
 

@@ -5,6 +5,14 @@ fallback, or performance regressions. It retains the reusable conclusions from
 prior debugging practice without publishing session history or diagnostic
 payloads.
 
+For setup failures, first inspect the native-loader diagnostic, shared-library
+resolution and device-node `O_RDWR` permissions under the inference account.
+Configuration validation does not touch the device. Explicit CausalLM RPU loads
+must fail before weights when the backend is unavailable; preserve CPU-only
+loading and restart Python after correcting import-time access. Normal Graph
+BUILD and first REPLAY messages are INFO, repeated replay diagnostics are DEBUG;
+stderr is not itself a severity. [Runtime preflight](../../docs/runtime_assets.md#board-sdk-and-device-access)
+
 ## Fast triage order
 
 1. **Bind the exact profile.** Record source revision, model/checkpoint revision,
@@ -63,6 +71,7 @@ Choose one mechanism according to the question:
 |---|---|---|
 | Which backend wrappers or accumulated regions are expensive? | `torch.rpu.set_profile(True)` | Warm first when measuring steady state and reset counters before the window. |
 | Where is host/operator time spent? | `torch.profiler.profile(...)` | Profile a bounded call; keep warmup separate and expect tracing overhead. |
+| What hardware work does the Qwen3 runner execute? | `--hwperf` / `run.hwperf=true` | Enable before model setup and BUILD with the matching Release runtime; bound dumps, inspect `hwperf/`, and keep traced timings separate. |
 
 See [runtime profiling controls](../../docs/runtime_config.md#profiling-mechanisms)
 and the [TOML profiling guide](../../docs/model_testing.md#diagnose-a-call).
@@ -70,6 +79,10 @@ and the [TOML profiling guide](../../docs/model_testing.md#diagnose-a-call).
 Profiler-on latency does not represent normal inference. Torch traces may contain
 tensor shapes and source paths. Review locally and keep traces and measurement
 summaries outside the repository and release artifacts.
+The ordinary Qwen3 runner's `PASS` means execution completed; it still reports
+`correctness=not_run` and `formal_certification=false`. A P7/D4 continuation is a
+five-token smoke case, not a chat answer or complete task-quality evaluation.
+[First-result interpretation](../../docs/getting_started.md#4-read-the-short-case-result)
 
 ## Stop conditions
 

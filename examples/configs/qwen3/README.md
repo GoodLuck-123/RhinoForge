@@ -93,10 +93,24 @@ ln -s /absolute/path/to/existing-Qwen3-4B "$RPU_MODEL_CACHE/Qwen3-4B"
 
 ### 官方浮点源：FP16 运行与量化准备
 
+首次 0.6B FP16 使用与[入门指南](../../../docs/getting_started.zh.md)相同的固定 revision：
+
 ```bash
-SIZE=4  # 可选：0.6、1.7、4、8、14、32；14/32B仅用于量化
-hf download "Qwen/Qwen3-${SIZE}B" --local-dir "$RPU_MODEL_CACHE/Qwen3-${SIZE}B"
+SIZE=0.6
+REVISION=c1899de289a04d12100db370d81485cdf75e47ca
+hf download "Qwen/Qwen3-${SIZE}B" --revision "$REVISION" \
+  --local-dir "$RPU_MODEL_CACHE/Qwen3-${SIZE}B"
 ```
+
+其他尺寸可选 1.7、4、8、14、32；修改 `SIZE` 时，必须同时将 `REVISION` 改为该模型
+上游仓库对应的完整 commit 并记录来源，不能跨尺寸复用 0.6B revision。
+14/32B 浮点源仅用于量化和参考。下载完整 config/tokenizer/权重，不需要先将官方
+BF16 包离线转换为 FP16。
+
+首次运行按入门指南创建本地配置、设置仓库外的 `run.output_dir`、检查 SDK/设备权限
+并取得平台锁，再执行 `--check-config` 和正式运行。原始 0.6B 模板为裸提示词 P7、
+D4、W2/R3，最多输出 5 token，没有应用 chat template。结果的 `PASS` 只表示
+执行完成，`correctness=not_run` / `formal_certification=false` 不代表参考验证或认证。
 
 <a id="cmd-instruct"></a>
 

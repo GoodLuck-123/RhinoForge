@@ -16,6 +16,11 @@ DDR-expansion 资产与[依赖清单](../release/runtime-dependencies.json)一�
 `v1.1.0-2-gbdc0dae` 目录对应旧 SDK，其 CMake 版本为 `1.0.0`，不满足当前依赖。
 见[发布流程](release_policy.md)。
 
+按当前 checkout 的依赖清单选择资产。提供方的开发版下载页或包内 README
+可能描述旧源码：`1.3.0.dev0` 不意味着依赖 Launch `1.3.0.dev0`。
+本源码线使用上面标识的稳定 1.2.0 资产；页面不一致时向提供方申请修正文案，
+不要绕过 CMake 或资产身份检查。
+
 ## 申请运行时资产
 
 可通过仓库 [GitHub Issues](https://github.com/HUIXI-AI/RhinoForge/issues/new) 提交资产申请，
@@ -37,13 +42,26 @@ DDR-expansion 资产与[依赖清单](../release/runtime-dependencies.json)一�
 
 ## 配置路径
 
-接收资产时按提供方说明核对校验值，再将其解压到源码和 Python 环境之外的固定目录。
-设置安装后的 Launch 前缀及原始算子资产路径：
+从提供方的受控交付入口下载 `RhinoForge-runtime-v1.2.0.tar.gz` 和其 `.sha256`，
+放入同一下载目录。以下命令校验并解开两层包；只解外层包并不会产生可安装的
+Launch 前缀。使用源码和 Python 环境之外的新目录，任何校验失败都应停止：
 
 ```bash
-export RHINO_LAUNCH_ROOT="/absolute/path/to/matching/launch-install"
-export RPU_KERNEL_LIB_PATH="/absolute/path/to/matching-runtime/rhinoOpLib_current.ref"
-export RPU_KERNEL_LIB_PATH_EXPANSION="/absolute/path/to/matching-runtime/rhinoExpansionOpLib_current.ref"
+export RHINOFORGE_DOWNLOADS="/absolute/path/to/runtime-downloads"
+export RHINOFORGE_RUNTIME="/absolute/path/to/new/runtime"
+cd "$RHINOFORGE_DOWNLOADS"
+sha256sum -c RhinoForge-runtime-v1.2.0.tar.gz.sha256
+mkdir -p "$RHINOFORGE_RUNTIME"
+tar -xzf RhinoForge-runtime-v1.2.0.tar.gz -C "$RHINOFORGE_RUNTIME"
+export RHINOFORGE_BUNDLE="$RHINOFORGE_RUNTIME/RhinoForge-runtime-v1.2.0"
+cd "$RHINOFORGE_BUNDLE"
+sha256sum -c SHA256SUMS
+cat RELEASE.txt
+tar -xzf rhino-launch-kernel-v1.2.0-linux-aarch64.tar.gz -C "$RHINOFORGE_RUNTIME"
+
+export RHINO_LAUNCH_ROOT="$RHINOFORGE_RUNTIME/rhino-launch-kernel-v1.2.0-linux-aarch64"
+export RPU_KERNEL_LIB_PATH="$RHINOFORGE_BUNDLE/rhinoOpLib_current.ref"
+export RPU_KERNEL_LIB_PATH_EXPANSION="$RHINOFORGE_BUNDLE/rhinoExpansionOpLib_current.ref"
 export CMAKE_PREFIX_PATH="$RHINO_LAUNCH_ROOT${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export LD_LIBRARY_PATH="$RHINO_LAUNCH_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
@@ -52,11 +70,78 @@ test -r "$RPU_KERNEL_LIB_PATH"
 test -r "$RPU_KERNEL_LIB_PATH.kernels"
 test -r "$RPU_KERNEL_LIB_PATH_EXPANSION"
 test -r "$RPU_KERNEL_LIB_PATH_EXPANSION.kernels"
+ls "$RHINO_LAUNCH_ROOT/lib/"librhino_launch.so*
 ```
 
-将示例路径替换为实际交付文件。清除继承环境中冲突的 Launch 路径，同时保留 SDK
+解包结果为：
+
+```text
+runtime/
+  RhinoForge-runtime-v1.2.0/
+    RELEASE.txt, SHA256SUMS
+    rhino-launch-kernel-v1.2.0-linux-aarch64.tar.gz
+    rhinoOpLib_current.ref, rhinoOpLib_current.ref.kernels
+    rhinoExpansionOpLib_current.ref, rhinoExpansionOpLib_current.ref.kernels
+  rhino-launch-kernel-v1.2.0-linux-aarch64/
+    include/
+    lib/                       # 动态库及 cmake/rhino_launch/
+```
+
+将 `RELEASE.txt` 与[源码依赖清单](../release/runtime-dependencies.json)对照：
+Launch 的 commit、版本、ABI 以及两份算子资产的 commit、SHA256 均须匹配。
+随包校验和验证下载完整性，源码依赖清单确定该包是否适配当前源码。
+清除继承环境中冲突的 Launch 路径，同时保留 SDK
 必需路径。凭据和本机路径放在 shell 环境中，不写入模型 TOML。随后参考
 [入门指南](getting_started.zh.md)或[源码构建指南](development_build.md)。
+
+## 板卡 SDK 与设备权限
+
+Runtime 包**不安装**板卡 SDK 或内核驱动，也没有绑定可跨平台使用的 SDK 最低版本。
+请通过提供方交付渠道获取板卡 SDK/driver 包、支持的 OS/内核/版本组合、安装命令、
+动态库配置及权限和设备锁规范。本仓库没有通用 SDK 下载地址或驱动安装命令；
+裸板应先完成平台初始化，再构建 RhinoForge。记录实际 SDK/driver 版本；
+保留预装板卡基础环境，只能称为独立应用安装，不能称为 SDK/driver 从零安装。
+
+配置平台和新 Launch 路径后检查：
+
+```bash
+uname -smr
+ldd "$RHINO_LAUNCH_ROOT/lib/librhino_launch.so"
+ls -l /dev/rpu* /dev/mem
+```
+
+`ldd` 中依赖必须全部解析到所选 Launch 或平台 SDK/系统库；出现 `not found`
+时按 SDK 文档配置 loader 路径。若包内没有无版本号的 `.so` 链接，使用实际库文件名。
+节点存在不等于有权限：运行进程需要对至少一个 `/dev/rpu*` 节点和 `/dev/mem`
+执行 `O_RDWR` 打开。用即将执行推理的账号检查，以下代码不读写设备内容：
+
+```bash
+python3 - <<'PY'
+import glob, os
+candidates = sorted(glob.glob("/dev/rpu*"))
+if not candidates:
+    raise SystemExit("No /dev/rpu* node: check the platform driver")
+for path in candidates:
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
+    except OSError as error:
+        print(f"{path}: {error}")
+    else:
+        os.close(fd)
+        print(f"O_RDWR available: {path}")
+        break
+else:
+    raise SystemExit("No accessible RPU node")
+fd = os.open("/dev/mem", os.O_RDWR | os.O_CLOEXEC)
+os.close(fd)
+print("O_RDWR available: /dev/mem")
+PY
+```
+
+权限不足时由平台管理员设置受支持的访问策略，或使用获准的特权启动器。
+不要全局放宽 `/dev/mem` 权限。权限修复后启动新 Python 进程；普通 CPU-only
+导入可在 native backend 不可用时成功，`--check-config` 也不检查设备。
+空闲检查、锁及特权运行示例见[入门指南](getting_started.zh.md#3-在空闲设备上运行)。
 
 ## 算子库角色与替换
 
@@ -88,4 +173,5 @@ test -r "$RPU_KERNEL_LIB_PATH_EXPANSION.kernels"
 | CMake 拒绝缺失的能力 | 获取匹配的 sanitized Release Launch 包 |
 | Launch 动态库无法加载 | 检查其 `lib` 路径及板卡 SDK 动态库路径 |
 | 资产、清单或所需 kernel 缺失 | 获取配套资产和未修改的清单 |
-| 设备不可用 | 检查设备权限和平台运行时配置 |
+| 设备节点缺失、`Permission denied` 或 `Operation not permitted` | 检查驱动，以及推理账号对 `/dev/rpu*` 和 `/dev/mem` 的 `O_RDWR` 权限；修复后重启 Python |
+| 旧代码报 `PyTorch is not linked with support for rpu devices` | 先查看此前的 native loader 诊断和节点权限；可能是后端注册被跳过，而非 PyTorch 编译问题 |
