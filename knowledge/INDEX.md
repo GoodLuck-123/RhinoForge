@@ -21,8 +21,9 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
 - [Decoder step-by-step](../docs/new_model_step_by_step.md): minimal
   Adapter-only CausalLM checklist.
 - [Porting pitfalls](../docs/pitfalls.md): focused correctness triage.
-- [Getting started](../docs/getting_started.md): installation, metadata checks
-  without device access, and first inference.
+- [Install, run and develop](../docs/getting_started.md): Miniconda3, the single
+  `RHINOFORGE_ENV`, complete environment bundles, source/editable/wheel builds,
+  metadata checks without device access, and first inference.
 - [Restricted runtime assets](../docs/runtime_assets.md): matching external
   runtime packages, provider integrity checks, and installation.
 - [Run and debug models](../docs/model_testing.md): direct examples,

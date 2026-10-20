@@ -7,26 +7,12 @@ agreed first.
 
 ## Development setup
 
-Follow the [source build guide](docs/development_build.md) to prepare Python 3.12
-with development headers, an explicit C++17 compiler, a fresh venv and matching
-external assets. Current `1.3.0.dev0` source uses the archived sanitized Release
-Rhino Launch **1.2.0** pinned by
-[runtime-dependencies.json](release/runtime-dependencies.json), not a same-version
-development Launch package. After the guide's build-dependency installation,
-install the contributor extra from the repository root:
-
-```bash
-python -m pip install -e '.[dev]' -c constraints/security.txt --no-build-isolation \
-  -Cbuild-dir="$RHINOFORGE_DEV_BUILD" \
-  -Ccmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch" \
-  -Cbuild.tool-args=-j2
-```
-
-Set `RPU_KERNEL_LIB_PATH` and `RPU_KERNEL_LIB_PATH_EXPANSION` to the corresponding
-release-matched assets, each with its unchanged sidecar. Follow
-[runtime setup](docs/runtime_assets.md) for nested extraction, platform SDK and
-device access, and [getting started](docs/getting_started.md) for device locking.
-Restricted packages and assets must stay outside the repository.
+Follow the [unified installation and development guide](docs/getting_started.md)
+to install Miniconda3, create the single `RHINOFORGE_ENV`, prepare the matching
+runtime and build RhinoForge. Its [development section](docs/getting_started.md#5-develop-in-the-same-environment)
+installs `.[dev]` in that same environment and describes editable and wheel
+builds. Use the guide's device locking and SDK/access checks for a board run.
+Restricted packages and generated artifacts must stay outside the repository.
 
 ## Change requirements
 

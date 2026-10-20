@@ -4,7 +4,8 @@
 
 RhinoForge 源码和 wheel 不包含 Rhino Launch 二进制、主算子资产与扩展算子资产、板卡 SDK 或
 模型权重。请向运行时提供方获取与待安装源码版本匹配的资产，按随包条款和完整性说明
-使用。
+使用。[完整 Conda 环境包](getting_started.zh.md#6-部署完整环境包)可以按提供方条款
+随包包含这些用户态运行时资产；实际内容和仍需外部提供的 SDK 组件以包内清单为准。
 
 当前 `1.3.0.dev0` 开发线依赖已归档的 **Rhino Launch 1.2.0**，
 commit 为 `3dd1b410f5f46373997fef3dfbf9b67eecec6a84`，CMake 数值版本为 `1.2.0`，ABI 为 `1`。
@@ -92,7 +93,7 @@ Launch 的 commit、版本、ABI 以及两份算子资产的 commit、SHA256 均
 随包校验和验证下载完整性，源码依赖清单确定该包是否适配当前源码。
 清除继承环境中冲突的 Launch 路径，同时保留 SDK
 必需路径。凭据和本机路径放在 shell 环境中，不写入模型 TOML。随后参考
-[入门指南](getting_started.zh.md)或[源码构建指南](development_build.md)。
+[统一安装、运行与开发指南](getting_started.zh.md)。
 
 ## 板卡 SDK 与设备权限
 

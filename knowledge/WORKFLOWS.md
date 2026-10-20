@@ -16,9 +16,13 @@ For build-version mismatches, compare the installed Launch package with
 determine the Launch version. Preserve exact dependency and capability checks;
 see the [release policy](../docs/release_policy.md).
 
-For a clean installation, follow the [Python/compiler preparation](../docs/development_build.md#prepare-python-and-the-compiler),
-[two-layer runtime extraction and SDK checks](../docs/runtime_assets.md), and
-[first-run device locking](../docs/getting_started.md). Clear inherited Python
+For a clean installation, use the [unified installation and development guide](../docs/getting_started.md):
+install Miniconda3, create one `RHINOFORGE_ENV`, and keep it for source, editable
+and wheel operations. A complete Conda bundle replaces the download/build steps;
+validate its profile, architecture, platform requirements and installation at a
+different prefix before delivery. It does not include model weights or a kernel
+driver. Use [runtime extraction and SDK checks](../docs/runtime_assets.md) and the
+first-run guide's platform device lock. Clear inherited Python
 and native-library overrides, bind compiler and asset identities, and distinguish
 the new application environment from the board OS/SDK/driver baseline.
 `--check-config` is device-free; it does not prove runtime availability.

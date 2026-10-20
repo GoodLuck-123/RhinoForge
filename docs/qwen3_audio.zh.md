@@ -39,7 +39,7 @@ checkpoint 配置：top-k 50、temperature 0.9、top-p 1.0。未生成 EOS 时�
 
 ## 1. 安装
 
-按[源码构建](development_build.md)创建 Python 3.12 环境，并配置
+按[统一安装指南](getting_started.zh.md)创建 Python 3.12 Conda 环境，并配置
 [匹配的运行时资产](runtime_assets.zh.md)。在仓库根目录安装 `audio` 可选依赖：
 
 ```bash

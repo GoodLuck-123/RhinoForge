@@ -5,7 +5,10 @@
 RhinoForge source and wheels do not contain Rhino Launch binaries, the external
 main and expansion operator assets, the board SDK, or model weights. Obtain a runtime package
 compatible with the source revision you are installing from the runtime provider.
-Follow that package's distribution terms and integrity instructions.
+Follow that package's distribution terms and integrity instructions. A
+[complete Conda environment bundle](getting_started.md#6-deploy-a-complete-environment-bundle)
+can include these user-space runtime assets under the provider's terms; its
+manifest identifies the exact contents and remaining SDK prerequisites.
 
 This `1.3.0.dev0` development line depends on archived Rhino Launch **1.2.0**,
 commit `3dd1b410f5f46373997fef3dfbf9b67eecec6a84`, with CMake version `1.2.0` and
@@ -102,8 +105,7 @@ The supplied checksum validates receipt of a particular bundle; the dependency
 lock establishes whether that bundle belongs to this source. Remove conflicting
 Launch paths from the inherited environment while preserving required SDK paths.
 Credentials and machine paths belong in the shell environment, outside model
-TOMLs. Continue with [Getting started](getting_started.md) or the
-[source build guide](development_build.md).
+TOMLs. Continue with the [unified installation and development guide](getting_started.md).
 
 ## Board SDK and device access
 

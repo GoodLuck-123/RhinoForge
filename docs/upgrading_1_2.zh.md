@@ -7,7 +7,7 @@
 
 ## 安装
 
-1. 按[入门指南](getting_started.zh.md)创建新的 Python 3.12 环境。
+1. 按[入门指南](getting_started.zh.md)创建新的 Python 3.12 Conda 环境。
    [pyproject.toml](../pyproject.toml)固定 PyTorch 2.10.0 和 Transformers 5.3.0；
    按模型选择 `vision`、`vla` 或 `audio` 可选依赖。
 2. 从[资产申请入口](runtime_assets.zh.md#申请运行时资产)获取
