@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Pack an installed RhinoForge conda environment and matching external runtime.
 
-Run this with the builder's Python containing conda-pack. The target environment
-must contain a regular wheel installation, never an editable installation.
-External runtime inputs stay outside the source repository.
+Run this with the builder's Python containing conda-pack and scikit-build-core's
+pathspec dependency (also tomli on Python 3.10). The target environment must
+contain a regular wheel installation, never an editable installation. External
+runtime inputs stay outside the source repository.
 """
 from __future__ import annotations
 
@@ -113,6 +114,31 @@ def clean_header(info: tarfile.TarInfo) -> tarfile.TarInfo:
 def source_files(source: Path) -> list[Path]:
     paths = [Path(os.fsdecode(x)) for x in git(source, "ls-files", "-z").split(b"\0") if x]
     return sorted(path for path in paths if (source / path).is_file())
+
+
+def verify_installed_python(source: Path, installed: Path, tracked: list[Path]) -> None:
+    """Match the source mapping and final wheel filters used by scikit-build-core."""
+    from pathspec import GitIgnoreSpec
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10 builder with scikit-build-core.
+        import tomli as tomllib
+    with (source / "pyproject.toml").open("rb") as stream:
+        project = tomllib.load(stream)
+    patterns = project["tool"]["scikit-build"]["wheel"].get("exclude", [])
+    exclude = GitIgnoreSpec.from_lines(patterns)
+    for relative in tracked:
+        if relative.parts[:2] != ("python", "rpu_backend") or relative.suffix != ".py":
+            continue
+        package_path = Path(*relative.parts[2:])
+        wheel_path = Path(*relative.parts[1:])
+        # 0.12.2's package mapping filters relative to the package directory;
+        # its wheel writer applies the same patterns to the final wheel path.
+        if exclude.match_file(package_path.as_posix()) or exclude.match_file(wheel_path.as_posix()):
+            continue
+        target = installed / package_path
+        if not target.is_file() or sha256(target) != sha256(source / relative):
+            raise ValueError(f"Installed wheel differs from source: {relative}")
 
 
 def verify_ref(path: Path, expected: str) -> None:
@@ -241,6 +267,7 @@ def main() -> int:
         [str(prefix / "bin/python"), "-c", ENV_PROBE, json.dumps(extras)], env=child_env))
     installed = Path(metadata.pop("package_directory"))
     tracked = source_files(source)
+    verify_installed_python(source, installed, tracked)
     snapshot_digest = hashlib.sha256()
     for relative in tracked:
         path = source / relative
@@ -248,10 +275,6 @@ def main() -> int:
             raise ValueError(f"Source snapshot symlinks are not supported: {relative}")
         digest = sha256(path)
         snapshot_digest.update(relative.as_posix().encode() + b"\0" + digest.encode() + b"\n")
-        if relative.parts[:2] == ("python", "rpu_backend") and path.suffix == ".py":
-            target = installed.joinpath(*relative.parts[2:])
-            if not target.is_file() or sha256(target) != digest:
-                raise ValueError(f"Installed wheel differs from source: {relative}")
     manifest = {
         "schema": "rhinoforge-conda-bundle/v1",
         "created_at": datetime.now(timezone.utc).isoformat(),

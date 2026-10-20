@@ -179,3 +179,33 @@ def test_full_profile_rejects_nonexecutable_tool_and_records_valid_paths(tmp_pat
     assert packer.profile_runtime_files(tmp_path, "full") == [
         "bin/sox", "bin/ffmpeg", "lib/libsndfile.so.1"]
     assert packer.profile_runtime_files(tmp_path, "text") == []
+
+
+@pytest.mark.parametrize("runtime_state", ["matching", "missing", "changed"])
+def test_wheel_exclusions_preserve_runtime_source_checks(tmp_path, runtime_state):
+    source = tmp_path / "source"
+    installed = tmp_path / "site-packages/rpu_backend"
+    installed.mkdir(parents=True)
+    files = {
+        "api.py": "runtime = True\n",
+        "tests/_seed.py": "test support\n",
+        "debug/inspect.py": "debug helper\n",
+        "nested/test_runtime.py": "test case\n",
+    }
+    tracked = []
+    for name, text in files.items():
+        relative = Path("python/rpu_backend") / name
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        tracked.append(relative)
+    (source / "pyproject.toml").write_text(
+        (Path(__file__).parents[1] / "pyproject.toml").read_text())
+    if runtime_state != "missing":
+        (installed / "api.py").write_text(
+            files["api.py"] if runtime_state == "matching" else "different runtime\n")
+    if runtime_state == "matching":
+        packer.verify_installed_python(source, installed, tracked)
+    else:
+        with pytest.raises(ValueError, match=r"python/rpu_backend/api\.py"):
+            packer.verify_installed_python(source, installed, tracked)
