@@ -38,7 +38,19 @@ while IFS= read -r _rf_key; do
 done < <(compgen -v)
 unset _rf_key
 export PYTHONNOUSERSITE=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0
-. "$RHINOFORGE_ENV/bin/activate"
+# conda-pack's activation script reads unset variables such as CONDA_PREFIX.
+# Relax nounset only while sourcing it, then restore the caller's shell mode.
+_rf_had_nounset=0
+case $- in *u*) _rf_had_nounset=1; set +u ;; esac
+if . "$RHINOFORGE_ENV/bin/activate"; then
+  _rf_activate_status=0
+else
+  _rf_activate_status=$?
+fi
+if [ "$_rf_had_nounset" = 1 ]; then set -u; else set +u; fi
+unset _rf_had_nounset
+if [ "$_rf_activate_status" != 0 ]; then return "$_rf_activate_status"; fi
+unset _rf_activate_status
 export RHINO_LAUNCH_ROOT="$RHINOFORGE_BUNDLE/runtime/launch"
 export RPU_KERNEL_LIB_PATH="$RHINOFORGE_BUNDLE/runtime/operators/rhinoOpLib_current.ref"
 export RPU_KERNEL_LIB_PATH_EXPANSION="$RHINOFORGE_BUNDLE/runtime/operators/rhinoExpansionOpLib_current.ref"

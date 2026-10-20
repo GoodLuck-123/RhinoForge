@@ -153,6 +153,34 @@ def test_activate_uses_relocated_paths_and_preserves_model_cache(tmp_path):
         str(bundle), str(bundle / "build")]
 
 
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("activation_status", [0, 7])
+def test_activate_restores_nounset_and_propagates_conda_failure(
+        tmp_path, strict, activation_status):
+    bundle = tmp_path / "relocated bundle"
+    (bundle / "env/bin").mkdir(parents=True)
+    (bundle / "env/bin/activate").write_text(
+        'if [ -n "$CONDA_PREFIX" ]; then return 99; fi\n'
+        'export CONDA_PREFIX="$RHINOFORGE_ENV"\n'
+        'export PATH="$CONDA_PREFIX/bin:$PATH"\n'
+        f"return {activation_status}\n")
+    (bundle / "activate.sh").write_text(packer.ACTIVATE)
+    command = (
+        ("set -euo pipefail; " if strict else "set +u; ")
+        + 'before=$-; if . "$1"; then status=0; else status=$?; fi; '
+        'printf "%s\\n" "$status" "$before" "$-" "$PATH" '
+        '"${RHINO_LAUNCH_ROOT-unset}"')
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-c", command, "bash", str(bundle / "activate.sh")],
+        env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, check=True)
+    status, before, after, path, launch = result.stdout.splitlines()
+    assert status == str(activation_status)
+    assert before == after
+    assert ("u" in after) is strict
+    assert path == f"{bundle}/env/bin:/usr/bin:/bin"
+    assert launch == (str(bundle / "runtime/launch") if activation_status == 0 else "unset")
+
+
 @pytest.mark.parametrize("missing", ["bin/sox", "bin/ffmpeg", "lib/libsndfile.so"])
 def test_full_profile_requires_packaged_audio_runtime(tmp_path, missing):
     for relative in ("bin/sox", "bin/ffmpeg", "lib/libsndfile.so"):
