@@ -183,6 +183,7 @@ def test_full_profile_rejects_nonexecutable_tool_and_records_valid_paths(tmp_pat
 
 @pytest.mark.parametrize("runtime_state", ["matching", "missing", "changed"])
 def test_wheel_exclusions_preserve_runtime_source_checks(tmp_path, runtime_state):
+    pytest.importorskip("pathspec", reason="wheel filtering uses the optional packaging toolchain")
     source = tmp_path / "source"
     installed = tmp_path / "site-packages/rpu_backend"
     installed.mkdir(parents=True)
