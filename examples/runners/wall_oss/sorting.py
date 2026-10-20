@@ -69,8 +69,14 @@ def validate_example_config(config: dict) -> None:
 
 def cold_environment(precision: str) -> tuple[dict, dict]:
     env = validation_runner().exact_environment(ROOT, PRECISIONS[precision])
-    # Allow an explicitly selected build, while binding this checkout's REF pair.
-    env["RPU_BACKEND_SO"] = str(Path(os.environ.get("RPU_BACKEND_SO", env["RPU_BACKEND_SO"])).expanduser().resolve())
+    # A wheel owns its native extension. Only override it for an explicitly
+    # selected library or a build actually present in this source checkout.
+    checkout_native = Path(env.pop("RPU_BACKEND_SO"))
+    selected_native = os.environ.get("RPU_BACKEND_SO")
+    if selected_native is not None:
+        env["RPU_BACKEND_SO"] = str(Path(selected_native).expanduser().resolve())
+    elif checkout_native.is_file():
+        env["RPU_BACKEND_SO"] = str(checkout_native.resolve())
     env["RPU_LINEAR_ACC32"] = "0"
     resolver = vars(_library_helpers)
     libraries, records = resolver["current_libraries"](ROOT)
@@ -171,10 +177,8 @@ def run_example_config(config: dict) -> int:
     output_dir = prepare_output_directory(run["output_dir"])
     env, libraries = cold_environment(precision)
     bind_cold_environment(env)
-    # Match the validation CLI's source-checkout import isolation.
-    sys.meta_path[:] = [finder for finder in sys.meta_path
-                       if not finder.__class__.__module__.startswith("_rpu_backend_editable")]
-    sys.path.insert(0, str(ROOT / "python"))
+    # Use the activated environment's wheel/editable installation. Validate its
+    # identity below without redirecting a wheel to the source snapshot.
     effective_cpu = _CPU["configure_cpu_threads"](_CPU["resolve_cpu_threads"](config))
     import torch
     import rpu_backend
