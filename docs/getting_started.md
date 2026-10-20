@@ -374,6 +374,11 @@ public download URL. Restricted runtime components retain their own distribution
 terms; a source-code license does not grant permission to redistribute them.
 A full dependency profile also does not establish validation of every model.
 
+The supplied examples run against the matching installed wheel; no local
+`build/` directory or editable installation is needed. Prepare each model's
+checkpoint, input/reference fixtures and any required third-party source
+separately, following that model's README and supported profile.
+
 ### Download and install in one command
 
 Obtain `scripts/install_conda_bundle.py` from the same source revision (or the

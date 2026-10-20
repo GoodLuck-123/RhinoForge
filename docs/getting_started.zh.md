@@ -328,6 +328,10 @@ RhinoForge、sanitized Launch、主/扩展算子资产及各自 sidecar。
 板卡/SDK 基线；仓库不提供尚未发布的虚构下载链接。受限运行时仍遵循各自的分发
 条款，源码许可证不等于这些资产的再分发授权。依赖齐全也不等于所有模型都已验证。
 
+随包示例可直接使用匹配的已安装 wheel，无需额外的 `build/` 目录或 editable 安装。
+各模型的 checkpoint、输入/参考 fixture，以及所需的第三方源码仍须单独准备，
+具体遵循该模型 README 和支持的 profile。
+
 ### 一条命令下载安装
 
 从同版本源码的 `scripts/install_conda_bundle.py` 或提供方交付物取得安装脚本，
