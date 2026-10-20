@@ -269,9 +269,9 @@ def run(args: argparse.Namespace, fp16: Path, w8: Path, w4: Path, golden_path: P
     if (
         backend_spec is None
         or backend_spec.origin is None
-        or not Path(backend_spec.origin).resolve().is_relative_to(root)
     ):
         raise RuntimeError(f"conda/import overlay before import: {backend_spec}")
+    _library_helpers.verify_backend_source(root, backend_spec.origin)
     import numpy as np
     import torch
     from PIL import Image
@@ -289,9 +289,7 @@ def run(args: argparse.Namespace, fp16: Path, w8: Path, w4: Path, golden_path: P
     }
     if loaded_native != {args.so.resolve()}:
         raise RuntimeError(f"unexpected native extension mapping: {sorted(map(str, loaded_native))}")
-    imported = Path(rpu_backend.__file__).resolve()
-    if not imported.is_relative_to(root):
-        raise RuntimeError(f"conda/import overlay: rpu_backend={imported}, expected below {root}")
+    _library_helpers.verify_backend_source(root, rpu_backend.__file__)
     torch_origin = Path(torch.__file__).resolve()
     if site_packages is not None and not torch_origin.is_relative_to(site_packages):
         raise RuntimeError(

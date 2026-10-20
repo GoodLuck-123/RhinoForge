@@ -182,8 +182,7 @@ def run_example_config(config: dict) -> int:
     from rpu_backend.adapters.wall_oss import build_wall_oss_vla
     from rpu_backend.graph import GraphRuntimePolicy
 
-    if not Path(rpu_backend.__file__).resolve().is_relative_to(ROOT):
-        raise RuntimeError("sorting example imported rpu_backend from another checkout")
+    _library_helpers.verify_backend_source(ROOT, rpu_backend.__file__)
     actual = _cpp_ext.get_runtime_payload_paths()
     for role, key in (("main", "RPU_KERNEL_LIB_PATH"), ("expansion", "RPU_KERNEL_LIB_PATH_EXPANSION")):
         path = actual.get("oplib_roles", {}).get(role)
