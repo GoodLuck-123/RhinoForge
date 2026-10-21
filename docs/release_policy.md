@@ -52,15 +52,16 @@ the branch or tag against `VERSION`. Validate Python metadata, the selected Laun
 package and the affected build or runtime path before publishing. Keep model
 evaluation records outside release artifacts.
 
-## Planned dependency environment releases
+## Dependency environment releases
 
 The [dependency bundle design](environment_bundle.md) separates public third-party
 environments from RhinoForge source, platform SDK libraries and restricted runtime
 assets. Environment versions and immutable archives are independent of RF versions;
 source checkouts bind to a compatible environment by ID, locks and checksums.
-No dependency-only archive or download URL has been published yet. Planned `deps-*`
-tags require their own release validation; the existing `v*`/`VERSION` source tag
-check remains unchanged. Do not tag or upload a legacy full bundle as a public
+The first environment is the `deps-2026.10.1` preview; its actual archive and
+checksums are bound by [environment.json](../release/environment.json). `deps-*` tags
+use `check_dependency_release.py`, dispatched by `check_release_version.py`;
+the existing `v*`/`VERSION` source tag check remains unchanged. Do not tag or upload a legacy full bundle as a public
 dependency release.
 
 ## 中文说明
@@ -87,5 +88,6 @@ API 兼容版本独立维护。算子资产固定来自 main 与 DDR-expansion �
 模型评测记录不进入发行资产。
 
 公开依赖环境包采用独立版本，源码以环境 ID、依赖锁和校验和关联；不携带 RF、
-板卡 SDK 库或受限运行资产。目前尚未发布此类包，设计见[依赖环境包说明](environment_bundle.zh.md)。
-计划中的 `deps-*` 环境标签需独立发布检查，现有 `v*` 源码标签规则保持不变。
+板卡 SDK 库或受限运行资产。首个环境为 `deps-2026.10.1` 预览版，
+实际下载与摘要由 [environment.json](../release/environment.json) 固定，见[依赖环境包说明](environment_bundle.zh.md)。
+`deps-*` 环境标签由 `check_dependency_release.py` 独立检查，现有 `v*` 源码标签规则保持不变。

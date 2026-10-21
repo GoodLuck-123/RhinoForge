@@ -24,7 +24,7 @@ RhinoForge is an inference-only PyTorch `PrivateUse1` backend exposed as
    documented concept.
 
 Use the [unified installation and development guide](docs/getting_started.md)
-for Miniconda3, the single `RHINOFORGE_ENV`, source/wheel builds and the planned dependency-only
+for Miniconda3, the single `RHINOFORGE_ENV`, source/wheel builds and dependency-only
 environment bundles; use [restricted runtime assets](docs/runtime_assets.md) for
 external asset identities and SDK setup,
 [model testing](docs/model_testing.md) for runnable entry points and profiling,

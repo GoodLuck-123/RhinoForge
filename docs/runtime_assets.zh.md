@@ -3,10 +3,9 @@
 简体中文 | [English](runtime_assets.md)
 
 RhinoForge 源码和 wheel 不包含 Rhino Launch 二进制、主算子资产与扩展算子资产、板卡 SDK 或
-模型权重。规划中的[公开依赖环境包](environment_bundle.zh.md)同样不包含这些组件，
+模型权重。[公开依赖环境包](environment_bundle.zh.md)同样不包含这些组件，
 也不包含 RhinoForge 本身。RhinoForge 从 GitHub 获取，OS/驱动和完整 SDK 由平台方
-提供，匹配的 Launch 与算子资产仍单独交付。各包按随包条款和完整性说明使用；
-目前尚未发布公开依赖环境包。
+提供，匹配的 Launch 与算子资产仍单独交付。各包按随包条款和完整性说明使用。
 
 当前 `1.3.0.dev0` 开发线依赖已归档的 **Rhino Launch 1.2.0**，
 commit 为 `3dd1b410f5f46373997fef3dfbf9b67eecec6a84`，CMake 数值版本为 `1.2.0`，ABI 为 `1`。
@@ -124,14 +123,16 @@ RhinoForge。记录实际 SDK/driver 版本；保留预装板卡基础环境，�
 
 激活 Python 环境后，按平台说明配置动态库搜索路径。如果 SDK 要求设置
 `LD_LIBRARY_PATH`，使用平台提供的实际目录；以下示例假设三份库位于同一目录，
-分布在多个目录时按平台说明添加。加入 Launch 路径时保留 SDK 路径：
+分布在多个目录时按平台说明添加。保留当前应用环境的 `lib` 在前，再加入
+Launch 与 SDK 路径；尤其当 SDK 库位于 `/lib` 或 `/usr/lib` 时，避免系统同名库
+抢先覆盖依赖环境中的音视频和 C++ 运行库：
 
 ```bash
 export RHINOFORGE_SDK_LIB_DIR="/absolute/path/to/platform-sdk/lib"
 test -r "$RHINOFORGE_SDK_LIB_DIR/libHxMem.so"
 test -r "$RHINOFORGE_SDK_LIB_DIR/libHxil.so"
 test -r "$RHINOFORGE_SDK_LIB_DIR/librpu_api.so"
-export LD_LIBRARY_PATH="$RHINO_LAUNCH_ROOT/lib:$RHINOFORGE_SDK_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${RHINOFORGE_ENV:+$RHINOFORGE_ENV/lib:}$RHINO_LAUNCH_ROOT/lib:$RHINOFORGE_SDK_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
 检查动态库解析结果与设备节点：
