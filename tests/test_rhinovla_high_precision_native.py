@@ -142,6 +142,7 @@ struct Context {
 };
 constexpr int64_t RHINO_HIGH_PRECISION_SITE = __SITE_VALUE__;
 struct Model {
+    bool rtc_mode_ = false;
     struct Config { bool precompute_adarms = true, skip_adarms_gemv = false,
         packed_qkv = false, expert_fusions = true, aligned_kv = false; } cold_config_;
     bool high_precision_ = false, high_precision_bound_ = false, cold_config_bound_ = true;
