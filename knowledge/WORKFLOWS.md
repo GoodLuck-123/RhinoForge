@@ -86,6 +86,15 @@ For Pi0.5 fixed-input comparisons, use the public `input.noise` field for both
 Graph preparation and inference; retain default-input failures separately.
 See the [policy API](../docs/api_reference.md#policy-apis) and
 [model family map](synthesis/model-family-map.md#pi05).
+For RhinoVLA v3 RTC, bind `rtc` at construction and validate the paired
+`action_prefix`/`delay` request before model loading. Preserve per-token time
+conditioning and the state token's mean time embedding, refresh prefix contents
+on replay, and include delay in Graph identity. Verify the requested delay range
+independently of non-RTC evidence. Reserve the complete Graph pool during cold
+construction, including transient preparation while all delay variants remain
+retained. Keep the Python/native RTC build paired; VLA dependencies in an older
+bundle do not supply the new runtime. Use the [RTC input guide](../examples/configs/rhinovla/v3/README.md#rtc)
+for the exact FP16 envelope and current verification status.
 When adding quantized examples, trace the checkpoint loader and installed
 projection storage, not just the `dtype` label. Document the component scope
 and retain its admission controls. Bind the recipe, input and lifetime requirements before extending a profile. For caller factories, bind precision inputs,

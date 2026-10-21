@@ -130,6 +130,35 @@ def test_host_preflight_and_allocator_failures_do_not_poison_owner(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize("available", [False, True])
+def test_rtc_reserves_all_delay_arenas_under_claim_before_conversion(monkeypatch, available):
+    from rpu_backend.graph import GraphRuntimePolicy
+
+    events = []
+    monkeypatch.setattr(_execution, "_require_execution_process_safe", lambda: None)
+    monkeypatch.setattr(pipeline, "_preflight_rhinovla_cold_install", lambda **kw: object())
+    monkeypatch.setattr(causal_lm, "_claim_live_instance", lambda owner: events.append("claim"))
+    monkeypatch.setattr(causal_lm, "_release_live_instance", lambda owner: events.append("release"))
+    monkeypatch.setattr(torch.rpu, "set_caching_allocator", lambda enabled: events.append("allocator"))
+    def prepare(policy):
+        events.append(("arenas", policy.graph_arena_count))
+        return available
+    monkeypatch.setattr(GraphRuntimePolicy, "prepare_arenas", prepare)
+    def initialize(owner, **kwargs):
+        assert owner._graph_arena_policy.graph_arena_count == 10
+        events.append("conversion")
+    monkeypatch.setattr(RhinoVLAOnRPU, "_initialize", initialize)
+    args = dict(qin={}, prefix_len=230, model=object(), action_bundle=object(), rtc=True)
+    if available:
+        owner = RhinoVLAOnRPU(**args)
+        assert events == ["claim", "allocator", ("arenas", 10), "conversion"]
+        owner._rhinovla_closed = True
+    else:
+        with pytest.raises(pipeline.RPUBackendError, match="cold SDK graph arenas"):
+            RhinoVLAOnRPU(**args)
+        assert events == ["claim", "allocator", ("arenas", 10), "release"]
+
+
 @pytest.mark.parametrize("expert,full", [(False, False), (True, False), (True, True)])
 def test_explicit_pipeline_expert_scope_keeps_other_components_fp16(monkeypatch, expert, full):
     from types import SimpleNamespace as NS

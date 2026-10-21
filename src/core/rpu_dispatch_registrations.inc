@@ -1153,6 +1153,9 @@ TORCH_LIBRARY(rpu, m) {
         "int action_horizon, int suffix_len, bool direct_action_input=False) -> ()");
   m.def("rhino_vla_set_denoise_loop_adarms_tables("
         "int handle, Tensor pair_table, Tensor final_table) -> ()");
+  m.def("rhino_vla_set_denoise_loop_rtc_tables("
+        "int handle, Tensor pair_table, Tensor final_table) -> ()");
+  m.def("rhino_vla_prepare_rtc", TORCH_FN(rpu_rhino_vla_prepare_rtc));
   m.def("rhino_vla_set_denoise_loop_time_proj_table("
         "int handle, Tensor table) -> ()");
   m.def("rhino_vla_set_weights(int handle, "
@@ -1201,6 +1204,12 @@ TORCH_LIBRARY(rpu, m) {
         "Tensor state_rpu, Tensor state_mask_rpu, Tensor action_mask_rpu, "
         "Tensor x_out, float dt, int prefix_len, int num_steps, "
         "int[] planned_stage_descriptor=[]) -> Tensor");
+  m.def("rhino_vla_denoise_loop_rtc_forward(int handle, "
+        "Tensor x0_rpu, Tensor[] k_caches, Tensor[] v_caches, "
+        "Tensor cond_all, Tensor attention_mask, "
+        "Tensor state_rpu, Tensor state_mask_rpu, Tensor action_mask_rpu, "
+        "Tensor x_out, float dt, int prefix_len, int num_steps, "
+        "Tensor action_prefix, int delay, int[] planned_stage_descriptor=[]) -> Tensor");
   // v5-05 D-08 / D-10 (C2): deleted v2 SigLIP shim ops (3 schemas) — replaced
   // by direct-handle SigLIPModel below (siglip_create / set_weights / forward).
   // SigLIPModel All-Layers-Once (Phase 5: FusedModelBase migration)
@@ -1798,10 +1807,14 @@ TORCH_LIBRARY_IMPL(rpu, PrivateUse1, m) {
          TORCH_FN(rpu_rhino_vla_set_denoise_loop_weights));
   m.impl("rhino_vla_set_denoise_loop_adarms_tables",
          TORCH_FN(rpu_rhino_vla_set_denoise_loop_adarms_tables));
+  m.impl("rhino_vla_set_denoise_loop_rtc_tables",
+         TORCH_FN(rpu_rhino_vla_set_denoise_loop_rtc_tables));
   m.impl("rhino_vla_set_denoise_loop_time_proj_table",
          TORCH_FN(rpu_rhino_vla_set_denoise_loop_time_proj_table));
   m.impl("rhino_vla_denoise_loop_forward",
          TORCH_FN(rpu_rhino_vla_denoise_loop_forward));
+  m.impl("rhino_vla_denoise_loop_rtc_forward",
+         TORCH_FN(rpu_rhino_vla_denoise_loop_rtc_forward));
   m.impl("navdp_set_weights", TORCH_FN(rpu_navdp_set_weights));
   m.impl("navdp_forward", TORCH_FN(rpu_navdp_forward));
   m.impl("navdp_set_denoise_glue", TORCH_FN(rpu_navdp_set_denoise_glue));
@@ -2032,8 +2045,10 @@ TORCH_LIBRARY_IMPL(rpu, AutogradPrivateUse1, m) {
   m.impl("rhino_vla_forward", torch::CppFunction::makeFallthrough());
   m.impl("rhino_vla_set_denoise_loop_weights", torch::CppFunction::makeFallthrough());
   m.impl("rhino_vla_set_denoise_loop_adarms_tables", torch::CppFunction::makeFallthrough());
+  m.impl("rhino_vla_set_denoise_loop_rtc_tables", torch::CppFunction::makeFallthrough());
   m.impl("rhino_vla_set_denoise_loop_time_proj_table", torch::CppFunction::makeFallthrough());
   m.impl("rhino_vla_denoise_loop_forward", torch::CppFunction::makeFallthrough());
+  m.impl("rhino_vla_denoise_loop_rtc_forward", torch::CppFunction::makeFallthrough());
   m.impl("navdp_set_weights", torch::CppFunction::makeFallthrough());
   m.impl("navdp_forward", torch::CppFunction::makeFallthrough());
   m.impl("navdp_set_denoise_glue", torch::CppFunction::makeFallthrough());

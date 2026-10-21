@@ -72,7 +72,7 @@ HELPER
 struct Model {
     struct Config { bool expert_fusions=true, adarms_resident=true, packed_qkv=false, aligned_kv=true,
         precompute_adarms=true, skip_adarms_gemv=false, precompute_time_proj=false, fold_action_time_in=false; } cold_config_;
-    bool expert_w8a16_=true, expert_cond_w8a16_=true, full_action_w8a16_=false, high_precision_=false;
+    bool expert_w8a16_=true, expert_cond_w8a16_=true, full_action_w8a16_=false, high_precision_=false, rtc_mode_=false;
     bool denoise_adarms_tables_ready_=true, denoise_loop_weights_ready_=true, loop_mode_=true, direct_action_input_=true;
     int64_t last_chunk=0;
     int64_t num_steps_=10, action_dim_=96, state_dim_=96, action_horizon_=30, suffix_len_=31;

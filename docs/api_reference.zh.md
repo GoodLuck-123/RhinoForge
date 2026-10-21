@@ -268,6 +268,21 @@ Loader 会在加载权重前校验精确公开 payload 和请求范围，后续 
 runtime factory。Runtime 必须声明 execution capability 和实际消费的 `rpu_execution`；
 facade 拒绝静默 mismatch。
 
+内置 `rpu_backend.adapters.rhinovla.factory:v3_runtime_factory` 提供构造时固定的
+`rtc=True` 模式，限定固定 v3 checkpoint、FP16、batch 1、30×96 动作、18 层专家和
+十步展开去噪。`predict` 必须同时传入 `action_prefix` 和 `delay`：前者为有限的 CPU
+浮点 Tensor，形状 `[1,D,96]` 或 `[D,96]`，满足 `delay <= D <= 30`；后者为
+`0..6` 的 Python 整数，不接受 `bool` 或 Tensor。`delay=0` 可使用空前缀。
+non-RTC 构造保持 `rtc=False`，不接收这两个字段。RTC 每步使用逐动作时间和 state
+的平均时间嵌入，并固定掩码处理后的动作前缀。冷配置和验证状态见
+[RTC 模板与输入说明](../examples/configs/rhinovla/v3/README.md#rtc)，范围不包含
+W8 或其他 checkpoint。runtime 在构造时自动为七个 delay、Vision/Language 保留图
+和一个准备阶段临时图预留 10 个 Graph arena，无需用户额外设置环境变量。验证输入
+为三幅等尺寸视图、230 个逻辑 prefix token；模板在构造时固定 qin 的 token、attention
+mask 和 grid，改变这些内容或像素几何需新建 runtime。异尺寸视图不在本轮验证范围内，
+强制 oneshot 会被拒绝。需安装
+配套的 RTC Python 和 native 构建；旧环境包仅包含 VLA 依赖并不代表提供 RTC。
+
 字符串 `runtime_factory="module:callable"` 会 import 并执行该 module 中的 Python code。
 只使用已安装、已审查的模型集成，不从不可信 TOML/request 复制该值；已导入 callable
 同样需要信任。

@@ -392,6 +392,7 @@ CPU 列为请求值，`继承` 表示按运行器或环境设置。固定 P/D �
 | [rhinovla/v3/controlled/w8a16_pipeline_high_fused_vector_qk_partial_rope.toml](rhinovla/v3/controlled/w8a16_pipeline_high_fused_vector_qk_partial_rope.toml) | [validate_rhinovla_v3.py](../../scripts/validate_rhinovla_v3.py) `--config`<br>独立验证片段 | `—` | 12（验证 CLI 默认，可覆盖） | 未登记；独立验证片段 |
 | [rhinovla/v3/controlled/w8a16_pipeline_input_cache.toml](rhinovla/v3/controlled/w8a16_pipeline_input_cache.toml) | [validate_rhinovla_v3.py](../../scripts/validate_rhinovla_v3.py) `--config`<br>独立验证片段 | `—` | 12（验证 CLI 默认，可覆盖） | 未登记；独立验证片段 |
 | [rhinovla/v3/fp16.toml](rhinovla/v3/fp16.toml) | [run.py](../run.py)<br>调用者 factory | `fp16` | 继承 | 调用者 factory 模板 |
+| [rhinovla/v3/rtc_fp16.toml](rhinovla/v3/rtc_fp16.toml) | [run.py](../run.py)<br>调用者 factory | `fp16` | 继承 | 调用者 factory 模板 |
 | [rhinovla/v3/w8a16_action.toml](rhinovla/v3/w8a16_action.toml) | [run.py](../run.py)<br>调用者 factory | `w8a16` | 继承 | 调用者 factory 模板 |
 | [rhinovla/v3/w8a16_action_adarms.toml](rhinovla/v3/w8a16_action_adarms.toml) | [run.py](../run.py)<br>调用者 factory | `w8a16` | 继承 | 调用者 factory 模板 |
 | [rhinovla/v3/w8a16_pipeline.toml](rhinovla/v3/w8a16_pipeline.toml) | [run.py](../run.py)<br>调用者 factory | `w8a16` | 12 | 调用者 factory 模板 |
@@ -425,4 +426,4 @@ CPU 列为请求值，`继承` 表示按运行器或环境设置。固定 P/D �
 | [wall_oss/sorting/w8a16.toml](wall_oss/sorting/w8a16.toml) | [run.py](../run.py)<br>运行模板 | `w8a16` | 继承 | 未登记；模型专用模板 |
 | [wall_oss/sorting/w8a16_action_w4a16_g32.toml](wall_oss/sorting/w8a16_action_w4a16_g32.toml) | [run.py](../run.py)<br>运行模板 | `w8a16_action_w4a16` | 继承 | 未登记；模型专用模板 |
 
-合计 **293** 份配置。
+合计 **294** 份配置。

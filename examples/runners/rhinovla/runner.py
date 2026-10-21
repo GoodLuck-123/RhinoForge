@@ -6,6 +6,8 @@ import json
 from examples.common.inputs import _required_file, _load_mapping, _policy_checkpoint as _checkpoint
 
 _RHINOVLA_QUANT_KEYS = ("expert_w8a16", "full_w8a16")
+_RHINOVLA_V3_FACTORY = "rpu_backend.adapters.rhinovla.factory:v3_runtime_factory"
+_RHINOVLA_RTC_PROFILE = "rhinovla.v3.rtc.fp16.trusted-factory"
 _RHINOVLA_FULL_PIPELINE_PROFILES = frozenset({
     "rhinovla.v3.w8a16.full-pipeline.trusted-factory",
     "rhinovla.v3.w8a16.full-pipeline-high.trusted-factory",
@@ -51,6 +53,9 @@ def validate_rhinovla_config(config):
     if config["example"].get("dtype") not in {"fp16", "w8a16"}:
         raise ValueError("RhinoVLA dtype must be fp16 or w8a16")
     _rhinovla_quantization(config)
+    if (config["example"].get("profile_id") == _RHINOVLA_RTC_PROFILE
+            and inputs.get("runtime_factory") != _RHINOVLA_V3_FACTORY):
+        raise ValueError("RhinoVLA RTC requires the built-in v3_runtime_factory")
     for key in ("runtime_factory", "factory_config", "request"):
         if not isinstance(inputs.get(key), str) or not inputs[key].strip():
             raise ValueError(f"[input].{key} must be a nonempty string")
@@ -73,6 +78,23 @@ def _bind_rhinovla_quantization(config, factory_config):
         if name in config["input"]:
             factory_config[name] = value
     return expected
+
+def _validate_rhinovla_rtc_request(config, factory_config, request):
+    """Bind the built-in RTC mode before loading qin or constructing a model."""
+    if config["input"]["runtime_factory"] != _RHINOVLA_V3_FACTORY:
+        return
+    from rpu_backend.adapters.rhinovla.rtc import validate_rtc_request
+
+    rtc = factory_config.get("rtc", False)
+    profile_id = config["example"].get("profile_id")
+    if profile_id == _RHINOVLA_RTC_PROFILE:
+        if rtc is not True:
+            raise ValueError("RhinoVLA RTC profile requires factory_config.rtc=true")
+    elif rtc is True and profile_id and profile_id.startswith("rhinovla.v3."):
+        raise ValueError("RhinoVLA factory_config.rtc=true requires the RTC profile_id")
+    validate_rtc_request(
+        rtc=rtc, action_prefix=request.get("action_prefix"), delay=request.get("delay"))
+
 
 def _confirm_rhinovla_quantization(policy, expected, *, full_pipeline=False):
     """Inspect the installed expert, not a factory-provided precision label."""
@@ -128,9 +150,10 @@ def _factory(runner):
     factory_config = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(factory_config, dict):
         raise ValueError("RhinoVLA factory_config must contain a JSON object")
-    if inputs["runtime_factory"] == "rpu_backend.adapters.rhinovla.factory:v3_runtime_factory":
-        factory_config["qin"] = _load_mapping(factory_config, "qin")
     quantization = _bind_rhinovla_quantization(config, factory_config)
+    _validate_rhinovla_rtc_request(config, factory_config, request)
+    if inputs["runtime_factory"] == _RHINOVLA_V3_FACTORY:
+        factory_config["qin"] = _load_mapping(factory_config, "qin")
     if inputs["runtime_factory"].startswith("your_package."):
         raise ValueError("set [input].runtime_factory to your trusted model integration's module:callable")
     for name, value in (("checkpoint", str(_checkpoint(config))), ("steps", inputs.get("num_steps", 10))):

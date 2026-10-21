@@ -144,6 +144,23 @@ to change allocator mode. [Runtime configuration](../../docs/runtime_config.md#m
   cache, and action boundaries separately; a final action result alone cannot
   localize an upstream component error. [RhinoVLA example](../../examples/run.py)
 
+- The pinned built-in v3 factory has a separate cold `rtc=True` contract for
+  FP16/30×96/18-layer/ten-step inference. Requests pair a CPU floating
+  `action_prefix` with Python-integer `delay=0..6`; validate them before loading
+  model assets. Every step uses zero time for committed actions and the mean
+  action-time embedding for state, then preserves the masked prefix. Do not
+  treat a final output overwrite or a passing non-RTC case as RTC evidence.
+  Delay belongs to the Graph signature; prefix values must refresh for replay.
+  Construction reserves ten arenas for seven action variants, retained
+  vision/text graphs and one transient preparation graph, without a user
+  environment override. Validation uses three equal-sized views and P230; keep
+  template qin token/mask/grid contents and pixel geometry cold-bound. Rebuild
+  the runtime when they change. Unequal view sizes are outside this validation,
+  and forced oneshot is rejected. Keep Python and native RTC builds matched when updating an older
+  environment bundle.
+  [RTC contract and verification status](../../examples/configs/rhinovla/v3/README.md#rtc),
+  [request validation](../../python/rpu_backend/adapters/rhinovla/rtc.py)
+
 ## How to use the map
 
 1. Find the configuration and API through [Examples](../../docs/model_support.md).
