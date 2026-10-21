@@ -6,12 +6,39 @@ and model checkpoints are distributed separately under their own terms.
 
 RhinoForge `1.3.0.dev0` depends on archived Rhino Launch `1.2.0` at
 `3dd1b410f5f46373997fef3dfbf9b67eecec6a84`, with CMake version `1.2.0` and ABI
-version `1`. Use the Launch SDK and two operator assets from the stable
+version `1`. Use the Launch package and two operator assets from the stable
 `RhinoForge-runtime-v1.2.0.tar.gz` distribution, as pinned in
 [runtime-dependencies.json](runtime-dependencies.json). Keep each operator payload
 with its adjacent `.ref.kernels` file. Advancing RhinoForge's development version
 does not change the Launch dependency version.
 See the [release policy](../docs/release_policy.md).
+
+The recommended board SDK is **`EA_R1SDK_2026_08F-2156007a`**, validated on R1
+Linux `aarch64`, Ubuntu 22.04/glibc 2.35, GCC 11.4 and Python 3.12.15. It is a
+tested baseline, not a minimum-version promise. The platform provider supplies
+the matching OS/driver and complete SDK, including its user-space libraries.
+The board SDK is separate from Rhino Launch 1.2.0. See the
+[SDK setup and validation scope](../docs/runtime_assets.md#board-sdk-and-device-access).
+
+The [dependency environment bundle design](../docs/environment_bundle.md)
+([中文](../docs/environment_bundle.zh.md)) defines a public Conda bundle for
+Python, third-party libraries and tools. It excludes RhinoForge source and
+installed code/native libraries, all board SDK components, Launch, operator
+assets and model weights. Users obtain RhinoForge from GitHub and build it in
+that environment; Launch and operator assets retain their separate delivery
+terms.
+
+Environment versions are independent of RhinoForge source versions. The design
+binds each supported source release or commit to a tested environment ID and
+manifest, with download location and SHA256 recorded when an artifact is
+published. Source-only changes can reuse a compatible environment. Requirement or
+compatibility changes need revalidation and an updated source binding; publish a
+new environment version when its actual contents must change.
+GitHub Releases is the intended distribution channel for the dependency-only
+bundle after its contents and redistribution materials have been checked.
+**No public dependency environment bundle or download URL is available yet.**
+The existing restricted full-bundle tooling and archives do not implement this
+new distribution format and must not be presented as its public release.
 
 Keep model evaluation data and reports outside source releases, package artifacts and release notes.
 

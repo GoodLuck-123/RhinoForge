@@ -3,23 +3,24 @@
 [简体中文](runtime_assets.zh.md) | English
 
 RhinoForge source and wheels do not contain Rhino Launch binaries, the external
-main and expansion operator assets, the board SDK, or model weights. Obtain a runtime package
-compatible with the source revision you are installing from the runtime provider.
-Follow that package's distribution terms and integrity instructions. A
-[complete Conda environment bundle](getting_started.md#6-deploy-a-complete-environment-bundle)
-can include these user-space runtime assets under the provider's terms; its
-manifest identifies the exact contents and remaining SDK prerequisites.
+main and expansion operator assets, the board SDK, or model weights. The planned
+[public dependency environment bundle](environment_bundle.md) also excludes all
+of these components and RhinoForge itself. Obtain RhinoForge from GitHub, the
+OS/driver and complete SDK from the platform provider, and the matching Launch
+and operator assets through their separate delivery channel. Follow each
+package's distribution terms and integrity instructions. No public dependency
+environment bundle has been released yet.
 
 This `1.3.0.dev0` development line depends on archived Rhino Launch **1.2.0**,
 commit `3dd1b410f5f46373997fef3dfbf9b67eecec6a84`, with CMake version `1.2.0` and
 ABI version `1`. Obtain the stable `RhinoForge-runtime-v1.2.0.tar.gz` and its
-`.tar.gz.sha256` from the provider. Its Launch SDK directory is
+`.tar.gz.sha256` from the provider. Its Launch package directory is
 `rhino-launch-kernel-v1.2.0-linux-aarch64`; its main and DDR-expansion assets match
 [runtime-dependencies.json](../release/runtime-dependencies.json).
 Each operator asset requires its adjacent `.ref.kernels` file.
 Historical candidates can have the same bundle filename: verify the checksum,
 `RELEASE.txt` and Launch commit. A directory named `v1.1.0-2-gbdc0dae` contains
-an older SDK whose CMake version is `1.0.0`, and does not satisfy this dependency.
+an older Launch package whose CMake version is `1.0.0`, and does not satisfy this dependency.
 See the [release policy](release_policy.md).
 
 Select the bundle by the dependency manifest in the checkout being built. A
@@ -44,8 +45,9 @@ out of the public issue. Asset access follows the provider's distribution terms.
 - **Two operator assets**, built from the main and DDR-expansion branches respectively, matching this source, each with an adjacent
   `<asset>.kernels` manifest. It must contain the kernels required by the public
   models and precision profiles being used.
-- **The matching board SDK/runtime**, configured according to the platform's
-  installation instructions.
+- **The matching board OS, driver and complete SDK**, including its user-space
+  libraries, supplied and configured according to the platform's installation
+  instructions. The recommended SDK baseline is listed below.
 
 Keep build-time and run-time Launch paths consistent.
 Do not mix an old operator payload with a new sidecar or merge payloads locally.
@@ -109,16 +111,48 @@ TOMLs. Continue with the [unified installation and development guide](getting_st
 
 ## Board SDK and device access
 
-The runtime bundle does **not** install the board SDK or kernel driver and does
-not bind a portable minimum SDK version. Obtain the board platform's SDK/driver
-package, supported OS/kernel/version matrix, installation commands, library-path
-setup and access/locking policy from the runtime provider through its delivery
-channel. This repository has no universal SDK download or driver-install command.
-On an unprovisioned board, complete that platform step before building RhinoForge.
-Record the SDK/driver versions used; retaining a provisioned board baseline is
-an isolated application install, not a clean SDK/driver installation.
+**Recommended board SDK: `EA_R1SDK_2026_08F-2156007a`.** This is the baseline used
+for our board deployment and RhinoVLA v3 RTC delay `0–6` validation:
 
-After installing that baseline and selecting the new Launch paths, inspect:
+| Component | Validated baseline |
+|---|---|
+| Board platform | R1, Linux `aarch64` |
+| Board SDK | `EA_R1SDK_2026_08F-2156007a` |
+| OS / system C library | Ubuntu 22.04 / glibc 2.35 |
+| Host compiler | GCC 11.4 |
+| Application Python | Python 3.12.15 |
+
+This recommendation is a tested combination, not a universal minimum SDK
+version or a claim that newer SDKs are compatible. The platform provider must
+confirm the matching OS/kernel/driver combination and any alternative SDK.
+The board SDK and **Rhino Launch 1.2.0** are different components; the Launch
+version and operator identities remain pinned by
+[runtime-dependencies.json](../release/runtime-dependencies.json).
+
+The runtime package and public dependency environment bundle do **not** supply
+the board SDK, its user-space libraries, or the kernel driver. In particular,
+`libHxMem.so`, `libHxil.so` and `librpu_api.so` come from the platform SDK.
+Obtain the complete SDK/driver package, installation commands, loader setup and
+access/locking policy from the platform provider. This repository has no
+universal SDK download or driver-install command. On an unprovisioned board,
+complete that platform step before building RhinoForge. Record the actual
+SDK/driver versions used; retaining a provisioned board baseline is an isolated
+application install, not a clean SDK/driver installation.
+
+After activating the Python environment, apply the provider's loader setup.
+If it requires `LD_LIBRARY_PATH`, use the actual SDK library directory (or
+directories) supplied by the platform; the following example assumes all three
+libraries are in one directory. Preserve the SDK paths when adding Launch:
+
+```bash
+export RHINOFORGE_SDK_LIB_DIR="/absolute/path/to/platform-sdk/lib"
+test -r "$RHINOFORGE_SDK_LIB_DIR/libHxMem.so"
+test -r "$RHINOFORGE_SDK_LIB_DIR/libHxil.so"
+test -r "$RHINOFORGE_SDK_LIB_DIR/librpu_api.so"
+export LD_LIBRARY_PATH="$RHINO_LAUNCH_ROOT/lib:$RHINOFORGE_SDK_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
+Inspect library resolution and device nodes:
 
 ```bash
 uname -smr
@@ -195,7 +229,7 @@ payload. Operator source and payload contents remain outside this repository.
 | Symptom | Action |
 |---|---|
 | CMake cannot find `rhino_launch` | Set the Launch prefix or pass `-Ccmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch"` |
-| CMake reports a Launch version mismatch | Select the archived stable SDK pinned by the dependency manifest and update both build and runtime paths; do not rewrite SDK version files or remove the EXACT check |
+| CMake reports a Launch version mismatch | Select the archived stable Launch package pinned by the dependency manifest and update both build and runtime paths; do not rewrite Launch version files or remove the EXACT check |
 | CMake rejects a required capability | Obtain a matching sanitized Release Launch package |
 | Launch cannot be loaded | Check its `lib` path and the board SDK library paths |
 | Asset or sidecar is missing, or a kernel is absent | Obtain the matching asset and unchanged sidecar together |

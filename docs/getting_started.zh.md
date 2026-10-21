@@ -22,18 +22,24 @@ Conda 环境替代：
 请先按平台交付说明完成系统、驱动和 SDK 的配置，并取得匹配的运行资产；具体资产
 身份和检查方法见[运行时资产说明](runtime_assets.zh.md)。本指南中的“从零构建”指
 新建应用环境并构建 RhinoForge，不包含裸板刷机、驱动安装或 SDK 适配。
-完整环境包可以随包交付平台方允许分发的用户态运行资产，但不会替代上述平台前置条件。
+推荐板卡 SDK 为 **`EA_R1SDK_2026_08F-2156007a`**；已有验证基线为
+R1 Linux aarch64、Ubuntu 22.04、glibc 2.35、GCC 11.4 和 Python 3.12.15。
+这是已验证的组合，不是通用最低版本；其他 SDK 需由平台方确认适配并验证。
+**SDK 用户态库也由平台方提供，不进入我们的依赖环境包。**
+Rhino Launch **1.2.0** 是独立运行组件，不能与板卡 SDK 版本混用。
 
 ## 选择一条部署路径
 
 | 路径 | 需要做什么 | 适用情况 |
 |---|---|---|
-| [路径一：从 Miniconda3 开始构建](#source-build) | 安装 Miniconda3 → 创建 Python 3.12 环境 → 获取源码和平台运行资产 → 安装依赖并编译 | 需要自行构建、修改源码，或尚未取得匹配环境包 |
-| [路径二：部署我们提供的完整环境包](#bundle-deploy) | 获取配套交付包 → 校验并解包 → 激活环境 | 已取得匹配的完整包，希望省去 Torch 等依赖下载和本机编译 |
+| [路径一：从 Miniconda3 开始构建](#source-build) | 安装 Miniconda3 → 创建 Python 3.12 环境 → 安装依赖 → 获取源码和运行资产并编译 | 当前可执行的完整部署流程 |
+| [路径二：使用我们提供的依赖环境包](#bundle-deploy) | 下载、校验、解包环境 → 从 GitHub 获取源码 → 配置运行资产并编译 | 新包发布后，省去 Torch 等第三方依赖的逐个下载与安装 |
 
-**两条路径二选一，不必先做路径一再做路径二。** 路径二包含 Python 和已编译的
-RhinoForge，无需另装 Miniconda3、创建环境或重新编译。完成任一路径后，均继续
-[第 3 节：准备模型与配置](#model-setup)，再按平台约定运行。开发也继续使用同一环境。
+两条路径都使用一个 `RHINOFORGE_ENV`，都从 GitHub 获取并编译 RhinoForge，
+随后共用模型准备、运行和开发步骤。路径二只替代依赖环境的创建与安装，不包含
+RhinoForge、板卡 SDK、Launch 或算子，也不免除本地编译。
+**新的依赖环境包尚未制作发布，目前请使用路径一。** 交付范围及版本关联见
+[依赖环境包设计](environment_bundle.zh.md)。
 
 <a id="1-安装-miniconda3-并构建源码"></a>
 <a id="source-build"></a>
@@ -80,10 +86,9 @@ conda --version
 清除历史安装的覆盖变量，再创建和激活应用环境。`--override-channels` 明确选用
 的包源，不继承用户的 channel 列表；Miniconda 提供管理器，下面通过社区
 `conda-forge` channel 获取 Python。`CONDA_PKGS_DIRS` 将本次安装的包缓存放在
-独立工作目录内，不修改全局 Conda 配置，也不使用或清理其他用户的缓存。制作
-`full` 包时，可在下方 `conda create` 命令末尾追加 `ffmpeg libsndfile`；也可在
-[制作环境包附录](#build-bundle)向这同一个环境补装。aarch64 不要向
-`conda-forge` 请求 `sox`，其单独构建步骤也见该附录。
+独立工作目录内，不修改全局 Conda 配置，也不使用或清理其他用户的缓存。需要
+音频工具时，可在下方 `conda create` 命令末尾追加 `ffmpeg libsndfile`，或按
+[音频工具附录](#build-bundle)向同一环境补装。aarch64 的 SoX 构建步骤也见该附录。
 
 ```bash
 unset PYTHONPATH PYTHONHOME RHINO_LAUNCH_ROOT CMAKE_PREFIX_PATH LD_LIBRARY_PATH
@@ -158,7 +163,7 @@ Conda 环境不会安装板卡 SDK 或内核驱动。
 
 ### 1.4 安装依赖并构建 RhinoForge
 
-在同一 shell 和源码根目录继续。这里安装普通 wheel，便于后续打包迁移。
+在同一 shell 和源码根目录继续。这里编译并安装普通 wheel；后续开发仍使用同一环境。
 当前 [pyproject.toml](../pyproject.toml)固定 PyTorch **2.10.0**、Transformers
 **5.3.0**。首次安装保留依赖解析；`constraints/security.txt` 是安全版本约束，
 不等于全部依赖的锁文件。
@@ -187,8 +192,8 @@ PY
 `'.[audio]'`；`'.[vision,vla,audio]'` 安装全部三组可选依赖。Qwen3 文本 FP16 无需
 这些可选依赖，语音所需输入见[语音指南](qwen3_audio.zh.md)。
 
-下载过慢或板卡离线，且已取得匹配架构与运行时基线的交付包时，可改用
-[路径二](#bundle-deploy)。
+依赖包发布后，下载过慢的用户可使用[路径二](#bundle-deploy)准备环境；
+离线部署仍须提前备齐源码、系统工具、SDK、运行资产和模型。
 若自行使用镜像或 wheel 缓存，包必须适配 Python 3.12 和板卡架构，并记录下载源；
 不要靠更换固定的 Torch/Transformers 版本解决下载速度问题。
 安装成功后，[可编辑开发和 wheel 构建](#development)继续使用这个环境。
@@ -198,94 +203,43 @@ PY
 <a id="6-部署完整环境包"></a>
 <a id="bundle-deploy"></a>
 
-## 路径二：部署我们提供的完整 Conda 环境包
+## 路径二：使用我们提供的依赖 Conda 环境包（待发布）
 
-### 2.1 获取匹配的交付包
+### 2.1 获取与源码匹配的环境版本
 
-向 RhinoForge 团队申请与板卡和 SDK 基线匹配的完整包，由我们通过平台方确认的
-**受控交付渠道**提供压缩包或授权下载链接。随包取得：
+计划通过 **GitHub Releases** 提供公开依赖包、SHA256、环境清单、精确锁文件及
+第三方分发材料。当前没有此类包的下载地址或 SHA256；已有内部完整归档包含
+RhinoForge 和受限运行资产，不是新的依赖包，也不能改名后公开发布。
 
-- 压缩包及可信的 SHA256、匹配版本的 `install_conda_bundle.py`。
-- `bundle-manifest.json`、源码版本、适用的架构 / OS / glibc / 驱动 / SDK 基线。
-- 包含的功能与运行资产清单、使用说明及原始分发条款。
+首包采用 `full` 配置，包含 Python 3.12、默认依赖、`vision`、`vla`、`audio`、
+`dev` 及 CMake/Ninja、SoX/FFmpeg/libsndfile 等工具。**不包含 RhinoForge 源码、
+已安装包、wheel/native、SDK 用户态库、Launch、算子或模型。** 包内也不包含
+Miniconda 管理器；目标机仍需路径一列出的系统 C/C++ 构建工具。
 
-**当前状态：仅有内部验证归档，尚未发布供用户下载的完整环境包，也没有公开的
-GitHub Release 下载地址。** 在收到匹配交付包前，请使用路径一。当前内部归档
-早于 RTC 更新，不包含新增的 RTC 原生接口；需要 RTC 时，应获取明确包含该功能的
-新版包，不能只复制新 Python 文件或 TOML 后沿用旧原生库。
+环境采用独立版本。GitHub 源码将记录推荐的环境 ID、平台/Python 基线、真实
+下载地址和 SHA256；依赖不变时，多个源码版本可共用一个环境包。具体字段及
+制作流程见[依赖环境包设计](environment_bundle.zh.md)。
 
-当前完整包包含受限运行资产，应按平台方条款受控交付，不上传到公开 GitHub Release。
-GitHub 提供源码、安装脚本和获取说明；资产申请入口见[申请运行时资产](runtime_assets.zh.md#申请运行时资产)。
-是否允许公开分发以实际交付条款为准，不能从 RhinoForge 源码许可证推导。
+### 2.2 部署后仍从 GitHub 构建 RhinoForge
 
-包内包含 Python 3.12、选定的依赖、已编译的 RhinoForge、匹配的源码和示例，以及
-获准随包分发的 Launch / 算子资产。`full` 包覆盖默认依赖及 `vision`、`vla`、`audio`
-扩展，包含 SoX 可执行程序和 FFmpeg / libsndfile；`text` 包仅含基础文本依赖。
-以 `bundle-manifest.json` 为准核对实际内容，SDK 用户态库只有清单明确列出时才在包内。
-**OS、内核驱动、未列入清单的 SDK 组件仍须由平台方提供。** 模型权重、模型输入及
-必要的第三方模型源码需另行准备；依赖齐全不代表所有模型都已验证。
+新包发布后，用户流程为：
 
-### 2.2 校验并安装
+1. 按所选源码的环境记录获取包，校验 SHA256，解包到最终目录并完成前缀迁移。
+2. 激活同一个 `RHINOFORGE_ENV`，无需另装 Miniconda3 或重新创建应用环境。
+3. 从 GitHub 检出指定 tag/commit，源码目录与环境目录分开；配置平台 SDK 及
+   单独交付的 Launch、算子资产，使用[路径一的配置说明](#source-build)。
+4. 检查环境是否满足当前源码全部运行和构建依赖，再在本机编译 RhinoForge。
+   通过兼容性检查后使用 `--no-build-isolation --no-deps`，避免重新下载依赖。
+5. 继续[模型准备](#model-setup)、运行和[同环境开发](#development)。
 
-从同版本源码的 `scripts/install_conda_bundle.py` 或提供方交付物取得安装脚本，
-将它放在目标目录之外。安装脚本只需系统 Python 3.10 或更新版本；推理使用包内的
-Python 3.12，因此目标机无需再安装 Miniconda 或执行 `conda create`。
-填入提供方实际交付的 URL 和 SHA256；离线板卡则先传输压缩包，使用本地文件路径：
+“一键部署”指依赖环境部署，不是完整模型部署。离线使用须提前取得 GitHub 源码、
+系统编译工具、SDK、运行资产与模型。激活环境后按[运行资产说明](runtime_assets.zh.md)
+设置 SDK/Launch 动态库路径；环境包不会替平台安装或选择这些组件。
+迁移后不要直接移动环境目录，需要换位置时从原压缩包重新部署。
 
-```bash
-set -e
-export RHINOFORGE_WORKDIR="$HOME/rhinoforge"
-export RHINOFORGE_BUNDLE_ARCHIVE="/absolute/path/to/rhinoforge-conda.tar.gz"
-export RHINOFORGE_BUNDLE_SHA256="REPLACE_WITH_PROVIDER_SHA256"
-mkdir -p "$(dirname "$RHINOFORGE_WORKDIR")"
-python3 /absolute/path/to/install_conda_bundle.py \
-  --archive "$RHINOFORGE_BUNDLE_ARCHIVE" \
-  --sha256 "$RHINOFORGE_BUNDLE_SHA256" \
-  --prefix "$RHINOFORGE_WORKDIR"
-source "$RHINOFORGE_WORKDIR/activate.sh"
-cd "$RHINOFORGE_SOURCE"
-python -m pip check
-printf 'Python environment: %s\nSource: %s\n' "$RHINOFORGE_ENV" "$RHINOFORGE_SOURCE"
-```
-
-`--archive` 也接受 HTTP(S) URL，同一条命令完成下载、校验和安装。目标目录必须
-尚不存在，其父目录应已存在且当前用户可写。安装过程不再联网安装依赖、不编译
-RhinoForge，也不访问 RPU 设备。
-激活脚本设置包内路径，包括 `RHINOFORGE_ENV="$RHINOFORGE_WORKDIR/env"`。
-安装器检查系统类型、架构与 glibc，不验证 SDK / 驱动是否匹配，也不检查设备是否可用。
-
-安装后的目录结构：
-
-```text
-rhinoforge/
-  activate.sh, run-example.sh, bundle-manifest.json
-  env/                         # Python、全部已选依赖和安装好的 RhinoForge
-  source/                      # 匹配的源码、示例和文档
-  runtime/launch/              # sanitized Release Launch
-  runtime/operators/           # 主/扩展算子资产及 sidecar
-  runtime/sdk/                 # 若交付，包含 SDK 用户态库
-  runtime/notices/              # 随包运行时分发条款
-```
-
-直接安装到最终绝对路径。安装器执行一次 `conda-unpack` 修复环境前缀，之后不支持
-直接移动安装目录；需要换位置时，从原始压缩包重新安装到新目录。遵循清单中的
-OS/glibc、架构和 SDK 要求；aarch64 包不能直接用于 x86_64 或任意 Linux/SDK 组合。
-相关限制见 [conda-pack 迁移说明](https://conda.github.io/conda-pack/)。
-
-### 2.3 补齐平台 SDK 路径并继续
-
-`activate.sh` 会重新设置 `LD_LIBRARY_PATH` 为包内路径。如果平台要求使用包外的
-SDK 用户态库，应在**每次激活之后**追加平台方给出的实际目录。例如，仅在平台方
-确认需要该目录时执行：
-
-```bash
-export RHINOFORGE_PLATFORM_SDK_LIB="/absolute/path/to/platform/sdk/lib"
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$RHINOFORGE_PLATFORM_SDK_LIB"
-```
-
-按[SDK 与设备权限检查](runtime_assets.zh.md#板卡-sdk-与设备权限)确认所需动态库均能
-解析，并使用平台方指定的推理账号。路径二到此完成，进入[第 3 节](#model-setup)；
-后续仍须准备模型、确认设备空闲并遵循设备锁约定。
+**上述为待实现流程。** 现有 `pack_conda_bundle.py` / `install_conda_bundle.py`
+只处理旧完整包格式，不能用于新的依赖包；本节暂不提供未实现的安装命令。
+新包和工具验证完成后，将在这里补充真实下载及逐步部署命令。
 
 <a id="2-准备公开模型与本地配置"></a>
 <a id="model-setup"></a>
@@ -422,8 +376,8 @@ CPU 参考对比或证明完整数值/任务认证。相关独立检查见[模�
 
 继续使用相同的 `RHINOFORGE_ENV`、源码目录和配套运行时。需要 Python 修改直接
 从源码生效时，将普通安装替换为可编辑安装；修改 native 代码后仍须重新执行构建。
-若从环境包开始开发，先安装[路径一](#source-build)列出的主机编译工具，并设置 `CC=/usr/bin/gcc`、
-`CXX=/usr/bin/g++`，继续使用已安装的同一环境。
+主机编译工具与 `CC=/usr/bin/gcc`、`CXX=/usr/bin/g++` 沿用首次构建时的设置。
+从 GitHub 指定 tag/commit 创建自己的开发分支；依赖包不携带另一份源码快照。
 
 ```bash
 cd "$RHINOFORGE_SOURCE"
@@ -448,22 +402,21 @@ python -m pip wheel . -c constraints/security.txt --no-build-isolation --no-deps
 
 记录源码提交和 diff、解析后的依赖、wheel/native hash 以及 Launch/算子/SDK
 身份，并在新的部署目录验证 wheel。Python 和 native 修改后都要重新构建 wheel；
-`.so` hash 不变不能证明旧 wheel 已包含当前 Python 代码。打包环境前，先将所选
-wheel 以普通方式重新安装；`conda-pack` 不能迁移依赖源码目录的 editable 安装。
+`.so` hash 不变不能证明旧 wheel 已包含当前 Python 代码。更新源码后重新安装/构建；
+依赖和 ABI 未变化时可复用原环境，依赖变化时先核对新需求及环境关联记录。
+制作公开依赖包时另建未安装 RhinoForge 的干净环境，不打包这里的普通或 editable 安装。
 
 <a id="build-bundle"></a>
 
-## 附录：从已验证环境制作交付包
+## 附录：可选音频工具与环境包维护
 
-本节供维护和交付环境包的人员使用，普通部署用户无需执行。制作包需要 Miniconda
-管理器及由它管理的构建环境；路径二交付的是应用环境，不能假定激活后就有 `conda`
-命令。日常运行和同一环境中的源码开发不要求重新执行本附录。
+本节的音频工具用于在路径一环境中补齐音频场景；Qwen3 文本 FP16 不需要这些工具。
+公开依赖包的制作设计见[独立说明](environment_bundle.zh.md)，它必须从全新、
+未安装 RhinoForge 的依赖环境制作，不能打包下面已经用于开发/推理的环境。
+未来依赖包不附带 Conda 管理器；这里的 `conda install` 命令供路径一用户使用。
 
-使用[路径一](#source-build)的普通安装，或[开发章节](#development)构建后普通安装的
-wheel，不要打包 editable 环境。
-制作 `--profile full` 前，在同一环境中安装音视频库和全部三组 Python 可选依赖。
-先安装 Conda 包，让其依赖解析先完成，再安装 Python 可选依赖。继续使用路径一
-的 packaging/setuptools 兼容范围，不让 pip 替换 Conda 安装的副本：
+需要全部三组扩展时，先安装 Conda 音视频库，再安装 Python extras。保持路径一的
+packaging/setuptools 兼容范围，不让 pip 替换 Conda 管理的副本：
 
 ```bash
 export RHINOFORGE_DOWNLOADS="${RHINOFORGE_DOWNLOADS:-$HOME/rhinoforge-downloads}"
@@ -487,7 +440,7 @@ ffmpeg -version
 各自支持的能力；它们的存在不会自动为本 SoX 构建增加 codec。
 
 下方子 shell 临时清除构建环境中的其他库路径，退出后仍保留当前激活的 Conda
-环境。源压缩包和许可证保存在环境内部，随完整包一起交付。
+环境。源压缩包和许可证保存在环境内部，供后续核对和分发审查。
 
 ```bash
 export RHINOFORGE_SOX_BUILD="$RHINOFORGE_WORKDIR/sox-build"
@@ -540,32 +493,11 @@ SOX_SOURCE
 上述短命令先生成 16 kHz、16-bit 单声道 PCM 的 800 个采样，再重采样为 8 kHz 的
 400 个采样。它只检查这条 CLI 路径，不代表所有音频模型或 codec 都已验证。
 
-仅含基础依赖的环境使用 `--profile text`；Qwen3 文本示例不需要这些可选依赖和音视频
-工具。先检查依赖并运行目标模型。`conda-pack` 可能需要包缓存中的记录修复前缀，
-因此完成打包前，须保留 `CONDA_PKGS_DIRS` 和其中的下载缓存，不要执行 `conda clean`
-或提前删除缓存。`--runtime-notices` 目录必须包含提供方原始 `RELEASE.txt` 和
-`DISTRIBUTION_TERMS.txt`。然后传入验证时实际使用的运行时路径：
+这些命令只补充音视频依赖，不会生成公开环境包。制作期间须保留 Conda 包缓存
+直到打包完成；缓存不作为发布内容。保留包内所需的前缀迁移记录，使用独立的干净
+依赖环境，并验证不同绝对路径下的部署、源码
+构建和受影响的模型路径。第三方依赖应附带各自所需的许可证、声明和源码材料；
+SoX 的材料不能代替 FFmpeg、libsndfile 等其他组件的材料。
 
-```bash
-python -m pip install "conda-pack==0.8.1"
-python -m pip check
-python scripts/pack_conda_bundle.py \
-  --env "$RHINOFORGE_ENV" --source "$RHINOFORGE_SOURCE" \
-  --launch "$RHINO_LAUNCH_ROOT" \
-  --main-ref "$RPU_KERNEL_LIB_PATH" \
-  --expansion-ref "$RPU_KERNEL_LIB_PATH_EXPANSION" \
-  --sdk-version "REPLACE_WITH_VALIDATED_SDK_VERSION" \
-  --runtime-notices /absolute/path/to/provider-runtime-notices \
-  --profile full \
-  --output /absolute/path/to/new/rhinoforge-conda.tar.gz
-```
-
-仅对提供方允许随包分发的 SDK 用户态库使用
-`--sdk-libs-dir /absolute/path/to/redistributable-sdk-libraries`；未包含的 SDK 库
-须在目标机提供。模型权重和私人缓存放在环境之外。压缩包、校验和和清单应一起
-保留，交付前必须在**不同绝对路径**下解包，并用新解包的环境跑通 Qwen3-0.6B FP16。
-仅编译成功不能证明迁移和板卡兼容性。
-
-交付前还须核验包内全部 Conda / pip 依赖及用户态运行资产的分发条件，准备相应的
-许可证、声明及所需源码材料。SoX 的材料不能代替其他依赖的材料；安装和推理验证
-通过也不等于包内所有内容已取得公开分发授权。
+旧完整包的打包脚本不属于新公开依赖包流程。发布状态、版本关联和工具改造要求
+统一见[依赖环境包设计](environment_bundle.zh.md)。

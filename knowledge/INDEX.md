@@ -22,8 +22,10 @@ and source remain authoritative; see [the schema](SCHEMA.md) and
   Adapter-only CausalLM checklist.
 - [Porting pitfalls](../docs/pitfalls.md): focused correctness triage.
 - [Install, run and develop](../docs/getting_started.md): Miniconda3, the single
-  `RHINOFORGE_ENV`, complete environment bundles, source/editable/wheel builds,
+  `RHINOFORGE_ENV`, planned dependency bundles, source/editable/wheel builds,
   metadata checks without device access, and first inference.
+- [Dependency environment design](../docs/environment_bundle.md): public dependency-only
+  archives, independent versions, source binding and the boundary with platform assets.
 - [Restricted runtime assets](../docs/runtime_assets.md): matching external
   runtime packages, provider integrity checks, and installation.
 - [Run and debug models](../docs/model_testing.md): direct examples,
