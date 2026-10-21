@@ -1,0 +1,22 @@
+{
+  "schema": "rhinoforge-dependency-env/v1",
+  "environment_id": "deps-2026.10.1",
+  "profile": "full",
+  "extras": [
+    "audio",
+    "dev",
+    "vision",
+    "vla"
+  ],
+  "platform": {
+    "system": "Linux",
+    "machine": "aarch64",
+    "glibc_minimum": "2.35"
+  },
+  "python": "3.12.15",
+  "requirements_sha256": "088ca4001ed5c0b217ec42bce060f8717df03315961e13c20bf0b8abdea4fee2",
+  "archive_url": "https://github.com/HUIXI-AI/RhinoForge/releases/download/deps-2026.10.1/rhinoforge-deps-2026.10.1-full-linux-aarch64-py312.tar.gz",
+  "archive_sha256": "bacf193f7dd266499c01931979610f0edd5356ba217a45ad199e378435953381",
+  "manifest_sha256": "7bf4beae4a6e04908f25278b93bf647b3249dbd3b80bcf927f15fba904d8f35c",
+  "lock_sha256": "1da82a8a773114f08e7f29f68bb0c7527294b739d0dae2221c085784b2645c96"
+}

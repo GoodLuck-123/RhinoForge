@@ -3,13 +3,12 @@
 [简体中文](runtime_assets.zh.md) | English
 
 RhinoForge source and wheels do not contain Rhino Launch binaries, the external
-main and expansion operator assets, the board SDK, or model weights. The planned
+main and expansion operator assets, the board SDK, or model weights. The
 [public dependency environment bundle](environment_bundle.md) also excludes all
 of these components and RhinoForge itself. Obtain RhinoForge from GitHub, the
 OS/driver and complete SDK from the platform provider, and the matching Launch
 and operator assets through their separate delivery channel. Follow each
-package's distribution terms and integrity instructions. No public dependency
-environment bundle has been released yet.
+package's distribution terms and integrity instructions.
 
 This `1.3.0.dev0` development line depends on archived Rhino Launch **1.2.0**,
 commit `3dd1b410f5f46373997fef3dfbf9b67eecec6a84`, with CMake version `1.2.0` and
@@ -142,14 +141,17 @@ application install, not a clean SDK/driver installation.
 After activating the Python environment, apply the provider's loader setup.
 If it requires `LD_LIBRARY_PATH`, use the actual SDK library directory (or
 directories) supplied by the platform; the following example assumes all three
-libraries are in one directory. Preserve the SDK paths when adding Launch:
+libraries are in one directory. Keep the current application environment's `lib`
+first, followed by Launch and SDK paths. This matters when the SDK uses `/lib`
+or `/usr/lib`, which also contain system libraries that could otherwise override
+the environment's media and C++ runtime libraries:
 
 ```bash
 export RHINOFORGE_SDK_LIB_DIR="/absolute/path/to/platform-sdk/lib"
 test -r "$RHINOFORGE_SDK_LIB_DIR/libHxMem.so"
 test -r "$RHINOFORGE_SDK_LIB_DIR/libHxil.so"
 test -r "$RHINOFORGE_SDK_LIB_DIR/librpu_api.so"
-export LD_LIBRARY_PATH="$RHINO_LAUNCH_ROOT/lib:$RHINOFORGE_SDK_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${RHINOFORGE_ENV:+$RHINOFORGE_ENV/lib:}$RHINO_LAUNCH_ROOT/lib:$RHINOFORGE_SDK_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
 Inspect library resolution and device nodes:

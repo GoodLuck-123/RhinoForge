@@ -36,16 +36,16 @@ installation.
 
 | Path | Steps | Use it when |
 |---|---|---|
-| [A. Build from source](#source-build) | Install Miniconda3, create the environment, install dependencies and compile RhinoForge | Available now, including for development |
-| [B. Use our dependency environment bundle](#bundle-deploy) | Obtain and activate the dependency bundle, then clone and compile RhinoForge | Planned: avoids repeated downloads of Python and third-party dependencies |
+| [A. Build from source](#source-build) | Install Miniconda3, create the environment, install dependencies and compile RhinoForge | Step-by-step dependency installation or a custom environment |
+| [B. Use our dependency environment bundle](#bundle-deploy) | Obtain and activate the dependency bundle, then clone and compile RhinoForge | Avoids repeated downloads of Python and third-party dependencies |
 
 Both paths use the same `RHINOFORGE_ENV` for installation, inference and later
-development. Path B will replace environment creation and dependency downloads;
+development. Path B replaces environment creation and dependency downloads;
 it still requires the GitHub source, host compiler, platform SDK and separately
-delivered runtime assets. **The new dependency-only bundle is not yet built or
-published. Use path A for executable installation instructions today.** See the
-[environment bundle design](environment_bundle.md) for its release and source
-version relationship.
+delivered runtime assets. The current environment is
+[`deps-2026.10.1` (preview)](https://github.com/HUIXI-AI/RhinoForge/releases/tag/deps-2026.10.1).
+See the [environment bundle guide](environment_bundle.md) for contents, known
+limitations and the relationship to source versions.
 
 <a id="source-build"></a>
 <a id="1-install-miniconda3-and-build-the-source"></a>
@@ -214,8 +214,7 @@ FP16 requires none of them. See the [speech guide](qwen3_audio.md) for its input
 If downloads are slow or the board is offline, a mirror or wheel cache must
 supply packages compatible with Python 3.12 and the target architecture; record
 its source instead of changing the pinned Torch/Transformers versions. The
-planned dependency bundle in [path B](#bundle-deploy) will cover this use case
-once its release is available. The source installation also supports
+dependency bundle in [path B](#bundle-deploy) avoids individual downloads. The source installation also supports
 [editable development and wheel builds](#development).
 
 Path A is complete. Skip path B and continue with [model preparation](#model-setup).
@@ -223,60 +222,110 @@ Path A is complete. Skip path B and continue with [model preparation](#model-set
 <a id="bundle-deploy"></a>
 <a id="6-deploy-a-complete-environment-bundle"></a>
 
-## 2. Path B: use our dependency environment bundle (planned)
+## 2. Path B: use the dependency Conda environment bundle
 
-The public bundle will contain **Python 3.12 and third-party dependencies and
-tools only**. Its `full` profile covers the default, `vision`, `vla`, `audio` and
-`dev` dependencies, plus build and media tools such as CMake, Ninja, conda-pack,
-SoX, FFmpeg and libsndfile. It will contain no RhinoForge source, installed
-RhinoForge package, native extension or wheel; no SDK libraries; and no Rhino
-Launch, operator assets or model weights. The host compiler remains a platform
-prerequisite. A complete dependency profile does not establish validation of
-every model.
+### B1. Obtain source and its matching environment version
 
-### B1. Obtain a compatible dependency release
+Dependency bundles have independent GitHub Releases. The full profile contains
+Python 3.12, default/vision/vla/audio/dev dependencies and build/media tools.
+RhinoForge, SDK libraries, Launch, operators and models remain separate; build
+and develop RhinoForge in your own Git checkout.
 
-**No new dependency-only archive, public download URL or installer is available
-yet.** The intended delivery location is this repository's GitHub Releases after
-a clean dependency-only build, redistribution review and relocation/build
-validation. The environment will have its own version. Each supported RhinoForge
-source revision will identify the compatible environment release, manifest and
-SHA256; a source change will not automatically require a new environment release.
-See [environment bundle contents and release design](environment_bundle.md).
+Use the [GitHub Release](https://github.com/HUIXI-AI/RhinoForge/releases/tag/deps-2026.10.1)
+identified by the checkout's [`release/environment.json`](../release/environment.json).
+This first version is a preview; read its `KNOWN_ISSUES.md` before deployment.
+Its support boundary uses reviewed local models, media and datasets.
 
-The existing internal full bundle contains installed RhinoForge and restricted
-runtime assets. It is not the planned public dependency bundle, and must not be
-uploaded as one. The current `scripts/pack_conda_bundle.py` and
-`scripts/install_conda_bundle.py` implement that older full-bundle format;
-they are not installation instructions for the new format.
+The host needs Bash, Python 3.10 or newer and system C/C++ build tools, but no
+Miniconda manager or conda create step. On Ubuntu/Debian, prepare these tools
+and clone the source. If the provider specifies a tag/commit, check it out before
+reading its environment binding:
 
-### B2. Planned deployment and development flow
+```bash
+set -e
+sudo apt-get update
+sudo apt-get install --yes build-essential pkg-config git curl ca-certificates bzip2 xz-utils python3
+export RHINOFORGE_WORKDIR="$HOME/rhinoforge"
+export RHINOFORGE_SOURCE="$RHINOFORGE_WORKDIR/source"
+export RHINOFORGE_BUILD="$RHINOFORGE_WORKDIR/build"
+export RHINOFORGE_DEPENDENCIES="$RHINOFORGE_WORKDIR/dependencies"
+test "$(uname -m)" = aarch64
+mkdir -p "$RHINOFORGE_WORKDIR"
+git clone https://github.com/HUIXI-AI/RhinoForge.git "$RHINOFORGE_SOURCE"
+cd "$RHINOFORGE_SOURCE"
+git rev-parse HEAD
+```
 
-Once the release and its installer are available:
+The checkout's `release/environment.json` binds source to the environment ID,
+platform, requirements digest, download URL and SHA256. Source changes that
+preserve the normalized dependency recipe and ABI can reuse the same archive.
 
-1. Obtain the dependency archive and its published checksum and manifest for
-   the board architecture. Install into a new final prefix, complete relocation,
-   and activate it as `RHINOFORGE_ENV`. The target will not need a separate
-   Miniconda manager to use the unpacked environment.
-2. Clone RhinoForge from GitHub, check out the tag or commit selected for the
-   deployment, and verify that its environment requirement matches the archive.
-   Keep the source and build directories outside the dependency prefix.
-3. Install the host build tools from [A1](#a1-download-and-install-miniconda3),
-   select the compiler, and configure the platform SDK and separately delivered
-   Launch/operator assets as in [A3](#a3-obtain-the-source-and-configure-the-supplied-runtime).
-4. Build and install that RhinoForge checkout in `RHINOFORGE_ENV` using its
-   verified dependency set, then continue with [model preparation](#model-setup).
-5. For development, use the same checkout and environment with an
-   [editable installation](#development). Rebuild after native changes. When
-   updating the source, recheck its dependency and runtime requirements before
-   reusing the environment.
+### B2. Download, verify and deploy dependencies
 
-The release instructions will supply the exact download, checksum verification,
-relocation and build commands. This section describes the agreed design, not a
-working installation route today. An aarch64 environment is not portable to
-x86_64 or every Linux/SDK combination. Moving a relocated environment will
-require a fresh installation into its new final prefix; see
-[conda-pack's relocation constraints](https://conda.github.io/conda-pack/).
+Continue in the same shell. Read the actual URL and checksum from the checkout;
+the standalone installer downloads, checks, extracts, relocates and runs pip
+check. The installer uses host Python; builds and inference use bundled Python 3.12:
+
+```bash
+cd "$RHINOFORGE_SOURCE"
+mapfile -t rf_bundle_fields < <(python3 - <<'PYENV'
+import json
+from pathlib import Path
+record = json.loads(Path("release/environment.json").read_text())
+print(record["archive_url"])
+print(record["archive_sha256"])
+PYENV
+)
+python3 scripts/install_dependency_env.py \
+  --archive "${rf_bundle_fields[0]}" \
+  --sha256 "${rf_bundle_fields[1]}" \
+  --prefix "$RHINOFORGE_DEPENDENCIES"
+unset rf_bundle_fields
+source "$RHINOFORGE_DEPENDENCIES/activate.sh"
+python scripts/dependency_environment.py \
+  --source "$RHINOFORGE_SOURCE" --prefix "$RHINOFORGE_ENV"
+```
+
+The installation directory must be new, with an existing writable parent. For an
+offline board, transfer the archive and source first, then use the local archive
+path with the same published SHA256. Installation does not download pip/Conda
+packages, install RhinoForge or access the device.
+
+Activation sets `RHINOFORGE_ENV="$RHINOFORGE_DEPENDENCIES/env"`, clears stale
+Python/native overrides and preserves platform library paths. In a new shell,
+set source/work paths and activate again. The installer checks archive identity,
+architecture and glibc; confirm SDK, driver and device permissions separately.
+Install directly at the final path; to move later, reinstall from the archive.
+
+### B3. Configure separate runtime assets and build RhinoForge
+
+Follow the [runtime guide](runtime_assets.md#configure-paths) to set
+`RHINO_LAUNCH_ROOT`, `RPU_KERNEL_LIB_PATH`, `RPU_KERNEL_LIB_PATH_EXPANSION` and
+platform SDK loader paths, and complete the [SDK/access checks](runtime_assets.md#board-sdk-and-device-access).
+The dependency environment supplies none of those components.
+
+After dependency compatibility checks pass, build in the same shell.
+`--no-index --no-deps --no-build-isolation` uses the verified environment without
+redownloading Torch or silently changing dependencies:
+
+```bash
+cd "$RHINOFORGE_SOURCE"
+export CC=/usr/bin/gcc CXX=/usr/bin/g++
+test -r "$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch/rhino_launchConfig.cmake"
+python -m pip install '.[vision,vla,audio,dev]' --no-index --no-deps --no-build-isolation \
+  --config-settings=build-dir="$RHINOFORGE_BUILD" \
+  --config-settings=cmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch" \
+  --config-settings=build.tool-args=-j2
+python -m pip check
+python -c 'from importlib.metadata import version; print("RhinoForge:", version("rhinoforge"))'
+```
+
+One-command deployment covers dependencies only. RF still needs a build and
+separate assets; offline use also requires system tools, SDK, Launch/operators,
+models and inputs in advance. Continue with [model preparation](#model-setup)
+and inference, then [editable development](#development) in your own Git branch
+using the same environment. See [bundle contents, redistribution materials and
+known limitations](environment_bundle.md).
 
 <a id="model-setup"></a>
 <a id="2-prepare-the-public-model-and-local-configuration"></a>
@@ -356,8 +405,8 @@ sudo env -i \
   "$RHINOFORGE_ENV/bin/python" -m examples.run --config "$RHINOFORGE_CONFIG"
 ```
 
-Review `LD_LIBRARY_PATH` beforehand so it contains only the selected Launch and
-required SDK paths. The process-local Git setting permits provenance recording
+Review `LD_LIBRARY_PATH` beforehand: retain the current `$RHINOFORGE_ENV/lib`,
+selected Launch and required SDK paths, and remove stale environment paths. The process-local Git setting permits provenance recording
 for this checkout. Privileged execution can create root-owned private result
 subdirectories; after the process exits, return only this newly created task's
 results to the calling user if the platform permits it:
@@ -428,9 +477,16 @@ Continue with [Model assets](model_assets.md),
 
 Keep the same `RHINOFORGE_ENV`, source checkout and matching runtime. To make
 Python edits take effect directly from the checkout, replace the regular install
-with an editable one; native changes still require rerunning the build. A future
-dependency-bundle installation will use this same workflow. After updating the
-checkout, check its dependency and runtime requirements before rebuilding.
+with an editable one; native changes still require rerunning the build. Keep the
+same system compiler settings, `CC=/usr/bin/gcc` and `CXX=/usr/bin/g++`. Create your
+development branch from the selected GitHub tag/commit; the dependency archive
+does not contain a separate source snapshot. After updating the checkout, check
+its dependency and runtime requirements before rebuilding.
+
+Path B already includes `dev`: rerun the compatibility check from B2, then add
+`--no-index --no-deps` to the following `pip install` command to keep the bundled
+dependencies unchanged. Path A uses the command as shown to resolve and install
+any missing development dependencies.
 
 ```bash
 cd "$RHINOFORGE_SOURCE"

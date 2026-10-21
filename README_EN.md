@@ -68,12 +68,10 @@ guide](docs/getting_started.md):
 
 - [Build from source](docs/getting_started.md#source-build): install Miniconda3,
   create Python 3.12, install dependencies and compile RhinoForge.
-- [Use our dependency Conda bundle](docs/getting_started.md#bundle-deploy)
-  **(planned)**: download a compatible dependency environment from GitHub Releases,
-  then clone and compile RhinoForge. The new archive and installer are not yet
-  available; use the source-build path today.
+- [Use our dependency Conda bundle](docs/getting_started.md#bundle-deploy): download a compatible dependency environment from GitHub Releases,
+  then clone and compile RhinoForge.
 
-Both paths use one `RHINOFORGE_ENV` for inference and development. The planned
+Both paths use one `RHINOFORGE_ENV` for inference and development. The
 public bundle contains Python and third-party dependencies/tools only. RhinoForge
 comes from GitHub; the platform supplies the complete SDK, including its
 user-space libraries. Launch/operator assets and model weights remain separate.

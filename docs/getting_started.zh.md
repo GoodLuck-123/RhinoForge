@@ -32,14 +32,15 @@ Rhino Launch **1.2.0** 是独立运行组件，不能与板卡 SDK 版本混用�
 
 | 路径 | 需要做什么 | 适用情况 |
 |---|---|---|
-| [路径一：从 Miniconda3 开始构建](#source-build) | 安装 Miniconda3 → 创建 Python 3.12 环境 → 安装依赖 → 获取源码和运行资产并编译 | 当前可执行的完整部署流程 |
-| [路径二：使用我们提供的依赖环境包](#bundle-deploy) | 下载、校验、解包环境 → 从 GitHub 获取源码 → 配置运行资产并编译 | 新包发布后，省去 Torch 等第三方依赖的逐个下载与安装 |
+| [路径一：从 Miniconda3 开始构建](#source-build) | 安装 Miniconda3 → 创建 Python 3.12 环境 → 安装依赖 → 获取源码和运行资产并编译 | 逐步安装依赖，也适合自定义环境 |
+| [路径二：使用我们提供的依赖环境包](#bundle-deploy) | 下载、校验、解包环境 → 从 GitHub 获取源码 → 配置运行资产并编译 | 省去 Torch 等第三方依赖的逐个下载与安装 |
 
 两条路径都使用一个 `RHINOFORGE_ENV`，都从 GitHub 获取并编译 RhinoForge，
 随后共用模型准备、运行和开发步骤。路径二只替代依赖环境的创建与安装，不包含
 RhinoForge、板卡 SDK、Launch 或算子，也不免除本地编译。
-**新的依赖环境包尚未制作发布，目前请使用路径一。** 交付范围及版本关联见
-[依赖环境包设计](environment_bundle.zh.md)。
+当前依赖环境版本为 [`deps-2026.10.1`（预览）](https://github.com/HUIXI-AI/RhinoForge/releases/tag/deps-2026.10.1)，
+包含默认依赖及全部扩展。具体范围、已知限制和版本关联见
+[依赖环境包说明](environment_bundle.zh.md)。
 
 <a id="1-安装-miniconda3-并构建源码"></a>
 <a id="source-build"></a>
@@ -192,7 +193,7 @@ PY
 `'.[audio]'`；`'.[vision,vla,audio]'` 安装全部三组可选依赖。Qwen3 文本 FP16 无需
 这些可选依赖，语音所需输入见[语音指南](qwen3_audio.zh.md)。
 
-依赖包发布后，下载过慢的用户可使用[路径二](#bundle-deploy)准备环境；
+下载过慢的用户可使用[路径二](#bundle-deploy)准备环境；
 离线部署仍须提前备齐源码、系统工具、SDK、运行资产和模型。
 若自行使用镜像或 wheel 缓存，包必须适配 Python 3.12 和板卡架构，并记录下载源；
 不要靠更换固定的 Torch/Transformers 版本解决下载速度问题。
@@ -203,43 +204,102 @@ PY
 <a id="6-部署完整环境包"></a>
 <a id="bundle-deploy"></a>
 
-## 路径二：使用我们提供的依赖 Conda 环境包（待发布）
+## 路径二：使用依赖 Conda 环境包
 
-### 2.1 获取与源码匹配的环境版本
+### 2.1 获取源码与匹配的环境版本
 
-计划通过 **GitHub Releases** 提供公开依赖包、SHA256、环境清单、精确锁文件及
-第三方分发材料。当前没有此类包的下载地址或 SHA256；已有内部完整归档包含
-RhinoForge 和受限运行资产，不是新的依赖包，也不能改名后公开发布。
+依赖包通过 GitHub Releases 单独版本化，包含 Python 3.12、默认依赖、`vision`、
+`vla`、`audio`、`dev` 和构建/音视频工具。它不包含 RhinoForge、SDK 库、Launch、
+算子或模型；用户在自己的 Git checkout 中编译和开发。
 
-首包采用 `full` 配置，包含 Python 3.12、默认依赖、`vision`、`vla`、`audio`、
-`dev` 及 CMake/Ninja、SoX/FFmpeg/libsndfile 等工具。**不包含 RhinoForge 源码、
-已安装包、wheel/native、SDK 用户态库、Launch、算子或模型。** 包内也不包含
-Miniconda 管理器；目标机仍需路径一列出的系统 C/C++ 构建工具。
+从 [GitHub Release](https://github.com/HUIXI-AI/RhinoForge/releases/tag/deps-2026.10.1) 获取
+与当前源码的 [`release/environment.json`](../release/environment.json) 匹配的包。
+首个版本为预览包，已知依赖限制随 Release 的 `KNOWN_ISSUES.md` 提供；
+用于已确认来源的本地模型、媒体和数据。
 
-环境采用独立版本。GitHub 源码将记录推荐的环境 ID、平台/Python 基线、真实
-下载地址和 SHA256；依赖不变时，多个源码版本可共用一个环境包。具体字段及
-制作流程见[依赖环境包设计](environment_bundle.zh.md)。
+目标机需要 Bash、系统 Python 3.10 或更新版本，以及 C/C++ 构建工具。无需安装
+Miniconda 管理器，也无需执行 `conda create`。Ubuntu/Debian 先准备系统工具，
+再获取源码；使用提供方指定的 tag/commit 时，在读取环境记录前切换到该版本：
 
-### 2.2 部署后仍从 GitHub 构建 RhinoForge
+```bash
+set -e
+sudo apt-get update
+sudo apt-get install --yes build-essential pkg-config git curl ca-certificates bzip2 xz-utils python3
+export RHINOFORGE_WORKDIR="$HOME/rhinoforge"
+export RHINOFORGE_SOURCE="$RHINOFORGE_WORKDIR/source"
+export RHINOFORGE_BUILD="$RHINOFORGE_WORKDIR/build"
+export RHINOFORGE_DEPENDENCIES="$RHINOFORGE_WORKDIR/dependencies"
+test "$(uname -m)" = aarch64
+mkdir -p "$RHINOFORGE_WORKDIR"
+git clone https://github.com/HUIXI-AI/RhinoForge.git "$RHINOFORGE_SOURCE"
+cd "$RHINOFORGE_SOURCE"
+git rev-parse HEAD
+```
 
-新包发布后，用户流程为：
+`release/environment.json` 绑定当前源码与环境 ID、平台、依赖摘要、下载 URL 和
+SHA256。环境版本独立于 RhinoForge；只改代码而不改依赖时，可以复用同一个包。
 
-1. 按所选源码的环境记录获取包，校验 SHA256，解包到最终目录并完成前缀迁移。
-2. 激活同一个 `RHINOFORGE_ENV`，无需另装 Miniconda3 或重新创建应用环境。
-3. 从 GitHub 检出指定 tag/commit，源码目录与环境目录分开；配置平台 SDK 及
-   单独交付的 Launch、算子资产，使用[路径一的配置说明](#source-build)。
-4. 检查环境是否满足当前源码全部运行和构建依赖，再在本机编译 RhinoForge。
-   通过兼容性检查后使用 `--no-build-isolation --no-deps`，避免重新下载依赖。
-5. 继续[模型准备](#model-setup)、运行和[同环境开发](#development)。
+### 2.2 下载、校验和部署依赖环境
 
-“一键部署”指依赖环境部署，不是完整模型部署。离线使用须提前取得 GitHub 源码、
-系统编译工具、SDK、运行资产与模型。激活环境后按[运行资产说明](runtime_assets.zh.md)
-设置 SDK/Launch 动态库路径；环境包不会替平台安装或选择这些组件。
-迁移后不要直接移动环境目录，需要换位置时从原压缩包重新部署。
+保持上一节的同一 shell。下面从当前 checkout 读取真实下载地址和校验和，由
+安装器下载、校验、解包、执行前缀迁移并检查包依赖。安装脚本使用系统 Python，
+解包后的 Python 3.12 用于构建和推理：
 
-**上述为待实现流程。** 现有 `pack_conda_bundle.py` / `install_conda_bundle.py`
-只处理旧完整包格式，不能用于新的依赖包；本节暂不提供未实现的安装命令。
-新包和工具验证完成后，将在这里补充真实下载及逐步部署命令。
+```bash
+cd "$RHINOFORGE_SOURCE"
+mapfile -t rf_bundle_fields < <(python3 - <<'PYENV'
+import json
+from pathlib import Path
+record = json.loads(Path("release/environment.json").read_text())
+print(record["archive_url"])
+print(record["archive_sha256"])
+PYENV
+)
+python3 scripts/install_dependency_env.py \
+  --archive "${rf_bundle_fields[0]}" \
+  --sha256 "${rf_bundle_fields[1]}" \
+  --prefix "$RHINOFORGE_DEPENDENCIES"
+unset rf_bundle_fields
+source "$RHINOFORGE_DEPENDENCIES/activate.sh"
+python scripts/dependency_environment.py \
+  --source "$RHINOFORGE_SOURCE" --prefix "$RHINOFORGE_ENV"
+```
+
+安装目标目录必须尚不存在；父目录须存在且可写。离线板卡先传输归档和源码，
+将 `--archive` 改为本地文件路径，SHA256 仍来自同一源码记录。安装过程不需要
+下载 pip/Conda 依赖，不安装 RhinoForge，也不访问 RPU。
+
+激活脚本设置 `RHINOFORGE_ENV="$RHINOFORGE_DEPENDENCIES/env"`，清除旧 Python/native
+覆盖变量，并保留平台库路径。每次打开新 shell 均重新设置源码/工作目录并激活。
+安装器检查归档身份、架构和 glibc；SDK、驱动和设备权限仍按平台说明确认。
+直接部署到最终目录；迁移后换位置时，从原归档重新安装。
+
+### 2.3 配置独立运行资产并编译 RhinoForge
+
+按[运行资产说明](runtime_assets.zh.md#配置路径)设置 `RHINO_LAUNCH_ROOT`、
+`RPU_KERNEL_LIB_PATH`、`RPU_KERNEL_LIB_PATH_EXPANSION` 和平台 SDK 动态库路径，
+并完成[SDK 与权限检查](runtime_assets.zh.md#板卡-sdk-与设备权限)。
+依赖环境不会提供或替换这些组件。
+
+兼容性检查通过后，在同一 shell 构建 RF。`--no-index --no-deps --no-build-isolation`
+使本次构建使用已核对的包内依赖，不再下载 Torch 或隐式调整依赖版本：
+
+```bash
+cd "$RHINOFORGE_SOURCE"
+export CC=/usr/bin/gcc CXX=/usr/bin/g++
+test -r "$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch/rhino_launchConfig.cmake"
+python -m pip install '.[vision,vla,audio,dev]' --no-index --no-deps --no-build-isolation \
+  --config-settings=build-dir="$RHINOFORGE_BUILD" \
+  --config-settings=cmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch" \
+  --config-settings=build.tool-args=-j2
+python -m pip check
+python -c 'from importlib.metadata import version; print("RhinoForge:", version("rhinoforge"))'
+```
+
+“一键部署”只覆盖依赖环境，仍需编译 RF 并准备独立资产。离线使用还需提前备齐
+系统编译工具、SDK、Launch/算子、模型及输入。继续[模型准备](#model-setup)和运行；
+后续在自己的 Git 分支中使用[同环境 editable 开发](#development)。
+环境包的清单、第三方分发材料及已知限制见[依赖包说明](environment_bundle.zh.md)。
 
 <a id="2-准备公开模型与本地配置"></a>
 <a id="model-setup"></a>
@@ -314,7 +374,8 @@ sudo env -i \
   "$RHINOFORGE_ENV/bin/python" -m examples.run --config "$RHINOFORGE_CONFIG"
 ```
 
-先检查 `LD_LIBRARY_PATH` 只保留所选 Launch 与必需 SDK 路径。进程级 Git 配置用于
+先检查 `LD_LIBRARY_PATH` 保留当前 `$RHINOFORGE_ENV/lib`、所选 Launch 与必需 SDK 路径，
+并去除旧环境路径。进程级 Git 配置用于
 记录当前 checkout 的来源。特权执行可能生成 root 所有的私有结果子目录；进程结束
 后，若平台允许，仅将本次新建任务结果归还调用用户：
 
@@ -378,6 +439,9 @@ CPU 参考对比或证明完整数值/任务认证。相关独立检查见[模�
 从源码生效时，将普通安装替换为可编辑安装；修改 native 代码后仍须重新执行构建。
 主机编译工具与 `CC=/usr/bin/gcc`、`CXX=/usr/bin/g++` 沿用首次构建时的设置。
 从 GitHub 指定 tag/commit 创建自己的开发分支；依赖包不携带另一份源码快照。
+路径二已包含 `dev` 依赖：先重新执行第 2.2 节的兼容性检查，并在下方
+`pip install` 命令中追加 `--no-index --no-deps`，确保开发安装不下载或改动依赖。
+路径一按下方命令解析并安装尚缺的开发依赖。
 
 ```bash
 cd "$RHINOFORGE_SOURCE"
@@ -413,7 +477,7 @@ python -m pip wheel . -c constraints/security.txt --no-build-isolation --no-deps
 本节的音频工具用于在路径一环境中补齐音频场景；Qwen3 文本 FP16 不需要这些工具。
 公开依赖包的制作设计见[独立说明](environment_bundle.zh.md)，它必须从全新、
 未安装 RhinoForge 的依赖环境制作，不能打包下面已经用于开发/推理的环境。
-未来依赖包不附带 Conda 管理器；这里的 `conda install` 命令供路径一用户使用。
+依赖包不附带 Conda 管理器；这里的 `conda install` 命令供路径一用户使用。
 
 需要全部三组扩展时，先安装 Conda 音视频库，再安装 Python extras。保持路径一的
 packaging/setuptools 兼容范围，不让 pip 替换 Conda 管理的副本：
@@ -499,5 +563,5 @@ SOX_SOURCE
 构建和受影响的模型路径。第三方依赖应附带各自所需的许可证、声明和源码材料；
 SoX 的材料不能代替 FFmpeg、libsndfile 等其他组件的材料。
 
-旧完整包的打包脚本不属于新公开依赖包流程。发布状态、版本关联和工具改造要求
-统一见[依赖环境包设计](environment_bundle.zh.md)。
+旧完整包脚本继续只用于历史交付。新的 `pack_dependency_env.py` 只接收干净依赖
+环境和审核后的第三方材料；制作命令和边界见[依赖包说明](environment_bundle.zh.md)。
