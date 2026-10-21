@@ -171,7 +171,7 @@ factory 接收 checkpoint、steps、量化选择和组件配置。修改安装�
 
 ### RTC FP16：delay 0–6
 
-[RTC 模板](rtc_fp16.toml)绑定上述固定 v3 源码与 checkpoint、FP16、batch 1、30×96 动作和 18 层专家，使用十步展开去噪。该精确输入范围已完成本地 R1 硬件验证；配置登记仍为 caller-factory 模板，不扩展其他 profile 的支持状态。W8、v1、其他 horizon/步数及 `delay > 6` 不在此契约内。
+[RTC 模板](rtc_fp16.toml)绑定上述固定 v3 源码与 checkpoint、FP16、batch 1、30×96 动作和 18 层专家，使用十步展开去噪。该精确输入范围已完成本地 R1 硬件验证；配置登记仍为 `example_only` 模板，使用内置 v3 factory，不扩展其他 profile 的支持状态。W8、v1、其他 horizon/步数及 `delay > 6` 不在此契约内。
 
 继续使用[统一安装指南](../../../../docs/getting_started.md)创建的 Miniconda3 `RHINOFORGE_ENV`。完整环境包可提供 `vla` 依赖；运行 RTC 还需要包含本节接口的新版本 RhinoForge 源码及同版本编译的 native 扩展。旧环境包需按统一指南更新或重新构建，不能仅复制 RTC Python 文件或 TOML 后沿用旧 native 库。按照前文生成普通 `factory.json`、`qin.pt` 和 `request.pt`，再创建 RTC 输入：
 
