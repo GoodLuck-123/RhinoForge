@@ -162,6 +162,7 @@ def test_adapter_routes_only_plain_8b_to_bounded_move(monkeypatch, size, w8):
     adapter = qwen3.Qwen3Adapter(model)
     calls = []
     monkeypatch.setattr(qwen3, "_claim_live_instance", lambda _model: None)
+    monkeypatch.setattr(qwen3, "require_native_backend", lambda: None)
 
     def fail_move(owner, **kwargs):
         calls.append((owner, kwargs))
@@ -212,6 +213,7 @@ def test_late_upload_failure_poison_preserves_completed_moves(monkeypatch):
     adapter = qwen3.Qwen3Adapter(model)
     claims, moves = [], []
     monkeypatch.setattr(qwen3, "_claim_live_instance", lambda owner: claims.append(id(owner)))
+    monkeypatch.setattr(qwen3, "require_native_backend", lambda: None)
     monkeypatch.setattr(FakeTensor, "data_ptr", lambda tensor: id(tensor))
     monkeypatch.setattr(weights, "_release_cpu_weight_pages", lambda: None)
     names = {id(module): name for name, module in model.named_modules()}

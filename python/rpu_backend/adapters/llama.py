@@ -20,6 +20,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from rpu_backend._native_loader import require_native_backend
 # v5-11 NS-03b (D-03e): inline class-patch block absorbed from the deleted
 # `_internal/patches/llama.py` (~49 LOC). Fires LlamaRMSNorm + LlamaRotaryEmbedding
 # class patches at module-load time. Idempotency sentinels guard against
@@ -276,6 +277,7 @@ class LlamaAdapter:
             )
             validate_preinstall(self.model)
 
+            require_native_backend()
             _claim_live_instance(self.model)
 
             self.model._rpu_swizzle_started = True

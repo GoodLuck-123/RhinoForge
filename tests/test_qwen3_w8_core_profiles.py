@@ -52,6 +52,7 @@ def test_exact_w8_decoder_and_head_reach_claim_with_actual_cold_topology(monkeyp
         calls.append(value)
         raise ReachedClaim
     monkeypatch.setattr(qwen3, "_claim_live_instance", claim)
+    monkeypatch.setattr(qwen3, "require_native_backend", lambda: None)
     with pytest.raises(ReachedClaim):
         adapter.to_rpu()
     assert calls == [model]

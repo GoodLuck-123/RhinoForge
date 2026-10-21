@@ -4993,6 +4993,10 @@ void rpu_rhino_vla_set_denoise_loop_adarms_tables(
     const at::Tensor& pair_table,
     const at::Tensor& final_table);
 
+void rpu_rhino_vla_set_denoise_loop_rtc_tables(
+    int64_t handle, const at::Tensor& pair_table, const at::Tensor& final_table);
+void rpu_rhino_vla_prepare_rtc(int64_t handle, int64_t delay);
+
 void rpu_rhino_vla_set_denoise_loop_time_proj_table(
     int64_t handle,
     const at::Tensor& table);
@@ -5059,6 +5063,24 @@ at::Tensor rpu_rhino_vla_denoise_loop_forward(
     double dt,
     int64_t prefix_len,
     int64_t num_steps,
+    at::IntArrayRef planned_stage_descriptor);
+
+at::Tensor rpu_rhino_vla_denoise_loop_rtc_forward(
+    int64_t handle,
+    const at::Tensor& x0_rpu,
+    at::TensorList k_caches_list,
+    at::TensorList v_caches_list,
+    const at::Tensor& cond_all,
+    const at::Tensor& attention_mask,
+    const at::Tensor& state_rpu,
+    const at::Tensor& state_mask_rpu,
+    const at::Tensor& action_mask_rpu,
+    at::Tensor x_out,
+    double dt,
+    int64_t prefix_len,
+    int64_t num_steps,
+    const at::Tensor& action_prefix,
+    int64_t delay,
     at::IntArrayRef planned_stage_descriptor);
 
 // Materialize per-core SPM debug dumps requested during graph build (RhinoVLA).

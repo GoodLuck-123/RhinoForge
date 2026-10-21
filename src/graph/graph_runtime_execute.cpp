@@ -1511,7 +1511,7 @@ void RpuKernelGraph::build_segments_from_nodes() {
     close_segment(nodes_.size());
 
     if (resource_split_count > 0 && log_at(3)) {
-        std::cerr << "[GRAPH-INSTR] AUTO-SPLIT "
+        std::cerr << "[INFO] [GRAPH-INSTR] AUTO-SPLIT "
                   << (graph_label.empty() ? std::string("<unlabeled>") : graph_label)
                   << ": cuts=" << resource_split_count
                   << " segments=" << segments_.size()
@@ -3517,7 +3517,7 @@ void RpuKernelGraph::record_segment_execution(
             record.companion_rc = write_hw_perf_graph_companion(record);
         }
         if ((record.hwperf_rc != 0 || record.companion_rc != 0) && log_at(2)) {
-            std::cerr << "[HW_PERF] graph evidence failed: dump_rc="
+            std::cerr << "[WARN] [HW_PERF] graph evidence failed: dump_rc="
                       << record.hwperf_rc << " companion_rc=" << record.companion_rc
                       << " path=" << record.hwperf_path << "\n";
         }
@@ -3623,7 +3623,7 @@ void RpuKernelGraph::execute_graph_for_recording() {
     static std::atomic<int64_t> g_build_seq{0};
     const int64_t build_seq = ++g_build_seq;
     if (log_at(4)) {
-        std::cerr << "[GRAPH-INSTR] BUILD " << gid << " build#" << build_seq
+        std::cerr << "[DEBUG] [GRAPH-INSTR] BUILD " << gid << " build#" << build_seq
                   << " mix=[" << kernel_histogram_string(nodes_) << "]\n";
     }
     // Cold BUILD uses fallback slot 0. Optional additional prepared queues
@@ -3650,7 +3650,7 @@ void RpuKernelGraph::execute_graph_for_recording() {
         // at DEBUG(4) because per-segment lines dominate stderr noise at the
         // default INFO level. P6: also prefix the op_id label.
         if (log_at(4)) {
-            std::cerr << "[GRAPH-INSTR] BUILD " << gid << " build#" << build_seq << " "
+            std::cerr << "[DEBUG] [GRAPH-INSTR] BUILD " << gid << " build#" << build_seq << " "
                       << kernel_summary_string(nodes_, seg, seg_idx_for_instr)
                       << " => private_queue " << (fresh ? "FRESH" : "cached") << "\n";
         }
@@ -3698,7 +3698,7 @@ void RpuKernelGraph::execute_graph_for_recording() {
         next_node = seg.end_idx;
     }
     if (log_at(3)) {
-        std::cerr << "[GRAPH-INSTR] BUILD " << gid << " build#" << build_seq
+        std::cerr << "[INFO] [GRAPH-INSTR] BUILD " << gid << " build#" << build_seq
                   << ": segments=" << segments_.size()
                   << " nodes=" << nodes_.size()
                   << " kernels=" << last_stats_.kernel_count
@@ -3732,12 +3732,12 @@ void RpuKernelGraph::execute_graph_for_replaying() {
             built_signature_.op_id_str.empty() ? std::string("<unlabeled>")
                                                 : built_signature_.op_id_str;
         if (log_at(4)) {
-            std::cerr << "[GRAPH-INSTR] REPLAY " << gid
+            std::cerr << "[DEBUG] [GRAPH-INSTR] REPLAY " << gid
                       << " call#" << total_replay_count_
                       << " segments=" << segments_.size()
                       << " kernels=" << last_stats_.kernel_count << "\n";
         } else if (total_replay_count_ == 1 && log_at(3)) {
-            std::cerr << "[GRAPH-INSTR] REPLAY " << gid
+            std::cerr << "[INFO] [GRAPH-INSTR] REPLAY " << gid
                       << " FIRST hit: segments=" << segments_.size()
                       << " kernels=" << last_stats_.kernel_count << "\n";
         }

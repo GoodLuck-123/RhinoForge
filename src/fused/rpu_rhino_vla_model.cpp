@@ -141,6 +141,8 @@ constexpr int64_t RHINO_EXPERT_W8A16_SITE = 2568242320735694809LL;
 constexpr int64_t RHINO_LINEAR_W8A16_PER_CHANNEL = 1;
 constexpr int64_t RHINO_FULL_W8A16_SITE = 7661653982490056347LL;
 constexpr int64_t RHINO_HIGH_PRECISION_SITE = 1749523321564235290LL;
+constexpr int64_t RHINO_RTC_SCHEDULE_SITE = 3199266949682321047LL;
+constexpr int64_t RHINO_RTC_PREFIX_DMA_SITE = 3482081395520638223LL;
 
 void check_rhino_full_w8_projection(const at::Tensor& weight,
                                    const at::Tensor& scale,
@@ -490,6 +492,7 @@ public:
         auto identity = FusedModelBase::planner_cache_identity();
         identity.push_back(rope_position_);
         identity.push_back(static_cast<int64_t>(fast_replay_skip_layer_loop_));
+        identity.push_back(rtc_mode_ ? rtc_delay_ : -1);
         return identity;
     }
 
@@ -735,6 +738,7 @@ public:
         at::TensorList cold_weights = {}, at::TensorList cold_scales = {},
         at::TensorList cold_biases = {}, bool gates_tanh_precomputed = false,
         bool high_precision = false) {
+        TORCH_CHECK(!rtc_mode_, "RhinoVLA RTC tables cannot be replaced by scalar tables");
         TORCH_CHECK(num_layers() > 0,
                     "RhinoVLAModel::set_denoise_loop_adarms_tables before set_weights");
         TORCH_CHECK(high_precision == high_precision_,
@@ -838,6 +842,67 @@ public:
             ::rhino_lkn::RpuGetDevAddr(time_proj_table_.data_ptr());
         denoise_time_proj_table_ready_ = true;
         invalidate_model_state();
+    }
+
+    // RTC has three contiguous conditioning groups: the state token, clean
+    // action-prefix tokens, and noisy action-suffix tokens. Tables retain the
+    // upstream mean of action time embeddings for the state token. They are
+    // cold-owned DDR tensors, streamed per layer instead of made SPM-resident.
+    void set_denoise_loop_rtc_tables(
+        const at::Tensor& pair_table, const at::Tensor& final_table) {
+        constexpr const char* op = "rhino_vla_set_denoise_loop_rtc_tables";
+        RpuExecutionCoordinator::require_graph_quiescent(op);
+        RpuExecutionCoordinator::check_current_thread_execution_allowed(op);
+        TORCH_CHECK(!rtc_mode_ && get_last_resolved_chunk_size() == 0,
+                    "RhinoVLA RTC tables must be installed once before dispatch");
+        TORCH_CHECK(denoise_loop_weights_ready_ && loop_mode_ && dt_pinned_ &&
+                        direct_action_input_ && num_steps_ == 10 &&
+                        static_cast<float>(dt_) == static_cast<float>(c10::Half(-0.1f)) &&
+                        num_layers() == 18 &&
+                        hidden_size() == 1024 && intermediate_size() == 3072 &&
+                        num_q_heads() == 16 && num_kv_heads() == 8 &&
+                        head_dim() == 128 && attn_tp() == 8 &&
+                        action_horizon_ == 30 && suffix_len_ == 31 &&
+                        action_dim_ == 96 && action_dim_pad_ == 96 &&
+                        state_dim_ == 96 && state_dim_pad_ == 96,
+                    "RhinoVLA RTC requires the exact v3 96D/H30 ten-step descending loop");
+        TORCH_CHECK(cold_config_.precompute_adarms &&
+                        !cold_config_.skip_adarms_gemv &&
+                        !cold_config_.adarms_resident && !cold_config_.expert_fusions &&
+                        !cold_config_.packed_qkv && !cold_config_.precompute_time_proj &&
+                        !cold_config_.fold_action_time_in &&
+                        !expert_w8a16_ && !expert_cond_w8a16_ &&
+                        !full_action_w8a16_ && !high_precision_,
+                    "RhinoVLA RTC requires FP16 streamed AdaRMS without expert fusions");
+        const auto check_table = [](const at::Tensor& table, const char* name) {
+            TORCH_CHECK(table.defined() && table.device().type() == at::kPrivateUse1 &&
+                            table.scalar_type() == at::kHalf && table.is_contiguous(),
+                        "RhinoVLA RTC ", name, " must be contiguous FP16 device storage");
+        };
+        check_table(pair_table, "pair_table");
+        check_table(final_table, "final_table");
+        TORCH_CHECK(pair_table.sizes() == at::IntArrayRef({7, 10, 18, 3, 6144}),
+                    "RhinoVLA RTC pair_table must be [7,10,18,3,6144]");
+        TORCH_CHECK(final_table.sizes() == at::IntArrayRef({7, 10, 3, 3072}),
+                    "RhinoVLA RTC final_table must be [7,10,3,3072]");
+        adarms_pair_table_ = pair_table;
+        adarms_final_table_ = final_table;
+        adarms_pair_table_src_base_ = ::rhino_lkn::RpuGetDevAddr(pair_table.data_ptr());
+        adarms_final_table_src_base_ = ::rhino_lkn::RpuGetDevAddr(final_table.data_ptr());
+        denoise_adarms_tables_ready_ = true;
+        rtc_mode_ = true;
+        rtc_delay_ = 0;
+        invalidate_model_state();
+    }
+
+    // Select semantics before minting the physical descriptor. Delay changes
+    // graph topology, but never the SPM layout or immutable model generation.
+    void prepare_rtc(int64_t delay) {
+        RpuExecutionCoordinator::require_graph_quiescent("rhino_vla_prepare_rtc");
+        RpuExecutionCoordinator::check_current_thread_execution_allowed("rhino_vla_prepare_rtc");
+        TORCH_CHECK(rtc_mode_, "RhinoVLA RTC tables are not installed");
+        TORCH_CHECK(delay >= 0 && delay <= 6, "RhinoVLA RTC delay must be in [0,6]");
+        rtc_delay_ = delay;
     }
 
     // ========================================================================
@@ -1239,7 +1304,23 @@ public:
         double dt,
         int64_t prefix_len,
         int64_t num_steps,
-        at::IntArrayRef planned_stage_descriptor = {}) {
+        at::IntArrayRef planned_stage_descriptor = {},
+        const at::Tensor& action_prefix = at::Tensor{},
+        int64_t rtc_delay = -1) {
+        // Both entry points converge here. Reject a mismatched mode before
+        // changing the schedule, cache state, or any live DMA source.
+        TORCH_CHECK(rtc_mode_ == action_prefix.defined(),
+                    "RhinoVLA RTC requires its dedicated forward and action_prefix");
+        TORCH_CHECK(rtc_mode_ ? (rtc_delay >= 0 && rtc_delay <= 6 && rtc_delay == rtc_delay_)
+                              : rtc_delay == -1,
+                    "RhinoVLA RTC delay must match prepare_rtc before action planning");
+        if (rtc_mode_) {
+            TORCH_CHECK(action_prefix.sizes() == x0_rpu.sizes() &&
+                            action_prefix.scalar_type() == at::kHalf &&
+                            action_prefix.device().type() == at::kPrivateUse1 &&
+                            action_prefix.is_contiguous(),
+                        "RhinoVLA RTC action_prefix must match padded FP16 device x0");
+        }
         prepare_denoise_loop_schedule(num_steps, dt);
         TORCH_CHECK(x0_rpu.dim() == 3 && x0_rpu.size(0) == 1 &&
                     x0_rpu.size(1) == action_horizon_ &&
@@ -1280,8 +1361,9 @@ public:
         if (cold_config_.precompute_adarms) {
             TORCH_CHECK(denoise_adarms_tables_ready_,
                         "RPU_RHINOVLA_PRECOMPUTE_ADARMS=1 but AdaRMS tables were not bound");
-            TORCH_CHECK(adarms_pair_table_.size(0) >= num_steps &&
-                        adarms_final_table_.size(0) >= num_steps,
+            const int64_t step_axis = rtc_mode_ ? 1 : 0;
+            TORCH_CHECK(adarms_pair_table_.size(step_axis) >= num_steps &&
+                        adarms_final_table_.size(step_axis) >= num_steps,
                         "RhinoVLA AdaRMS tables do not cover num_steps=", num_steps,
                         " pair_steps=", adarms_pair_table_.size(0),
                         " final_steps=", adarms_final_table_.size(0));
@@ -1326,6 +1408,7 @@ public:
         state_ref_ = state_rpu;
         state_mask_ref_ = state_mask_rpu;
         action_mask_ref_ = action_mask_rpu;
+        action_prefix_ref_ = action_prefix;
         x_out_ref_ = x_out;
         // Inputs and static tables are already device-visible. This prologue
         // only binds DMA addresses; x_out is written by the device. CPU reads
@@ -1335,6 +1418,9 @@ public:
         state_src_base_ = ::rhino_lkn::RpuGetDevAddr(state_rpu.data_ptr());
         state_mask_src_base_ = ::rhino_lkn::RpuGetDevAddr(state_mask_rpu.data_ptr());
         action_mask_src_base_ = ::rhino_lkn::RpuGetDevAddr(action_mask_rpu.data_ptr());
+        if (rtc_mode_) {
+            action_prefix_src_base_ = ::rhino_lkn::RpuGetDevAddr(action_prefix.data_ptr());
+        }
         x_out_dst_base_ = ::rhino_lkn::RpuGetDevAddr(x_out.data_ptr());
 
         prepare_sdpa_mask_cached(std::optional<at::Tensor>(attention_mask), false,
@@ -1387,7 +1473,7 @@ protected:
             cold_config_.adarms_resident, cold_config_.packed_qkv,
             cold_config_.aligned_kv, expert_w8a16_, expert_cond_w8a16_,
             full_action_w8a16_, gates_tanh_precomputed_,
-            high_precision_, high_precision_ ? 1 : 0};
+            high_precision_, high_precision_ ? 1 : 0, rtc_mode_};
         if (high_precision_) {
             identity.push_back(high_precision_fusions_);
             identity.push_back(vector_k_norm_);
@@ -1486,6 +1572,10 @@ protected:
             "RhinoVLA COMPLETE descriptor requires one action suffix chunk");
         const ChunkInfo& chunk = plan.compute.chunks.front();
         validate_expert_transfer(chunk.len);
+        TORCH_CHECK(!rtc_mode_ || (physical_len == 31 && logical_len == 31 &&
+                        chunk.offset == 0 && chunk.len == 31 &&
+                        layout.use_attn_mask && !layout.is_causal),
+                    "RhinoVLA RTC requires one complete M31 suffix and explicit non-causal mask");
         if (cold_config_.aligned_kv) {
             TORCH_CHECK(physical_len == 31 && logical_len == 31 &&
                             chunk.offset == 0 && position % 16 == 0 &&
@@ -1571,6 +1661,15 @@ protected:
                    static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
                    0, {num_steps_ * 3 * hidden_size()});
         }
+        if (rtc_mode_) {
+            append(FmbRouteFamily::GRAPH_SCHEDULE, RHINO_RTC_SCHEDULE_SITE,
+                   1, 0, {rtc_delay_, 3, action_horizon_, action_dim_pad_});
+            if (rtc_delay_ > 0) {
+                append(FmbRouteFamily::MUTABLE_DMA, RHINO_RTC_PREFIX_DMA_SITE,
+                       static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
+                       0, {rtc_delay_ * action_dim_pad_});
+            }
+        }
 
         if (layout.use_attn_mask && !(layout.is_causal && physical_len > 1)) {
             auto declarations = const_cast<RhinoVLAModel*>(this)
@@ -1595,8 +1694,10 @@ protected:
         }
         if (precomputed_adarms) {
             if (!cold_config_.adarms_resident) {
-                append_dma(RHINO_ADARMS_TABLE_DMA_SITE,
-                           RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM);
+                append(FmbRouteFamily::MUTABLE_DMA, RHINO_ADARMS_TABLE_DMA_SITE,
+                       static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
+                       0, rtc_mode_ ? std::vector<int64_t>{3, 18 * hidden_size()}
+                                    : std::vector<int64_t>{});
             }
         } else if (!skip_adarms && fused_adarms) {
             append_linear(RHINO_ADARMS_PAIR_LINEAR_SITE);
@@ -1717,7 +1818,8 @@ protected:
                        static_cast<int64_t>(
                            RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
                        /*flags=*/0,
-                       {cold_config_.precompute_adarms ? 1 : 0});
+                       rtc_mode_ ? std::vector<int64_t>{1, 3, 9 * hidden_size()}
+                                 : std::vector<int64_t>{cold_config_.precompute_adarms ? 1 : 0});
             }
             append_io_linear(RHINO_POST_ACTION_LINEAR_SITE, action_horizon_, action_dim_pad_, hidden_size());
             append_dma(RHINO_POST_OUTPUT_DMA_SITE,
@@ -1866,7 +1968,8 @@ protected:
         decls.push_back({"mlp_gemv",     gemv_out_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
         decls.push_back({"bias_temp",    gemv_out_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
         decls.push_back({"gemv_partial", gemv_out_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
-        decls.push_back({"adarms_pair_gemv",       pair_gemv_out_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
+        decls.push_back({"adarms_pair_gemv", (rtc_mode_ ? 3 : 1) * pair_gemv_out_sz,
+            0, 0, StorageClass::Temp, 0, nullptr, ALL});
         decls.push_back({"adarms_pair_bias_temp",  pair_gemv_out_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
         decls.push_back({"adarms_pair_partial",    pair_gemv_out_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
 
@@ -1911,7 +2014,8 @@ protected:
             decls.push_back({"action_mask_hidden_spm", action_h_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
             decls.push_back({"state_token_spm", token_h_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
             decls.push_back({"state_mask_hidden_spm", token_h_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
-            decls.push_back({"final_gemv", gemv_out_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
+            decls.push_back({"final_gemv", (rtc_mode_ ? 3 : 1) * gemv_out_sz,
+                0, 0, StorageClass::Temp, 0, nullptr, ALL});
             decls.push_back({"final_out_spm", res, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
             decls.push_back({"v_t_core0_spm", v_t_sz, 0, 0, StorageClass::Temp, 0, nullptr, ALL});
 
@@ -2008,6 +2112,7 @@ protected:
         h = detail::layout_mix(h, expert_cond_w8a16_);
         h = detail::layout_mix(h, full_action_w8a16_);
         h = detail::layout_mix(h, gates_tanh_precomputed_);
+        h = detail::layout_mix(h, rtc_mode_);
         h = detail::layout_mix(h, high_precision_);
         if (high_precision_) {
             h = detail::layout_mix(h, high_precision_fusions_);
@@ -2198,18 +2303,22 @@ protected:
             } else if (precomputed_adarms) {
                 if (!cold_config_.adarms_resident) {
                     int64_t step = ctx().body_iter;
+                    const int64_t groups = rtc_mode_ ? 3 : 1;
+                    const int64_t table_step = rtc_mode_ ? rtc_delay_ * num_steps_ + step : step;
                     int64_t offset =
-                        ((step * num_layers() + layer_idx) * 6 * h) * DWIDTH;
+                        ((table_step * num_layers() + layer_idx) * groups * 6 * h) * DWIDTH;
                     ctx().consume_physical_route(
                         FmbRouteFamily::MUTABLE_DMA,
                         RHINO_ADARMS_TABLE_DMA_SITE,
                         static_cast<int64_t>(
                             RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
-                        /*resolved_flags=*/0, {}, chunk.idx);
+                        /*resolved_flags=*/0,
+                        rtc_mode_ ? std::vector<int64_t>{3, groups * 6 * h}
+                                  : std::vector<int64_t>{}, chunk.idx);
                     rpu_launch_ddr_broadcast_spm_dma_mutable(
                         &adarms_pair_table_src_base_,
                         offset,
-                        6 * h,
+                        groups * 6 * h,
                         addr(0, "adarms_pair_gemv"),
                         NUM_CORES);
                 }
@@ -2260,9 +2369,9 @@ protected:
         // (1+scale) was applied during GEMV, so RMSNorm uses attn_scale directly.
         // Then add shift (broadcast 1xC onto NxC rows).
         // --------------------------------------------------------------------
-        emit_norm_shift(
+        emit_conditioned_norm_shift(
             addr(0, "residual1"), addr(0, "input_norm"),
-            attn_scale, attn_shift, seq_len);
+            attn_scale, attn_shift, seq_len, 6 * h * DWIDTH);
 
         // --------------------------------------------------------------------
         // Phase 3: QKV Linear (col partition)
@@ -2547,14 +2656,16 @@ protected:
                 num_elems_full, ValuOpType::SUB, c10::Half(1.0), NUM_CORES);
         }
         // TANH: attn_gate = tanh(attn_gate) in-place [1,H]
-        if (!gates_tanh_precomputed_) {
+        if (!rtc_mode_ && !gates_tanh_precomputed_) {
             rpu_launch_eltwise_unary_spm_kernel(
                 attn_gate, attn_gate,
                 h, ValuOpType::TANH,
                 /*is_gelu=*/false, /*num_cores=*/NUM_CORES, unary_precision());
         }
         // MUL: residual2 = attn_gate [1,H] * residual2 [S,H]
-        if (cold_config_.expert_fusions) {
+        if (rtc_mode_) {
+            emit_rtc_gated_residual(addr(0, "residual2"), addr(0, "residual1"), attn_gate);
+        } else if (cold_config_.expert_fusions) {
             rpu_launch_pi05_gated_residual_spm_kernel(
                 addr(0, "residual2"), addr(0, "residual1"), attn_gate,
                 addr(0, "residual2"), seq_len, NUM_CORES);
@@ -2572,9 +2683,9 @@ protected:
         // --------------------------------------------------------------------
         // Phase 10: AdaRMSNorm (MLP): residual2 -> residual1
         // --------------------------------------------------------------------
-        emit_norm_shift(
+        emit_conditioned_norm_shift(
             addr(0, "residual2"), addr(0, "residual1"),
-            mlp_scale, mlp_shift, seq_len);
+            mlp_scale, mlp_shift, seq_len, 6 * h * DWIDTH);
 
         // --------------------------------------------------------------------
         // Phase 11: MLP pipeline (SiLU, NOT GELU)
@@ -2605,14 +2716,16 @@ protected:
                 num_elems_full, ValuOpType::SUB, c10::Half(1.0), NUM_CORES);
         }
         // TANH: mlp_gate = tanh(mlp_gate) in-place [1,H]
-        if (!gates_tanh_precomputed_) {
+        if (!rtc_mode_ && !gates_tanh_precomputed_) {
             rpu_launch_eltwise_unary_spm_kernel(
                 mlp_gate, mlp_gate,
                 h, ValuOpType::TANH,
                 /*is_gelu=*/false, /*num_cores=*/NUM_CORES, unary_precision());
         }
         // MUL: residual1 = mlp_gate [1,H] * residual1 [S,H]
-        if (cold_config_.expert_fusions) {
+        if (rtc_mode_) {
+            emit_rtc_gated_residual(addr(0, "residual1"), addr(0, "residual2"), mlp_gate);
+        } else if (cold_config_.expert_fusions) {
             rpu_launch_pi05_gated_residual_spm_kernel(
                 addr(0, "residual1"), addr(0, "residual2"), mlp_gate,
                 addr(0, "residual1"), seq_len, NUM_CORES);
@@ -2843,6 +2956,60 @@ private:
         }
     }
 
+    template <typename Emit>
+    void for_each_rtc_group(Emit emit) {
+        const int64_t starts[] = {0, 1, 1 + rtc_delay_};
+        const int64_t rows[] = {1, rtc_delay_, action_horizon_ - rtc_delay_};
+        for (int group = 0; group < 3; ++group) {
+            if (rows[group] != 0) emit(group, starts[group], rows[group]);
+        }
+    }
+
+    void emit_conditioned_norm_shift(uint32_t input, uint32_t output,
+                                     uint32_t scale, uint32_t shift,
+                                     int64_t rows, int64_t table_group_bytes) {
+        if (!rtc_mode_) {
+            emit_norm_shift(input, output, scale, shift, rows);
+            return;
+        }
+        TORCH_CHECK(rows == suffix_len_, "RhinoVLA RTC requires one complete suffix chunk");
+        for_each_rtc_group([&](int group, int64_t start, int64_t count) {
+            const uint32_t row_offset = static_cast<uint32_t>(start * hidden_size() * DWIDTH);
+            const uint32_t table_offset = static_cast<uint32_t>(group * table_group_bytes);
+            emit_norm_shift(input + row_offset, output + row_offset,
+                            scale + table_offset, shift + table_offset, count);
+        });
+    }
+
+    void emit_rtc_gated_residual(uint32_t update, uint32_t residual,
+                                 uint32_t gate) {
+        const int64_t h = hidden_size();
+        for_each_rtc_group([&](int group, int64_t start, int64_t rows) {
+            const uint32_t row_offset = static_cast<uint32_t>(start * h * DWIDTH);
+            const uint32_t group_gate = gate + static_cast<uint32_t>(group * 6 * h * DWIDTH);
+            rpu_launch_eltwise_unary_spm_kernel(
+                group_gate, group_gate, h, ValuOpType::TANH,
+                /*is_gelu=*/false, NUM_CORES, unary_precision());
+            rpu_launch_eltwise_binary_1xC_NxC_spm_kernel(
+                group_gate, update + row_offset, update + row_offset,
+                rows, h, c10::Half(1.0), ValuOpType::MUL, /*is_bopa=*/false);
+        });
+        rpu_launch_eltwise_binary_spm_kernel(
+            update, residual, update, suffix_len_ * h,
+            ValuOpType::ADD, c10::Half(1.0), NUM_CORES);
+    }
+
+    void emit_rtc_prefix_clamp() {
+        if (!rtc_mode_ || rtc_delay_ == 0) return;
+        ctx().consume_physical_route(
+            FmbRouteFamily::MUTABLE_DMA, RHINO_RTC_PREFIX_DMA_SITE,
+            static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
+            0, {rtc_delay_ * action_dim_pad_});
+        rpu_launch_ddr_broadcast_spm_dma_mutable(
+            &action_prefix_src_base_, 0, rtc_delay_ * action_dim_pad_,
+            addr(0, "x_t_spm"), /*num_cores=*/1);
+    }
+
     // Host preparation runs at both public forward entries, before FMB may
     // skip the host body on replay. The shape-keyed DDR slot remains stable;
     // tracked identity/version is only a content memo, never SPM residency.
@@ -3067,6 +3234,11 @@ private:
         const bool fold_action_time_in = cold_config_.fold_action_time_in;
 
         if (bit == 0) {
+            if (rtc_mode_) {
+                ctx().consume_physical_route(
+                    FmbRouteFamily::GRAPH_SCHEDULE, RHINO_RTC_SCHEDULE_SITE,
+                    1, 0, {rtc_delay_, 3, action_horizon_, action_dim_pad_});
+            }
             if (expert_cond_w8a16_) consume_full_action_w8a16_route();
             if (high_precision_) consume_high_precision_route();
             if (cold_config_.adarms_resident) emit_resident_adarms_tables();
@@ -3078,6 +3250,7 @@ private:
             rpu_launch_ddr_broadcast_spm_dma_mutable(
                 &x0_src_base_, 0, ah * adp, addr(0, "x_t_spm"), /*num_cores=*/1);
         }
+        emit_rtc_prefix_clamp();
         if (emit_static_context) {
             ctx().consume_physical_route(
                 FmbRouteFamily::MUTABLE_DMA,
@@ -3287,18 +3460,21 @@ private:
         if (cold_config_.precompute_adarms) {
             if (!cold_config_.adarms_resident) {
                 int64_t step = ctx().body_iter;
-                int64_t offset = (step * 3 * h) * DWIDTH;
+                const int64_t groups = rtc_mode_ ? 3 : 1;
+                const int64_t table_step = rtc_mode_ ? rtc_delay_ * num_steps_ + step : step;
+                int64_t offset = (table_step * groups * 3 * h) * DWIDTH;
                 ctx().consume_physical_route(
                     FmbRouteFamily::MUTABLE_DMA,
                     RHINO_POST_ADARMS_DMA_SITE,
                     static_cast<int64_t>(
                         RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
                     /*resolved_flags=*/0,
-                    {cold_config_.precompute_adarms ? 1 : 0});
+                    rtc_mode_ ? std::vector<int64_t>{1, 3, groups * 3 * h}
+                              : std::vector<int64_t>{cold_config_.precompute_adarms ? 1 : 0});
                 rpu_launch_ddr_broadcast_spm_dma_mutable(
                     &adarms_final_table_src_base_,
                     offset,
-                    3 * h,
+                    groups * 3 * h,
                     addr(0, "final_gemv"),
                     NUM_CORES);
             }
@@ -3313,9 +3489,9 @@ private:
             ? addr(0, "adarms_final_resident") + ctx().body_iter * 3 * h * DWIDTH
             : addr(0, "final_gemv");
         const uint32_t final_shift = final_scale + (uint32_t)(h * DWIDTH);
-        emit_norm_shift(
+        emit_conditioned_norm_shift(
             addr(0, "residual1"), addr(0, "final_out_spm"),
-            final_scale, final_shift, suffix_len_);
+            final_scale, final_shift, suffix_len_, 3 * h * DWIDTH);
 
         if (get_debug_export()) {
             const std::string suffix = "_b" + std::to_string(ctx().body_iter);
@@ -3371,6 +3547,7 @@ private:
             addr(0, "action_mask_spm"),
             addr(0, "x_t_spm"),
             ah * adp, ValuOpType::MUL, c10::Half(1.0), /*num_cores=*/1);
+        if (ctx().body_iter == num_steps_ - 1) emit_rtc_prefix_clamp();
         ctx().consume_physical_route(
             FmbRouteFamily::MUTABLE_DMA, RHINO_POST_OUTPUT_DMA_SITE,
             static_cast<int64_t>(RhinoMutableDmaRoute::SPM_COPY_TO_DDR),
@@ -3421,6 +3598,8 @@ private:
     bool expert_cond_w8a16_ = false;
     bool full_action_w8a16_ = false;
     bool gates_tanh_precomputed_ = false;
+    bool rtc_mode_ = false;
+    int64_t rtc_delay_ = 0;
     bool high_precision_ = false;
     bool high_precision_bound_ = false;
     bool vector_k_norm_ = false;
@@ -3488,11 +3667,13 @@ private:
     uint64_t time_proj_table_src_base_ = 0;
     at::Tensor action_emb_stage_;
     at::Tensor x0_ref_, state_ref_, state_mask_ref_, action_mask_ref_, x_out_ref_;
+    at::Tensor action_prefix_ref_;
     uint64_t x0_src_base_ = 0;
     uint64_t cond_all_src_base_ = 0;
     uint64_t state_src_base_ = 0;
     uint64_t state_mask_src_base_ = 0;
     uint64_t action_mask_src_base_ = 0;
+    uint64_t action_prefix_src_base_ = 0;
     uint64_t x_out_dst_base_ = 0;
 
 };
@@ -3708,6 +3889,16 @@ void rpu_rhino_vla_set_denoise_loop_adarms_tables(
         ->set_denoise_loop_adarms_tables(pair_table, final_table);
 }
 
+void rpu_rhino_vla_set_denoise_loop_rtc_tables(
+    int64_t handle, const at::Tensor& pair_table, const at::Tensor& final_table) {
+    RhinoVLARegistry::get(handle, "rpu_rhino_vla_set_denoise_loop_rtc_tables")
+        ->set_denoise_loop_rtc_tables(pair_table, final_table);
+}
+
+void rpu_rhino_vla_prepare_rtc(int64_t handle, int64_t delay) {
+    RhinoVLARegistry::get(handle, "rpu_rhino_vla_prepare_rtc")->prepare_rtc(delay);
+}
+
 void rpu_rhino_vla_set_denoise_loop_adarms_tables_w8a16(
     int64_t handle,
     const at::Tensor& pair_table,
@@ -3871,6 +4062,33 @@ at::Tensor rpu_rhino_vla_denoise_loop_forward(
             x0_rpu, k_caches, v_caches, cond_all, attention_mask,
             state_rpu, state_mask_rpu, action_mask_rpu, x_out,
             dt, prefix_len, num_steps, planned_stage_descriptor);
+}
+
+at::Tensor rpu_rhino_vla_denoise_loop_rtc_forward(
+    int64_t handle,
+    const at::Tensor& x0_rpu,
+    at::TensorList k_caches_list,
+    at::TensorList v_caches_list,
+    const at::Tensor& cond_all,
+    const at::Tensor& attention_mask,
+    const at::Tensor& state_rpu,
+    const at::Tensor& state_mask_rpu,
+    const at::Tensor& action_mask_rpu,
+    at::Tensor x_out,
+    double dt,
+    int64_t prefix_len,
+    int64_t num_steps,
+    const at::Tensor& action_prefix,
+    int64_t delay,
+    at::IntArrayRef planned_stage_descriptor) {
+    std::vector<at::Tensor> k_caches(k_caches_list.begin(), k_caches_list.end());
+    std::vector<at::Tensor> v_caches(v_caches_list.begin(), v_caches_list.end());
+    return RhinoVLARegistry::get(handle, "rpu_rhino_vla_denoise_loop_rtc_forward")
+        ->denoise_loop_forward(
+            x0_rpu, k_caches, v_caches, cond_all, attention_mask,
+            state_rpu, state_mask_rpu, action_mask_rpu, x_out,
+            dt, prefix_len, num_steps, planned_stage_descriptor,
+            action_prefix, delay);
 }
 
 void rpu_rhino_vla_set_chunk_size(int64_t handle, int64_t chunk_size) {

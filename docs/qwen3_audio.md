@@ -46,7 +46,7 @@ cores and accept only `dtype=torch.float16`.
 
 ## 1. Install
 
-Create a Python 3.12 environment using the [source build guide](development_build.md)
+Create a Python 3.12 Conda environment using the [unified installation guide](getting_started.md)
 and configure [matching runtime assets](runtime_assets.md). From the repository
 root, install the `audio` extra:
 

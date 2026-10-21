@@ -341,9 +341,7 @@ def main(args=None):
         import rpu_backend
         from rpu_backend.api import WallOssPolicy
 
-        imported = Path(rpu_backend.__file__).resolve()
-        if not imported.is_relative_to(ROOT):
-            raise RuntimeError(f"wrong source checkout imported: {imported}")
+        imported = _library_helpers.verify_backend_source(ROOT, rpu_backend.__file__)
         report["python_source"] = str(imported)
         report["packages"] = {"torch": torch.__version__, "transformers": transformers.__version__}
         loaded_native = sorted({str(Path(line.split()[-1]).resolve())

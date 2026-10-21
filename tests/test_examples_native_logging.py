@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -14,6 +15,24 @@ from examples.common.native_logging import NativeCapture, _line_level
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_native_graph_message_levels_survive_stderr_capture():
+    # Exercise actual native prefixes: copying labelled sample messages here
+    # would miss a producer that still emits unlabelled INFO/DEBUG to stderr.
+    source = (ROOT / "src/graph/graph_runtime_execute.cpp").read_text()
+    messages = re.findall(
+        r'if \([^\n]*log_at\((\d)\)[^\n]*\) \{\s*'
+        r'std::cerr << "([^"\n]+)"', source)
+    assert messages
+    native_levels = {2: logging.WARNING, 3: logging.INFO, 4: logging.DEBUG}
+    assert {int(level) for level, _ in messages} == set(native_levels)
+    for level, message in messages:
+        assert _line_level(message, stderr=True) == native_levels[int(level)], message
+    # An unlabelled runtime failure must retain the conservative stderr default.
+    assert _line_level(
+        "prepare_segment_queue: build_batch SDK rc=1", stderr=True
+    ) == logging.ERROR
 
 
 def _child(tmp_path, body):

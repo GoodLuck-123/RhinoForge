@@ -4,7 +4,19 @@
 
 开发线已进入 1.3；当前仅提供源码。
 
+- 合并入门与开发安装文档，统一使用 Miniconda3 和 `RHINOFORGE_ENV`，补齐下载安装、环境创建、原生库构建与模型资产准备步骤。
+- 增加完整 Conda 环境包的制作、校验与部署工具，可包含默认依赖及 vision、vla、audio 扩展；运行资产继续遵循原有分发条款。
+- 修复环境包中的 wheel 排除规则、严格 shell 模式下的激活，以及 Wall-OSS 从已安装环境运行时的源码身份和路径检查。
+- 增加 RhinoVLA v3 FP16 RTC 示例与接口，支持 `action_prefix` 和整数 `delay=0..6`；限定 batch 1、30 步动作窗口、96 维动作及 10 步去噪配置。
+- RTC 按 delay 缓存 Graph、刷新历史动作输入并提前预留所需 arena；不支持的精度、融合和执行配置会提前报错。该配置仍为 `example_only`，需配套新编译的原生扩展，不能直接使用此前制作的环境包。
+
 Development has moved to 1.3; this line currently provides source only.
+
+- Unified installation and development instructions around Miniconda3 and `RHINOFORGE_ENV`, including installer download, environment creation, native builds and model asset preparation.
+- Added tools to create, verify and deploy complete Conda environments with default dependencies and optional vision, VLA and audio dependencies. Runtime assets retain their original distribution terms.
+- Fixed wheel exclusions and strict-shell activation in environment bundles, and source identity/path checks when running Wall-OSS from an installed environment.
+- Added a RhinoVLA v3 FP16 RTC example and API with `action_prefix` and integer `delay=0..6`, restricted to batch 1, a 30-action horizon, 96 action dimensions and ten denoising steps.
+- RTC caches Graphs by delay, refreshes action history inputs and reserves the required arenas before conversion. Unsupported precision, fusion and execution profiles fail early. The profile remains `example_only` and requires a newly built native extension; earlier environment bundles do not include RTC support.
 
 ## v1.2.0
 

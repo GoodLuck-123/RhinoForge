@@ -169,6 +169,7 @@ def _pad_prefix_static_cache(cache, execution_len):
 def _preflight_rhinovla_cold_install(
     *, qin, prefix_len, steps, rpu_execution, model, action_bundle,
     flow_direction, expert_w8a16=None, full_expert_w8a16=None,
+    rtc=False,
 ):
     """Resolve pipeline-owned host gates before selecting the allocator."""
     from rpu_backend.adapters.rhinovla.runtime import (
@@ -241,6 +242,25 @@ def _preflight_rhinovla_cold_install(
     from .runtime import resolve_rhinovla_quantization
     expert_w8a16, full_expert_w8a16, full_w8a16 = resolve_rhinovla_quantization(
         expert_w8a16=expert_w8a16, full_expert_w8a16=full_expert_w8a16)
+    from .rtc import validate_rtc_install
+    validate_rtc_install(
+        rtc=rtc, steps=steps, flow_direction=flow_direction,
+        expert_w8a16=expert_w8a16, full_expert_w8a16=full_expert_w8a16,
+        native_cold=native_cold, action_cold=action_cold)
+    if rtc:
+        from .convert import _direct_action_input
+        if rpu_env_bool("RPU_GRAPH_FORCE_ONESHOT_ON_REPLAY"):
+            raise ValueError("RhinoVLA RTC requires ordinary Graph replay, not forced oneshot")
+        if not (_direct_action_input(action_io) and expert_depth == 18
+                and expert_mlp_dim == 3072 and suffix_len == 31
+                and getattr(expert_cfg, "action_dim", None) == 96
+                and getattr(expert_cfg, "state_dim", None) == 96
+                and getattr(expert_cfg, "action_horizon", None) == 30
+                and getattr(expert_cfg, "use_state_token", None) is True
+                and tuple(getattr(expert_cfg, key, None) for key in
+                          ("width", "num_attention_heads", "num_key_value_heads", "head_dim"))
+                == (1024, 16, 8, 128)):
+            raise ValueError("RhinoVLA RTC requires the exact v3 18-layer, 31-token expert")
     precompute_gate_tanh = rpu_env_bool("RPU_RHINOVLA_PRECOMPUTE_GATE_TANH")
     high_precision = rpu_env_bool("RPU_RHINOVLA_HIGH_PRECISION")
     high_precision_fusions = rpu_env_bool("RPU_RHINOVLA_HIGH_PRECISION_FUSIONS")
@@ -350,6 +370,7 @@ def _preflight_rhinovla_cold_install(
 
     return {
         "denoise_times": denoise_times,
+        "rtc": rtc,
         "denoise_dt": denoise_dt,
         "denoise_schedule_words": denoise_schedule_words,
         "steps": steps,
@@ -402,7 +423,7 @@ class RhinoVLAOnRPU:
     def __init__(self, *, qin, prefix_len, steps=5, instance_id=0,
                  rpu_execution=None, model=None, action_bundle=None,
                  flow_direction="legacy_ascending",
-                 expert_w8a16=None, full_expert_w8a16=None):
+                 expert_w8a16=None, full_expert_w8a16=None, rtc=False):
         if model is None or action_bundle is None:
             raise ValueError(
                 "RhinoVLAOnRPU requires an explicitly loaded model and "
@@ -428,6 +449,7 @@ class RhinoVLAOnRPU:
                 action_bundle=action_bundle,
                 flow_direction=flow_direction,
                 expert_w8a16=expert_w8a16, full_expert_w8a16=full_expert_w8a16,
+                rtc=rtc,
             )
             _claim_live_instance(self)
             claim_acquired = True
@@ -435,6 +457,16 @@ class RhinoVLAOnRPU:
                 # RhinoVLA retains more than a thousand small weights. Freeze
                 # the common allocator only after the exclusive owner exists.
                 torch.rpu.set_caching_allocator(True)
+                if rtc:
+                    from rpu_backend.graph import GraphRuntimePolicy
+
+                    # Seven delay entries plus vision and text each retain
+                    # one private queue; eager prefix/patch work needs one
+                    # transient queue. Segments reuse their entry's queue.
+                    arena_policy = GraphRuntimePolicy.from_environment(graph_arena_count=10)
+                    if not arena_policy.prepare_arenas():
+                        raise RPUBackendError("RhinoVLA RTC requires cold SDK graph arenas")
+                    self._graph_arena_policy = arena_policy
             except BaseException:
                 _release_live_instance(self)
                 claim_acquired = False
@@ -480,6 +512,7 @@ class RhinoVLAOnRPU:
         if _cold_preflight is None:
             raise RuntimeError("RhinoVLA initialization requires cold preflight")
         cold = _cold_preflight
+        self._rtc = cold.get("rtc", False)
         self._flow_direction = flow_direction
         self._denoise_times = cold["denoise_times"]
         self._denoise_dt = cold["denoise_dt"]
@@ -777,6 +810,14 @@ class RhinoVLAOnRPU:
                     torch.ops.rpu.rhino_vla_set_denoise_loop_adarms_tables_w8a16(
                         self.er._rpu_handle, pair_table, final_table, weights, scales, biases,
                         cold["precompute_gate_tanh"], cold["high_precision"])
+                elif self._rtc:
+                    from .convert import _prepare_rtc_adarms_tables
+                    from .rtc import rtc_condition_groups
+                    groups = rtc_condition_groups(
+                        times, action_mod.create_sinusoidal_pos_embedding, self.cfg.width)
+                    pair_table, final_table = _prepare_rtc_adarms_tables(self.expert, groups)
+                    torch.ops.rpu.rhino_vla_set_denoise_loop_rtc_tables(
+                        self.er._rpu_handle, pair_table, final_table)
                 else:
                     pair_table, final_table = _prepare_denoise_adarms_tables(
                         self.expert, cond_cpu)
@@ -1291,7 +1332,8 @@ class RhinoVLAOnRPU:
             prefix_len=int(self._text_cache.position),
         )
 
-    def _denoise(self, prefix_kv, prefix_mask, state, x0, state_mask, action_mask):
+    def _denoise(self, prefix_kv, prefix_mask, state, x0, state_mask, action_mask,
+                 *, rtc_prefix=None, delay=None):
         if (self.steps, self._flow_direction) != self._bound_denoise_schedule:
             raise ValueError("RhinoVLA cold denoise schedule changed; construct a new runtime")
         # Idempotency: old path resets to empty so the prefix-prefill guard
@@ -1306,7 +1348,8 @@ class RhinoVLAOnRPU:
             self.er._rpu_kv_cache.reset_to_position(0)
         if self._denoise_unroll:
             return self._denoise_loop(prefix_kv, prefix_mask, state, x0,
-                                      state_mask, action_mask)
+                                      state_mask, action_mask,
+                                      rtc_prefix=rtc_prefix, delay=delay)
         x, _ = rpu_denoise(self.er, self.action_io, self.mask_proj,
                              prefix_key_values=prefix_kv, prefix_mask=prefix_mask,
                              state=state, state_mask=state_mask, action_mask=action_mask,
@@ -1315,7 +1358,8 @@ class RhinoVLAOnRPU:
                              prefix_rope_deltas=self._last_prefix_rope_deltas)
         return x
 
-    def _denoise_loop(self, prefix_kv, prefix_mask, state, x0, state_mask, action_mask):
+    def _denoise_loop(self, prefix_kv, prefix_mask, state, x0, state_mask, action_mask,
+                      *, rtc_prefix=None, delay=None):
         import torch.nn.functional as Fnn
         from rpu_backend.adapters.rhinovla.convert import (
             _plan_rhino_prefix_kv_execution,
@@ -1420,10 +1464,12 @@ class RhinoVLAOnRPU:
         if self._flow_direction == "official_descending":
             state_2d = state_2d * _sm
         state_pad = Fnn.pad(state_2d, (0, SDP - SD))
-        action_mask_pad, state_mask_pad, x0_pad, state_pad = (
-            _upload_denoise_inputs(
-                self, (action_mask_pad, state_mask_pad, x0_pad, state_pad))
-        )
+        inputs = (action_mask_pad, state_mask_pad, x0_pad, state_pad)
+        if self._rtc:
+            inputs += (Fnn.pad(rtc_prefix, (0, ADP - AD)),)
+        uploaded = _upload_denoise_inputs(self, inputs)
+        action_mask_pad, state_mask_pad, x0_pad, state_pad = uploaded[:4]
+        rtc_prefix_rpu = uploaded[4] if self._rtc else None
 
         # A3 (prefix alias): pass the text-cache prefix layers as the expert's KV
         # storage — zero copy. Stable DDR addresses → the captured graph bakes them
@@ -1440,6 +1486,8 @@ class RhinoVLAOnRPU:
         x_out = torch.empty_like(x0_pad)
         torch.ops.rpu.rhino_vla_set_rope_position(
             self.er._rpu_handle, rope_position)
+        if self._rtc:
+            torch.ops.rpu.rhino_vla_prepare_rtc(self.er._rpu_handle, delay)
         action_plan = plan_rhino_action_execution(
             self.er,
             logical_len=S,
@@ -1467,12 +1515,15 @@ class RhinoVLAOnRPU:
                 1 if self._precompute_time_proj else 0,
                 1 if self._fold_action_time_in else 0,
                 1 if self._prefix_alias else 0,
+                1 if self._rtc else 0, delay if self._rtc else -1,
                 *action_plan.graph_key_words(),
             ],
             dtypes=[torch.float16],
         )
         with self.er._rpu_graph_cache.capture(sig):
-            out_pad = torch.ops.rpu.rhino_vla_denoise_loop_forward(
+            loop_forward = (torch.ops.rpu.rhino_vla_denoise_loop_rtc_forward
+                            if self._rtc else torch.ops.rpu.rhino_vla_denoise_loop_forward)
+            out_pad = loop_forward(
                 self.er._rpu_handle,
                 x0_pad,
                 ace_k,
@@ -1486,6 +1537,7 @@ class RhinoVLAOnRPU:
                 self._denoise_dt,
                 physical_prefix_len,
                 self.steps,
+                *((rtc_prefix_rpu, delay) if self._rtc else ()),
                 selected_action_plan.stage_tuple.physical_descriptor,
             )
         publish_rhino_action_execution_receipt(
@@ -1495,11 +1547,21 @@ class RhinoVLAOnRPU:
             prefix_plan=prefix_plan,
             prefix_route_argument_digest=prefix_route_argument_digest,
         )
-        return out_pad[:, :, :AD].to("cpu", torch.float32)
+        result = out_pad[:, :, :AD].to("cpu", torch.float32)
+        if self._rtc:
+            # Upstream returns the caller's FP32 prefix exactly. The expert
+            # consumes its FP16 representation, like all device activations.
+            result[:, :delay].copy_(rtc_prefix[:, :delay])
+        return result
 
     @execution_serialized
     @torch.no_grad()
-    def predict(self, *, x0, state, state_mask, action_mask):
+    def predict(self, *, x0, state, state_mask, action_mask,
+                action_prefix=None, delay=None):
+        from .rtc import normalize_rtc_request
+        rtc_prefix = normalize_rtc_request(
+            rtc=self._rtc, action_prefix=action_prefix, delay=delay,
+            x0=x0, state=state, state_mask=state_mask, action_mask=action_mask)
         # Isolation knob: skip vision+text FORWARDS, feed a synthetic prefix,
         # run expert-only. Models stay resident. If this OOMs, the co-resident
         # setup exhausts SDK SPM; if it runs, the vision/text forwards do.
@@ -1510,7 +1572,8 @@ class RhinoVLAOnRPU:
             self._last_prefix_rope_deltas = None
             self._last_prefix_kv, self._last_prefix_mask = skv, smask
             t = time.perf_counter()
-            act = self._denoise(skv, smask, state, x0, state_mask, action_mask)
+            act = self._denoise(skv, smask, state, x0, state_mask, action_mask,
+                                rtc_prefix=rtc_prefix, delay=delay)
             t_d = (time.perf_counter() - t) * 1000.0
             _trace("phase: denoise done (SKIP_VT)"); _spm_dump(self._rb, "after_denoise_skipvt")
             self.last_phase_ms = {"vision_ms": 0.0, "prefill_ms": 0.0, "denoise_ms": t_d}
@@ -1546,7 +1609,9 @@ class RhinoVLAOnRPU:
         torch.ops.rpu.spm_alloc_reset_temporary()
         _trace("phase: reset_temporary (graph caches kept for replay)")
         _spm_dump(self._rb, "after_prefill_reset")
-        t = time.perf_counter(); act = self._denoise(kv, pmask, state, x0, state_mask, action_mask)
+        t = time.perf_counter(); act = self._denoise(
+            kv, pmask, state, x0, state_mask, action_mask,
+            rtc_prefix=rtc_prefix, delay=delay)
         t_d = (time.perf_counter() - t) * 1000.0
         _trace("phase: denoise done"); _spm_dump(self._rb, "after_denoise_fwd")
         self.last_phase_ms = {"vision_ms": t_v, "prefill_ms": t_p, "denoise_ms": t_d}

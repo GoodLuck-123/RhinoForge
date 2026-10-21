@@ -24,6 +24,7 @@ import threading
 
 import torch
 
+from rpu_backend._native_loader import require_native_backend
 from rpu_backend.runtime.log import _LOG
 
 # Phase 12 D-H2: was the model_converter shim multi-import; split per canonical home.
@@ -728,6 +729,7 @@ class Qwen3Adapter:
             # .to('rpu') on a DIFFERENT model raises before we touch any weights.
             # _claim_live_instance is idempotent for the same model id (HIGH-3 fix
             # in 02-01); only a different live model triggers RPUSingleHandleError.
+            require_native_backend()
             _claim_live_instance(self.model)
             try:
                 # Reuse HostDDR mappings for request temporaries before the

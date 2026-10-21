@@ -113,12 +113,22 @@ def test_rtc_prefix_is_required_only_for_nonzero_delay(runner):
 def test_cold_configuration_reuses_validation_selectors(runner, precision, mode, monkeypatch):
     monkeypatch.delenv('RPU_BACKEND_SO', raising=False)
     expected = runner.validation_runner().exact_environment(runner.ROOT, mode)
+    expected.pop('RPU_BACKEND_SO')
     (env, records) = runner.cold_environment(precision)
+    assert 'RPU_BACKEND_SO' not in env  # The installed wheel selects its native.
     assert {key: env[key] for key in expected if not key.startswith('RPU_KERNEL_LIB_PATH')} == {key: value for (key, value) in expected.items() if not key.startswith('RPU_KERNEL_LIB_PATH')}
     assert env['RPU_LINEAR_ACC32'] == '0'
     assert set(records) == {'RPU_KERNEL_LIB_PATH', 'RPU_KERNEL_LIB_PATH_EXPANSION'}
     for (key, record) in records.items():
         assert env[key] == record['path'] and Path(record['path']).is_file()
+
+def test_existing_checkout_build_is_selected(runner, monkeypatch):
+    monkeypatch.delenv('RPU_BACKEND_SO', raising=False)
+    native = runner.ROOT / 'build/rpu_backend/rpu_backend.so'
+    native.parent.mkdir(parents=True)
+    native.touch()
+    env, _ = runner.cold_environment('fp16')
+    assert env['RPU_BACKEND_SO'] == str(native.resolve())
 
 def test_cold_configuration_follows_current_aliases_and_manifest(runner, tmp_path, monkeypatch):
     validation = runner.validation_runner()
@@ -312,6 +322,13 @@ def test_full_run_excludes_warmup_and_closes_before_reporting(runner, failure, w
     monkeypatch.setattr(runner, 'bind_cold_environment', lambda env: calls.append('environment'))
     monkeypatch.setattr(sys, 'path', list(sys.path))
     monkeypatch.setattr(sys, 'meta_path', list(sys.meta_path))
+    class EditableFinder:
+        __module__ = '_rpu_backend_editable'
+
+        def find_spec(self, fullname, path=None, target=None):
+            return None
+    sys.meta_path.append(EditableFinder())
+    original_paths, original_finders = list(sys.path), list(sys.meta_path)
     if failure:
         with pytest.raises(RuntimeError, match={'arenas': 'could not prepare fifteen', 'predict': 'predict failed', 'replay': 'changed actions', 'close': 'close failed'}[failure]):
             runner.run_example_config(config)
@@ -343,3 +360,5 @@ def test_full_run_excludes_warmup_and_closes_before_reporting(runner, failure, w
         assert calls == ['environment', 'arenas']
     else:
         assert calls[:4] == ['environment', 'arenas', 'build', 'prepare'] and calls[-1] == 'close'
+    assert sys.path == original_paths
+    assert sys.meta_path == original_finders

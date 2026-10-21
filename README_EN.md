@@ -61,46 +61,24 @@ Qwen3 ASR/TTS use dedicated speech entry points. Follow the
 
 ## Quick start
 
-The current source requires Python 3.12, a configured device board environment,
-and matching Rhino Launch and operator assets. Follow
-[Build the current development source](docs/development_build.md) to create an
-isolated environment and install the dependencies defined in
-[pyproject.toml](pyproject.toml). Use the `vision`, `vla` or `audio` extra for the corresponding
-entry points.
+Follow the [unified installation, inference and development guide](docs/getting_started.md)
+to install Miniconda3, create Python 3.12, install dependencies and run
+Qwen3-0.6B FP16. The first deployment and later editable/wheel development use
+one `RHINOFORGE_ENV` and the same guide.
 
-1. Configure the external runtime paths and install the current source using
-   the build guide.
-2. Prepare the checkpoint as described in [Model assets](docs/model_assets.md),
-   set `RPU_MODEL_CACHE`, and select the corresponding TOML example.
-3. Confirm that the board is idle, check the installation and configuration,
-   then run inference:
-
-```bash
-python -m pip check
-cp examples/configs/qwen3/text/0_6b/fp16.toml qwen3.local.toml
-cat >> qwen3.local.toml <<'TOML'
-
-[logging]
-level = "INFO"
-TOML
-python -m examples.run --config qwen3.local.toml --check-config
-python -m examples.run --config qwen3.local.toml
-```
-
-The example sets `logging.level="INFO"` to display generated text. The default
-`ERROR` level shows errors and separately controlled summaries.
-[Run and debug models](docs/model_testing.md) describes the TOML
-runner, quantization and diagnostic entry points.
-
-See [Getting started](docs/getting_started.md) for installation and a first run.
+For slow downloads or offline boards, use the guide's
+[complete Conda environment bundle](docs/getting_started.md#6-deploy-a-complete-environment-bundle)
+to download and unpack the matching Python, dependencies and native runtime
+at once. Prepare model weights, the board OS/driver and any SDK components not
+listed in the bundle separately. Download availability and compatible platforms
+follow the provider's actual delivery.
 
 ## Documentation
 
 | Topic | Document |
 |---|---|
 | v1.2 changes and installation | [Changelog](CHANGELOG.md) · [Upgrade guide](docs/upgrading_1_2.md) |
-| Install current source | [Development build](docs/development_build.md) |
-| Installation and first run | [Getting started](docs/getting_started.md) |
+| Installation, inference and development | [Unified guide](docs/getting_started.md) |
 | Speech recognition and synthesis | [Qwen3 ASR/TTS](docs/qwen3_audio.md) |
 | Examples | [Example directory and entry points](examples/README.md) |
 | Restricted Launch and operator assets | [Restricted runtime assets](docs/runtime_assets.md) |

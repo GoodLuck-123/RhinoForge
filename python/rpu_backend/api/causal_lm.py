@@ -16,6 +16,7 @@ import weakref
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
+from rpu_backend._native_loader import require_native_backend
 from rpu_backend.api.errors import RPUUnsupportedDtypeError, RPUSingleHandleError, UnsupportedModelError
 from rpu_backend.api._execution import normalize_rpu_execution
 from rpu_backend.api._loading import resolve_config_architecture, resolve_loader_device
@@ -293,6 +294,9 @@ class RPUModelForCausalLM:
             adapter_cls.preflight(config)
         if hasattr(adapter_cls, "preflight_execution"):
             adapter_cls.preflight_execution(config, execution_config)
+
+        if move_to_rpu:
+            require_native_backend()
 
         # Profile validated — safe to do the full load. W8A16 checkpoints need
         # a custom loader because HF's generic path casts int8 projection weights

@@ -1,4 +1,4 @@
-"""Explicit factory for the reviewed official, ordinary non-RTC profile."""
+"""Explicit factories for pinned official RhinoVLA profiles."""
 from collections.abc import Mapping
 import copy
 import hashlib
@@ -48,7 +48,7 @@ def _validate_official_assets(
         raise ValueError("RhinoVLA official factory checkpoint SHA-256 mismatch")
 
 
-def _load_official_model(model_root, checkpoint):
+def _load_official_model(model_root, checkpoint, *, rtc=False):
     """Strict CPU FP32 source model; this function never imports the native backend."""
     import torch
     from omegaconf import OmegaConf
@@ -69,7 +69,9 @@ def _load_official_model(model_root, checkpoint):
         cfg = OmegaConf.load(model_root / "configs/training/demo_full_finetune.yaml")
         cfg.framework.qwenvl.base_vlm = str(model_root / "rhinovla/assets/qwen3_vl_processor")
         cfg.framework.qwenvl.attn_implementation = "sdpa"
-        if "training_time_rtc" in cfg.framework.action_expert:
+        if rtc:
+            cfg.framework.action_expert.training_time_rtc = {"max_delay": 6}
+        elif "training_time_rtc" in cfg.framework.action_expert:
             cfg.framework.action_expert.training_time_rtc.max_delay = 0
         model = framework.build_framework(cfg).float().eval().requires_grad_(False)
         state = torch.load(checkpoint, map_location="cpu", mmap=True, weights_only=True)
@@ -130,11 +132,13 @@ def official_runtime_factory(config, *, rpu_execution=None):
 
 
 def v3_runtime_factory(config, *, rpu_execution=None):
-    """Load the pinned v3 96D, horizon-30, depth-18 non-RTC profile.
+    """Load the pinned v3 96D, horizon-30, depth-18 profile.
 
     Use the v3 checkpoint remapping, descending flow and prefix RoPE continuation;
     training-only OAT/LoRA tensors are ignored. Configuration and prepared CPU
-    inputs follow ``official_runtime_factory``. The v1 asset contract is separate."""
+    inputs follow ``official_runtime_factory``. ``rtc=True`` selects the FP16
+    ten-step RTC path with request delays 0 through 6. The v1 asset contract
+    is separate."""
     return _runtime_factory(config, rpu_execution=rpu_execution, v3=True)
 
 
@@ -142,11 +146,16 @@ def _runtime_factory(config, *, rpu_execution=None, v3=False):
     if not isinstance(config, Mapping):
         raise TypeError("RhinoVLA official factory config must be a mapping")
     allowed = {"model_root", "checkpoint", "qin", "steps", "trust_model_code",
-               "expert_w8a16", "full_w8a16"}
+               "expert_w8a16", "full_w8a16", "rtc"}
     if set(config) - allowed:
         raise ValueError(f"unsupported RhinoVLA official factory keys: {sorted(set(config) - allowed)}")
     if config.get("trust_model_code") is not True:
         raise PermissionError("official model code requires explicit trust_model_code=True")
+    rtc = config.get("rtc", False)
+    if type(rtc) is not bool:
+        raise TypeError("RhinoVLA rtc must be bool")
+    if rtc and not v3:
+        raise ValueError("RhinoVLA RTC requires v3_runtime_factory")
     _reject_unsafe_diagnostics()
     from .runtime import resolve_rhinovla_quantization
     expert_w8a16, full_expert_w8a16, _ = resolve_rhinovla_quantization(
@@ -160,6 +169,28 @@ def _runtime_factory(config, *, rpu_execution=None, v3=False):
     checkpoint = _path_argument("checkpoint", config["checkpoint"]).resolve()
     steps = config.get("steps", 10)
     denoise_schedule(steps, "official_descending")
+    if rtc:
+        from .rtc import validate_rtc_install
+        from .runtime import RhinoVLAPipelineColdConfig
+        from .fused import _RhinoVLANativeColdConfig
+        from rpu_backend.runtime import rpu_env_bool
+
+        if rpu_env_bool("RPU_GRAPH_FORCE_ONESHOT_ON_REPLAY"):
+            raise ValueError("RhinoVLA RTC requires ordinary Graph replay, not forced oneshot")
+        for suffix in ("HIGH_PRECISION", "HIGH_PRECISION_FUSIONS", "PRECOMPUTE_GATE_TANH",
+                       "VECTOR_K_NORM", "VECTOR_Q_NORM", "PARTIAL_ROPE"):
+            if rpu_env_bool("RPU_RHINOVLA_" + suffix):
+                raise ValueError(f"RhinoVLA RTC requires {suffix} disabled")
+        pipeline_cold, _ = RhinoVLAPipelineColdConfig.resolve(rpu_execution)
+        validate_rtc_install(
+            rtc=rtc, steps=steps, flow_direction="official_descending",
+            expert_w8a16=expert_w8a16, full_expert_w8a16=full_expert_w8a16,
+            native_cold=_RhinoVLANativeColdConfig.from_env(),
+            action_cold=pipeline_cold.stages["action"])
+        for op in ("rhino_vla_set_denoise_loop_rtc_tables", "rhino_vla_prepare_rtc",
+                   "rhino_vla_denoise_loop_rtc_forward"):
+            if not hasattr(torch.ops.rpu, op):
+                raise RuntimeError("RhinoVLA RTC requires a matching native RhinoForge build")
     qin = config["qin"]
     if not isinstance(qin, Mapping):
         raise TypeError("RhinoVLA qin must contain preprocessed CPU tensors")
@@ -186,7 +217,8 @@ def _runtime_factory(config, *, rpu_execution=None, v3=False):
         _validate_official_assets(root, checkpoint)
     model_config = json.loads((root / "rhinovla/assets/qwen3_vl_processor/config.json").read_text())
     _validate_qin_profile(qin, model_config)
-    model = _load_official_model(root, checkpoint)
+    model = (_load_official_model(root, checkpoint, rtc=True) if rtc
+             else _load_official_model(root, checkpoint))
     full_expert = model.action_expert
     expert = full_expert.transformer
     # Upstream shares this small module with Qwen; Qwen's later .half() must
@@ -203,6 +235,7 @@ def _runtime_factory(config, *, rpu_execution=None, v3=False):
         model=model, action_bundle=bundle, flow_direction="official_descending",
         rpu_execution=rpu_execution,
         expert_w8a16=expert_w8a16, full_expert_w8a16=full_expert_w8a16,
+        rtc=rtc,
     )
 
 

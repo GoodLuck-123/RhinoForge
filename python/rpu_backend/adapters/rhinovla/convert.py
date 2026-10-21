@@ -345,7 +345,8 @@ def _fold_final_norm_dense(final_norm):
 
 def _prepare_denoise_adarms_tables(expert, cond_all_cpu, *, full_w8a16=False,
                                    loop_weights=None, precompute_gate_tanh=False,
-                                   high_precision=False, quantize_final_norm=True, final_norm=None):
+                                   high_precision=False, quantize_final_norm=True, final_norm=None,
+                                   device="rpu"):
     """Precompute denoise-loop AdaRMS dense outputs for fixed timestep conds.
 
     RhinoVLA's denoise schedule uses the same timestep embedding for every
@@ -387,16 +388,27 @@ def _prepare_denoise_adarms_tables(expert, cond_all_cpu, *, full_w8a16=False,
         pair_layers.append(torch.cat(layer_outs, dim=1).contiguous())
 
     pair_table = torch.stack(pair_layers, dim=1).to(
-        dtype=torch.float16, device="rpu").contiguous()
+        dtype=torch.float16, device=device).contiguous()
 
     final_w, final_b = _fold_final_norm_dense(expert.norm)
     final_table = torch.nn.functional.linear(cond, final_w, final_b).contiguous()
     final_table[:, :H] += 1.0
-    final_table = final_table.to(dtype=torch.float16, device="rpu").contiguous()
+    final_table = final_table.to(dtype=torch.float16, device=device).contiguous()
     print(
         f"[Rhino] AdaRMS precomputed: pair_table={tuple(pair_table.shape)} "
         f"final_table={tuple(final_table.shape)}")
     return pair_table, final_table
+
+
+def _prepare_rtc_adarms_tables(expert, condition_groups):
+    """Cold tables for each admitted delay and three contiguous token groups."""
+    if tuple(condition_groups.shape) != (7, 10, 3, 1024):
+        raise ValueError("RhinoVLA RTC requires condition groups [7,10,3,1024]")
+    pair, final = _prepare_denoise_adarms_tables(
+        expert, condition_groups.reshape(-1, 1024), device="cpu")
+    pair = pair.reshape(7, 10, 3, 18, 6144).permute(0, 1, 3, 2, 4)
+    final = final.reshape(7, 10, 3, 3072)
+    return (pair.contiguous().to("rpu"), final.contiguous().to("rpu"))
 
 
 def _prepare_full_w8_adarms_tables(expert, cond_all_cpu, loop_weights, *,

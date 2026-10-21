@@ -53,32 +53,13 @@ Qwen3 ASR/TTS 使用独立语音入口，下载和运行步骤见[语音指南](
 
 ## 快速开始
 
-当前源码需要 Python 3.12、已配置好的设备板卡环境，以及与源码匹配的
-Rhino Launch 和算子资产。请按[当前源码构建说明](docs/development_build.md)
-创建独立环境并安装依赖；版本以 [pyproject.toml](pyproject.toml) 为准。
-视觉、VLA 和语音入口分别使用 `vision`、`vla`、`audio` 可选依赖。
+按[统一安装、运行与开发指南](docs/getting_started.zh.md)完成 Miniconda3 下载、
+Python 3.12 环境创建、依赖安装和 Qwen3-0.6B FP16 首次运行。首次部署与后续
+editable/wheel 开发共用一个 `RHINOFORGE_ENV`，无需切换到另一份构建指南。
 
-1. 按构建说明配置外部运行时路径，在独立环境中安装当前源码。
-2. 按[模型资产说明](docs/model_assets.zh.md)准备模型 checkpoint，设置
-   `RPU_MODEL_CACHE`，选择对应的 TOML 示例。
-3. 确认板卡空闲后检查安装和模型配置，再运行推理：
-
-```bash
-python -m pip check
-cp examples/configs/qwen3/text/0_6b/fp16.toml qwen3.local.toml
-cat >> qwen3.local.toml <<'TOML'
-
-[logging]
-level = "INFO"
-TOML
-python -m examples.run --config qwen3.local.toml --check-config
-python -m examples.run --config qwen3.local.toml
-```
-
-示例显式设置 `logging.level="INFO"`，以显示生成文本；默认 `ERROR` 仅显示错误及独立摘要。
-[模型运行与调试](docs/model_testing.zh.md)说明 TOML runner、量化与调试入口。
-
-完整安装和首次运行步骤见[入门指南](docs/getting_started.zh.md)。
+下载慢或目标板卡离线时，使用指南中的[完整 Conda 环境包部署](docs/getting_started.zh.md#6-部署完整环境包)，
+一次下载并解包匹配的 Python、依赖和 native 运行时。模型权重、板卡 OS/驱动和
+包清单未包含的 SDK 组件仍须单独准备；下载地址和适用平台以提供方实际交付为准。
 
 ## 文档
 
@@ -86,8 +67,7 @@ python -m examples.run --config qwen3.local.toml
 |---|---|
 | v1.2 更新与安装 | [发行说明](CHANGELOG.md) · [升级指南](docs/upgrading_1_2.zh.md) |
 | 完整文档导航 | [文档索引](docs/README.md) |
-| 当前源码安装 | [源码构建](docs/development_build.md) |
-| 安装与首次运行 | [入门指南](docs/getting_started.zh.md) |
+| 安装、首次运行与开发 | [统一指南](docs/getting_started.zh.md) |
 | 语音识别与生成 | [Qwen3 ASR/TTS](docs/qwen3_audio.zh.md) |
 | 示例 | [示例目录与运行入口](examples/README.md) |
 | 受限 Launch 与算子资产 | [受限运行时资产](docs/runtime_assets.zh.md) |

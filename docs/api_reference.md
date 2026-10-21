@@ -86,6 +86,15 @@ profiles early. It currently admits the built-in Qwen3 and Llama CausalLM
 architectures. Only `torch.float16` is accepted by this entry point; a
 quantized checkpoint carries its own checked metadata.
 
+With `device="rpu"`, the CausalLM loader checks native-backend availability and
+`O_RDWR` access to an RPU node and `/dev/mem` before loading full weights.
+Unavailable devices raise `RPUBackendError` with the failing path and OS error;
+an unavailable native extension is reported separately. The Qwen3/Llama two-step
+`model.to("rpu")` path checks again before weight conversion and live-instance
+ownership. CPU loading does not require device access. After fixing permissions
+or an installation that was unavailable at import, start a fresh Python process.
+See [runtime setup](runtime_assets.md#board-sdk-and-device-access).
+
 `rpu_execution` is a read-only per-handle mapping. The CausalLM entry accepts a
 `prefill` stage with:
 
@@ -302,6 +311,26 @@ representative inputs; reuse a range only for inputs admitted by that policy.
 to an explicit model-repository runtime factory. The runtime must expose the
 execution capabilities and effective `rpu_execution` configuration it
 consumed; the facade rejects a silent mismatch.
+
+The built-in `rpu_backend.adapters.rhinovla.factory:v3_runtime_factory` has an
+explicit cold `rtc=True` mode for the pinned v3 FP16, batch-1, 30×96, 18-layer,
+ten-step unrolled profile. Its `predict` request requires `action_prefix` and
+`delay` together: a finite CPU floating tensor `[1,D,96]` or `[D,96]`, with
+`delay <= D <= 30`, and a Python integer in `0..6` (not `bool` or a tensor).
+Delay zero permits an empty prefix. Non-RTC construction keeps `rtc=False` and
+accepts neither field. RTC uses per-action times and the mean time embedding for
+the state token, and clamps the masked prefix throughout denoising. Its separate
+[RTC template and input guide](../examples/configs/rhinovla/v3/README.md#rtc)
+specify the cold options and current verification status; this does not extend
+RTC admission to W8 or other checkpoints. The runtime reserves the complete
+Graph pool of ten arenas at construction for all seven delay variants, retained
+Vision/Language graphs and one transient preparation graph; no additional user
+environment setting is required. The validation fixture uses three equal-sized
+views and a 230-token logical prefix. The template cold-binds qin tokens,
+attention masks and grids; changing these or pixel geometry requires a new
+runtime. Unequal view sizes are outside this validation, and forced oneshot
+execution is rejected. Install matching RTC-capable Python and native
+builds; an older bundle containing VLA dependencies alone does not provide RTC.
 
 A string `runtime_factory="module:callable"` imports and executes Python code
 from that module. Treat it as a trusted extension point: use only an installed,

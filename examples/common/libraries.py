@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+from importlib import metadata
 import os
 import json
 from pathlib import Path
 import re
+import sysconfig
 
 
 LIBRARY_ROLES = (
@@ -22,6 +24,46 @@ def file_sha256(path: Path | str) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             checksum.update(chunk)
     return checksum.hexdigest()
+
+
+def verify_backend_source(root: Path, origin: str | Path) -> Path:
+    """Accept this checkout or its matching installed wheel, never an overlay."""
+    root, imported = Path(root).resolve(), Path(origin).resolve()
+    source_package = root / "python/rpu_backend"
+    if imported == (source_package / "__init__.py").resolve():
+        return imported
+
+    def fail(detail: str) -> None:
+        raise RuntimeError(f"wrong source checkout or installed wheel imported: {imported}; {detail}")
+
+    package_dirs = {Path(sysconfig.get_path(kind)).resolve() / "rpu_backend"
+                    for kind in ("purelib", "platlib")}
+    if imported.parent not in package_dirs or imported.name != "__init__.py":
+        fail("expected this checkout or the current interpreter's site-packages")
+    try:
+        distribution = metadata.distribution("rhinoforge")
+    except metadata.PackageNotFoundError:
+        fail("rhinoforge distribution metadata is missing")
+    files = list(distribution.files or ())
+    entry = next((item for item in files if str(item) == "rpu_backend/__init__.py"), None)
+    if entry is None or Path(distribution.locate_file(entry)).resolve() != imported:
+        fail("the imported package is not owned by the rhinoforge distribution")
+    if distribution.version != (root / "VERSION").read_text().strip():
+        fail("rhinoforge distribution version differs from the example source")
+    # RECORD lists only installed runtime modules, so excluded tests/debug files
+    # do not make a matching wheel fail. Source snapshots bind the Python bytes
+    # too; version alone cannot distinguish different builds of one release.
+    if source_package.is_dir():
+        for item in files:
+            relative = Path(str(item))
+            if relative.parts[:1] != ("rpu_backend",) or relative.suffix != ".py":
+                continue
+            installed = Path(distribution.locate_file(item)).resolve()
+            expected = root / "python" / relative
+            if (not installed.is_file() or not expected.is_file()
+                    or file_sha256(installed) != file_sha256(expected)):
+                fail(f"installed Python differs from source: {relative}")
+    return imported
 
 
 def verify_libraries(root: Path, selected: dict) -> tuple[dict, dict]:

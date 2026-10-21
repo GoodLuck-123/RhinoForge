@@ -361,6 +361,7 @@ def test_32b_public_staging_claim_arena_banks_and_cache_capacity(monkeypatch):
     from rpu_backend.graph import GraphRuntimePolicy
     model = _model(**_dense_config(_DENSE[-1]))
     (packed, converted, installs) = _host_install(monkeypatch, model)
+    monkeypatch.setattr(causal_lm, 'require_native_backend', lambda: None)
     events = model._events
 
     def stage(config, path, **kwargs):

@@ -7,7 +7,7 @@ changes. The distribution is `rhinoforge`; Python uses `rpu_backend` and `torch.
 
 ## Install
 
-1. Follow [Getting started](getting_started.md) in a fresh Python 3.12 environment.
+1. Follow [Getting started](getting_started.md) in a fresh Python 3.12 Conda environment.
    [pyproject.toml](../pyproject.toml) pins PyTorch 2.10.0 and Transformers 5.3.0;
    select the `vision`, `vla` or `audio` extra for the models you use.
 2. Obtain `RhinoForge-runtime-v1.2.0.tar.gz` and its checksum from the

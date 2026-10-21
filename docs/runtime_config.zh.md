@@ -538,6 +538,9 @@ AUTO 校验 Launch 能力以及已加载资产的哈希和程序身份。未知�
 |---|---|---|---|
 | `torch.rpu.set_profile(True)` | Backend wrapper 和累计 timing counter | 如果只需要 steady-state counter，在 warmup 后启用；测量窗口前调用 `reset_profile_accumulators()` | 轻量 console/counter 诊断；它不是 PyTorch operation trace。 |
 | `torch.profiler.profile(...)` | CPU 和 `PrivateUse1` operation scope，包括 Graph capture/replay range | 只包围要测量的调用；按 benchmark protocol 单独包含 warmup | 生成 operation-level trace/table，并增加 profiler 开销。 |
+| `torch.rpu.hw_perf_trace(output_dir, max_dumps=32)` | 匹配 sanitized Release Launch 的硬件 trace | 在模型准备和 Graph BUILD 前启用；Qwen3 runner 提供 `--hwperf` / `run.hwperf=true` | 输出 Chrome 硬件 trace，限制 dump 数且影响执行耗时；保存在源码和发布资产之外。 |
+
+不同 runner 支持范围不同；Qwen3 命令及拒绝跟踪的延迟入口见[模型诊断](model_testing.zh.md#诊断调用)。
 
 ## 清单维护
 

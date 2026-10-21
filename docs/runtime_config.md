@@ -580,6 +580,10 @@ Synchronization covers the actual tensor byte range, including view offsets. Reu
 |---|---|---|---|
 | `torch.rpu.set_profile(True)` | Backend wrapper and accumulated timing counters | After warmup if only steady-state counters are wanted; call `reset_profile_accumulators()` before the measured window | Lightweight console/counter diagnostics; it is not a PyTorch operation trace. |
 | `torch.profiler.profile(...)` | CPU and `PrivateUse1` operation scopes, including Graph capture/replay ranges | Wrap only the calls to measure; include warmup separately according to the benchmark protocol | Produces an operation-level trace/table and adds profiler overhead. |
+| `torch.rpu.hw_perf_trace(output_dir, max_dumps=32)` | Hardware trace from the matching sanitized Release Launch | Enable before model setup and Graph BUILD; the Qwen3 runner exposes `--hwperf` / `run.hwperf=true` | Writes Chrome hardware traces; bounds dump count and affects execution timing. Keep traces outside source/release artifacts. |
+
+Runner support differs by entry; see [model profiling](model_testing.md#diagnose-a-call)
+for the Qwen3 command and rejected latency-runner flags.
 
 ## Inventory maintenance
 

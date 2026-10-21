@@ -16,6 +16,23 @@ For build-version mismatches, compare the installed Launch package with
 determine the Launch version. Preserve exact dependency and capability checks;
 see the [release policy](../docs/release_policy.md).
 
+For a clean installation, use the [unified installation and development guide](../docs/getting_started.md):
+install Miniconda3, create one `RHINOFORGE_ENV`, and keep it for source, editable
+and wheel operations. A complete Conda bundle replaces the download/build steps;
+validate its profile, architecture, platform requirements and installation at a
+different prefix before delivery. It does not include model weights or a kernel
+driver. Use [runtime extraction and SDK checks](../docs/runtime_assets.md) and the
+first-run guide's platform device lock. Clear inherited Python
+and native-library overrides, bind compiler and asset identities, and distinguish
+the new application environment from the board OS/SDK/driver baseline.
+`--check-config` is device-free; it does not prove runtime availability.
+For CausalLM permission failures, retain the failing node and OS error and verify
+failure before weight loading or transformation. Preserve CPU-only loading and
+restart the process after repairing an import-time native-load failure. Normal
+Graph BUILD/REPLAY is informational; do not classify all native stderr as an
+error or downgrade genuine errors. See [API behavior](../docs/api_reference.md#rpumodelforcausallmfrom_pretrained)
+and [model diagnostics](../docs/model_testing.md).
+
 For model assessment or implementation, use the
 [`rhinoforge-port` skill](../.agents/skills/rhinoforge-port/SKILL.md) with
 [model porting](../docs/model_porting.md).
@@ -69,6 +86,15 @@ For Pi0.5 fixed-input comparisons, use the public `input.noise` field for both
 Graph preparation and inference; retain default-input failures separately.
 See the [policy API](../docs/api_reference.md#policy-apis) and
 [model family map](synthesis/model-family-map.md#pi05).
+For RhinoVLA v3 RTC, bind `rtc` at construction and validate the paired
+`action_prefix`/`delay` request before model loading. Preserve per-token time
+conditioning and the state token's mean time embedding, refresh prefix contents
+on replay, and include delay in Graph identity. Verify the requested delay range
+independently of non-RTC evidence. Reserve the complete Graph pool during cold
+construction, including transient preparation while all delay variants remain
+retained. Keep the Python/native RTC build paired; VLA dependencies in an older
+bundle do not supply the new runtime. Use the [RTC input guide](../examples/configs/rhinovla/v3/README.md#rtc)
+for the exact FP16 envelope and current verification status.
 When adding quantized examples, trace the checkpoint loader and installed
 projection storage, not just the `dtype` label. Document the component scope
 and retain its admission controls. Bind the recipe, input and lifetime requirements before extending a profile. For caller factories, bind precision inputs,

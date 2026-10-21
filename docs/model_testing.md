@@ -21,13 +21,41 @@ Preprocessed-input examples accept CPU tensor mappings produced by the checkpoin
 - `run.warmup` defaults to two calls: BUILD followed by REPLAY for a new Graph signature. Set `run.runs` for subsequent calls.
 - With `warmup >= 2`, omit `warmup_decode_steps` or match `input.decode_steps`. Explicit `warmup=0` or `1` allows shortened cold-path diagnostics.
 - Decode steps count calls after the prefill token. EOS may stop generation early; fixed-length runs use `stop_on_eos=false` in both phases.
-- `run.output_dir` selects the output directory. Check the generated files for outputs and Graph state.
+- `run.output_dir` selects the output directory. Check the generated files for outputs and execution status. Graph statistics depend on the runner; the ordinary Qwen3 report does not collect them. BUILD/REPLAY log messages alone do not prove Graph invariants.
 
 ## Diagnose a call
 
 `--profile` or `[run].profile=true` adds one Torch profiler call after ordinary execution. Enable shapes, memory or stacks only when needed. Traces can contain application data; store them outside the source tree.
 
-The public runner rejects `hwperf=true`. For a device-specific issue, use the installed runtime's profiler and record the matching asset and input shape. See [runtime configuration](runtime_config.md) for controls and [validation](validation_policy.md) for focused checks.
+Qwen3's public runner supports `--hwperf` or `[run].hwperf=true` with the matched
+sanitized Release Launch runtime. For example, on an idle, locked board:
+
+```bash
+python -m examples.run --config qwen3.local.toml --hwperf --check-config
+python -m examples.run --config qwen3.local.toml --hwperf
+```
+
+The configuration check alone does not collect or validate a trace. HWPerf is
+enabled before model setup/Graph BUILD and stores hardware traces under the run's
+`hwperf/` directory; missing or unreadable requested traces fail the run.
+`[runner.hw_profile].max_dumps` bounds dumps (default 32). Tracing affects the
+execution window, so do not compare its latency to uninstrumented runs. Support
+depends on the runner: Wall-OSS base/sorting latency entries reject these tracing
+flags. Keep hardware traces outside the repository and record the source, runtime
+assets and input shape. See [runtime configuration](runtime_config.md#profiling-mechanisms)
+and [validation](validation_policy.md).
+
+## Interpret a first Qwen3 run
+
+The [first-run guide](getting_started.md#4-read-the-short-case-result) uses the
+pinned Qwen3-0.6B checkpoint with a raw P7 prompt, D4, W2/R3 and FP16 computation.
+D4 permits at most five generated tokens including prefill; no chat template is
+applied. The default output parent is `perf_results/examples`; set
+`run.output_dir` to an external task directory. Each Qwen3 run writes
+`report.json` and the final measured `output.pt` under a unique profile directory.
+`PASS` / `execution.status=COMPLETED` means execution completed;
+`correctness=not_run` and `formal_certification=false` remain explicit.
+Use separate, semantically matched reference checks for numerical claims.
 
 ## Qwen3 speech
 

@@ -1,6 +1,6 @@
 # Host launch runtime boundary
 
-RhinoForge uses the separately distributed Rhino Launch development package as
+RhinoForge uses the separately distributed sanitized Release Rhino Launch package as
 a link-time library dependency. Model code calls public host wrappers; the
 restricted library and main and expansion operator assets remain outside the source tree. [Restricted runtime assets](../../docs/runtime_assets.md)
 
@@ -23,6 +23,24 @@ restricted library and main and expansion operator assets remain outside the sou
 - Require the release-provided `<operator-asset>.kernels` sidecar before loading
   any program. It lists the asset size and names only; RhinoForge never parses
   the opaque asset. [Kernel manifest](../../docs/runtime_assets.md#required-components)
+
+## Installation and availability
+
+Verify the outer runtime checksum, inner `SHA256SUMS`, and source dependency
+identities, then unpack the nested Launch archive before setting its prefix.
+The platform SDK and kernel driver are separate prerequisites; the bundle does
+not install or version-bind them. Inspect `ldd` and record the provider's
+platform versions. [Runtime setup](../../docs/runtime_assets.md#configure-paths)
+
+An RPU process needs `O_RDWR` access to an RPU device node and `/dev/mem` under
+the actual inference account. CPU-only imports remain possible without native
+loading. Explicit CausalLM RPU loading checks before full weights, and the
+Qwen3/Llama two-step transfer checks before layout mutation and model ownership.
+Preserve the OS error; restart Python after fixing import-time access or runtime
+installation. Hold the platform's shared device lock across the whole process.
+[Access preflight](../../docs/runtime_assets.md#board-sdk-and-device-access) ·
+[First run](../../docs/getting_started.md#3-run-inference-on-an-idle-device) ·
+[Loader contract](../../docs/api_reference.md#rpumodelforcausallmfrom_pretrained)
 
 ## Public wrapper contract
 

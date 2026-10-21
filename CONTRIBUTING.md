@@ -7,18 +7,12 @@ agreed first.
 
 ## Development setup
 
-Use a preconfigured device board environment and install the exact Rhino Launch
-1.0.0 development package. If its CMake package is outside the system search
-path, add its prefix to `CMAKE_PREFIX_PATH`, then install from the repository
-root:
-
-```bash
-python -m pip install -e '.[dev]' --no-build-isolation
-```
-
-Set `RPU_KERNEL_LIB_PATH` to the release-matched main and expansion operator assets for
-board execution. Restricted packages and assets must stay outside the
-repository.
+Follow the [unified installation and development guide](docs/getting_started.md)
+to install Miniconda3, create the single `RHINOFORGE_ENV`, prepare the matching
+runtime and build RhinoForge. Its [development section](docs/getting_started.md#5-develop-in-the-same-environment)
+installs `.[dev]` in that same environment and describes editable and wheel
+builds. Use the guide's device locking and SDK/access checks for a board run.
+Restricted packages and generated artifacts must stay outside the repository.
 
 ## Change requirements
 
