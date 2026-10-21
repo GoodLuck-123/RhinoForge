@@ -305,15 +305,18 @@ def test_activation_preserves_provider_paths_and_shell_modes(tmp_path, status):
     result = subprocess.run(["bash", "--noprofile", "--norc", "-c",
         'set -euo pipefail; before=$-; if . "$1"; then status=0; else status=$?; fi; '
         'printf "%s\\n" "$status" "$before" "$-" "$LD_LIBRARY_PATH" "$RHINO_LAUNCH_ROOT" '
-        '"$RHINOFORGE_SOURCE" "${RHINOFORGE_BUILD-unset}" "$RPU_KERNEL_LIB_PATH"',
+        '"$RHINOFORGE_SOURCE" "${RHINOFORGE_BUILD-unset}" "$RPU_KERNEL_LIB_PATH" '
+        '"${RPU_BACKEND_SO-unset}"',
         "bash", str(bundle / "activate.sh")],
         env={"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": "/provider/sdk/lib:/provider/launch/lib",
              "RHINO_LAUNCH_ROOT": "/provider/launch", "RHINOFORGE_SOURCE": "/github/source",
-             "RPU_KERNEL_LIB_PATH": "/provider/operators/main.ref"},
+             "RPU_KERNEL_LIB_PATH": "/provider/operators/main.ref",
+             "RPU_BACKEND_SO": "/old-environment/backend.so"},
         text=True, capture_output=True, check=True)
-    observed, before, after, libraries, launch, source, build, operators = result.stdout.splitlines()
+    observed, before, after, libraries, launch, source, build, operators, backend = result.stdout.splitlines()
     assert observed == str(status)
     assert before == after and "u" in after
+    assert backend == "unset"
     expected = "/provider/sdk/lib:/provider/launch/lib"
     assert libraries == (f"{bundle}/env/lib:{expected}" if status == 0 else expected)
     assert (launch, source, build, operators) == (

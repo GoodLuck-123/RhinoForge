@@ -26,7 +26,7 @@ ACTIVATE = r'''# Source this file in bash. The SDK and runtime assets are config
 export RHINOFORGE_DEPENDENCIES="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 export RHINOFORGE_ENV="$RHINOFORGE_DEPENDENCIES/env"
 export RHINOFORGE_ENVIRONMENT_ID=__ENVIRONMENT_ID__
-unset PYTHONPATH PYTHONHOME
+unset PYTHONPATH PYTHONHOME RPU_BACKEND_SO
 export PYTHONNOUSERSITE=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0
 _rf_had_nounset=0
 case $- in *u*) _rf_had_nounset=1; set +u ;; esac
