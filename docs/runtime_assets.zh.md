@@ -3,18 +3,19 @@
 简体中文 | [English](runtime_assets.md)
 
 RhinoForge 源码和 wheel 不包含 Rhino Launch 二进制、主算子资产与扩展算子资产、板卡 SDK 或
-模型权重。请向运行时提供方获取与待安装源码版本匹配的资产，按随包条款和完整性说明
-使用。[完整 Conda 环境包](getting_started.zh.md#6-部署完整环境包)可以按提供方条款
-随包包含这些用户态运行时资产；实际内容和仍需外部提供的 SDK 组件以包内清单为准。
+模型权重。规划中的[公开依赖环境包](environment_bundle.zh.md)同样不包含这些组件，
+也不包含 RhinoForge 本身。RhinoForge 从 GitHub 获取，OS/驱动和完整 SDK 由平台方
+提供，匹配的 Launch 与算子资产仍单独交付。各包按随包条款和完整性说明使用；
+目前尚未发布公开依赖环境包。
 
 当前 `1.3.0.dev0` 开发线依赖已归档的 **Rhino Launch 1.2.0**，
 commit 为 `3dd1b410f5f46373997fef3dfbf9b67eecec6a84`，CMake 数值版本为 `1.2.0`，ABI 为 `1`。
 向提供方获取正式版 `RhinoForge-runtime-v1.2.0.tar.gz` 及其 `.tar.gz.sha256`。
-其中 Launch SDK 目录为 `rhino-launch-kernel-v1.2.0-linux-aarch64`，main 和
+其中 Launch 开发包目录为 `rhino-launch-kernel-v1.2.0-linux-aarch64`，main 和
 DDR-expansion 资产与[依赖清单](../release/runtime-dependencies.json)一致，
 两份资产都需保留相邻的 `.ref.kernels` 清单。
 历史候选包可能使用同一整包文件名，须核对校验和、`RELEASE.txt` 和 Launch commit。
-`v1.1.0-2-gbdc0dae` 目录对应旧 SDK，其 CMake 版本为 `1.0.0`，不满足当前依赖。
+`v1.1.0-2-gbdc0dae` 目录对应旧 Launch 开发包，其 CMake 版本为 `1.0.0`，不满足当前依赖。
 见[发布流程](release_policy.md)。
 
 按当前 checkout 的依赖清单选择资产。提供方的开发版下载页或包内 README
@@ -36,7 +37,8 @@ DDR-expansion 资产与[依赖清单](../release/runtime-dependencies.json)一�
   不暴露 development Program API。
 - **两份算子资产**：主分支和 DDR-expansion 分支各自产出的资产，以及各自相邻的 `<asset>.kernels` 清单：资产需匹配当前源码，
   并包含所用公开模型和精度配置要求的 kernel。
-- **匹配的板卡 SDK/runtime**：按平台安装说明配置。
+- **匹配的板卡 OS、驱动和完整 SDK**：包括 SDK 用户态库，均由平台方提供并按平台
+  安装说明配置。推荐的 SDK 基线见下文。
 
 构建和运行时使用同一套 Launch。
 不要将旧算子资产与新清单混用，也不要在本地拼接算子资产。
@@ -97,13 +99,42 @@ Launch 的 commit、版本、ABI 以及两份算子资产的 commit、SHA256 均
 
 ## 板卡 SDK 与设备权限
 
-Runtime 包**不安装**板卡 SDK 或内核驱动，也没有绑定可跨平台使用的 SDK 最低版本。
-请通过提供方交付渠道获取板卡 SDK/driver 包、支持的 OS/内核/版本组合、安装命令、
-动态库配置及权限和设备锁规范。本仓库没有通用 SDK 下载地址或驱动安装命令；
-裸板应先完成平台初始化，再构建 RhinoForge。记录实际 SDK/driver 版本；
-保留预装板卡基础环境，只能称为独立应用安装，不能称为 SDK/driver 从零安装。
+**推荐板卡 SDK：`EA_R1SDK_2026_08F-2156007a`。** 已有板卡部署及 RhinoVLA v3 RTC
+delay `0–6` 验证使用以下基线：
 
-配置平台和新 Launch 路径后检查：
+| 组件 | 已验证基线 |
+|---|---|
+| 板卡平台 | R1，Linux `aarch64` |
+| 板卡 SDK | `EA_R1SDK_2026_08F-2156007a` |
+| OS / 系统 C 库 | Ubuntu 22.04 / glibc 2.35 |
+| 主机编译器 | GCC 11.4 |
+| 应用 Python | Python 3.12.15 |
+
+这是已验证组合，不是通用 SDK 最低版本，也不表示更新的 SDK 必然兼容。
+具体 OS/内核/驱动组合及其他 SDK 版本的适配，应由平台方确认。
+板卡 SDK 与 **Rhino Launch 1.2.0** 是不同组件；Launch 版本及算子身份仍以
+[runtime-dependencies.json](../release/runtime-dependencies.json)为准。
+
+Runtime 包和公开依赖环境包均**不提供**板卡 SDK、SDK 用户态库或内核驱动。
+其中 `libHxMem.so`、`libHxil.so`、`librpu_api.so` 属于平台 SDK。
+请通过平台方获取完整 SDK/driver 包、安装命令、动态库配置及权限和设备锁规范。
+本仓库没有通用 SDK 下载地址或驱动安装命令；裸板应先完成平台初始化，再构建
+RhinoForge。记录实际 SDK/driver 版本；保留预装板卡基础环境，只能称为独立应用安装，
+不能称为 SDK/driver 从零安装。
+
+激活 Python 环境后，按平台说明配置动态库搜索路径。如果 SDK 要求设置
+`LD_LIBRARY_PATH`，使用平台提供的实际目录；以下示例假设三份库位于同一目录，
+分布在多个目录时按平台说明添加。加入 Launch 路径时保留 SDK 路径：
+
+```bash
+export RHINOFORGE_SDK_LIB_DIR="/absolute/path/to/platform-sdk/lib"
+test -r "$RHINOFORGE_SDK_LIB_DIR/libHxMem.so"
+test -r "$RHINOFORGE_SDK_LIB_DIR/libHxil.so"
+test -r "$RHINOFORGE_SDK_LIB_DIR/librpu_api.so"
+export LD_LIBRARY_PATH="$RHINO_LAUNCH_ROOT/lib:$RHINOFORGE_SDK_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
+检查动态库解析结果与设备节点：
 
 ```bash
 uname -smr
@@ -170,7 +201,7 @@ PY
 | 现象 | 处理 |
 |---|---|
 | CMake 找不到 `rhino_launch` | 设置 Launch 前缀，或传入 `-Ccmake.define.rhino_launch_DIR="$RHINO_LAUNCH_ROOT/lib/cmake/rhino_launch"` |
-| CMake 报 Launch 版本不匹配 | 按依赖清单选择正式归档 SDK，同时更新构建和运行路径；不要改写 SDK 版本文件或移除 EXACT 检查 |
+| CMake 报 Launch 版本不匹配 | 按依赖清单选择正式归档的 Launch 开发包，同时更新构建和运行路径；不要改写 Launch 版本文件或移除 EXACT 检查 |
 | CMake 拒绝缺失的能力 | 获取匹配的 sanitized Release Launch 包 |
 | Launch 动态库无法加载 | 检查其 `lib` 路径及板卡 SDK 动态库路径 |
 | 资产、清单或所需 kernel 缺失 | 获取配套资产和未修改的清单 |

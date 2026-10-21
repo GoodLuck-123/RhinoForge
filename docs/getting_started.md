@@ -4,7 +4,8 @@
 
 Use this single guide and one `RHINOFORGE_ENV` for the first model run and later
 development. First obtain a supported board platform, then choose one of the two
-application installation paths below. Both paths continue with Qwen3-0.6B FP16.
+application installation paths below. Both paths build RhinoForge from a GitHub
+checkout and continue with Qwen3-0.6B FP16.
 
 ## Platform prerequisites
 
@@ -16,26 +17,35 @@ environment; it does not provision a bare board.
 |---|---|
 | Board OS | Supported Linux distribution, architecture and kernel combination |
 | Driver | Matching RPU driver, device nodes, inference-account permissions and device scheduling/lock convention |
-| Board SDK | Compatible SDK version, installation instructions and user-space library paths |
+| Board SDK | The complete SDK, including its user-space libraries, installation instructions and library paths |
 | Runtime assets | Matching Rhino Launch, main/expansion operator assets and their `.kernels` sidecars, checksums and distribution terms |
 
-See [runtime assets and platform setup](runtime_assets.md). A source checkout or
-wheel does not supply these prerequisites. A complete environment bundle may
-include authorized user-space runtime components; the provider must still supply
-the OS, driver and any SDK components absent from its manifest. Model weights
-are prepared separately after application installation.
+Our recommended, validated SDK baseline is **`EA_R1SDK_2026_08F-2156007a`** on
+R1 Linux aarch64, Ubuntu 22.04, glibc 2.35 and GCC 11.4. This records the tested
+combination; it is not a minimum-version claim or a guarantee for other SDK
+versions. Ask the platform provider to confirm the matching OS, kernel and
+driver. **Rhino Launch 1.2.0 is a separate runtime version, not the SDK version.**
+
+See [runtime assets and platform setup](runtime_assets.md). The platform supplies
+the complete SDK; we do not package SDK libraries. Rhino Launch and the operator
+assets are delivered separately from the public dependency environment, under
+their own terms. Model weights are prepared separately after application
+installation.
 
 ## Choose one installation path
 
 | Path | Steps | Use it when |
 |---|---|---|
-| [A. Build from source](#source-build) | Install Miniconda3, create the environment, install dependencies and compile RhinoForge | You need to build or modify the source |
-| [B. Deploy our complete environment bundle](#bundle-deploy) | Obtain the matching bundle, verify it, install and activate it | You want to avoid separate dependency downloads and compilation, including on an offline board |
+| [A. Build from source](#source-build) | Install Miniconda3, create the environment, install dependencies and compile RhinoForge | Available now, including for development |
+| [B. Use our dependency environment bundle](#bundle-deploy) | Obtain and activate the dependency bundle, then clone and compile RhinoForge | Planned: avoids repeated downloads of Python and third-party dependencies |
 
-Choose either A or B. Both use the same `RHINOFORGE_ENV` and continue at
-[step 3: prepare the model](#model-setup). Bundle deployment already includes
-Python and compiled RhinoForge, so it does not require Miniconda installation,
-`conda create` or a source build.
+Both paths use the same `RHINOFORGE_ENV` for installation, inference and later
+development. Path B will replace environment creation and dependency downloads;
+it still requires the GitHub source, host compiler, platform SDK and separately
+delivered runtime assets. **The new dependency-only bundle is not yet built or
+published. Use path A for executable installation instructions today.** See the
+[environment bundle design](environment_bundle.md) for its release and source
+version relationship.
 
 <a id="source-build"></a>
 <a id="1-install-miniconda3-and-build-the-source"></a>
@@ -86,10 +96,10 @@ application environment. `--override-channels` makes the selected package source
 explicit rather than inheriting a user's channel list. Miniconda supplies the
 manager; this command obtains Python from the community `conda-forge` channel.
 `CONDA_PKGS_DIRS` keeps this installation's package cache under its own workspace
-without changing the global Conda configuration or other users' caches. For a
-`full` bundle, append `ffmpeg libsndfile` to the `conda create` command below;
-otherwise add them to this same environment in the [bundle-building appendix](#build-bundle).
-Do not request `sox` from `conda-forge` on aarch64; its separate build is in that appendix.
+without changing the global Conda configuration or other users' caches. For audio
+workloads, append `ffmpeg libsndfile` to the `conda create` command below, or add
+them to this same environment using the [audio tools appendix](#build-bundle).
+That appendix also provides the separately built SoX executable for aarch64.
 
 ```bash
 unset PYTHONPATH PYTHONHOME RHINO_LAUNCH_ROOT CMAKE_PREFIX_PATH LD_LIBRARY_PATH
@@ -170,8 +180,8 @@ A Conda environment does not install the SDK or kernel driver.
 
 ### A4. Install dependencies and build RhinoForge
 
-Continue in the same shell and source directory. This installs a regular wheel,
-which can later be packed and relocated. The current [pyproject.toml](../pyproject.toml)
+Continue in the same shell and source directory. This compiles and installs
+RhinoForge into the selected environment. The current [pyproject.toml](../pyproject.toml)
 requires PyTorch **2.10.0** and Transformers **5.3.0**. Keep dependency resolution
 enabled during the first install; `constraints/security.txt` is a security
 constraint file, not a complete lock of every dependency.
@@ -201,12 +211,11 @@ in the source-install command with `'.[vision]'`, `'.[vla]'` or `'.[audio]'`;
 `'.[vision,vla,audio]'` installs all three optional dependency groups. Qwen3 text
 FP16 requires none of them. See the [speech guide](qwen3_audio.md) for its inputs.
 
-If downloads are slow or the board is offline and you have received a bundle
-for the same architecture and runtime baseline, use [path B](#bundle-deploy).
-A mirror or wheel cache must supply
-packages compatible with Python 3.12 and the target architecture; record its
-source instead of changing the pinned Torch/Transformers versions. Once the
-source installation works, the same environment supports
+If downloads are slow or the board is offline, a mirror or wheel cache must
+supply packages compatible with Python 3.12 and the target architecture; record
+its source instead of changing the pinned Torch/Transformers versions. The
+planned dependency bundle in [path B](#bundle-deploy) will cover this use case
+once its release is available. The source installation also supports
 [editable development and wheel builds](#development).
 
 Path A is complete. Skip path B and continue with [model preparation](#model-setup).
@@ -214,107 +223,59 @@ Path A is complete. Skip path B and continue with [model preparation](#model-set
 <a id="bundle-deploy"></a>
 <a id="6-deploy-a-complete-environment-bundle"></a>
 
-## 2. Path B: deploy our complete environment bundle
+## 2. Path B: use our dependency environment bundle (planned)
 
-A bundle is a snapshot of a working **Conda environment**, plus the matching
-source/examples, compiled RhinoForge, sanitized Launch and the main/expansion
-operator assets with their sidecars. The `full` profile includes the `vision`,
-`vla` and `audio` Python extras, the SoX executable and the Conda packages
-`ffmpeg` and `libsndfile`, including the audio/video command-line tools and native
-libraries. The Python `sox` package alone does not provide the SoX executable.
-The `text` profile includes the base text dependencies only.
-Consult the supplied `bundle-manifest.json` for the actual profile, versions,
-architecture and build platform. Optional SDK user-space libraries are included
-only when the manifest lists them. Model weights, the OS and kernel driver are
-not part of this environment package.
+The public bundle will contain **Python 3.12 and third-party dependencies and
+tools only**. Its `full` profile covers the default, `vision`, `vla`, `audio` and
+`dev` dependencies, plus build and media tools such as CMake, Ninja, conda-pack,
+SoX, FFmpeg and libsndfile. It will contain no RhinoForge source, installed
+RhinoForge package, native extension or wheel; no SDK libraries; and no Rhino
+Launch, operator assets or model weights. The host compiler remains a platform
+prerequisite. A complete dependency profile does not establish validation of
+every model.
 
-### B1. Obtain the matching bundle
+### B1. Obtain a compatible dependency release
 
-Currently, complete bundles are internal validation archives; **there is no
-public download link**. We provide bundles through the platform provider's
-controlled delivery channel. Request the archive or authorized download URL,
-`install_conda_bundle.py`, SHA256, `bundle-manifest.json`, the supported board/SDK
-baseline and accompanying distribution terms together.
+**No new dependency-only archive, public download URL or installer is available
+yet.** The intended delivery location is this repository's GitHub Releases after
+a clean dependency-only build, redistribution review and relocation/build
+validation. The environment will have its own version. Each supported RhinoForge
+source revision will identify the compatible environment release, manifest and
+SHA256; a source change will not automatically require a new environment release.
+See [environment bundle contents and release design](environment_bundle.md).
 
-The current restricted runtime components do not permit public distribution, so
-this complete bundle must not be uploaded to a public GitHub Release. RhinoForge's
-source license does not grant redistribution rights for those components.
-The older internal bundle predates the new RhinoVLA v3 RTC native extension;
-request a bundle matching the source version and features you need. A complete
-dependency profile does not establish validation of every model.
+The existing internal full bundle contains installed RhinoForge and restricted
+runtime assets. It is not the planned public dependency bundle, and must not be
+uploaded as one. The current `scripts/pack_conda_bundle.py` and
+`scripts/install_conda_bundle.py` implement that older full-bundle format;
+they are not installation instructions for the new format.
 
-The supplied examples run against the matching installed wheel; no local
-`build/` directory or editable installation is needed. Prepare each model's
-checkpoint, input/reference fixtures and any required third-party source
-separately, following that model's README and supported profile.
+### B2. Planned deployment and development flow
 
-### B2. Install and activate the bundle
+Once the release and its installer are available:
 
-Obtain `scripts/install_conda_bundle.py` from the same source revision (or the
-provider's delivery) and put it outside the destination directory. The installer
-requires system Python 3.10 or newer; the bundle supplies its own Python 3.12 for
-inference, so no Miniconda installation or `conda create` is needed on the target.
-Set the actual provider URL and checksum, or use a local archive path after
-transferring the file to an offline board. The destination must not exist, and
-its parent directory must already exist:
+1. Obtain the dependency archive and its published checksum and manifest for
+   the board architecture. Install into a new final prefix, complete relocation,
+   and activate it as `RHINOFORGE_ENV`. The target will not need a separate
+   Miniconda manager to use the unpacked environment.
+2. Clone RhinoForge from GitHub, check out the tag or commit selected for the
+   deployment, and verify that its environment requirement matches the archive.
+   Keep the source and build directories outside the dependency prefix.
+3. Install the host build tools from [A1](#a1-download-and-install-miniconda3),
+   select the compiler, and configure the platform SDK and separately delivered
+   Launch/operator assets as in [A3](#a3-obtain-the-source-and-configure-the-supplied-runtime).
+4. Build and install that RhinoForge checkout in `RHINOFORGE_ENV` using its
+   verified dependency set, then continue with [model preparation](#model-setup).
+5. For development, use the same checkout and environment with an
+   [editable installation](#development). Rebuild after native changes. When
+   updating the source, recheck its dependency and runtime requirements before
+   reusing the environment.
 
-```bash
-set -e
-export RHINOFORGE_WORKDIR="$HOME/rhinoforge"
-export RHINOFORGE_BUNDLE_ARCHIVE="/absolute/path/to/rhinoforge-conda.tar.gz"
-export RHINOFORGE_BUNDLE_SHA256="REPLACE_WITH_PROVIDER_SHA256"
-mkdir -p "$(dirname "$RHINOFORGE_WORKDIR")"
-python3 /absolute/path/to/install_conda_bundle.py \
-  --archive "$RHINOFORGE_BUNDLE_ARCHIVE" \
-  --sha256 "$RHINOFORGE_BUNDLE_SHA256" \
-  --prefix "$RHINOFORGE_WORKDIR"
-source "$RHINOFORGE_WORKDIR/activate.sh"
-cd "$RHINOFORGE_SOURCE"
-python -m pip check
-printf 'Python environment: %s\nSource: %s\n' "$RHINOFORGE_ENV" "$RHINOFORGE_SOURCE"
-```
-
-`--archive` also accepts an HTTP(S) URL: the same command downloads, verifies and
-installs it. Installation uses the supplied dependencies without compiling
-RhinoForge or accessing an RPU device. The installer checks the OS type,
-architecture and minimum glibc version; it does **not** validate the SDK, driver
-or device permissions.
-
-Activation sets `RHINOFORGE_ENV`, `RHINOFORGE_SOURCE`, `RHINOFORGE_WORKDIR` and
-`RHINOFORGE_BUILD`. It also resets `LD_LIBRARY_PATH` to the packaged Launch, SDK
-and environment libraries. If the provider requires additional SDK library
-directories outside the bundle, add those directories **after activation**, using
-the provider's actual path, for example:
-
-```bash
-# Only when the provider requires SDK libraries outside this bundle:
-export RHINOFORGE_PLATFORM_SDK_LIB="/absolute/path/to/provider/sdk/lib"
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$RHINOFORGE_PLATFORM_SDK_LIB"
-```
-
-Complete the provider's [SDK and device access checks](runtime_assets.md#board-sdk-and-device-access)
-with these selected paths. Repeat activation and any required SDK path addition
-in each new shell. Path B is complete; continue with [model preparation](#model-setup)
-and use the platform's inference account and device lock for the run.
-
-The installed layout is:
-
-```text
-rhinoforge/
-  activate.sh, run-example.sh, bundle-manifest.json
-  env/                         # Python, dependencies and installed RhinoForge
-  source/                      # matching source, examples and documentation
-  runtime/launch/              # sanitized Release Launch
-  runtime/operators/           # main/expansion assets and sidecars
-  runtime/sdk/                 # SDK user-space libraries, when supplied
-  runtime/notices/              # accompanying runtime distribution terms
-```
-
-Install directly into its final absolute path. The installer runs `conda-unpack`
-to repair environment prefixes once; moving the installed directory afterwards
-is unsupported. To change its location, install the original archive into another
-new directory. Follow the manifest's OS/glibc, architecture and SDK requirements;
-an aarch64 bundle is not portable to x86_64 or every Linux/SDK combination. See
+The release instructions will supply the exact download, checksum verification,
+relocation and build commands. This section describes the agreed design, not a
+working installation route today. An aarch64 environment is not portable to
+x86_64 or every Linux/SDK combination. Moving a relocated environment will
+require a fresh installation into its new final prefix; see
 [conda-pack's relocation constraints](https://conda.github.io/conda-pack/).
 
 <a id="model-setup"></a>
@@ -467,10 +428,9 @@ Continue with [Model assets](model_assets.md),
 
 Keep the same `RHINOFORGE_ENV`, source checkout and matching runtime. To make
 Python edits take effect directly from the checkout, replace the regular install
-with an editable one; native changes still require rerunning the build. If you
-started from a bundle, first install the host build tools listed in [path A](#source-build) and
-set `CC=/usr/bin/gcc` and `CXX=/usr/bin/g++`; keep the installed environment.
-
+with an editable one; native changes still require rerunning the build. A future
+dependency-bundle installation will use this same workflow. After updating the
+checkout, check its dependency and runtime requirements before rebuilding.
 
 ```bash
 cd "$RHINOFORGE_SOURCE"
@@ -498,24 +458,20 @@ python -m pip wheel . -c constraints/security.txt --no-build-isolation --no-deps
 Record the source commit/diff, resolved dependencies, wheel/native hashes and
 Launch/operator/SDK identities. Validate the wheel in a fresh deployment prefix.
 Rebuild it after Python as well as native changes; an unchanged `.so` hash does
-not mean an older wheel contains the current Python code. Before packing an
-environment, reinstall the chosen wheel normally: `conda-pack` cannot relocate
-an editable checkout dependency.
+not mean an older wheel contains the current Python code. Keep wheels and
+editable checkouts separate from the public dependency bundle: that bundle
+must not contain any installed RhinoForge package or source.
 
 <a id="build-bundle"></a>
 
-## Appendix: build a bundle from a validated environment
+## Appendix: optional audio tools and bundle maintenance
 
-This optional appendix is for maintainers preparing delivery artifacts. Users
-installing a supplied bundle can skip it. Use a regular, non-editable installation
-from [path A](#source-build), or a wheel from [development](#development) installed
-normally in a build environment managed by Miniconda3. A deployed bundle alone
-does not include a Conda manager for the `conda install` command below.
-
-For `--profile full`, install the audio/video libraries and all three Python
-extras in the same environment. Install Conda packages before Python extras so
-their dependency resolution finishes first. Keep path A's packaging/setuptools
-ranges; do not let pip replace Conda's copies:
+The following commands extend the Miniconda-managed application environment
+from [path A](#source-build) for audio/video workloads. Qwen3 text FP16 does not
+require these tools. Install Conda packages before Python extras so their
+dependency resolution finishes first. Keep path A's packaging/setuptools
+ranges; do not let pip replace Conda's copies. These commands install RhinoForge
+with optional extras for local use; they are not a public-bundle build recipe:
 
 ```bash
 conda install --yes --override-channels --channel conda-forge \
@@ -529,8 +485,8 @@ python -m pip install '.[vision,vla,audio]' -c constraints/security.txt --no-bui
 ffmpeg -version
 ```
 
-The `conda-forge` channel has no `sox` package for `linux-aarch64`. Build the
-[official SoX 14.4.2 source](https://sourceforge.net/projects/sox/files/sox/14.4.2/)
+The validated aarch64 setup builds SoX separately rather than obtaining it from
+`conda-forge`. Build the [official SoX 14.4.2 source](https://sourceforge.net/projects/sox/files/sox/14.4.2/)
 into the **same** `RHINOFORGE_ENV` instead of relying on a pre-existing system
 executable. This build embeds static `libsox` in the CLI, provides built-in
 PCM/WAV and effects/resampling, and disables external codecs, plugins and audio
@@ -540,7 +496,7 @@ presence does not enable codecs in this SoX build.
 
 The subshell below keeps Conda's active environment unchanged while preventing
 SoX's build from picking up unrelated libraries. Retain the source archive and
-license files inside the environment so they travel with the bundle.
+license files inside the environment for later inventory and redistribution review.
 
 ```bash
 export RHINOFORGE_DOWNLOADS="$RHINOFORGE_WORKDIR/downloads"
@@ -595,37 +551,23 @@ The short command sequence writes 800 samples of 16-bit mono PCM at 16 kHz,
 then resamples to 400 samples at 8 kHz. It checks this CLI path only; it does not
 certify every audio model or codec.
 
-Use `--profile text` for a base-only environment; the Qwen3 text example does
-not require these extras or audio/video tools. Check dependencies and run the
-intended model before packing. Keep `CONDA_PKGS_DIRS` and its downloaded package
-cache until packing finishes: `conda-pack` may need those records to repair
-prefixes. Do not run `conda clean` or remove that cache before packing.
-`--runtime-notices` must contain the provider's original `RELEASE.txt` and
-`DISTRIBUTION_TERMS.txt`. Provide the exact runtime paths used for validation:
+For public bundle maintenance, create a **new, clean dependency environment
+that has never had RhinoForge installed**. Resolve its third-party dependencies
+from the selected source revision without installing the project itself. Do not
+strip the existing internal full bundle or pack this application environment:
+removing a few directories does not establish that code, runtime assets and SDK
+libraries are absent.
 
-```bash
-python -m pip install "conda-pack==0.8.1"
-python -m pip check
-python scripts/pack_conda_bundle.py \
-  --env "$RHINOFORGE_ENV" --source "$RHINOFORGE_SOURCE" \
-  --launch "$RHINO_LAUNCH_ROOT" \
-  --main-ref "$RPU_KERNEL_LIB_PATH" \
-  --expansion-ref "$RPU_KERNEL_LIB_PATH_EXPANSION" \
-  --sdk-version "REPLACE_WITH_VALIDATED_SDK_VERSION" \
-  --runtime-notices /absolute/path/to/provider-runtime-notices \
-  --profile full \
-  --output /absolute/path/to/new/rhinoforge-conda.tar.gz
-```
+Keep `CONDA_PKGS_DIRS` and the downloaded package cache until packing finishes:
+`conda-pack` may need those records to repair prefixes. Retain the resolved
+package/build inventory, source URLs, checksums, license notices and required
+corresponding-source materials. Build tools and media libraries have their own
+redistribution terms. Public availability of a dependency alone does not settle
+the requirements for redistributing its binary build.
 
-Use `--sdk-libs-dir /absolute/path/to/redistributable-sdk-libraries` only for the
-provider-approved SDK user-space libraries; otherwise the target must supply
-them. Keep model weights and private caches outside the environment. Retain the
-bundle, checksum and manifest together. Validate installation at a **different
-absolute prefix** and run Qwen3-0.6B FP16 with that installed environment before
-delivery. A successful build alone does not demonstrate relocation or board
-compatibility.
-
-Before delivery, review redistribution terms for the runtime and every packaged
-dependency, and include all required license notices and corresponding source
-materials. Passing the packaging and relocation checks does not establish
-permission to distribute the bundle publicly.
+The [environment bundle design](environment_bundle.md) defines the separate
+release version, source compatibility mapping, archive exclusions and validation
+required before publishing. Validate relocation into a different absolute
+prefix, build a fresh GitHub checkout there with the platform SDK and separately
+provided runtime assets, then exercise the intended model paths. The existing
+full-bundle scripts do not implement that public dependency-only workflow.

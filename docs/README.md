@@ -9,6 +9,7 @@
 |---|---|---|
 | v1.2.0 变更与升级 | [升级指南](upgrading_1_2.zh.md) · [发行说明](../CHANGELOG.md) | [Upgrade guide](upgrading_1_2.md) · [Changelog](../CHANGELOG.md) |
 | Miniconda、环境包、首次运行与开发 | [统一安装指南](getting_started.zh.md) | [Install, run and develop](getting_started.md) |
+| 公开依赖环境包设计（待实现） | [设计](environment_bundle.zh.md) | [Design](environment_bundle.md) |
 | 语音识别与生成 | [Qwen3 ASR/TTS](qwen3_audio.zh.md) | [Qwen3 ASR/TTS](qwen3_audio.md) |
 | 示例与运行范围 | [示例](model_support.zh.md) | [Examples](model_support.md) |
 | Rhino Launch 和主算子资产与扩展算子资产 | [受限运行时资产](runtime_assets.zh.md) | [Restricted runtime assets](runtime_assets.md) |

@@ -18,11 +18,14 @@ see the [release policy](../docs/release_policy.md).
 
 For a clean installation, use the [unified installation and development guide](../docs/getting_started.md):
 install Miniconda3, create one `RHINOFORGE_ENV`, and keep it for source, editable
-and wheel operations. A complete Conda bundle replaces the download/build steps;
-validate its profile, architecture, platform requirements and installation at a
-different prefix before delivery. It does not include model weights or a kernel
-driver. Use [runtime extraction and SDK checks](../docs/runtime_assets.md) and the
-first-run guide's platform device lock. Clear inherited Python
+and wheel operations. The planned [dependency environment bundle](../docs/environment_bundle.md)
+replaces third-party dependency installation only: clone and build RhinoForge
+separately in the same environment. It excludes RF, Launch, operators, all board
+SDK libraries and models; new tooling and a public archive are not yet available.
+Validate relocation and source/dependency compatibility before publication.
+The recommended validated board SDK is EA_R1SDK_2026_08F-2156007a, distinct from
+Launch 1.2.0; use [runtime extraction and platform checks](../docs/runtime_assets.md)
+and the first-run guide's platform device lock. Clear inherited Python
 and native-library overrides, bind compiler and asset identities, and distinguish
 the new application environment from the board OS/SDK/driver baseline.
 `--check-config` is device-free; it does not prove runtime availability.

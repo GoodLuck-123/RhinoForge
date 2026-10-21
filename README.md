@@ -57,10 +57,12 @@ Qwen3 ASR/TTS 使用独立语音入口，下载和运行步骤见[语音指南](
 [统一安装、运行与开发指南](docs/getting_started.zh.md)选择一条应用部署路径：
 
 - [从 Miniconda3 开始构建](docs/getting_started.zh.md#source-build)：安装管理器、创建 Python 3.12 环境、安装依赖并编译 RhinoForge。
-- [部署我们提供的完整环境包](docs/getting_started.zh.md#bundle-deploy)：取得匹配的受控交付包后，校验、解包并激活，无需重复下载依赖或编译。当前仅有内部验证归档，尚无公开环境包下载。
+- [使用依赖环境包（待发布）](docs/getting_started.zh.md#bundle-deploy)：计划从 GitHub Releases 获取第三方依赖环境，随后从 GitHub 获取并编译 RhinoForge。新包尚无公开下载，当前请使用路径一。
 
 两条路径都使用一个 `RHINOFORGE_ENV`，完成后继续相同的模型准备、Qwen3-0.6B FP16
-运行和后续开发步骤。环境包不替代平台基础环境，模型权重也需另行准备。
+运行和后续开发步骤。依赖包不包含 RhinoForge、SDK 用户态库、Launch 或算子；
+SDK、运行资产和模型仍单独准备。推荐已验证板卡 SDK 为 **`EA_R1SDK_2026_08F-2156007a`**，
+平台适配要求见[运行资产说明](docs/runtime_assets.zh.md#板卡-sdk-与设备权限)。
 
 ## 文档
 

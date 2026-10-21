@@ -62,19 +62,24 @@ Qwen3 ASR/TTS use dedicated speech entry points. Follow the
 ## Quick start
 
 The **platform provider must supply and confirm the board OS, driver, SDK and
-matching runtime assets** first. Then choose either path in the
+matching runtime assets** first. Our recommended, validated SDK baseline is
+**`EA_R1SDK_2026_08F-2156007a`** on R1 Linux aarch64 / Ubuntu 22.04; Rhino Launch
+1.2.0 has its own version. See the platform requirements in the
 [unified installation, inference and development guide](docs/getting_started.md):
 
 - [Build from source](docs/getting_started.md#source-build): install Miniconda3,
   create Python 3.12, install dependencies and compile RhinoForge.
-- [Deploy our complete Conda bundle](docs/getting_started.md#bundle-deploy): obtain
-  the matching package through the platform provider's controlled delivery
-  channel, verify and install it. No separate dependency downloads or compilation
-  are required; there is currently no public bundle download.
+- [Use our dependency Conda bundle](docs/getting_started.md#bundle-deploy)
+  **(planned)**: download a compatible dependency environment from GitHub Releases,
+  then clone and compile RhinoForge. The new archive and installer are not yet
+  available; use the source-build path today.
 
-Both paths use one `RHINOFORGE_ENV`, then prepare the model and run Qwen3-0.6B
-FP16. Later development uses the same environment. Model weights, OS/driver and
-SDK components absent from the bundle remain separate prerequisites.
+Both paths use one `RHINOFORGE_ENV` for inference and development. The planned
+public bundle contains Python and third-party dependencies/tools only. RhinoForge
+comes from GitHub; the platform supplies the complete SDK, including its
+user-space libraries. Launch/operator assets and model weights remain separate.
+See the [environment bundle design](docs/environment_bundle.md) for contents and
+source-version compatibility.
 
 ## Documentation
 
