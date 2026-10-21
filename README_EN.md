@@ -62,10 +62,9 @@ Qwen3 ASR/TTS use dedicated speech entry points. Follow the
 ## Quick start
 
 The **platform provider must supply and confirm the board OS, driver, SDK and
-matching runtime assets** first. Our recommended, validated SDK baseline is
-**`EA_R1SDK_2026_08F-2156007a`** on R1 Linux aarch64 / Ubuntu 22.04; Rhino Launch
-1.2.0 has its own version. See the platform requirements in the
-[unified installation, inference and development guide](docs/getting_started.md):
+matching runtime assets** first. See the recommended SDK version and platform
+requirements in the [unified installation, inference and development
+guide](docs/getting_started.md):
 
 - [Build from source](docs/getting_started.md#source-build): install Miniconda3,
   create Python 3.12, install dependencies and compile RhinoForge.

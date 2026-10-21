@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -65,7 +66,17 @@ def main() -> None:
     parser.add_argument("--tag", default=os.environ.get("CI_COMMIT_TAG", ""))
     args = parser.parse_args()
     try:
-        result = check(args.root, branch=args.branch, tag=args.tag)
+        if args.tag.startswith("deps-"):
+            # Environment releases have their own immutable identity. Preserve
+            # every source-version check, but do not treat this as an RF v* tag.
+            result = check(args.root, branch=args.branch)
+            spec = importlib.util.spec_from_file_location(
+                "dependency_release", Path(__file__).with_name("check_dependency_release.py"))
+            environment = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(environment)
+            result["dependency_environment"] = environment.check(args.root, tag=args.tag)
+        else:
+            result = check(args.root, branch=args.branch, tag=args.tag)
     except (KeyError, OSError, ValueError) as exc:
         parser.exit(1, f"Version check failed: {exc}\n")
     print(json.dumps(result, sort_keys=True))
