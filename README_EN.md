@@ -61,17 +61,20 @@ Qwen3 ASR/TTS use dedicated speech entry points. Follow the
 
 ## Quick start
 
-Follow the [unified installation, inference and development guide](docs/getting_started.md)
-to install Miniconda3, create Python 3.12, install dependencies and run
-Qwen3-0.6B FP16. The first deployment and later editable/wheel development use
-one `RHINOFORGE_ENV` and the same guide.
+The **platform provider must supply and confirm the board OS, driver, SDK and
+matching runtime assets** first. Then choose either path in the
+[unified installation, inference and development guide](docs/getting_started.md):
 
-For slow downloads or offline boards, use the guide's
-[complete Conda environment bundle](docs/getting_started.md#6-deploy-a-complete-environment-bundle)
-to download and unpack the matching Python, dependencies and native runtime
-at once. Prepare model weights, the board OS/driver and any SDK components not
-listed in the bundle separately. Download availability and compatible platforms
-follow the provider's actual delivery.
+- [Build from source](docs/getting_started.md#source-build): install Miniconda3,
+  create Python 3.12, install dependencies and compile RhinoForge.
+- [Deploy our complete Conda bundle](docs/getting_started.md#bundle-deploy): obtain
+  the matching package through the platform provider's controlled delivery
+  channel, verify and install it. No separate dependency downloads or compilation
+  are required; there is currently no public bundle download.
+
+Both paths use one `RHINOFORGE_ENV`, then prepare the model and run Qwen3-0.6B
+FP16. Later development uses the same environment. Model weights, OS/driver and
+SDK components absent from the bundle remain separate prerequisites.
 
 ## Documentation
 
