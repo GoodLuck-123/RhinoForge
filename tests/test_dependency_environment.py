@@ -153,12 +153,22 @@ def test_managed_file_audit_rejects_unlisted_payload_and_preserves_conda_metadat
     (tmp_path / "conda-meta").mkdir()
     (tmp_path / "conda-meta/python.json").write_text(json.dumps({"files": ["bin/python"]}))
     (tmp_path / "conda-meta/history").write_text("prefix history required by Conda")
+    (tmp_path / "conda-meta/created_at").write_text("1792575245.670647")
     (tmp_path / "bin").mkdir()
     (tmp_path / "bin/python").write_text("python")
     monkeypatch.setattr(deps.metadata, "distributions", lambda: [])
     deps.audit_managed_files(tmp_path)
     (tmp_path / "innocent-name.dat").write_text("private model or application data")
     with pytest.raises(ValueError, match="Unmanaged file"):
+        deps.audit_managed_files(tmp_path)
+
+
+@pytest.mark.parametrize("content", ["", "private payload", "1\n2", "1" * 40])
+def test_conda_creation_metadata_must_be_a_bounded_timestamp(tmp_path, monkeypatch, content):
+    (tmp_path / "conda-meta").mkdir()
+    (tmp_path / "conda-meta/created_at").write_text(content)
+    monkeypatch.setattr(deps.metadata, "distributions", lambda: [])
+    with pytest.raises(ValueError, match="Invalid Conda creation timestamp"):
         deps.audit_managed_files(tmp_path)
 
 

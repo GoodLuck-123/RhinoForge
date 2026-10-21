@@ -226,6 +226,16 @@ def audit_managed_files(prefix: Path, native: list[dict] | None = None) -> None:
     """
     prefix = prefix.resolve(strict=True)
     owned = {"conda-meta/history", "conda-meta/pinned", ".nonadmin"}
+    created_at = prefix / "conda-meta/created_at"
+    if created_at.exists() or created_at.is_symlink():
+        # Conda 26.9 records a Unix timestamp outside package file manifests.
+        # Admit this exact bookkeeping file, not arbitrary unowned metadata.
+        if (created_at.is_symlink() or not created_at.is_file()
+                or created_at.stat().st_size > 32
+                or not re.fullmatch(r"[0-9]{1,12}(?:\.[0-9]{1,9})?\n?",
+                                    created_at.read_text(encoding="ascii"))):
+            raise ValueError("Invalid Conda creation timestamp: conda-meta/created_at")
+        owned.add("conda-meta/created_at")
     for package in native or []:
         owned.update(package["files"])
     for path in (prefix / "conda-meta").glob("*.json"):
