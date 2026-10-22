@@ -5493,6 +5493,11 @@ private:
         prefix_scatter_active_ = true;
     }
     void scatter_merger_out_to_prefix(int64_t oh, c10::Half* target) {
+        int64_t scatter_rows = 0;
+        for (const auto& run : prefix_runs_) scatter_rows += run.second;
+        TORCH_CHECK(scatter_rows == current_num_patches_ / 4,
+                    "prefix scatter covers ", scatter_rows,
+                    " rows but the current merger produced ", current_num_patches_ / 4);
         int64_t off = 0;
         for (const auto& run : prefix_runs_) {
             const int64_t start = run.first, len = run.second;

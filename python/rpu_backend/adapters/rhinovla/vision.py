@@ -1710,18 +1710,6 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
     # and the merger consumed the snapshots in-graph (pop_merged below). Skip the whole
     # slice loop; last_hidden is set to the batched output (== cat of the per-view slices).
     fused_batched = _fused_merger and batched_out is not None
-    # Guard: the in-graph fused merger writes stable per-forward slots that the
-    # single post-loop pop_merged() reads once. On the non-batched per-image path
-    # (>1 image) each forward overwrites the previous view's slots, so only the
-    # last view would survive — the batched path (batched_out) pops all views from
-    # one forward. Fail loud rather than silently drop views.
-    if _fused_merger and not fused_batched and len(patches_per_image) > 1:
-        raise RuntimeError(
-            "RhinoVLA fused vision merger with >1 image needs the batched-view path "
-            f"(RPU_RHINOVLA_VISION_BATCH_VIEWS=1 + equal-size views); got "
-            f"{len(patches_per_image)} images with batching off — the per-image merger "
-            "slots would be overwritten. Enable BATCH_VIEWS or disable the fused merger."
-        )
     offset = 0
     for i, n_i in enumerate(patches_per_image):
         if fused_batched:
@@ -1815,17 +1803,30 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
             # per-image clone before the next image replay overwrites it.
             last_hidden_i = out_3d.squeeze(0).detach().clone()  # [n_i, hidden]
 
-            snapshots_i = torch.ops.rpu.qwen3vl_vision_pop_deepstack_snapshots(handle)
-            if len(snapshots_i) != n_deepstack:
-                raise RuntimeError(
-                    f"image_{i}: deepstack snapshot count "
-                    f"{len(snapshots_i)} != {n_deepstack}"
-                )
+            if _fused_merger:
+                merged_all = torch.ops.rpu.qwen3vl_vision_pop_merged(handle)
+                if len(merged_all) != 1 + n_deepstack:
+                    raise RuntimeError(
+                        f"image_{i}: merged count {len(merged_all)} != {1 + n_deepstack}"
+                    )
+                # Stable native slots are reused by the next same-shape view.
+                merged_per_image.append(merged_all[0].clone())
+                for layer_k in range(n_deepstack):
+                    deepstack_features_per_layer[layer_k].append(
+                        merged_all[1 + layer_k].clone()
+                    )
+                snapshots_i = []
+            else:
+                snapshots_i = torch.ops.rpu.qwen3vl_vision_pop_deepstack_snapshots(handle)
+                if len(snapshots_i) != n_deepstack:
+                    raise RuntimeError(
+                        f"image_{i}: deepstack snapshot count "
+                        f"{len(snapshots_i)} != {n_deepstack}"
+                    )
 
         last_hidden_per_image.append(last_hidden_i)
         if _fused_merger:
-            # C++ merger_post_fn computes the patch + deepstack mergers in-graph;
-            # Python collects neither the device merger nor CPU snapshots here.
+            # The per-image path already snapped the in-graph merger outputs above.
             pass
         elif mergers_on_rpu:
             if batch_mergers:
@@ -1874,7 +1875,7 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
     else:
         last_hidden = torch.cat(last_hidden_per_image, dim=0)  # [N_total, hidden] device
 
-    if _fused_merger:
+    if _fused_merger and fused_batched:
         # In-graph fused merger: the registered native post_fn already ran
         # the patch + N deepstack mergers into stable DDR slots. Pop all in one call; clone each
         # (stable slots are reused on the next same-shape forward — P4). pooler = [0], deepstack
@@ -1889,6 +1890,13 @@ def _rpu_vision_forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tenso
         deepstack_features = [
             (merged_all[1 + k] if _mnc else merged_all[1 + k].clone())
             for k in range(n_deepstack)
+        ]
+        raw_snapshots_cpu = []
+    elif _fused_merger:
+        merged = torch.cat(merged_per_image, dim=0).contiguous()
+        deepstack_features = [
+            torch.cat(features, dim=0).contiguous()
+            for features in deepstack_features_per_layer
         ]
         raw_snapshots_cpu = []
     elif mergers_on_rpu:

@@ -4,8 +4,59 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from PIL import Image, ImageChops
 
 from scripts import validate_rhinovla_v3 as command
+
+
+@pytest.mark.parametrize(
+    ("source_size", "crop_size"),
+    [((640, 400), (320, 256)), ((1280, 1056), None)],
+)
+def test_prepare_resizes_and_crops_like_rhinovla_v3_source(source_size, crop_size):
+    calls = []
+
+    def smart_resize(height, width, **kwargs):
+        calls.append((height, width, kwargs))
+        factor = kwargs["factor"]
+        return round(height / factor) * factor, round(width / factor) * factor
+
+    image = command._resize_v3_image(
+        Image.new("L", source_size), smart_resize=smart_resize,
+        crop_size=crop_size,
+    )
+
+    assert image.size == (320, 256)
+    assert image.mode == "RGB"
+    assert calls[0][2] == {
+        "factor": 32,
+        "min_pixels": 256 * 256,
+        "max_pixels": 256 * 512,
+    }
+
+
+def test_prepare_centers_top_head_crop_after_resize():
+    source = Image.new("L", (640, 400))
+    source.putdata([x % 256 for _y in range(400) for x in range(640)])
+
+    actual = command._resize_v3_image(
+        source,
+        smart_resize=lambda height, width, **kwargs: (256, 416),
+        crop_size=(320, 256),
+    )
+    resized = source.convert("RGB").resize((416, 256), Image.Resampling.BICUBIC)
+    expected = resized.crop((48, 0, 368, 256))
+
+    assert ImageChops.difference(actual, expected).getbbox() is None
+
+
+def test_prepare_rejects_top_head_crop_larger_than_resized_image():
+    with pytest.raises(ValueError, match=r"crop exceeds resized image"):
+        command._resize_v3_image(
+            Image.new("RGB", (256, 256)),
+            smart_resize=lambda height, width, **kwargs: (256, 256),
+            crop_size=(320, 256),
+        )
 
 
 def _payload():

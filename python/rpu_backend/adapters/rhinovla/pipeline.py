@@ -878,10 +878,20 @@ class RhinoVLAOnRPU:
         # Build the persistent buffers + register them + the runs with the C++ merger NOW
         # (before the first vision forward, so the captured graph bakes their addresses).
         # Requires the fused merger + device prefix prep. Bit-identical (on/off action A/B).
+        image_patches = self.qin["image_grid_thw"].detach().cpu().prod(-1)
+        single_vision_call = (
+            image_patches.numel() < 2
+            or (
+                getattr(self.vision_model, "_rpu_vision_batch_views", False)
+                and bool(torch.all(image_patches == image_patches[0]))
+                and not getattr(self.vision_model, "_rpu_vision_graph_disable", False)
+            )
+        )
         self._prefix_merger_scatter = (
             self._prefix_prep_rpu_enabled
             and getattr(self.vision_model, "_rpu_vision_fused_merger", False)
             and prefill_cold["merger_scatter"]
+            and single_vision_call
         )
         cache = self._prefix_static_cache
         if self._prefix_merger_scatter and cache is not None and "inputs_embeds_base_rpu" in cache:
