@@ -269,14 +269,18 @@ runtime factory。Runtime 必须声明 execution capability 和实际消费的 `
 facade 拒绝静默 mismatch。
 
 内置 `rpu_backend.adapters.rhinovla.factory:v3_runtime_factory` 提供构造时固定的
-`rtc=True` 模式，限定固定 v3 checkpoint、FP16、batch 1、30×96 动作、18 层专家和
-十步展开去噪。`predict` 必须同时传入 `action_prefix` 和 `delay`：前者为有限的 CPU
+`rtc=True` 模式，限定固定 v3 checkpoint、batch 1、30×96 动作、18 层专家和
+十步展开去噪。现有 FP16、专家 W8A16、完整专家 W8A16、全流水线 W8A16 配方均可
+使用 RTC，保留所选配方的量化范围及 HIGH/fused/vector/partial-RoPE 执行设置。
+`predict` 必须同时传入 `action_prefix` 和 `delay`：前者为有限的 CPU
 浮点 Tensor，形状 `[1,D,96]` 或 `[D,96]`，满足 `delay <= D <= 30`；后者为
 `0..6` 的 Python 整数，不接受 `bool` 或 Tensor。`delay=0` 可使用空前缀。
 non-RTC 构造保持 `rtc=False`，不接收这两个字段。RTC 每步使用逐动作时间和 state
 的平均时间嵌入，并固定掩码处理后的动作前缀。冷配置和验证状态见
-[RTC 模板与输入说明](../examples/configs/rhinovla/v3/README.md#rtc)，范围不包含
-W8 或其他 checkpoint。runtime 在构造时自动为七个 delay、Vision/Language 保留图
+[RTC 模板与输入说明](../examples/configs/rhinovla/v3/README.md#rtc)。五档 factory
+模板各有 RTC profile ID；九份独立配置通过
+`scripts/validate_rhinovla_v3.py run --rtc --delay 6` 选择 RTC。范围不扩展到 v1、
+其他 checkpoint 或新的精度格式。runtime 在构造时自动为七个 delay、Vision/Language 保留图
 和一个准备阶段临时图预留 10 个 Graph arena，无需用户额外设置环境变量。验证输入
 为三幅等尺寸视图、230 个逻辑 prefix token；模板在构造时固定 qin 的 token、attention
 mask 和 grid，改变这些内容或像素几何需新建 runtime。异尺寸视图不在本轮验证范围内，

@@ -400,28 +400,46 @@ def _prepare_denoise_adarms_tables(expert, cond_all_cpu, *, full_w8a16=False,
     return pair_table, final_table
 
 
-def _prepare_rtc_adarms_tables(expert, condition_groups):
+def _prepare_rtc_adarms_tables(expert, condition_groups, *, full_w8a16=False,
+                              loop_weights=None, precompute_gate_tanh=False,
+                              high_precision=False, quantize_final_norm=True,
+                              final_norm=None):
     """Cold tables for each admitted delay and three contiguous token groups."""
-    if tuple(condition_groups.shape) != (7, 10, 3, 1024):
-        raise ValueError("RhinoVLA RTC requires condition groups [7,10,3,1024]")
-    pair, final = _prepare_denoise_adarms_tables(
-        expert, condition_groups.reshape(-1, 1024), device="cpu")
+    if (tuple(condition_groups.shape) != (7, 10, 3, 1024)
+            or not bool(torch.isfinite(condition_groups).all())):
+        raise ValueError("RhinoVLA RTC requires finite condition groups [7,10,3,1024]")
+    cond = condition_groups.reshape(210, 1024)
+    owners = ()
+    if full_w8a16:
+        pair, final, *owners = _prepare_full_w8_adarms_tables(
+            expert, cond, loop_weights, precompute_gate_tanh=precompute_gate_tanh,
+            high_precision=high_precision, quantize_final_norm=quantize_final_norm,
+            final_norm=final_norm, condition_rows=210)
+        # Table layout is cold CPU work, independent of device transpose support.
+        pair, final = pair.cpu(), final.cpu()
+    else:
+        pair, final = _prepare_denoise_adarms_tables(
+            expert, cond, device="cpu", precompute_gate_tanh=precompute_gate_tanh,
+            high_precision=high_precision)
     pair = pair.reshape(7, 10, 3, 18, 6144).permute(0, 1, 3, 2, 4)
     final = final.reshape(7, 10, 3, 3072)
-    return (pair.contiguous().to("rpu"), final.contiguous().to("rpu"))
+    return (pair.contiguous().to("rpu"), final.contiguous().to("rpu"), *owners)
 
 
 def _prepare_full_w8_adarms_tables(expert, cond_all_cpu, loop_weights, *,
                                   precompute_gate_tanh=False, high_precision=False,
-                                  quantize_final_norm=True, final_norm=None):
+                                  quantize_final_norm=True, final_norm=None,
+                                  condition_rows=10):
     """Run actual W8A16 device Linear once for each fixed-timestep projection."""
     if type(quantize_final_norm) is not bool:
         raise TypeError("RhinoVLA quantize_final_norm must be bool")
     if not quantize_final_norm and (precompute_gate_tanh or high_precision):
         raise ValueError("RhinoVLA HIGH and gate TANH precompute require full-pipeline W8")
     cond = cond_all_cpu.detach().to(dtype=torch.float16, device="cpu").contiguous()
-    if tuple(cond.shape) != (10, 1024) or not torch.isfinite(cond).all():
-        raise ValueError("RhinoVLA full W8 AdaRMS requires finite [10,1024] conditions")
+    if (condition_rows not in (10, 210) or tuple(cond.shape) != (condition_rows, 1024)
+            or not torch.isfinite(cond).all()):
+        raise ValueError(
+            f"RhinoVLA full W8 AdaRMS requires finite [{condition_rows},1024] conditions")
     owners = getattr(expert, "_rpu_full_w8_cond_owners", None)
     if (owners is None or loop_weights is None or
             any(len(owners.get(name, ())) != 18 for name in

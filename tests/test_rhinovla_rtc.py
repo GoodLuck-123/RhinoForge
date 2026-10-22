@@ -85,20 +85,24 @@ def test_groups_match_upstream_token_embedding_then_state_mean():
     assert not torch.allclose(groups[6, 0, 0], embedding(torch.tensor([0.8]), 8)[0])
 
 
-def test_install_requires_exact_fp16_loop_and_supported_optimizations():
+@pytest.mark.parametrize("expert,full", [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize("resident,fusions", [(False, False), (True, False), (True, True)])
+def test_install_accepts_precision_and_grouped_optimization_paths(expert, full, resident, fusions):
     flags = {name: False for name in ("expert_fusions", "adarms_resident", "packed_qkv",
               "skip_adarms_gemv", "precompute_time_proj", "fold_action_time_in")}
     flags["precompute_adarms"] = True
+    flags.update(adarms_resident=resident, expert_fusions=fusions)
     args = dict(rtc=True, steps=10, flow_direction="official_descending",
-                expert_w8a16=False, full_expert_w8a16=False,
+                expert_w8a16=expert, full_expert_w8a16=full,
                 native_cold=SimpleNamespace(**flags), action_cold={"denoise_unroll": True})
     rtc.validate_rtc_install(**args)
-    for name, value in (("steps", 5), ("expert_w8a16", True), ("full_expert_w8a16", True),
+    for name, value in (("steps", 5),
                         ("flow_direction", "legacy_ascending"),
                         ("action_cold", {"denoise_unroll": False})):
         with pytest.raises(ValueError):
             rtc.validate_rtc_install(**{**args, name: value})
-    for flag in flags:
+    for flag in ("precompute_adarms", "packed_qkv", "skip_adarms_gemv",
+                 "precompute_time_proj", "fold_action_time_in"):
         changed = {**flags, flag: not flags[flag]}
         with pytest.raises(ValueError):
             rtc.validate_rtc_install(**{**args, "native_cold": SimpleNamespace(**changed)})
@@ -106,16 +110,24 @@ def test_install_requires_exact_fp16_loop_and_supported_optimizations():
 
 @pytest.mark.parametrize("flag", ["HIGH_PRECISION", "HIGH_PRECISION_FUSIONS",
     "PRECOMPUTE_GATE_TANH", "VECTOR_K_NORM", "VECTOR_Q_NORM", "PARTIAL_ROPE"])
-def test_factory_rejects_incompatible_math_before_asset_or_weight_loading(monkeypatch, flag):
+def test_factory_admits_rtc_math_options_before_asset_or_weight_loading(monkeypatch, flag):
     from rpu_backend.adapters.rhinovla import factory
     def must_not_load(*args, **kwargs):
         pytest.fail("RTC rejected configuration reached weight/asset loading")
     monkeypatch.setattr(factory, "_validate_official_assets", must_not_load)
     monkeypatch.setattr(factory, "_load_official_model", must_not_load)
+    for suffix in ("PRECOMPUTE_ADARMS", "GATED_NO_SUB", "ADARMS_RESIDENT",
+                   "EXPERT_FUSIONS", "ALIGNED_KV", "EXPERT_W8A16", "FULL_W8A16"):
+        monkeypatch.setenv("RPU_RHINOVLA_" + suffix, "1")
+    monkeypatch.setenv("RPU_RHINOVLA_DENOISE_UNROLL", "1")
+    for op in ("rhino_vla_set_denoise_loop_rtc_tables", "rhino_vla_prepare_rtc",
+               "rhino_vla_denoise_loop_rtc_forward", "rhino_vla_set_denoise_loop_rtc_tables_w8a16"):
+        monkeypatch.setattr(torch.ops.rpu, op, lambda *a: None, raising=False)
     for suffix in ("HIGH_PRECISION", "HIGH_PRECISION_FUSIONS", "PRECOMPUTE_GATE_TANH",
                    "VECTOR_K_NORM", "VECTOR_Q_NORM", "PARTIAL_ROPE"):
         monkeypatch.setenv("RPU_RHINOVLA_" + suffix, "1" if suffix == flag else "0")
-    with pytest.raises(ValueError, match=flag):
+    # Invalid qin must be caught next, rather than an obsolete FP16/math guard.
+    with pytest.raises(ValueError, match="qin is missing"):
         factory.v3_runtime_factory({"rtc": True, "trust_model_code": True,
             "model_root": "/nonexistent/source", "checkpoint": "/nonexistent/model.pt",
             "qin": {}, "steps": 10})
@@ -128,3 +140,20 @@ def test_factory_rejects_forced_oneshot_before_loading(monkeypatch):
         factory.v3_runtime_factory({"rtc": True, "trust_model_code": True,
             "model_root": "/nonexistent/source", "checkpoint": "/nonexistent/model.pt",
             "qin": {}, "steps": 10})
+
+
+@pytest.mark.parametrize("expert,full", [(False, False), (True, False), (True, True)])
+def test_factory_rejects_fp16_only_native_before_loading(monkeypatch, expert, full):
+    from rpu_backend.adapters.rhinovla import factory
+    for suffix, value in (("PRECOMPUTE_ADARMS", "1"), ("DENOISE_UNROLL", "1"),
+                          ("EXPERT_W8A16", "0"), ("FULL_W8A16", "0")):
+        monkeypatch.setenv("RPU_RHINOVLA_" + suffix, value)
+    for op in ("rhino_vla_set_denoise_loop_rtc_tables", "rhino_vla_prepare_rtc",
+               "rhino_vla_denoise_loop_rtc_forward"):
+        monkeypatch.setattr(torch.ops.rpu, op, lambda *a: None, raising=False)
+    monkeypatch.delattr(torch.ops.rpu, "rhino_vla_set_denoise_loop_rtc_tables_w8a16", raising=False)
+    monkeypatch.setattr(factory, "_validate_official_assets", lambda *a, **kw: pytest.fail("loaded assets"))
+    with pytest.raises(RuntimeError, match="matching native"):
+        factory.v3_runtime_factory({"rtc": True, "trust_model_code": True,
+            "model_root": "/nonexistent/source", "checkpoint": "/nonexistent/model.pt",
+            "qin": {}, "steps": 10, "expert_w8a16": expert, "full_w8a16": full})

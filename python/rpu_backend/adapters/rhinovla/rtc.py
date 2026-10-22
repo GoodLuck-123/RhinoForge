@@ -6,6 +6,15 @@ RTC_HORIZON = 30
 RTC_ACTION_DIM = 96
 
 
+def require_rtc_native():
+    """Reject an older FP16-only native extension before installing weights."""
+    for op in ("rhino_vla_set_denoise_loop_rtc_tables",
+               "rhino_vla_set_denoise_loop_rtc_tables_w8a16",
+               "rhino_vla_prepare_rtc", "rhino_vla_denoise_loop_rtc_forward"):
+        if not hasattr(torch.ops.rpu, op):
+            raise RuntimeError("RhinoVLA RTC requires a matching native RhinoForge build")
+
+
 def validate_rtc_request(*, rtc, action_prefix=None, delay=None):
     if type(rtc) is not bool:
         raise TypeError("RhinoVLA rtc must be bool")
@@ -41,12 +50,10 @@ def validate_rtc_install(*, rtc, steps, flow_direction, expert_w8a16,
         return
     if steps != 10 or flow_direction != "official_descending":
         raise ValueError("RhinoVLA RTC requires the v3 ten-step descending flow")
-    if expert_w8a16 or full_expert_w8a16:
-        raise ValueError("RhinoVLA RTC supports FP16 only")
     if not action_cold["denoise_unroll"] or not native_cold.precompute_adarms:
         raise ValueError("RhinoVLA RTC requires denoise_unroll and PRECOMPUTE_ADARMS")
-    for field in ("expert_fusions", "adarms_resident", "packed_qkv",
-                  "skip_adarms_gemv", "precompute_time_proj", "fold_action_time_in"):
+    for field in ("packed_qkv", "skip_adarms_gemv", "precompute_time_proj",
+                  "fold_action_time_in"):
         if getattr(native_cold, field):
             raise ValueError(f"RhinoVLA RTC requires {field.upper()} disabled")
 

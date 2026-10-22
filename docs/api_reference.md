@@ -313,16 +313,21 @@ execution capabilities and effective `rpu_execution` configuration it
 consumed; the facade rejects a silent mismatch.
 
 The built-in `rpu_backend.adapters.rhinovla.factory:v3_runtime_factory` has an
-explicit cold `rtc=True` mode for the pinned v3 FP16, batch-1, 30×96, 18-layer,
-ten-step unrolled profile. Its `predict` request requires `action_prefix` and
+explicit cold `rtc=True` mode for the pinned v3 batch-1, 30×96, 18-layer,
+ten-step unrolled profile. It accepts the existing FP16, expert W8A16,
+full-expert W8A16 and full-pipeline W8A16 recipes, including the configured
+HIGH/fused/vector/partial-RoPE options. RTC retains the selected recipe's
+weight scope and execution settings. Its `predict` request requires `action_prefix` and
 `delay` together: a finite CPU floating tensor `[1,D,96]` or `[D,96]`, with
 `delay <= D <= 30`, and a Python integer in `0..6` (not `bool` or a tensor).
 Delay zero permits an empty prefix. Non-RTC construction keeps `rtc=False` and
 accepts neither field. RTC uses per-action times and the mean time embedding for
 the state token, and clamps the masked prefix throughout denoising. Its separate
-[RTC template and input guide](../examples/configs/rhinovla/v3/README.md#rtc)
-specify the cold options and current verification status; this does not extend
-RTC admission to W8 or other checkpoints. The runtime reserves the complete
+[RTC templates and input guide](../examples/configs/rhinovla/v3/README.md#rtc)
+specify the cold options and current verification status. The five factory
+templates have distinct RTC profile IDs; the nine controlled recipes select RTC
+with `scripts/validate_rhinovla_v3.py run --rtc --delay 6`. This does not extend
+admission to v1, other checkpoints or new precision formats. The runtime reserves the complete
 Graph pool of ten arenas at construction for all seven delay variants, retained
 Vision/Language graphs and one transient preparation graph; no additional user
 environment setting is required. The validation fixture uses three equal-sized

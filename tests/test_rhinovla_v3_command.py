@@ -47,7 +47,8 @@ def test_fixture_rejects_different_identity_and_invalid_requests(tmp_path, fault
 
 
 @pytest.mark.parametrize("fault", [None, "cache_growth", "no_replay", "output_alias", "close"])
-def test_run_uses_all_requests_and_closes_before_publishing(monkeypatch, tmp_path, fault):
+@pytest.mark.parametrize("rtc", [False, True])
+def test_run_uses_all_requests_and_closes_before_publishing(monkeypatch, tmp_path, fault, rtc):
     from rpu_backend.api import RhinoVLAPolicy
 
     payload = _payload()
@@ -74,6 +75,9 @@ def test_run_uses_all_requests_and_closes_before_publishing(monkeypatch, tmp_pat
             entries["text"].signature = "second-build"
         assert torch.equal(runtime.qin["input_ids"], payload["cases"][int(state["calls"] == 2)]["qwen_inputs"]["input_ids"])
         value = request["x0"].clone()
+        if rtc:
+            assert request["delay"] == 6
+            value[:, :6] = request["action_prefix"] * request["action_mask"][:, None]
         if fault == "output_alias":
             buffer.copy_(value)
             return buffer
@@ -84,11 +88,12 @@ def test_run_uses_all_requests_and_closes_before_publishing(monkeypatch, tmp_pat
             raise RuntimeError("close failed")
     def construct(name, config, **kwargs):
         assert name.endswith(":v3_runtime_factory")
+        assert config["rtc"] is rtc
         runtime.qin = {key: value.clone() for key, value in config["qin"].items()}
         return SimpleNamespace(runtime=runtime, predict=predict, close=close)
     monkeypatch.setattr(RhinoVLAPolicy, "from_factory", construct)
     args = SimpleNamespace(config=None, fixture=fixture, output=output, source=tmp_path,
-                           checkpoint=tmp_path / "weights.pt", runs=1)
+                           checkpoint=tmp_path / "weights.pt", runs=1, rtc=rtc)
     if fault:
         with pytest.raises(RuntimeError):
             command.run(args)
@@ -98,10 +103,35 @@ def test_run_uses_all_requests_and_closes_before_publishing(monkeypatch, tmp_pat
         saved = torch.load(output, weights_only=True)
         assert len(saved["actions"]) == 4
         assert torch.equal(saved["actions"][0], saved["actions"][2])
-        assert saved["metadata"] == payload["metadata"]
+        expected = {**payload["metadata"], "rtc": rtc}
+        if rtc:
+            expected["delay"] = 6
+        assert saved["metadata"] == expected
     assert state["closed"]
 
 
 def test_run_requires_output_before_loading_assets():
     with pytest.raises(SystemExit):
         command.main(["run", "--source", ".", "--checkpoint", "missing", "--fixture", "missing"])
+
+
+@pytest.mark.parametrize("delay", range(7))
+def test_rtc_request_is_repeatable_and_checks_masked_committed_actions(delay):
+    request = command._rtc_request(command._request(0), delay=delay, seed=0)
+    repeated = command._rtc_request(command._request(0), delay=delay, seed=0)
+    assert torch.equal(request["action_prefix"], repeated["action_prefix"])
+    assert request["action_prefix"].shape == (1, delay, 96)
+    action = request["x0"].clone()
+    action[:, :delay] = request["action_prefix"] * request["action_mask"][:, None]
+    command._check_action(action, request)
+    if delay:
+        action[0, 0, 0] += 1
+        with pytest.raises(RuntimeError, match="committed prefix"):
+            command._check_action(action, request)
+
+
+@pytest.mark.parametrize("options", [("--delay", "3"), ("--rtc", "--delay", "7")])
+def test_rtc_cli_rejects_invalid_mode_or_delay_before_loading(options):
+    with pytest.raises(SystemExit):
+        command.main(["run", "--source", ".", "--checkpoint", "missing", "--fixture", "missing",
+                      "--output", "unused", *options])

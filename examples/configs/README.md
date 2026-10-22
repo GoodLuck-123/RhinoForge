@@ -11,7 +11,7 @@
 | HyVLA | [hy_vla](hy_vla/README.md) | 2/3cam × 三精度；当前优化入口为 TP8 |
 | Wall-OSS | [wall_oss](wall_oss/README.md) | base 按相机/分辨率/精度；RTC 与分拣为不同负载 |
 | GR00T | [gr00t](gr00t/README.md) | 224/256 × FP16/W8，text 在文件内修改 |
-| RhinoVLA | [rhinovla](rhinovla/README.md) | v1 官方/调用者 factory、v3 factory 与九种独立配置 |
+| RhinoVLA | [rhinovla](rhinovla/README.md) | v1 官方/调用者 factory；v3 五档 FP16/W8 factory 与九种独立配置，均可选择 non-RTC/RTC |
 | Qwen3-ASR | [qwen3_asr](qwen3_asr/README.md) | 0.6B 音频转文字，固定 FP16 配方 |
 | Qwen3-TTS | [qwen3_tts](qwen3_tts/README.md) | 0.6B Base；默认卸载 12 层残差卷积到 RPU，可显式切回 CPU |
 | Qwen3 | [qwen3](qwen3/README.md) | 模型大小、精度、Instruct / lm_head recipe |

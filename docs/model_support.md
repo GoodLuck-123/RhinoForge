@@ -27,7 +27,7 @@ name alone does not specify its checkpoint, precision or supported shapes.
 | G0.5 | `patch_g05_policy_for_rpu`; [guide](../examples/configs/g05/README.md) | Prepared camera/text/state input bundle and external policy source |
 | InternVLA / NavDP | Full-chain runner and component adapters; [guide](../examples/configs/internvla/README.md) | Paired checkpoint bundle, CPU fixture and asset manifest for System2 → RGBD → NavDP |
 | LingBot v1 / v2 | Component adapter or `build_lingbot_vla_v2`; [v1](../examples/configs/lingbot/README.md), [v2](../examples/configs/lingbot/v2/README.md) | v1: preprocessed observations; v2: checkpoint plus training YAML and camera/state/language tensors |
-| RhinoVLA | `RhinoVLAPolicy`; [guide](../examples/configs/rhinovla/README.md) | Model-repository preprocessing and runtime factory |
+| RhinoVLA | `RhinoVLAPolicy`; [guide](../examples/configs/rhinovla/README.md), [v3 FP16/W8 RTC](../examples/configs/rhinovla/v3/README.md#rtc) | Model-repository preprocessing and runtime factory; v3 RTC adds action prefix and delay 0–6 |
 | HALO | Action Expert runner; [guide](../examples/configs/halo/README.md) | Paired EMA checkpoint and CPU single-step fixture with prepared prefix K/V |
 
 Core allocation, storage padding and cache construction are described in

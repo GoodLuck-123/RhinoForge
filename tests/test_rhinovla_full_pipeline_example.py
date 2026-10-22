@@ -1,6 +1,9 @@
 """The explicit full-pipeline catalog scope must inspect installed child storage."""
 import importlib
+import importlib.util
+import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +17,9 @@ CONFIG_DIR = ROOT / "examples/configs/rhinovla/v3"
 
 
 @pytest.fixture(params=["w8a16_pipeline.toml",
-                        "w8a16_pipeline_high_fused_vector_qk.toml"])
+                        "w8a16_pipeline_high_fused_vector_qk.toml",
+                        "rtc_w8a16_pipeline.toml",
+                        "rtc_w8a16_pipeline_high_fused_vector_qk.toml"])
 def config_path(request):
     return CONFIG_DIR / request.param
 
@@ -22,6 +27,12 @@ def config_path(request):
 @pytest.fixture
 def modules(monkeypatch, helpers):
     monkeypatch.syspath_prepend(str(ROOT))
+    name = "rpu_backend.adapters.rhinovla.rtc"
+    spec = importlib.util.spec_from_file_location(
+        name, ROOT / "python/rpu_backend/adapters/rhinovla/rtc.py")
+    rtc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rtc)
+    monkeypatch.setitem(sys.modules, name, rtc)
     return importlib.import_module("examples.common.config"), importlib.import_module("examples.runners.rhinovla.runner")
 
 
@@ -41,7 +52,7 @@ def test_full_pipeline_example_has_distinct_scope_and_explicit_acc16(modules, co
     config = common.load_config(config_path)
     policies.validate_rhinovla_config(config)
     assert policies._rhinovla_quantization(config) == {"expert_w8a16": True, "full_w8a16": True}
-    assert config["example"]["profile_id"] in policies._RHINOVLA_FULL_PIPELINE_PROFILES
+    assert policies._rhinovla_precision_profile(config) in policies._RHINOVLA_FULL_PIPELINE_PROFILES
     components = config["rpu_execution"]["components"]
     assert components["language_model"]["prefill"]["linear_acc32"] is False
     assert components["vision_encoder"]["vision"]["linear_acc32"] is False
@@ -62,9 +73,11 @@ def test_real_examples_preparation_requires_full_inventory_before_predict(
     import rpu_backend.api as api
     from rpu_backend.adapters.rhinovla import precision
     config = common.load_config(config_path)
+    rtc = config["example"]["profile_id"] in policies._RHINOVLA_RTC_PROFILES
     factory_path = tmp_path / "factory.json"
-    factory_path.write_text("{}")
-    config["input"].update(factory_config=str(factory_path), runtime_factory="caller:create")
+    factory_path.write_text(json.dumps({"rtc": True, "qin": "qin.pt"} if rtc else {}))
+    config["input"].update(factory_config=str(factory_path), runtime_factory=(
+        policies._RHINOVLA_V3_FACTORY if rtc else "caller:create"))
     policy, expert, calls = installed_rhinovla_policy(request, full=True)
     runtime, controller = policy.runtime, policy._rhinovla_execution_controller
     runtime.er = expert
@@ -82,7 +95,10 @@ def test_real_examples_preparation_requires_full_inventory_before_predict(
             raise ValueError("RhinoVLA full W8 requires actual vision storage")
         return {}
     monkeypatch.setattr(precision, "full_w8_inventory", inspect)
-    monkeypatch.setattr(policies, "_load_mapping", lambda *_: {"x0": torch.zeros(1)})
+    payload = {"x0": torch.zeros(1)}
+    if rtc:
+        payload.update(delay=0, action_prefix=torch.empty(1, 0, 96))
+    monkeypatch.setattr(policies, "_load_mapping", lambda *_: payload)
     monkeypatch.setattr(policies, "_checkpoint", lambda *_: Path("caller-checkpoint"))
     monkeypatch.setattr(api, "RhinoVLAPolicy", SimpleNamespace(from_factory=lambda *_a, **_k: policy))
     if failure:

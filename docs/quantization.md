@@ -333,6 +333,16 @@ language and action IO keep their selected floating format. A custom trusted
 factory may implement the same input and lifecycle contract; the runner checks
 installed expert storage rather than relying on its precision label.
 
+`w8a16_pipeline.toml` additionally quantizes Vision, Text, action IO and final
+AdaRMS condition projections. The HIGH/vector QK variant keeps that weight recipe
+and selects the documented nonlinear and normalization options. These four W8
+recipes and FP16 each have an `rtc_*.toml` counterpart: RTC preserves the same
+weight scope and prepares per-delay conditioning with the selected projection
+weights and scales. Use the built-in v3 factory and supply an action prefix plus
+`delay=0..6`; the [RTC guide](../examples/configs/rhinovla/v3/README.md#rtc)
+describes input bounds and verification status. No new quantized checkpoint
+directory is required for RTC.
+
 ## Runtime conversion helpers
 
 Hy-Embodied W8/W4 are runtime-derived paths with no offline export CLI. Select

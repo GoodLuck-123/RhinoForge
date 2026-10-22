@@ -7,11 +7,25 @@ from examples.common.inputs import _required_file, _load_mapping, _policy_checkp
 
 _RHINOVLA_QUANT_KEYS = ("expert_w8a16", "full_w8a16")
 _RHINOVLA_V3_FACTORY = "rpu_backend.adapters.rhinovla.factory:v3_runtime_factory"
-_RHINOVLA_RTC_PROFILE = "rhinovla.v3.rtc.fp16.trusted-factory"
 _RHINOVLA_FULL_PIPELINE_PROFILES = frozenset({
     "rhinovla.v3.w8a16.full-pipeline.trusted-factory",
     "rhinovla.v3.w8a16.full-pipeline-high.trusted-factory",
 })
+_RHINOVLA_RTC_PROFILES = {
+    "rhinovla.v3.rtc." + suffix: "rhinovla.v3." + suffix
+    for suffix in (
+        "fp16.trusted-factory",
+        "w8a16.expert.trusted-factory",
+        "w8a16.full-expert.trusted-factory",
+        "w8a16.full-pipeline.trusted-factory",
+        "w8a16.full-pipeline-high.trusted-factory",
+    )
+}
+
+
+def _rhinovla_precision_profile(config):
+    profile_id = config["example"].get("profile_id")
+    return _RHINOVLA_RTC_PROFILES.get(profile_id, profile_id)
 
 
 def _rhinovla_quantization(config):
@@ -34,7 +48,7 @@ def _rhinovla_quantization(config):
         "rhinovla.v3.w8a16.full-expert.trusted-factory": True,
         **dict.fromkeys(_RHINOVLA_FULL_PIPELINE_PROFILES, True),
     }
-    profile_id = config["example"].get("profile_id")
+    profile_id = _rhinovla_precision_profile(config)
     if profile_id in profiles and full is not profiles[profile_id]:
         raise ValueError("RhinoVLA full_w8a16 conflicts with the selected profile_id")
     if profile_id in _RHINOVLA_FULL_PIPELINE_PROFILES and any(
@@ -53,7 +67,7 @@ def validate_rhinovla_config(config):
     if config["example"].get("dtype") not in {"fp16", "w8a16"}:
         raise ValueError("RhinoVLA dtype must be fp16 or w8a16")
     _rhinovla_quantization(config)
-    if (config["example"].get("profile_id") == _RHINOVLA_RTC_PROFILE
+    if (config["example"].get("profile_id") in _RHINOVLA_RTC_PROFILES
             and inputs.get("runtime_factory") != _RHINOVLA_V3_FACTORY):
         raise ValueError("RhinoVLA RTC requires the built-in v3_runtime_factory")
     for key in ("runtime_factory", "factory_config", "request"):
@@ -87,7 +101,7 @@ def _validate_rhinovla_rtc_request(config, factory_config, request):
 
     rtc = factory_config.get("rtc", False)
     profile_id = config["example"].get("profile_id")
-    if profile_id == _RHINOVLA_RTC_PROFILE:
+    if profile_id in _RHINOVLA_RTC_PROFILES:
         if rtc is not True:
             raise ValueError("RhinoVLA RTC profile requires factory_config.rtc=true")
     elif rtc is True and profile_id and profile_id.startswith("rhinovla.v3."):
@@ -169,7 +183,7 @@ def _factory(runner):
     if any(name in inputs or name in factory_config for name in _RHINOVLA_QUANT_KEYS):
         _confirm_rhinovla_quantization(
             policy, quantization,
-            full_pipeline=config["example"].get("profile_id") in _RHINOVLA_FULL_PIPELINE_PROFILES)
+            full_pipeline=_rhinovla_precision_profile(config) in _RHINOVLA_FULL_PIPELINE_PROFILES)
     return lambda: policy.predict(**request)
 
 def _official(runner):

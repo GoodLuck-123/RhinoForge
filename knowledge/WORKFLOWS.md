@@ -99,7 +99,11 @@ independently of non-RTC evidence. Reserve the complete Graph pool during cold
 construction, including transient preparation while all delay variants remain
 retained. Keep the Python/native RTC build paired; VLA dependencies in an older
 bundle do not supply the new runtime. Use the [RTC input guide](../examples/configs/rhinovla/v3/README.md#rtc)
-for the exact FP16 envelope and current verification status.
+for the exact FP16/W8A16 envelope and current verification status. Keep RTC
+orthogonal to the existing expert/full-expert/full-pipeline precision recipe;
+preserve its fusion/resident/HIGH/vector/partial-RoPE choices. Prepare delay
+tables with the selected condition-projection weights and scales, and verify
+installed storage for RTC profiles just as for their non-RTC counterparts.
 When adding quantized examples, trace the checkpoint loader and installed
 projection storage, not just the `dtype` label. Document the component scope
 and retain its admission controls. Bind the recipe, input and lifetime requirements before extending a profile. For caller factories, bind precision inputs,

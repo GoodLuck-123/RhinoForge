@@ -168,3 +168,61 @@ def test_gate_tanh_opt_in_requires_full_w8_before_any_work(monkeypatch):
     monkeypatch.setattr(torch, "tanh", lambda *a: pytest.fail("invalid cold mode dispatched TANH"))
     with pytest.raises(ValueError, match="gate TANH precompute requires full W8"):
         convert._prepare_denoise_adarms_tables(object(), object(), precompute_gate_tanh=True)
+
+
+@pytest.mark.parametrize("quantize_final_norm,high", [(False, False), (True, False), (True, True)])
+def test_rtc_w8_projects_all_delay_step_groups_and_retains_precision(
+        cpu_transfers, monkeypatch, quantize_final_norm, high):
+    expert, loop = _cold_owners()
+    if not quantize_final_norm:
+        loop.clear()
+        expert.norm = NS(norm=NS(weight=torch.ones(1024)), cond=torch.nn.Linear(1024, 3072))
+        with torch.no_grad():
+            expert.norm.cond.weight.zero_()
+            expert.norm.cond.bias.fill_(0.25)
+    # Each row has a distinct token-group value; mixing the group/layer axes
+    # produces wrong conditions even though all tensor shapes still agree.
+    groups = (torch.arange(210).float() / 1024).reshape(7, 10, 3, 1).expand(-1, -1, -1, 1024)
+    calls = []
+    tanh_calls = []
+
+    def linear(cond, weight, scale, bias):
+        assert tuple(cond.shape) == (210, 1024) and cond.dtype == torch.float16
+        index = len(calls)
+        calls.append((weight, scale, bias))
+        return (cond[:, :1] + index / 32).expand(-1, 3072 if index == 18 else 6144).clone()
+
+    def tanh(gates):
+        assert gates.shape == (210, 2048)
+        tanh_calls.append(gates.clone())
+        return gates.tanh()
+
+    monkeypatch.setattr(torch.ops.rpu, "linear_w8a16", linear, raising=False)
+    monkeypatch.setattr(torch.ops.rpu, "rhino_vla_tanh_high_precision", tanh, raising=False)
+    pair, final, weights, scales, biases = convert._prepare_rtc_adarms_tables(
+        expert, groups, full_w8a16=True, loop_weights=loop,
+        quantize_final_norm=quantize_final_norm, precompute_gate_tanh=high, high_precision=high)
+    assert pair.shape == (7, 10, 18, 3, 6144)
+    assert final.shape == (7, 10, 3, 3072)
+    assert pair.is_contiguous() and final.is_contiguous()
+    assert len(calls) == len(weights) == len(scales) == len(biases) == (19 if quantize_final_norm else 18)
+    assert loop["adarms_cold_owners"] == (weights, scales, biases)
+    assert len(tanh_calls) == (18 if high else 0)
+    for layer in range(18):
+        expected = groups[..., 0].half() + layer / 32
+        assert torch.equal(pair[:, :, layer, :, 1024], expected)
+        assert torch.equal(pair[:, :, layer, :, 0], expected + 1)
+        assert torch.equal(pair[:, :, layer, :, 3072], expected + 1)
+        assert torch.equal(pair[:, :, layer, :, 2048], expected.tanh() if high else expected)
+    expected_final = groups[..., 0].half() + 18 / 32 if quantize_final_norm else torch.full((7, 10, 3), 0.25)
+    assert torch.equal(final[..., 0], expected_final + 1)
+    assert torch.equal(final[..., 1024], expected_final)
+
+
+def test_rtc_nonfinite_conditions_reject_before_projection(cpu_transfers, monkeypatch):
+    expert, loop = _cold_owners()
+    groups = torch.zeros(7, 10, 3, 1024)
+    groups[6, 9, 2, 0] = float("nan")
+    monkeypatch.setattr(torch.ops.rpu, "linear_w8a16", lambda *a: pytest.fail("invalid RTC table projected"), raising=False)
+    with pytest.raises(ValueError, match="finite condition groups"):
+        convert._prepare_rtc_adarms_tables(expert, groups, full_w8a16=True, loop_weights=loop)

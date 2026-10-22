@@ -2,7 +2,7 @@
 
 # RhinoVLA v3 配置
 
-v3 使用公开的 96D 模型，通过 factory 创建 Vision、语言模型和动作专家组成的流水线。五份 non-RTC 配置从 FP16 开始，依次扩大量化范围，最后一档再调整非线性精度和 Q/K 归一化。另有独立的 [RTC FP16 配置](#rtc)，覆盖 `delay=0..6` 的请求契约。
+v3 使用公开的 96D 模型，通过 factory 创建 Vision、语言模型和动作专家组成的流水线。五档精度配置从 FP16 开始，依次扩大量化范围，最后一档再调整非线性精度和 Q/K 归一化。每档均有对应的 [RTC 配置](#rtc)，使用相同权重配方与优化设置，增加 `delay=0..6` 的请求契约。
 
 [模型入口](../README.md) · [准备与运行](#quantization) · [RTC](#rtc) · <a id="weight-recipes"></a>
 
@@ -169,11 +169,21 @@ factory 接收 checkpoint、steps、量化选择和组件配置。修改安装�
 
 <a id="rtc"></a>
 
-### RTC FP16：delay 0–6
+### RTC：FP16 与 W8A16，delay 0–6
 
-[RTC 模板](rtc_fp16.toml)绑定上述固定 v3 源码与 checkpoint、FP16、batch 1、30×96 动作和 18 层专家，使用十步展开去噪。该精确输入范围已完成本地 R1 硬件验证；配置登记仍为 `example_only` 模板，使用内置 v3 factory，不扩展其他 profile 的支持状态。W8、v1、其他 horizon/步数及 `delay > 6` 不在此契约内。
+RTC 绑定上述固定 v3 源码与 checkpoint、batch 1、30×96 动作和 18 层专家，使用十步展开去噪。RTC 是与精度配方独立的运行模式，不要求权重必须为 FP16；下面五份模板与对应 non-RTC 配置具有相同的量化范围和优化设置。
 
-继续使用[统一安装指南](../../../../docs/getting_started.md)创建的 Miniconda3 `RHINOFORGE_ENV`。完整环境包可提供 `vla` 依赖；运行 RTC 还需要包含本节接口的新版本 RhinoForge 源码及同版本编译的 native 扩展。旧环境包需按统一指南更新或重新构建，不能仅复制 RTC Python 文件或 TOML 后沿用旧 native 库。按照前文生成普通 `factory.json`、`qin.pt` 和 `request.pt`，再创建 RTC 输入：
+| RTC 配置 | 对应的精度配方 |
+|---|---|
+| [rtc_fp16.toml](rtc_fp16.toml) | FP16 |
+| [rtc_w8a16_action.toml](rtc_w8a16_action.toml) | 专家七类主干投影 W8 |
+| [rtc_w8a16_action_adarms.toml](rtc_w8a16_action_adarms.toml) | 专家主干与 AdaRMS 条件投影 W8 |
+| [rtc_w8a16_pipeline.toml](rtc_w8a16_pipeline.toml) | 全流水线 W8 |
+| [rtc_w8a16_pipeline_high_fused_vector_qk.toml](rtc_w8a16_pipeline_high_fused_vector_qk.toml) | 全流水线 W8 + HIGH/fused/vector QK |
+
+配置登记均为 `example_only` 模板，要求使用内置 v3 factory。RTC profile 在原精度 profile 的 `rhinovla.v3.` 后增加 `rtc.`，例如 `rhinovla.v3.rtc.w8a16.expert.trusted-factory`。v1、其他 horizon/步数及 `delay > 6` 不在此契约内。RTC 验证需覆盖所选精度与配置，不继承 non-RTC 的测试结论。
+
+继续使用[统一安装指南](../../../../docs/getting_started.md)创建的 Miniconda3 `RHINOFORGE_ENV`。完整环境包可提供 `vla` 依赖；运行 RTC 还需要包含本节接口的新版本 RhinoForge 源码及同版本编译的 native 扩展。依赖环境包可继续复用；更新 RhinoForge 源码后需按统一指南重新编译安装，不能仅复制 RTC Python 文件或 TOML 后沿用旧 native 库。按照前文生成普通 `factory.json`、`qin.pt` 和 `request.pt`，再创建 RTC 输入：
 
 ```bash
 export RHINOVLA_V3_EXAMPLE=/tmp/rhinovla_v3_example
@@ -201,6 +211,8 @@ python -m examples.run --config /tmp/rhinovla_v3_rtc.toml --check-config
 python -m examples.run --config /tmp/rhinovla_v3_rtc.toml
 ```
 
+运行 W8 档位时，将复制的模板替换为上表对应文件，继续使用同一份 checkpoint、`rtc_factory.json`、`qin.pt` 和 `rtc_request.pt`。保留模板的 `dtype`、`expert_w8a16/full_w8a16` 与环境开关；如果 factory JSON 也包含量化布尔值，其值必须与模板一致。runner 会检查实际安装的专家权重和 scale，全流水线模板还会检查 Vision、Text、动作 IO 与 AdaRMS 的量化存储。
+
 `--check-config`只检查 TOML；实际运行时，runner 会在加载 qin 和模型权重前检查 RTC 前缀与 delay。内置 factory 固定为 `rpu_backend.adapters.rhinovla.factory:v3_runtime_factory`。`factory_config.rtc=true` 是构造时设置；更改它需要重建 policy。
 
 | 字段 | 契约 |
@@ -214,11 +226,10 @@ RTC 请求必须同时提供 `action_prefix` 和 `delay`。`delay=0` 时仍需�
 
 RTC 每一步先复写已确定的前 `delay` 个动作，再执行去噪；这些 token 的时间为 0，其余动作使用本步时间。state token 使用全部动作时间嵌入的均值，最终输出再次固定前缀并应用动作掩码。只在输出阶段覆盖历史动作不能实现这一计算路径。
 
-RTC 模板保持 `PRECOMPUTE_ADARMS=1` 和 `denoise_unroll=true`，将 `EXPERT_FUSIONS`、`ADARMS_RESIDENT`、`PACKED_QKV` 及 W8 开关设为 `"0"`。使用模板中的整组设置。每个 delay 对应独立的动作 Graph 签名；同一 delay 更新 prefix 内容需要刷新输入。runtime 在构造时自动预留 10 个 Graph arena，覆盖七个 delay 的动作 Graph、Vision/Language 保留 Graph 和一个准备阶段的临时 Graph；用户无需额外设置环境变量。固定 Graph 集合前先预热需要使用的所有 delay。验证应逐个覆盖 0–6、同 delay 前缀变化、0→6→0 切换和输出存储独立性，不能用 non-RTC 的既有结果替代。
+RTC 模板保留对应 non-RTC 配方的 `PRECOMPUTE_ADARMS=1`、`EXPERT_FUSIONS=1`、`ADARMS_RESIDENT=1` 和 `denoise_unroll=true`，W8/HIGH/vector 开关随所选配方保持一致；`PACKED_QKV` 与 `SKIP_ADARMS_GEMV` 继续关闭。RTC 会为不同 delay 准备匹配的条件参数，不能复用 non-RTC 的统一时间表。使用模板中的整组设置。每个 delay 对应独立的动作 Graph 签名；同一 delay 更新 prefix 内容需要刷新输入。runtime 在构造时自动预留 10 个 Graph arena，覆盖七个 delay 的动作 Graph、Vision/Language 保留 Graph 和一个准备阶段的临时 Graph；用户无需额外设置环境变量。固定 Graph 集合前先预热需要使用的所有 delay。验证应逐个覆盖 0–6、同 delay 前缀变化、0→6→0 切换和输出存储独立性，不能用 non-RTC 的既有结果替代。
 
-本地 R1 验证使用三幅等尺寸视图、230 个逻辑 prefix token（P230）：`delay=0..6` 的 BUILD/REPLAY 逐位一致，前缀固定、有限值、零掩码、输出独立性、缓存稳定性及 0→6→0、同 delay 前缀 A→B→A 检查均通过。与 CPU FP32 参考的余弦相似度为 0.9999742–0.9999917，仅作数值诊断，不设通用验收阈值。
 
-模板会在构造时固定 qin 中的 token、attention mask 和 grid；这些内容或像素几何变化时需新建 runtime，同几何的像素值可更新。异尺寸视图不在本轮验证范围内，强制 oneshot 模式会被提前拒绝。
+示例输入使用三幅等尺寸视图与 230 个逻辑 prefix token（P230）。模板会在构造时固定 qin 中的 token、attention mask 和 grid；这些内容或像素几何变化时需新建 runtime，同几何的像素值可更新。异尺寸视图不在这些模板的输入范围内，强制 oneshot 模式会被提前拒绝。
 
 <a id="parameters"></a>
 

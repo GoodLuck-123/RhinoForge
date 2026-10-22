@@ -387,6 +387,12 @@ FP16、expert W8 和 full-expert W8 模板的九项公开缓存/融合环境控�
 实际安装的 text、vision、action IO 与冷 AdaRMS owner；其范围不同于 expert-only，
 基础版显式关闭 HIGH、gate-TANH 预计算与 vector Q/K norm，HIGH 版则启用它们。
 
+固定 v3 的 `rtc=True` 模式接受相同的 FP16 与 W8 精度范围。统一入口选择对应
+`rtc_*.toml`，独立配置则保持原 TOML 并使用 `run --rtc --delay 6`。AdaRMS 驻留、
+专家融合、HIGH、vector norm 与 partial RoPE 沿用所选设置；RTC 按该配方准备各
+delay 的条件参数。精度与 RTC 模式在构造时固定，请求中的 delay 可在 `0..6` 内
+变化，详见 [RTC 输入契约](../examples/configs/rhinovla/v3/README.md#rtc)。
+
 RhinoVLA 在 `components.language_model.prefill` 与
 `components.vision_encoder.vision` 接受冷态布尔 `linear_acc32`。
 默认 `false` 使用 ACC16，`true` 选择现有 text Linear 或 vision block/融合 merger 的
@@ -608,7 +614,7 @@ heading 之后。
 | `RPU_RHINOVLA_EXPERT_DEPTH_LIMIT` | 未设置 | 不超过权重层数的正整数 | 诊断用专家层数，范围为 1 到权重层数，并调整前缀层选择；官方及固定 W8 配置拒绝缩减层数。 |
 | `RPU_RHINOVLA_EXPERT_FUSIONS` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在固定 v3 专家中融合 norm/shift 及门控残差；要求预计算 AdaRMS、GATED_NO_SUB 及两个对应算子。 |
 | `RPU_RHINOVLA_EXPERT_MLP_DIM_LIMIT` | 未设置 | 不超过权重宽度的正整数 | 诊断用专家 MLP 宽度，范围为 1 到权重宽度；官方及固定 W8 配置拒绝缩减宽度。 |
-| `RPU_RHINOVLA_EXPERT_W8A16` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 仅量化固定普通 v3 专家的 Q/K/V/O 和 MLP 权重，使用逐通道 FP16 scale；拒绝缩减形状及 PACKED_QKV，全流程 W8 同时启用专家 W8。 |
+| `RPU_RHINOVLA_EXPERT_W8A16` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在 non-RTC 或 RTC 模式下量化固定 v3 专家的 Q/K/V/O 和 MLP 权重，使用逐通道 FP16 scale；拒绝缩减形状及 PACKED_QKV，全流程 W8 同时启用专家 W8。 |
 | `RPU_RHINOVLA_HIGH_PRECISION` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 为带驻留预计算 AdaRMS 的固定全 W8 v3 选择 Newton RMSNorm 和高精度激活；捕获前要求对应可选算子齐备。 |
 | `RPU_RHINOVLA_HIGH_PRECISION_FUSIONS` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 依赖 HIGH_PRECISION，使用对应高精度算子融合动作 norm/shift 和文本/动作 SiLU×up。 |
 | `RPU_RHINOVLA_PACKED_QKV` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 为固定 FP16 v3 专家合并不可变 Q/K/V 权重，保留原输出分区；修改后须重新安装权重。 |

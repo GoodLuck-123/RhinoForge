@@ -47,8 +47,25 @@ python scripts/validate_rhinovla_v3.py run \
 
 `prepare` 使用公开示例视频生成两组图像输入，state/noise 使用固定种子。`run` 固定十步去噪，检查输出形状、有限值、未激活动作槽、不同请求的独立输出与图重放，保存动作 tensor。`--runs` 控制重放次数；线程默认 12。修改环境开关或组件配置后使用新进程。
 
+### RTC：沿用同一精度与执行配置
+
+上表九份配置均可通过 `run --rtc` 选择 RTC，不需要另外准备权重、fixture 或修改 TOML。`--delay` 接受 `0,1,2,3,4,5,6` 中的一个整数；启用 RTC 且省略该参数时默认为 `6`。例如，在保留全流水线 W8、HIGH、融合、vector Q/K 与 partial RoPE 设置的情况下运行：
+
+```bash
+python scripts/validate_rhinovla_v3.py run \
+  --source "$RHINOVLA_V3_SRC" --checkpoint "$RHINOVLA_V3_CKPT" \
+  --fixture /tmp/rhinovla_v3_inputs.pt \
+  --config examples/configs/rhinovla/v3/controlled/w8a16_pipeline_high_fused_vector_qk_partial_rope.toml \
+  --rtc --delay 6 --runs 3 \
+  --output /tmp/rhinovla_v3_rtc_actions.pt
+```
+
+替换 `--config` 即可选择其余配方；将 `--delay` 改为 `0` 可检查无已确定动作的 RTC 请求。`--rtc` 只用于 `run`，`prepare` 输出由两种模式共用；不带 `--rtc` 时不能单独使用 `--delay`。
+
+脚本为每组 fixture 生成固定种子的测试动作前缀，除原有检查外，还检查输出保留掩码处理后的前缀，输出 metadata 记录 `rtc` 和 `delay`。这段测试前缀不代表机器人已执行的动作；应用集成须按照 [RTC 输入契约](../README.md#rtc)提供同一归一化 96D 空间内真实已确定的动作。每次命令只验证所选 delay，不能将单次运行当作所有 delay 或所有精度的验证结果。
+
 ### 参数与输出
 
-`--source`、`--checkpoint` 和 `--fixture` 必须来自同一套配对资产；`--config` 选择上表完整模板，`--output` 保存动作文件。`--runs` 默认 `3`，`--threads` 默认 `12`；去噪固定为十步。fixture 与统一入口的 `request.pt` 分别使用。
+`--source`、`--checkpoint` 和 `--fixture` 必须来自同一套配对资产；`--config` 选择上表完整模板，`--output` 保存动作文件。`--runs` 默认 `3`，`--threads` 默认 `12`；去噪固定为十步。`--rtc` 默认为关闭，开启后 `--delay` 默认为 `6`、范围为 `0..6`。fixture 与统一入口的 `request.pt` 分别使用。
 
 实现见[运行脚本](../../../../../scripts/validate_rhinovla_v3.py)、[权重与表准备](../../../../../python/rpu_backend/adapters/rhinovla/convert.py)、[流水线](../../../../../python/rpu_backend/adapters/rhinovla/pipeline.py)。
