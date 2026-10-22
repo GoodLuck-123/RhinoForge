@@ -474,7 +474,10 @@ def _prepare_full_w8_adarms_tables(expert, cond_all_cpu, loop_weights, *,
     for index, (weight, scale, bias) in enumerate(zip(weights, scales, biases)):
         # No dequantized CPU Linear: this dispatched op executes shipped W8A16
         # ACC16 hardware and returns fresh FP16 DDR output at the cold boundary.
-        output = torch.ops.rpu.linear_w8a16(cond_rpu, weight, scale, bias).cpu()
+        # RPU .cpu() can share the producer's DDR storage. Keep CPU edits in
+        # independent memory so freed device outputs cannot retain dirty CPU
+        # cache lines when the device allocator reuses them for later stages.
+        output = torch.ops.rpu.linear_w8a16(cond_rpu, weight, scale, bias).cpu().clone()
         output[:, :1024] += 1.0
         if index < 18:
             output[:, 3072:4096] += 1.0

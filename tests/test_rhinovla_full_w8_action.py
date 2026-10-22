@@ -96,6 +96,7 @@ def test_cold_tables_dispatch_real_w8_api_and_retain_owners(
         cpu_transfers, monkeypatch, precompute_gate_tanh, high_precision):
     expert, loop = _cold_owners()
     calls = []
+    projection_outputs = []
     tanh_calls = []
     high_tanh_calls = []
     original_tanh = torch.tanh
@@ -106,8 +107,10 @@ def test_cold_tables_dispatch_real_w8_api_and_retain_owners(
         assert scale.dtype == bias.dtype == torch.float16
         index = len(calls)
         calls.append((weight, scale, bias))
-        return torch.full((10, 3072 if index == 18 else 6144), index / 8,
-                          dtype=torch.float16)
+        output = torch.full((10, 3072 if index == 18 else 6144), index / 8,
+                            dtype=torch.float16)
+        projection_outputs.append(output)
+        return output
 
     def tanh(gates):
         assert gates.dtype == torch.float16 and gates.is_contiguous()
@@ -135,6 +138,10 @@ def test_cold_tables_dispatch_real_w8_api_and_retain_owners(
     assert len(high_tanh_calls) == (18 if precompute_gate_tanh and high_precision else 0)
     assert cpu_transfers.count(((10, 2048), torch.float16)) == len(tanh_calls)
     for index, call in enumerate(calls):
+        # RPU .cpu() can expose the producer's DDR storage. CPU table edits
+        # must not dirty that storage before the device allocator reuses it.
+        assert torch.equal(projection_outputs[index],
+                           torch.full_like(projection_outputs[index], index / 8))
         assert all(a is b for a, b in zip(call, (weights[index], scales[index], biases[index])))
         actual = final if index == 18 else pair[:, index]
         expected = torch.full_like(actual, index / 8)
@@ -184,13 +191,16 @@ def test_rtc_w8_projects_all_delay_step_groups_and_retains_precision(
     # produces wrong conditions even though all tensor shapes still agree.
     groups = (torch.arange(210).float() / 1024).reshape(7, 10, 3, 1).expand(-1, -1, -1, 1024)
     calls = []
+    projection_outputs = []
     tanh_calls = []
 
     def linear(cond, weight, scale, bias):
         assert tuple(cond.shape) == (210, 1024) and cond.dtype == torch.float16
         index = len(calls)
         calls.append((weight, scale, bias))
-        return (cond[:, :1] + index / 32).expand(-1, 3072 if index == 18 else 6144).clone()
+        output = (cond[:, :1] + index / 32).expand(-1, 3072 if index == 18 else 6144).clone()
+        projection_outputs.append(output)
+        return output
 
     def tanh(gates):
         assert gates.shape == (210, 2048)
@@ -208,6 +218,9 @@ def test_rtc_w8_projects_all_delay_step_groups_and_retains_precision(
     assert len(calls) == len(weights) == len(scales) == len(biases) == (19 if quantize_final_norm else 18)
     assert loop["adarms_cold_owners"] == (weights, scales, biases)
     assert len(tanh_calls) == (18 if high else 0)
+    for index, projection in enumerate(projection_outputs):
+        expected_projection = groups.reshape(210, 1024)[:, :1].half() + index / 32
+        assert torch.equal(projection, expected_projection.expand_as(projection))
     for layer in range(18):
         expected = groups[..., 0].half() + layer / 32
         assert torch.equal(pair[:, :, layer, :, 1024], expected)
