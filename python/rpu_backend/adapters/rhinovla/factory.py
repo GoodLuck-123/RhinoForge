@@ -136,8 +136,9 @@ def v3_runtime_factory(config, *, rpu_execution=None):
 
     Use the v3 checkpoint remapping, descending flow and prefix RoPE continuation;
     training-only OAT/LoRA tensors are ignored. Configuration and prepared CPU
-    inputs follow ``official_runtime_factory``. ``rtc=True`` selects the FP16
-    ten-step RTC path with request delays 0 through 6. The v1 asset contract
+    inputs follow ``official_runtime_factory``. ``rtc=True`` selects the
+    ten-step RTC path with request delays 0 through 6 for the selected FP16
+    or W8 precision and execution configuration. The v1 asset contract
     is separate."""
     return _runtime_factory(config, rpu_execution=rpu_execution, v3=True)
 
@@ -170,27 +171,20 @@ def _runtime_factory(config, *, rpu_execution=None, v3=False):
     steps = config.get("steps", 10)
     denoise_schedule(steps, "official_descending")
     if rtc:
-        from .rtc import validate_rtc_install
+        from .rtc import require_rtc_native, validate_rtc_install
         from .runtime import RhinoVLAPipelineColdConfig
         from .fused import _RhinoVLANativeColdConfig
         from rpu_backend.runtime import rpu_env_bool
 
         if rpu_env_bool("RPU_GRAPH_FORCE_ONESHOT_ON_REPLAY"):
             raise ValueError("RhinoVLA RTC requires ordinary Graph replay, not forced oneshot")
-        for suffix in ("HIGH_PRECISION", "HIGH_PRECISION_FUSIONS", "PRECOMPUTE_GATE_TANH",
-                       "VECTOR_K_NORM", "VECTOR_Q_NORM", "PARTIAL_ROPE"):
-            if rpu_env_bool("RPU_RHINOVLA_" + suffix):
-                raise ValueError(f"RhinoVLA RTC requires {suffix} disabled")
         pipeline_cold, _ = RhinoVLAPipelineColdConfig.resolve(rpu_execution)
         validate_rtc_install(
             rtc=rtc, steps=steps, flow_direction="official_descending",
             expert_w8a16=expert_w8a16, full_expert_w8a16=full_expert_w8a16,
             native_cold=_RhinoVLANativeColdConfig.from_env(),
             action_cold=pipeline_cold.stages["action"])
-        for op in ("rhino_vla_set_denoise_loop_rtc_tables", "rhino_vla_prepare_rtc",
-                   "rhino_vla_denoise_loop_rtc_forward"):
-            if not hasattr(torch.ops.rpu, op):
-                raise RuntimeError("RhinoVLA RTC requires a matching native RhinoForge build")
+        require_rtc_native()
     qin = config["qin"]
     if not isinstance(qin, Mapping):
         raise TypeError("RhinoVLA qin must contain preprocessed CPU tensors")

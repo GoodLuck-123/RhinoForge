@@ -45,6 +45,14 @@ def _request(seed):
     return result
 
 
+def _rtc_request(request, *, delay, seed):
+    """Use reproducible committed actions in the checkpoint's normalized space."""
+    import torch
+    generator = torch.Generator().manual_seed(seed + 100)
+    return {**request, "delay": delay,
+            "action_prefix": torch.randn(1, delay, 96, generator=generator) * 0.1}
+
+
 def prepare(args):
     import av
     import torch
@@ -148,6 +156,11 @@ def _check_action(action, request):
     inactive = request["action_mask"][:, None, :] == 0
     if bool(action.masked_select(inactive.expand_as(action)).any()):
         raise RuntimeError("Inactive action slots must remain zero")
+    if "delay" in request:
+        delay = request["delay"]
+        prefix = request["action_prefix"][:, :delay] * request["action_mask"][:, None]
+        if not torch.equal(action[:, :delay].cpu(), prefix):
+            raise RuntimeError("RTC committed prefix was not preserved exactly")
 
 
 def _load_fixture(path, factory):
@@ -188,11 +201,19 @@ def run(args):
 
     factory = _factory()
     payload = _load_fixture(args.fixture, factory)
+    rtc = getattr(args, "rtc", False)
+    delay = getattr(args, "delay", None)
+    if delay is not None and not rtc:
+        raise ValueError("--delay requires --rtc")
+    if rtc:
+        delay = 6 if delay is None else delay
+        if type(delay) is not int or not 0 <= delay <= 6:
+            raise ValueError("RTC delay must be in [0, 6]")
     live_qin = {key: value.clone() for key, value in payload["cases"][0]["qwen_inputs"].items()}
     policy = RhinoVLAPolicy.from_factory(
         "rpu_backend.adapters.rhinovla.factory:v3_runtime_factory",
         {"model_root": args.source, "checkpoint": args.checkpoint, "qin": live_qin,
-         "steps": 10, "trust_model_code": True},
+         "steps": 10, "trust_model_code": True, "rtc": rtc},
         rpu_execution=config.get("rpu_execution", {"action": {"denoise_unroll": True}}))
     actions, live_actions = [], []
     try:
@@ -203,8 +224,10 @@ def run(args):
             for key, value in case["qwen_inputs"].items():
                 policy.runtime.qin[key].copy_(value)
             before = _snapshot(policy.runtime) if actions else None
-            action = policy.predict(**case["request"])
-            _check_action(action, case["request"])
+            request = (_rtc_request(case["request"], delay=delay, seed=index)
+                       if rtc else case["request"])
+            action = policy.predict(**request)
+            _check_action(action, request)
             snapshot = action.detach().cpu().clone()
             for previous, saved in zip(live_actions, actions):
                 if not torch.equal(previous.cpu(), saved):
@@ -226,7 +249,10 @@ def run(args):
     finally:
         policy.close()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"metadata": payload["metadata"], "actions": actions}, args.output)
+    metadata = {**payload["metadata"], "rtc": rtc}
+    if rtc:
+        metadata["delay"] = delay
+    torch.save({"metadata": metadata, "actions": actions}, args.output)
     print(f"Replay checks passed; actions: {args.output}")
 
 
@@ -241,11 +267,17 @@ def main(argv=None):
     parser.add_argument("--example-dir", type=Path, help="prepare also writes inputs for the factory TOML examples")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--threads", type=int, default=12)
+    parser.add_argument("--rtc", action="store_true", help="enable RTC with any controlled precision recipe")
+    parser.add_argument("--delay", type=int, choices=range(7), help="RTC committed action count (default: 6)")
     args = parser.parse_args(argv)
     if args.phase == "run" and args.output is None:
         parser.error("run requires --output")
     if args.runs < 1 or args.threads < 1:
         parser.error("runs and threads must be positive")
+    if args.delay is not None and not args.rtc:
+        parser.error("--delay requires --rtc")
+    if args.phase != "run" and args.rtc:
+        parser.error("--rtc is a run option; prepared fixtures work with both modes")
     args.source = args.source.expanduser().resolve()
     args.checkpoint = args.checkpoint.expanduser().resolve()
     import torch

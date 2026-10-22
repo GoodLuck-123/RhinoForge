@@ -28,7 +28,7 @@ python examples/run.py --config /tmp/g05.toml --check-config
 python examples/run.py --config /tmp/g05.toml
 ```
 
-`--check-config` 检查配置结构及登记关系，无需加载 Torch/设备。最后一条命令执行模型加载和推理。RhinoVLA 的 `controlled/` 配置使用模型页给出的独立验证入口。
+`--check-config` 检查配置结构及登记关系，无需加载 Torch/设备。最后一条命令执行模型加载和推理。RhinoVLA 的 `controlled/` 配置使用模型页给出的独立验证入口。[RhinoVLA v3 RTC](configs/rhinovla/v3/README.md#rtc) 提供与五档 FP16/W8 配方对应的模板；九份独立配置通过 `--rtc --delay 6` 启用 RTC，delay 可选 `0..6`。
 
 <a id="logging-and-output"></a>
 <a id="日志与输出"></a>

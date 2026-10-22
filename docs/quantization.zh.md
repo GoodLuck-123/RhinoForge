@@ -278,6 +278,12 @@ FP16 计算后的 logits 以 CPU FP32 返回。
 和 activation，Vision、prefix language、action IO 保持所选浮点格式。自定义可信 factory
 需满足相同输入与生命周期合同；runner 检查实际 expert 存储。
 
+`w8a16_pipeline.toml` 进一步量化 Vision、Text、action IO 和最终 AdaRMS 条件投影；
+HIGH/vector QK 档保持同一权重配方，调整非线性与归一化执行。这四档 W8 与 FP16
+均有对应 `rtc_*.toml`：RTC 保留量化范围，使用所选投影权重和 scale 准备各 delay
+的条件参数。使用内置 v3 factory，传入动作前缀与 `delay=0..6`；输入边界及验证状态见
+[RTC 说明](../examples/configs/rhinovla/v3/README.md#rtc)。RTC 无需另外生成量化权重目录。
+
 ## 运行时转换 helper
 
 Hy-Embodied W8/W4 在运行时转换，没有离线导出 CLI。输入和转换配方见

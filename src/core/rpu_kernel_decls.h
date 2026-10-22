@@ -4995,6 +4995,10 @@ void rpu_rhino_vla_set_denoise_loop_adarms_tables(
 
 void rpu_rhino_vla_set_denoise_loop_rtc_tables(
     int64_t handle, const at::Tensor& pair_table, const at::Tensor& final_table);
+void rpu_rhino_vla_set_denoise_loop_rtc_tables_w8a16(
+    int64_t handle, const at::Tensor& pair_table, const at::Tensor& final_table,
+    at::TensorList cold_weights, at::TensorList cold_scales, at::TensorList cold_biases,
+    bool gates_tanh_precomputed, bool high_precision);
 void rpu_rhino_vla_prepare_rtc(int64_t handle, int64_t delay);
 
 void rpu_rhino_vla_set_denoise_loop_time_proj_table(

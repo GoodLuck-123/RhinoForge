@@ -1155,6 +1155,7 @@ TORCH_LIBRARY(rpu, m) {
         "int handle, Tensor pair_table, Tensor final_table) -> ()");
   m.def("rhino_vla_set_denoise_loop_rtc_tables("
         "int handle, Tensor pair_table, Tensor final_table) -> ()");
+  m.def("rhino_vla_set_denoise_loop_rtc_tables_w8a16(int handle, Tensor pair_table, Tensor final_table, Tensor[] cold_weights, Tensor[] cold_scales, Tensor[] cold_biases, bool gates_tanh_precomputed=False, bool high_precision=False) -> ()");
   m.def("rhino_vla_prepare_rtc", TORCH_FN(rpu_rhino_vla_prepare_rtc));
   m.def("rhino_vla_set_denoise_loop_time_proj_table("
         "int handle, Tensor table) -> ()");
@@ -1809,6 +1810,8 @@ TORCH_LIBRARY_IMPL(rpu, PrivateUse1, m) {
          TORCH_FN(rpu_rhino_vla_set_denoise_loop_adarms_tables));
   m.impl("rhino_vla_set_denoise_loop_rtc_tables",
          TORCH_FN(rpu_rhino_vla_set_denoise_loop_rtc_tables));
+  m.impl("rhino_vla_set_denoise_loop_rtc_tables_w8a16",
+         TORCH_FN(rpu_rhino_vla_set_denoise_loop_rtc_tables_w8a16));
   m.impl("rhino_vla_set_denoise_loop_time_proj_table",
          TORCH_FN(rpu_rhino_vla_set_denoise_loop_time_proj_table));
   m.impl("rhino_vla_denoise_loop_forward",
@@ -2046,6 +2049,7 @@ TORCH_LIBRARY_IMPL(rpu, AutogradPrivateUse1, m) {
   m.impl("rhino_vla_set_denoise_loop_weights", torch::CppFunction::makeFallthrough());
   m.impl("rhino_vla_set_denoise_loop_adarms_tables", torch::CppFunction::makeFallthrough());
   m.impl("rhino_vla_set_denoise_loop_rtc_tables", torch::CppFunction::makeFallthrough());
+  m.impl("rhino_vla_set_denoise_loop_rtc_tables_w8a16", torch::CppFunction::makeFallthrough());
   m.impl("rhino_vla_set_denoise_loop_time_proj_table", torch::CppFunction::makeFallthrough());
   m.impl("rhino_vla_denoise_loop_forward", torch::CppFunction::makeFallthrough());
   m.impl("rhino_vla_denoise_loop_rtc_forward", torch::CppFunction::makeFallthrough());

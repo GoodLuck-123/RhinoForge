@@ -249,6 +249,8 @@ def _preflight_rhinovla_cold_install(
         native_cold=native_cold, action_cold=action_cold)
     if rtc:
         from .convert import _direct_action_input
+        from .rtc import require_rtc_native
+        require_rtc_native()
         if rpu_env_bool("RPU_GRAPH_FORCE_ONESHOT_ON_REPLAY"):
             raise ValueError("RhinoVLA RTC requires ordinary Graph replay, not forced oneshot")
         if not (_direct_action_input(action_io) and expert_depth == 18
@@ -801,7 +803,25 @@ class RhinoVLAOnRPU:
                 times = torch.tensor(self._denoise_times, dtype=torch.float32)
                 cond_cpu = action_mod.create_sinusoidal_pos_embedding(
                     times, self.cfg.width).to(dtype=torch.float32).contiguous()
-                if cold["full_expert_w8a16"]:
+                if self._rtc:
+                    from .convert import _prepare_rtc_adarms_tables
+                    from .rtc import rtc_condition_groups
+                    groups = rtc_condition_groups(
+                        times, action_mod.create_sinusoidal_pos_embedding, self.cfg.width)
+                    pair_table, final_table, *owners = _prepare_rtc_adarms_tables(
+                        self.er if cold["full_expert_w8a16"] else self.expert, groups,
+                        full_w8a16=cold["full_expert_w8a16"], loop_weights=loop_w,
+                        quantize_final_norm=cold["full_w8a16"], final_norm=self.expert.norm,
+                        precompute_gate_tanh=cold["precompute_gate_tanh"],
+                        high_precision=cold["high_precision"])
+                    if cold["full_expert_w8a16"]:
+                        torch.ops.rpu.rhino_vla_set_denoise_loop_rtc_tables_w8a16(
+                            self.er._rpu_handle, pair_table, final_table, *owners,
+                            cold["precompute_gate_tanh"], cold["high_precision"])
+                    else:
+                        torch.ops.rpu.rhino_vla_set_denoise_loop_rtc_tables(
+                            self.er._rpu_handle, pair_table, final_table)
+                elif cold["full_expert_w8a16"]:
                     pair_table, final_table, weights, scales, biases = _prepare_denoise_adarms_tables(
                         self.er, cond_cpu, full_w8a16=True, loop_weights=loop_w,
                         quantize_final_norm=cold["full_w8a16"], final_norm=self.expert.norm,
@@ -810,14 +830,6 @@ class RhinoVLAOnRPU:
                     torch.ops.rpu.rhino_vla_set_denoise_loop_adarms_tables_w8a16(
                         self.er._rpu_handle, pair_table, final_table, weights, scales, biases,
                         cold["precompute_gate_tanh"], cold["high_precision"])
-                elif self._rtc:
-                    from .convert import _prepare_rtc_adarms_tables
-                    from .rtc import rtc_condition_groups
-                    groups = rtc_condition_groups(
-                        times, action_mod.create_sinusoidal_pos_embedding, self.cfg.width)
-                    pair_table, final_table = _prepare_rtc_adarms_tables(self.expert, groups)
-                    torch.ops.rpu.rhino_vla_set_denoise_loop_rtc_tables(
-                        self.er._rpu_handle, pair_table, final_table)
                 else:
                     pair_table, final_table = _prepare_denoise_adarms_tables(
                         self.expert, cond_cpu)

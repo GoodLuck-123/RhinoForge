@@ -26,7 +26,7 @@
 | G0.5 | `patch_g05_policy_for_rpu`；[指南](../examples/configs/g05/README.md) | 相机、文本、状态输入包及外部 policy 源码 |
 | InternVLA / NavDP | 完整链 runner 与组件 adapter；[指南](../examples/configs/internvla/README.md) | System2 → RGBD → NavDP 的配对权重包、CPU fixture 和资产清单 |
 | LingBot v1 / v2 | 组件 adapter 或 `build_lingbot_vla_v2`；[v1](../examples/configs/lingbot/README.md)、[v2](../examples/configs/lingbot/v2/README.md) | v1 为预处理观测；v2 为权重、训练 YAML 及相机/状态/语言张量 |
-| RhinoVLA | `RhinoVLAPolicy`；[指南](../examples/configs/rhinovla/README.md) | 模型仓库预处理及 runtime factory |
+| RhinoVLA | `RhinoVLAPolicy`；[指南](../examples/configs/rhinovla/README.md)、[v3 FP16/W8 RTC](../examples/configs/rhinovla/v3/README.md#rtc) | 模型仓库预处理及 runtime factory；v3 RTC 增加动作前缀和 delay 0–6 |
 | HALO | Action Expert runner；[指南](../examples/configs/halo/README.md) | 配对 EMA 权重、单步 CPU fixture 和已准备的前缀 K/V |
 
 核数、存储补齐与 cache 创建见[计算核拓扑](planner_core_topology.zh.md)，

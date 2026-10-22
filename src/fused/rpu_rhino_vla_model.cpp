@@ -847,9 +847,13 @@ public:
     // RTC has three contiguous conditioning groups: the state token, clean
     // action-prefix tokens, and noisy action-suffix tokens. Tables retain the
     // upstream mean of action time embeddings for the state token. They are
-    // cold-owned DDR tensors, streamed per layer instead of made SPM-resident.
+    // cold-owned DDR tensors. RTC resident profiles stage all three groups
+    // for one denoise step and reuse them across every layer in that step.
     void set_denoise_loop_rtc_tables(
-        const at::Tensor& pair_table, const at::Tensor& final_table) {
+        const at::Tensor& pair_table, const at::Tensor& final_table,
+        at::TensorList cold_weights = {}, at::TensorList cold_scales = {},
+        at::TensorList cold_biases = {}, bool gates_tanh_precomputed = false,
+        bool high_precision = false) {
         constexpr const char* op = "rhino_vla_set_denoise_loop_rtc_tables";
         RpuExecutionCoordinator::require_graph_quiescent(op);
         RpuExecutionCoordinator::check_current_thread_execution_allowed(op);
@@ -868,12 +872,16 @@ public:
                     "RhinoVLA RTC requires the exact v3 96D/H30 ten-step descending loop");
         TORCH_CHECK(cold_config_.precompute_adarms &&
                         !cold_config_.skip_adarms_gemv &&
-                        !cold_config_.adarms_resident && !cold_config_.expert_fusions &&
-                        !cold_config_.packed_qkv && !cold_config_.precompute_time_proj &&
-                        !cold_config_.fold_action_time_in &&
-                        !expert_w8a16_ && !expert_cond_w8a16_ &&
-                        !full_action_w8a16_ && !high_precision_,
-                    "RhinoVLA RTC requires FP16 streamed AdaRMS without expert fusions");
+                        !cold_config_.precompute_time_proj &&
+                        !cold_config_.fold_action_time_in,
+                    "RhinoVLA RTC requires precomputed AdaRMS and direct action input");
+        TORCH_CHECK(high_precision == high_precision_,
+                    "RhinoVLA RTC table precision must match the installed owner");
+        TORCH_CHECK(!gates_tanh_precomputed ||
+                        (full_action_w8a16_ && cold_config_.adarms_resident),
+                    "RhinoVLA RTC gate TANH precompute requires full W8 resident AdaRMS");
+        TORCH_CHECK(!high_precision_ || full_action_w8a16_,
+                    "RhinoVLA RTC high precision requires full W8 action IO");
         const auto check_table = [](const at::Tensor& table, const char* name) {
             TORCH_CHECK(table.defined() && table.device().type() == at::kPrivateUse1 &&
                             table.scalar_type() == at::kHalf && table.is_contiguous(),
@@ -885,6 +893,27 @@ public:
                     "RhinoVLA RTC pair_table must be [7,10,18,3,6144]");
         TORCH_CHECK(final_table.sizes() == at::IntArrayRef({7, 10, 3, 3072}),
                     "RhinoVLA RTC final_table must be [7,10,3,3072]");
+        const size_t expected_cold_owners =
+            expert_cond_w8a16_ ? (full_action_w8a16_ ? 19 : 18) : 0;
+        TORCH_CHECK(cold_weights.size() == expected_cold_owners &&
+                        cold_scales.size() == expected_cold_owners &&
+                        cold_biases.size() == expected_cold_owners,
+                    "RhinoVLA RTC cold W8 owner count does not match expert/IO precision");
+        for (size_t i = 0; i < expected_cold_owners; ++i) {
+            const int64_t n = i == 18 ? 3072 : 6144;
+            check_rhino_full_w8_projection(cold_weights[i], cold_scales[i], n, 1024);
+            check_table(cold_biases[i], "cold_bias");
+            TORCH_CHECK(cold_biases[i].dim() == 1 && cold_biases[i].numel() == n,
+                        "RhinoVLA RTC cold W8 bias shape mismatch");
+        }
+        // Publish only after validating all geometry, precision and owners.
+        std::vector<at::Tensor> next_weights(cold_weights.begin(), cold_weights.end());
+        std::vector<at::Tensor> next_scales(cold_scales.begin(), cold_scales.end());
+        std::vector<at::Tensor> next_biases(cold_biases.begin(), cold_biases.end());
+        full_cold_weights_.swap(next_weights);
+        full_cold_scales_.swap(next_scales);
+        full_cold_biases_.swap(next_biases);
+        gates_tanh_precomputed_ = gates_tanh_precomputed;
         adarms_pair_table_ = pair_table;
         adarms_final_table_ = final_table;
         adarms_pair_table_src_base_ = ::rhino_lkn::RpuGetDevAddr(pair_table.data_ptr());
@@ -1651,15 +1680,17 @@ protected:
                    1, high_precision_route_flags(), high_precision_route_arguments());
         }
         if (cold_config_.adarms_resident) {
+            const int64_t groups = rtc_mode_ ? 3 : 1;
+            const int64_t resident_steps = rtc_mode_ ? 1 : num_steps_;
             append(FmbRouteFamily::GRAPH_SCHEDULE, RHINO_ADARMS_RESIDENT_SITE,
-                   1, 0, {num_steps_, num_layers(), hidden_size(),
-                          num_steps_ * (num_layers() * 6 + 3) * hidden_size() * DWIDTH});
+                   1, rtc_mode_ ? 1 : 0, {resident_steps, num_layers(), hidden_size(),
+                          groups * resident_steps * (num_layers() * 6 + 3) * hidden_size() * DWIDTH});
             append(FmbRouteFamily::MUTABLE_DMA, RHINO_RESIDENT_PAIR_DMA_SITE,
                    static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
-                   0, {num_steps_ * num_layers() * 6 * hidden_size()});
+                   0, {groups * resident_steps * num_layers() * 6 * hidden_size()});
             append(FmbRouteFamily::MUTABLE_DMA, RHINO_RESIDENT_FINAL_DMA_SITE,
                    static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
-                   0, {num_steps_ * 3 * hidden_size()});
+                   0, {groups * resident_steps * 3 * hidden_size()});
         }
         if (rtc_mode_) {
             append(FmbRouteFamily::GRAPH_SCHEDULE, RHINO_RTC_SCHEDULE_SITE,
@@ -1923,10 +1954,10 @@ protected:
         }
         if (cold_config_.adarms_resident) {
             decls.push_back({"adarms_pair_resident",
-                num_steps_ * nl * 6 * h * DWIDTH,
+                (rtc_mode_ ? 3 : num_steps_) * nl * 6 * h * DWIDTH,
                 0, 0, StorageClass::Temp, 0, nullptr, ALL});
             decls.push_back({"adarms_final_resident",
-                num_steps_ * 3 * h * DWIDTH,
+                (rtc_mode_ ? 3 : num_steps_) * 3 * h * DWIDTH,
                 0, 0, StorageClass::Temp, 0, nullptr, ALL});
         }
 
@@ -2346,7 +2377,8 @@ protected:
             skip_adarms_gemv || fused_adarms || precomputed_adarms;
         const uint32_t pair_base = cold_config_.adarms_resident
             ? addr(0, "adarms_pair_resident") +
-                (ctx().body_iter * num_layers() + layer_idx) * 6 * h * DWIDTH
+                ((rtc_mode_ ? 0 : ctx().body_iter) * num_layers() + layer_idx) *
+                    (rtc_mode_ ? 3 : 1) * 6 * h * DWIDTH
             : addr(0, "adarms_pair_gemv");
         uint32_t attn_scale = use_pair_adarms_buffer ? pair_base : addr(0, "attn_gemv");
         uint32_t attn_shift = attn_scale + (uint32_t)(h * DWIDTH);
@@ -2987,16 +3019,26 @@ private:
         for_each_rtc_group([&](int group, int64_t start, int64_t rows) {
             const uint32_t row_offset = static_cast<uint32_t>(start * h * DWIDTH);
             const uint32_t group_gate = gate + static_cast<uint32_t>(group * 6 * h * DWIDTH);
-            rpu_launch_eltwise_unary_spm_kernel(
-                group_gate, group_gate, h, ValuOpType::TANH,
-                /*is_gelu=*/false, NUM_CORES, unary_precision());
-            rpu_launch_eltwise_binary_1xC_NxC_spm_kernel(
-                group_gate, update + row_offset, update + row_offset,
-                rows, h, c10::Half(1.0), ValuOpType::MUL, /*is_bopa=*/false);
+            if (!gates_tanh_precomputed_) {
+                rpu_launch_eltwise_unary_spm_kernel(
+                    group_gate, group_gate, h, ValuOpType::TANH,
+                    /*is_gelu=*/false, NUM_CORES, unary_precision());
+            }
+            if (cold_config_.expert_fusions) {
+                rpu_launch_pi05_gated_residual_spm_kernel(
+                    update + row_offset, residual + row_offset, group_gate,
+                    update + row_offset, rows, NUM_CORES);
+            } else {
+                rpu_launch_eltwise_binary_1xC_NxC_spm_kernel(
+                    group_gate, update + row_offset, update + row_offset,
+                    rows, h, c10::Half(1.0), ValuOpType::MUL, /*is_bopa=*/false);
+            }
         });
-        rpu_launch_eltwise_binary_spm_kernel(
-            update, residual, update, suffix_len_ * h,
-            ValuOpType::ADD, c10::Half(1.0), NUM_CORES);
+        if (!cold_config_.expert_fusions) {
+            rpu_launch_eltwise_binary_spm_kernel(
+                update, residual, update, suffix_len_ * h,
+                ValuOpType::ADD, c10::Half(1.0), NUM_CORES);
+        }
     }
 
     void emit_rtc_prefix_clamp() {
@@ -3198,26 +3240,33 @@ private:
 
     void emit_resident_adarms_tables() {
         const int64_t h = hidden_size();
-        // Whole-loop temporary storage: retaining this across model stages
-        // would subtract 2.17 MiB from the Vision planner's SPM budget.
-        // Reload every request, before any in-place TANH of the gate slices.
+        const int64_t groups = rtc_mode_ ? 3 : 1;
+        const int64_t resident_steps = rtc_mode_ ? 1 : num_steps_;
+        const int64_t pair_elements = groups * resident_steps * num_layers() * 6 * h;
+        const int64_t final_elements = groups * resident_steps * 3 * h;
+        const int64_t table_step = rtc_mode_ ? rtc_delay_ * num_steps_ + ctx().body_iter : 0;
+        // RTC's full ten-step triple tables crowd out the Vision/Text owners'
+        // persistent SPM. Stage one step, keeping every layer's groups resident
+        // until that step completes. Each Graph replay reloads raw/precomputed
+        // gates before their first use; ordinary scalar-time profiles retain
+        // their original whole-loop table preload.
         ctx().consume_physical_route(
             FmbRouteFamily::GRAPH_SCHEDULE, RHINO_ADARMS_RESIDENT_SITE,
-            1, 0, {num_steps_, num_layers(), h,
-                   num_steps_ * (num_layers() * 6 + 3) * h * DWIDTH});
+            1, rtc_mode_ ? 1 : 0, {resident_steps, num_layers(), h,
+                   (pair_elements + final_elements) * DWIDTH});
         ctx().consume_physical_route(
             FmbRouteFamily::MUTABLE_DMA, RHINO_RESIDENT_PAIR_DMA_SITE,
             static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
-            0, {num_steps_ * num_layers() * 6 * h});
+            0, {pair_elements});
         rpu_launch_ddr_broadcast_spm_dma_mutable(
-            &adarms_pair_table_src_base_, 0, num_steps_ * num_layers() * 6 * h,
+            &adarms_pair_table_src_base_, table_step * pair_elements * DWIDTH, pair_elements,
             addr(0, "adarms_pair_resident"), NUM_CORES);
         ctx().consume_physical_route(
             FmbRouteFamily::MUTABLE_DMA, RHINO_RESIDENT_FINAL_DMA_SITE,
             static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
-            0, {num_steps_ * 3 * h});
+            0, {final_elements});
         rpu_launch_ddr_broadcast_spm_dma_mutable(
-            &adarms_final_table_src_base_, 0, num_steps_ * 3 * h,
+            &adarms_final_table_src_base_, table_step * final_elements * DWIDTH, final_elements,
             addr(0, "adarms_final_resident"), NUM_CORES);
     }
 
@@ -3241,7 +3290,6 @@ private:
             }
             if (expert_cond_w8a16_) consume_full_action_w8a16_route();
             if (high_precision_) consume_high_precision_route();
-            if (cold_config_.adarms_resident) emit_resident_adarms_tables();
             ctx().consume_physical_route(
                 FmbRouteFamily::MUTABLE_DMA, RHINO_PRE_X_DMA_SITE,
                 static_cast<int64_t>(
@@ -3249,6 +3297,9 @@ private:
                 /*resolved_flags=*/0);
             rpu_launch_ddr_broadcast_spm_dma_mutable(
                 &x0_src_base_, 0, ah * adp, addr(0, "x_t_spm"), /*num_cores=*/1);
+        }
+        if (cold_config_.adarms_resident && (rtc_mode_ || bit == 0)) {
+            emit_resident_adarms_tables();
         }
         emit_rtc_prefix_clamp();
         if (emit_static_context) {
@@ -3486,7 +3537,8 @@ private:
                                addr(0, "gemv_partial"));
         }
         const uint32_t final_scale = cold_config_.adarms_resident
-            ? addr(0, "adarms_final_resident") + ctx().body_iter * 3 * h * DWIDTH
+            ? addr(0, "adarms_final_resident") +
+                (rtc_mode_ ? 0 : ctx().body_iter) * 3 * h * DWIDTH
             : addr(0, "final_gemv");
         const uint32_t final_shift = final_scale + (uint32_t)(h * DWIDTH);
         emit_conditioned_norm_shift(
@@ -3801,8 +3853,9 @@ at::Tensor rpu_rhino_vla_tanh_high_precision(const at::Tensor& input) {
     RpuExecutionCoordinator::check_current_thread_execution_allowed(operation);
     TORCH_CHECK(input.defined() && input.device().type() == at::kPrivateUse1 &&
                     input.scalar_type() == at::kHalf && input.is_contiguous() &&
-                    input.dim() == 2 && input.size(0) == 10 && input.size(1) == 2048,
-                "RhinoVLA high precision gate TANH requires cold contiguous FP16 device [10,2048]");
+                    input.dim() == 2 &&
+                    (input.size(0) == 10 || input.size(0) == 210) && input.size(1) == 2048,
+                "RhinoVLA high precision gate TANH requires cold contiguous FP16 device [10,2048] or RTC [210,2048]");
     rpu_require_high_precision_math_kernels();
     at::Tensor output = at::empty_like(input);
     rpu_launch_eltwise_unary_kernel(input, output, ValuOpType::TANH, RpuUnaryPrecision::HIGH);
@@ -3893,6 +3946,19 @@ void rpu_rhino_vla_set_denoise_loop_rtc_tables(
     int64_t handle, const at::Tensor& pair_table, const at::Tensor& final_table) {
     RhinoVLARegistry::get(handle, "rpu_rhino_vla_set_denoise_loop_rtc_tables")
         ->set_denoise_loop_rtc_tables(pair_table, final_table);
+}
+
+void rpu_rhino_vla_set_denoise_loop_rtc_tables_w8a16(
+    int64_t handle, const at::Tensor& pair_table, const at::Tensor& final_table,
+    at::TensorList cold_weights, at::TensorList cold_scales, at::TensorList cold_biases,
+    bool gates_tanh_precomputed, bool high_precision) {
+    TORCH_CHECK((cold_weights.size() == 18 || cold_weights.size() == 19) &&
+                    cold_scales.size() == cold_weights.size() &&
+                    cold_biases.size() == cold_weights.size(),
+                "RhinoVLA RTC W8 AdaRMS requires matching eighteen or nineteen cold projection lists");
+    RhinoVLARegistry::get(handle, "rpu_rhino_vla_set_denoise_loop_rtc_tables_w8a16")
+        ->set_denoise_loop_rtc_tables(pair_table, final_table, cold_weights, cold_scales,
+                                     cold_biases, gates_tanh_precomputed, high_precision);
 }
 
 void rpu_rhino_vla_prepare_rtc(int64_t handle, int64_t delay) {
