@@ -228,6 +228,7 @@ RTC 每一步先复写已确定的前 `delay` 个动作，再执行去噪；这�
 
 RTC 模板保留对应 non-RTC 配方的 `PRECOMPUTE_ADARMS=1`、`EXPERT_FUSIONS=1`、`ADARMS_RESIDENT=1` 和 `denoise_unroll=true`，W8/HIGH/vector 开关随所选配方保持一致；`PACKED_QKV` 与 `SKIP_ADARMS_GEMV` 继续关闭。RTC 会为不同 delay 准备匹配的条件参数，不能复用 non-RTC 的统一时间表。使用模板中的整组设置。每个 delay 对应独立的动作 Graph 签名；同一 delay 更新 prefix 内容需要刷新输入。runtime 在构造时自动预留 10 个 Graph arena，覆盖七个 delay 的动作 Graph、Vision/Language 保留 Graph 和一个准备阶段的临时 Graph；用户无需额外设置环境变量。固定 Graph 集合前先预热需要使用的所有 delay。验证应逐个覆盖 0–6、同 delay 前缀变化、0→6→0 切换和输出存储独立性，不能用 non-RTC 的既有结果替代。
 
+启用 `ADARMS_RESIDENT` 时，RTC 每个去噪步将该步的 state、已确定 prefix、剩余 suffix 三组条件表装入 SPM，在该步 18 层专家中复用，为前序 Vision/Text 保留缓冲区留出空间。non-RTC 仍驻留十步条件表；用户保留模板中的驻留与融合开关即可。
 
 示例输入使用三幅等尺寸视图与 230 个逻辑 prefix token（P230）。模板会在构造时固定 qin 中的 token、attention mask 和 grid；这些内容或像素几何变化时需新建 runtime，同几何的像素值可更新。异尺寸视图不在这些模板的输入范围内，强制 oneshot 模式会被提前拒绝。
 

@@ -236,20 +236,25 @@ int main() {
 def test_rtc_resident_actual_spm_layout_fits_without_group_alias(tmp_path):
     from test_rhinovla_mask_residency import _declaration_program, _run_cpp
 
-    program = _declaration_program() + r'''
+    fmb = (ROOT / "src/core/fused_model_base.cpp").read_text()
+    header = (ROOT / "src/core/fused_model_base.h").read_text()
+    budget = "namespace detail {" + _definition(header, "struct FmbPreparedSpmCost") + ";}\n"
+    budget += _definition(fmb, "int64_t detail::FmbPreparedSpmCost::available(") + "\n"
+    budget += _definition(fmb, "bool detail::FmbPreparedSpmCost::fits(") + "\n"
+    program = _declaration_program() + budget + r'''
 int main() {
  RhinoVLAModel m;
  m.rtc_mode_=true;
  m.denoise_loop_weights_ready_=m.direct_action_input_=true;
  m.action_dim_pad_=m.state_dim_pad_=96;
  for(bool resident:{false,true})for(bool aligned:{false,true})
- for(bool packed:{false,true})for(bool vector_q:{false,true}) {
+ for(bool packed:{false,true})for(bool vector_q:{false,true})for(int64_t rows:{31,32}) {
   m.cold_config_.adarms_resident=resident;
   m.cold_config_.aligned_kv=aligned;
   m.cold_config_.packed_qkv=packed;
   m.cold_config_.gated_no_sub=true;
   m.vector_q_norm_=vector_q;
-  LayoutContext l;l.chunk_size=31;l.max_kv_seq_len=272;
+  LayoutContext l;l.chunk_size=rows;l.max_kv_seq_len=272;
   l.use_attn_mask=true;l.is_causal=false;
   auto ds=m.declare_buffers(l);
   std::vector<SpmAllocator::AllocRequest> req;
@@ -259,16 +264,31 @@ int main() {
     persistent+=Align(d.size,int64_t{256})*(d.storage==StorageClass::PersistentPerLayer?d.per_layer:1);
    if(d.storage!=StorageClass::Temp||d.alias_of)continue;
    if(std::string(d.name)=="adarms_pair_resident") {
-    pair=req.size(); assert(d.size==3*10*18*6*1024*2);
+    pair=req.size(); assert(d.size==3*18*6*1024*2);
    }
    if(std::string(d.name)=="adarms_final_resident") {
-    final=req.size(); assert(d.size==3*10*3*1024*2);
+    final=req.size(); assert(d.size==3*3*1024*2);
    }
    req.push_back({d.size,d.phase_start,d.phase_end,static_cast<int>(d.scope)});
   }
   auto plan=SpmAllocator::plan_temporary_aliased(req);
-  // Preserve the framework/runtime reservation, not merely the raw 8 MiB.
-  assert(persistent+plan.peak_bytes<8303616);
+  // Run the real planner budget logic, including previously installed
+  // Vision/Text owners and the extra 64 KiB physical reserve. Cover C32 dry
+  // candidates as well as the actual M31 suffix at physical prefix P240.
+  constexpr int64_t usable=8*1024*1024-1024,budget=usable*99/100;
+  detail::FmbPreparedSpmCost cost{persistent,0,int64_t(plan.peak_bytes)};
+  for(int64_t prior:{0,512*1024,1024*1024,2*1024*1024}) {
+   assert(cost.fits(usable-prior,false,budget));
+   assert(cost.fits(usable-prior-persistent,true,budget));
+  }
+  if(resident) {
+   auto obsolete=req;
+   obsolete[pair].bytes*=10;obsolete[final].bytes*=10;
+   auto whole_loop=SpmAllocator::plan_temporary_aliased(obsolete);
+   detail::FmbPreparedSpmCost old{persistent,0,int64_t(whole_loop.peak_bytes)};
+   assert(old.fits(usable,false,budget));
+   assert(!old.fits(usable-512*1024,false,budget));
+  }
   if(resident)for(size_t group:{pair,final})for(size_t j=0;j<req.size();++j)if(j!=group) {
    assert(plan.offsets[group]+req[group].bytes<=plan.offsets[j] ||
           plan.offsets[j]+req[j].bytes<=plan.offsets[group]);
@@ -281,7 +301,7 @@ int main() {
 int main(){return v3::main();}
 '''
     output = _run_cpp(tmp_path, program)
-    assert len(output.strip().splitlines()) == 16
+    assert len(output.strip().splitlines()) == 32
 
 
 def test_rtc_resident_dma_and_fused_gate_groups_execute_selected_delay(tmp_path):
@@ -306,11 +326,12 @@ enum class FmbRouteFamily {GRAPH_SCHEDULE,MUTABLE_DMA};
 enum class RhinoMutableDmaRoute {DDR_BROADCAST_TO_SPM};
 enum class ValuOpType {TANH,MUL,ADD};
 constexpr int64_t RHINO_ADARMS_RESIDENT_SITE=1,RHINO_RESIDENT_PAIR_DMA_SITE=2,RHINO_RESIDENT_FINAL_DMA_SITE=3;
-struct Route {int64_t site;std::vector<int64_t> args;};
+struct Route {int64_t site,flags;std::vector<int64_t> args;};
 struct Context {
+ int64_t body_iter=0;
  std::vector<Route> routes;
- void consume_physical_route(FmbRouteFamily,int64_t site,int64_t,int,std::vector<int64_t> args) {
-  routes.push_back({site,args});
+ void consume_physical_route(FmbRouteFamily,int64_t site,int64_t,int flags,std::vector<int64_t> args) {
+  routes.push_back({site,flags,args});
  }
 };
 struct Dma {uint64_t* source;int64_t offset,elements;uint32_t destination;};
@@ -357,15 +378,19 @@ METHODS
 };
 int main() {
  Model m;
- for(bool rtc:{false,true})for(int delay=0;delay<=6;++delay) {
-  m.rtc_mode_=rtc;m.rtc_delay_=delay;m.context.routes.clear();dmas.clear();
+ for(bool rtc:{false,true})for(int delay=0;delay<=6;++delay)for(int step=0;step<10;++step) {
+  m.rtc_mode_=rtc;m.rtc_delay_=delay;m.context.body_iter=step;
+  m.context.routes.clear();dmas.clear();
   m.emit_resident_adarms_tables();
-  const int64_t groups=rtc?3:1,pair=groups*10*18*6*1024,final=groups*10*3*1024;
+  const int64_t groups=rtc?3:1,resident_steps=rtc?1:10;
+  const int64_t pair=groups*resident_steps*18*6*1024,final=groups*resident_steps*3*1024;
+  const int64_t table_step=rtc?delay*10+step:0;
   assert(dmas.size()==2 && m.context.routes.size()==3);
   assert(dmas[0].source==&m.adarms_pair_table_src_base_ && dmas[0].elements==pair);
   assert(dmas[1].source==&m.adarms_final_table_src_base_ && dmas[1].elements==final);
-  assert(dmas[0].offset==(rtc?delay:0)*pair*2 && dmas[1].offset==(rtc?delay:0)*final*2);
-  assert(m.context.routes[0].args==std::vector<int64_t>({10,18,1024,(pair+final)*2}));
+  assert(dmas[0].offset==table_step*pair*2 && dmas[1].offset==table_step*final*2);
+  assert(m.context.routes[0].args==std::vector<int64_t>({resident_steps,18,1024,(pair+final)*2}));
+  assert(m.context.routes[0].flags==(rtc?1:0));
   assert(m.context.routes[1].args==std::vector<int64_t>({pair}));
   assert(m.context.routes[2].args==std::vector<int64_t>({final}));
   m.adarms_pair_table_src_base_+=10;assert(*dmas[0].source==m.adarms_pair_table_src_base_);

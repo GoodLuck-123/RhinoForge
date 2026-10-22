@@ -847,8 +847,8 @@ public:
     // RTC has three contiguous conditioning groups: the state token, clean
     // action-prefix tokens, and noisy action-suffix tokens. Tables retain the
     // upstream mean of action time embeddings for the state token. They are
-    // cold-owned DDR tensors. Resident profiles stage only the selected delay's
-    // ten-step groups; streamed profiles transfer one layer/step at a time.
+    // cold-owned DDR tensors. RTC resident profiles stage all three groups
+    // for one denoise step and reuse them across every layer in that step.
     void set_denoise_loop_rtc_tables(
         const at::Tensor& pair_table, const at::Tensor& final_table,
         at::TensorList cold_weights = {}, at::TensorList cold_scales = {},
@@ -1681,15 +1681,16 @@ protected:
         }
         if (cold_config_.adarms_resident) {
             const int64_t groups = rtc_mode_ ? 3 : 1;
+            const int64_t resident_steps = rtc_mode_ ? 1 : num_steps_;
             append(FmbRouteFamily::GRAPH_SCHEDULE, RHINO_ADARMS_RESIDENT_SITE,
-                   1, 0, {num_steps_, num_layers(), hidden_size(),
-                          groups * num_steps_ * (num_layers() * 6 + 3) * hidden_size() * DWIDTH});
+                   1, rtc_mode_ ? 1 : 0, {resident_steps, num_layers(), hidden_size(),
+                          groups * resident_steps * (num_layers() * 6 + 3) * hidden_size() * DWIDTH});
             append(FmbRouteFamily::MUTABLE_DMA, RHINO_RESIDENT_PAIR_DMA_SITE,
                    static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
-                   0, {groups * num_steps_ * num_layers() * 6 * hidden_size()});
+                   0, {groups * resident_steps * num_layers() * 6 * hidden_size()});
             append(FmbRouteFamily::MUTABLE_DMA, RHINO_RESIDENT_FINAL_DMA_SITE,
                    static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
-                   0, {groups * num_steps_ * 3 * hidden_size()});
+                   0, {groups * resident_steps * 3 * hidden_size()});
         }
         if (rtc_mode_) {
             append(FmbRouteFamily::GRAPH_SCHEDULE, RHINO_RTC_SCHEDULE_SITE,
@@ -1953,10 +1954,10 @@ protected:
         }
         if (cold_config_.adarms_resident) {
             decls.push_back({"adarms_pair_resident",
-                (rtc_mode_ ? 3 : 1) * num_steps_ * nl * 6 * h * DWIDTH,
+                (rtc_mode_ ? 3 : num_steps_) * nl * 6 * h * DWIDTH,
                 0, 0, StorageClass::Temp, 0, nullptr, ALL});
             decls.push_back({"adarms_final_resident",
-                (rtc_mode_ ? 3 : 1) * num_steps_ * 3 * h * DWIDTH,
+                (rtc_mode_ ? 3 : num_steps_) * 3 * h * DWIDTH,
                 0, 0, StorageClass::Temp, 0, nullptr, ALL});
         }
 
@@ -2376,7 +2377,8 @@ protected:
             skip_adarms_gemv || fused_adarms || precomputed_adarms;
         const uint32_t pair_base = cold_config_.adarms_resident
             ? addr(0, "adarms_pair_resident") +
-                (ctx().body_iter * num_layers() + layer_idx) * (rtc_mode_ ? 3 : 1) * 6 * h * DWIDTH
+                ((rtc_mode_ ? 0 : ctx().body_iter) * num_layers() + layer_idx) *
+                    (rtc_mode_ ? 3 : 1) * 6 * h * DWIDTH
             : addr(0, "adarms_pair_gemv");
         uint32_t attn_scale = use_pair_adarms_buffer ? pair_base : addr(0, "attn_gemv");
         uint32_t attn_shift = attn_scale + (uint32_t)(h * DWIDTH);
@@ -3239,29 +3241,32 @@ private:
     void emit_resident_adarms_tables() {
         const int64_t h = hidden_size();
         const int64_t groups = rtc_mode_ ? 3 : 1;
-        const int64_t pair_elements = groups * num_steps_ * num_layers() * 6 * h;
-        const int64_t final_elements = groups * num_steps_ * 3 * h;
-        const int64_t table_delay = rtc_mode_ ? rtc_delay_ : 0;
-        // Whole-loop temporary storage. RTC stages only the selected delay,
-        // keeping all seven Graph signatures on one fixed SPM layout. Reload
-        // every request before any in-place TANH of the gate slices.
+        const int64_t resident_steps = rtc_mode_ ? 1 : num_steps_;
+        const int64_t pair_elements = groups * resident_steps * num_layers() * 6 * h;
+        const int64_t final_elements = groups * resident_steps * 3 * h;
+        const int64_t table_step = rtc_mode_ ? rtc_delay_ * num_steps_ + ctx().body_iter : 0;
+        // RTC's full ten-step triple tables crowd out the Vision/Text owners'
+        // persistent SPM. Stage one step, keeping every layer's groups resident
+        // until that step completes. Each Graph replay reloads raw/precomputed
+        // gates before their first use; ordinary scalar-time profiles retain
+        // their original whole-loop table preload.
         ctx().consume_physical_route(
             FmbRouteFamily::GRAPH_SCHEDULE, RHINO_ADARMS_RESIDENT_SITE,
-            1, 0, {num_steps_, num_layers(), h,
+            1, rtc_mode_ ? 1 : 0, {resident_steps, num_layers(), h,
                    (pair_elements + final_elements) * DWIDTH});
         ctx().consume_physical_route(
             FmbRouteFamily::MUTABLE_DMA, RHINO_RESIDENT_PAIR_DMA_SITE,
             static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
             0, {pair_elements});
         rpu_launch_ddr_broadcast_spm_dma_mutable(
-            &adarms_pair_table_src_base_, table_delay * pair_elements * DWIDTH, pair_elements,
+            &adarms_pair_table_src_base_, table_step * pair_elements * DWIDTH, pair_elements,
             addr(0, "adarms_pair_resident"), NUM_CORES);
         ctx().consume_physical_route(
             FmbRouteFamily::MUTABLE_DMA, RHINO_RESIDENT_FINAL_DMA_SITE,
             static_cast<int64_t>(RhinoMutableDmaRoute::DDR_BROADCAST_TO_SPM),
             0, {final_elements});
         rpu_launch_ddr_broadcast_spm_dma_mutable(
-            &adarms_final_table_src_base_, table_delay * final_elements * DWIDTH, final_elements,
+            &adarms_final_table_src_base_, table_step * final_elements * DWIDTH, final_elements,
             addr(0, "adarms_final_resident"), NUM_CORES);
     }
 
@@ -3285,7 +3290,6 @@ private:
             }
             if (expert_cond_w8a16_) consume_full_action_w8a16_route();
             if (high_precision_) consume_high_precision_route();
-            if (cold_config_.adarms_resident) emit_resident_adarms_tables();
             ctx().consume_physical_route(
                 FmbRouteFamily::MUTABLE_DMA, RHINO_PRE_X_DMA_SITE,
                 static_cast<int64_t>(
@@ -3293,6 +3297,9 @@ private:
                 /*resolved_flags=*/0);
             rpu_launch_ddr_broadcast_spm_dma_mutable(
                 &x0_src_base_, 0, ah * adp, addr(0, "x_t_spm"), /*num_cores=*/1);
+        }
+        if (cold_config_.adarms_resident && (rtc_mode_ || bit == 0)) {
+            emit_resident_adarms_tables();
         }
         emit_rtc_prefix_clamp();
         if (emit_static_context) {
@@ -3530,7 +3537,8 @@ private:
                                addr(0, "gemv_partial"));
         }
         const uint32_t final_scale = cold_config_.adarms_resident
-            ? addr(0, "adarms_final_resident") + ctx().body_iter * (rtc_mode_ ? 3 : 1) * 3 * h * DWIDTH
+            ? addr(0, "adarms_final_resident") +
+                (rtc_mode_ ? 0 : ctx().body_iter) * 3 * h * DWIDTH
             : addr(0, "final_gemv");
         const uint32_t final_shift = final_scale + (uint32_t)(h * DWIDTH);
         emit_conditioned_norm_shift(

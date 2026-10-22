@@ -422,6 +422,10 @@ normalization and partial RoPE retain their selected settings; RTC prepares
 conditioning for each delay using that recipe. Precision and RTC mode are cold
 state, while request delay may vary within `0..6`. See the
 [RTC input contract](../examples/configs/rhinovla/v3/README.md#rtc).
+With resident AdaRMS enabled, RTC loads the current denoising step's state,
+committed-prefix and remaining-suffix condition tables into SPM and reuses them
+across that step's 18 expert layers. This leaves room for retained Vision/Text
+buffers; non-RTC retains its ten-step table residency.
 
 RhinoVLA also accepts cold boolean `linear_acc32` in
 `components.language_model.prefill` and `components.vision_encoder.vision`.
@@ -657,7 +661,7 @@ values from the current invocation and stay in the caller's output directory.
 | `RPU_PI05_PREFILL_MASK_FP16` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Prepare and cache prefix additive masks in CPU FP16; dtype participates in the cache key. Selected paired TP8 templates enable it. |
 | `RPU_PI05_PREFILL_ROPE_CACHE` | 0 | `0`/`1`; empty is off; other values rejected | Cache one position-indexed RoPE upload using source identity/version and positions. Native stable slots still refresh; paired Down/KV-direct/KV-only profiles require this off. |
 | `RPU_PI05_PROBE_DIR` | unset | directory path | Write named Pi0.5 intermediate tensors and KV snapshots to the supplied directory; read per export, unset means no files. |
-| `RPU_RHINOVLA_ADARMS_RESIDENT` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | For the exact v3 ten-step expert, preload precomputed AdaRMS tables into SPM each graph execution. Requires precomputed tables and rejects SKIP_ADARMS_GEMV. |
+| `RPU_RHINOVLA_ADARMS_RESIDENT` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Preload precomputed AdaRMS tables into SPM for the exact v3 expert: ten-step residency for non-RTC; per-step state/prefix/suffix tables reused across 18 layers for RTC. Requires precomputed tables and rejects SKIP_ADARMS_GEMV. |
 | `RPU_RHINOVLA_ALIGNED_KV` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Pad the exact v3 expert's physical prefix and KV writes while preserving logical masks and RoPE positions; checks capacity and clears padding. |
 | `RPU_RHINOVLA_EXPERT_DEPTH_LIMIT` | unset | integer within checkpoint depth | Diagnostic expert depth in 1..checkpoint depth; adjusts prefix-layer selection. Official and exact W8 profiles reject reduced depth. |
 | `RPU_RHINOVLA_EXPERT_FUSIONS` | 0 | `0`/`1`, `false`/`true`, `off`/`on`; case-insensitive | Use norm/shift and gated-residual fusion in the exact v3 expert; requires precomputed AdaRMS, GATED_NO_SUB and both kernels. |

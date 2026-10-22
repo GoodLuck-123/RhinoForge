@@ -392,6 +392,9 @@ FP16、expert W8 和 full-expert W8 模板的九项公开缓存/融合环境控�
 专家融合、HIGH、vector norm 与 partial RoPE 沿用所选设置；RTC 按该配方准备各
 delay 的条件参数。精度与 RTC 模式在构造时固定，请求中的 delay 可在 `0..6` 内
 变化，详见 [RTC 输入契约](../examples/configs/rhinovla/v3/README.md#rtc)。
+启用 AdaRMS 驻留时，RTC 每个去噪步将该步的 state、已确定 prefix、剩余 suffix
+三组条件表装入 SPM，并在该步的 18 层专家中复用，为 Vision/Text 保留缓冲区留出
+空间；non-RTC 仍使用十步条件表驻留。
 
 RhinoVLA 在 `components.language_model.prefill` 与
 `components.vision_encoder.vision` 接受冷态布尔 `linear_acc32`。
@@ -609,7 +612,7 @@ heading 之后。
 | `RPU_PI05_PREFILL_MASK_FP16` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在 CPU 上以 FP16 准备并缓存前缀加性 mask，类型纳入缓存键；部分配对 TP8 模板显式开启。 |
 | `RPU_PI05_PREFILL_ROPE_CACHE` | 0 | `0`/`1`；空值关闭，拒绝其他值 | 按源张量身份、版本和位置缓存一次 RoPE 上传；原生稳定槽仍刷新，配对 Down、KV-direct 和 KV-only 配置要求关闭。 |
 | `RPU_PI05_PROBE_DIR` | 未设置 | 目录路径 | 将具名 Pi0.5 中间张量和 K/V 快照写入指定目录；每次导出读取，未设置则不写文件。 |
-| `RPU_RHINOVLA_ADARMS_RESIDENT` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 固定 v3 十步专家每次执行图时将预计算 AdaRMS 表装入 SPM；要求预计算表，并拒绝 SKIP_ADARMS_GEMV。 |
+| `RPU_RHINOVLA_ADARMS_RESIDENT` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 将固定 v3 专家的预计算 AdaRMS 表装入 SPM：non-RTC 驻留十步表；RTC 逐步驻留 state/prefix/suffix 三组表并在该步 18 层复用。要求预计算表，并拒绝 SKIP_ADARMS_GEMV。 |
 | `RPU_RHINOVLA_ALIGNED_KV` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 补齐固定 v3 专家的物理前缀与 K/V 写入，保留逻辑 mask 和 RoPE 位置；检查容量并清零补齐部分。 |
 | `RPU_RHINOVLA_EXPERT_DEPTH_LIMIT` | 未设置 | 不超过权重层数的正整数 | 诊断用专家层数，范围为 1 到权重层数，并调整前缀层选择；官方及固定 W8 配置拒绝缩减层数。 |
 | `RPU_RHINOVLA_EXPERT_FUSIONS` | 0 | `0`/`1`、`false`/`true`、`off`/`on`，忽略大小写 | 在固定 v3 专家中融合 norm/shift 及门控残差；要求预计算 AdaRMS、GATED_NO_SUB 及两个对应算子。 |
