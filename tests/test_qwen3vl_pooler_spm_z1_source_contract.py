@@ -405,3 +405,11 @@ def test_python_ordinary_fused_merger_fallback_still_pops_and_clones():
     pooler_clone = fallback.index("merged_all[0].clone()")
     deepstack_clone = fallback.index("merged_all[1 + layer_k].clone()")
     assert pop < pooler_clone < deepstack_clone
+
+
+def test_prefix_scatter_rejects_more_runs_than_the_current_merger_output():
+    source = _source()
+    scatter = _between(source, "void scatter_merger_out_to_prefix(", "\n   private:")
+    check = scatter.index("scatter_rows == current_num_patches_ / 4")
+    dma = scatter.index("rpu_launch_spm_copy_ddr_dma(")
+    assert check < dma

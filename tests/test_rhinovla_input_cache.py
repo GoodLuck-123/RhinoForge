@@ -470,3 +470,70 @@ def test_cached_cpu_positions_refresh_actual_forward_and_replay(monkeypatch, bat
         assert torch.equal(run(expected_a), first + 2)
         pixels.numpy()[:] = 0
         assert torch.equal(run(expected_a), first)
+
+
+def test_fused_merger_preserves_sequential_equal_resolution_views(monkeypatch):
+    original_to = torch.Tensor.to
+
+    def to(value, *args, **kwargs):
+        target = kwargs.get("device", args[0] if args else None)
+        if getattr(target, "type", None) == "rpu" or target == "rpu":
+            return value.clone()
+        return original_to(value, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", to)
+    monkeypatch.setattr(vision, "_execution_graph_key_words", lambda model: ())
+    monkeypatch.setattr(vision, "_plan_rhinovla_vision_execution", lambda model, rows, batch:
+                        NS(selected=NS(stage_tuple=NS(physical_descriptor=(rows, batch),
+                                                      compute_chunk=rows)),
+                           graph_key_words=lambda: (rows, batch)))
+    monkeypatch.setattr(vision, "_vision_execution_receipt", lambda *args: {})
+
+    calls = []
+
+    def native_forward(handle, hidden, keys, values, rows, batch, descriptor):
+        calls.append((rows, batch))
+        return hidden
+
+    def pop_merged(handle):
+        marker = float(len(calls))
+        return [torch.full((2, 4), marker, dtype=torch.float16),
+                torch.full((2, 4), marker + 10, dtype=torch.float16)]
+
+    monkeypatch.setattr(torch.ops.rpu, "qwen3vl_vision_forward", native_forward, raising=False)
+    monkeypatch.setattr(torch.ops.rpu, "qwen3vl_vision_get_resolved_chunk_size",
+                        lambda handle: 8, raising=False)
+    monkeypatch.setattr(torch.ops.rpu, "qwen3vl_vision_pop_merged", pop_merged, raising=False)
+    monkeypatch.setattr(torch.ops.rpu, "qwen3vl_vision_pop_deepstack_snapshots",
+                        lambda handle: pytest.fail("fused merger must consume snapshots"),
+                        raising=False)
+    monkeypatch.setattr(torch.ops.rpu, "spm_alloc_reset_temporary", lambda: None, raising=False)
+
+    class Model(NS):
+        def fast_pos_embed_interpolate(self, grid):
+            return torch.zeros(int(grid.prod(-1).sum()), 4, dtype=torch.float16)
+
+    model = Model(
+        _rpu_vision_handle=7, _rpu_vision_spatial_merge_size=2,
+        _rpu_vision_num_layers=1, _rpu_vision_hidden_size=4,
+        _rpu_vision_kv_cache=NS(k_caches=[None], v_caches=[None],
+                                reset_to_position=lambda position: None),
+        _rpu_vision_graph_cache=NS(), _rpu_vision_deepstack_hash=0,
+        _rpu_vision_prep_cache_enabled=False, _rpu_vision_input_cache_enabled=False,
+        _rpu_vision_max_hw=48, _rpu_vision_batch_views=False,
+        _rpu_vision_graph_disable=True,
+        _rpu_vision_position_idx_keepalive=torch.zeros(64, 2, dtype=torch.int16),
+        _rpu_vision_patch_embed_w=torch.eye(4, dtype=torch.float16),
+        _rpu_vision_patch_embed_b=torch.zeros(4, dtype=torch.float16),
+        _rpu_vision_deepstack_indexes=[0], deepstack_merger_list=[object()],
+        merger=object(), _rpu_vision_fused_merger=True,
+    )
+    grid = torch.tensor([[1, 2, 4]] * 3)
+    result = vision._rpu_vision_forward(
+        model, torch.zeros(24, 4, dtype=torch.float16), grid,
+    )
+
+    assert calls == [(8, 1)] * 3
+    assert torch.equal(result.pooler_output[:, 0],
+                       torch.tensor([1, 1, 2, 2, 3, 3], dtype=torch.float16))
+    assert torch.equal(result.deepstack_features[0][:, 0], result.pooler_output[:, 0] + 10)

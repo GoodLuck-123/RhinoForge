@@ -6328,7 +6328,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",
@@ -6418,7 +6418,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",
@@ -6501,7 +6501,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",
@@ -6591,7 +6591,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",
@@ -6674,7 +6674,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",
@@ -6764,7 +6764,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",
@@ -6847,7 +6847,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",
@@ -6972,7 +6972,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",
@@ -7090,7 +7090,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",
@@ -7215,7 +7215,7 @@
         {
           "kind": "env",
           "name": "RPU_RHINOVLA_VISION_BATCH_VIEWS",
-          "value": "1"
+          "value": "0"
         },
         {
           "kind": "env",

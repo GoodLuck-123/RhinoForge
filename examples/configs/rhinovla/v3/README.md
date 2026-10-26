@@ -30,10 +30,12 @@ FP16 模板已经开启下列优化，后续四档沿用：
 
 | 部分 | 已开启的行为 | 主要字段 |
 |---|---|---|
-| Vision | 多视角批处理、准备数据缓存；设备 patch/merger、融合 merger、将 merger 纳入图重放 | `VISION_BATCH_VIEWS`、`VISION_PREP_CACHE`；`rpu_patch_embed`、`rpu_mergers`、`fused_merger`、`bake_merger` |
+| Vision | 三路视角逐路执行、准备数据缓存；设备 patch/merger、融合 merger、将 merger 纳入图重放 | `VISION_BATCH_VIEWS=0`、`VISION_PREP_CACHE`；`rpu_patch_embed`、`rpu_mergers`、`fused_merger`、`bake_merger` |
 | Language | 缓存 prefix 准备数据，在设备组装 prefix；复用存储、partial MRoPE、merger scatter | `prefix_prep_cache`、`prefix_prep_rpu`、`prefix_no_clone`、`partial_mrope`、`merger_scatter` |
 | Action | 展开十步去噪、共享 prefix cache、复用 prefix 存储；state/mask 投影在每次请求的首步计算后复用 | `denoise_unroll`、`shared_cache`、`prefix_alias`、`DENOISE_STATIC_CONTEXT_CACHE` |
 | 专家计算 | AdaRMS 表预计算并驻留、gated residual 简化、SiLU×Mul 和专家算子融合、KV 对齐 | `PRECOMPUTE_ADARMS`、`ADARMS_RESIDENT`、`GATED_NO_SUB`、`FUSED_SILU_MUL`、`EXPERT_FUSIONS`、`ALIGNED_KV` |
+
+`VISION_BATCH_VIEWS=0` 时三路图像逐视角执行，运行时会关闭只适用于单次视觉调用的 merger scatter，避免按三路总行数读取单路 merger 输出。
 | 图执行 | 三个组件开启快速重放，Vision/Language 重放时跳过重复的预加载处理 | `fast_replay`、`preload_replay_skip` |
 
 本页表格中的大写开关均带 `RPU_RHINOVLA_` 前缀，写在 `[example.opt_in]`；小写字段位于对应的 `rpu_execution.components` 表。全部模板关闭 `PACKED_QKV` 和 `SKIP_ADARMS_GEMV`。

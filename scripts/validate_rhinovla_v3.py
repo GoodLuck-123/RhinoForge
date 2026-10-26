@@ -53,11 +53,41 @@ def _rtc_request(request, *, delay, seed):
             "action_prefix": torch.randn(1, delay, 96, generator=generator) * 0.1}
 
 
+def _resize_v3_image(image, *, smart_resize, crop_size=None):
+    from PIL import Image
+
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        raise ValueError(f"image dimensions must be positive, got {(width, height)}")
+    scale = 256.0 / min(width, height)
+    target_height, target_width = smart_resize(
+        height * scale,
+        width * scale,
+        factor=32,
+        min_pixels=256 * 256,
+        max_pixels=256 * 512,
+    )
+    resized = image.convert("RGB").resize(
+        (int(target_width), int(target_height)), Image.Resampling.BICUBIC,
+    )
+    if crop_size is None:
+        return resized
+    crop_width, crop_height = crop_size
+    if crop_width > resized.width or crop_height > resized.height:
+        raise ValueError(
+            f"top_head crop exceeds resized image: image={resized.size}, crop={crop_size}"
+        )
+    left = (resized.width - crop_width) // 2
+    top = (resized.height - crop_height) // 2
+    return resized.crop((left, top, left + crop_width, top + crop_height))
+
+
 def prepare(args):
     import av
     import torch
     from omegaconf import OmegaConf
     from PIL import Image
+    from qwen_vl_utils.vision_process import smart_resize as qwen_smart_resize
     from transformers import AutoProcessor
 
     factory = _factory()
@@ -78,7 +108,11 @@ def prepare(args):
             f"datasets/example_lerobot_v3/videos/observation.images.{camera}/"
             "chunk-000/file-000.mp4")
         with av.open(str(path)) as container:
-            images.append(next(container.decode(video=0)).to_image().resize((256, 256)))
+            images.append(_resize_v3_image(
+                next(container.decode(video=0)).to_image(),
+                smart_resize=qwen_smart_resize,
+                crop_size=(320, 256) if camera == "head_color" else None,
+            ))
     cases = []
     for seed in (0, 1):
         frames = images if seed == 0 else [image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
